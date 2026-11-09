@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Build and run an isolated macOS development bundle. Reno.app may remain
+# open: this bundle has a separate LaunchServices/TCC identity, data directory,
+# and engine IPC port.
+# Set RENO_DEV_BUILD_ONLY=1 to prepare the signed bundle without launching it.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
+VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
+DEV_ROOT="$ROOT/target/macos-dev"
+APP="$DEV_ROOT/Reno Dev.app"
+CONTENTS="$APP/Contents"
+DATA_DIR="${RENO_DEV_DATA_DIR:-$DEV_ROOT/data}"
+IPC_PORT="${RENO_DEV_IPC_PORT:-49777}"
+BUNDLE_ID="${RENO_DEV_BUNDLE_ID:-sh.reno.app.dev}"
+
+if pgrep -f -x "$CONTENTS/MacOS/reno" >/dev/null 2>&1; then
+  echo "Reno Dev is already running. Quit it before rebuilding the signed bundle." >&2
+  exit 1
+fi
+# The app's background engine keeps running after the app quits. Rebuilding
+# replaces its executable, so stop this bundle's engine (only this bundle's:
+# matched by its exact path) — its sessions stop with it.
+ENGINE="$CONTENTS/MacOS/Reno Engine"
+if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
+  echo "Stopping Reno Dev's background engine before rebuilding." >&2
+  pkill -TERM -f -x "$ENGINE" || true
+  for _ in $(seq 1 100); do
+    pgrep -f -x "$ENGINE" >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  if pgrep -f -x "$ENGINE" >/dev/null 2>&1; then
+    echo "Reno Dev's background engine didn't stop; quit it and retry." >&2
+    exit 1
+  fi
+fi
+
+cd "$ROOT"
+cargo build -p reno
+
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+install -m 755 "$TARGET_DIR/debug/reno" "$CONTENTS/MacOS/reno"
+install -m 755 "$TARGET_DIR/debug/reno-engine" "$ENGINE"
+sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
+plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$CONTENTS/Info.plist"
+plutil -replace LSEnvironment.RENO_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
+plutil -replace LSEnvironment.RENO_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
+if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
+  plutil -insert LSEnvironment.CODEX_EXECUTABLE -string "$CODEX_EXECUTABLE" "$CONTENTS/Info.plist"
+fi
+# Another edge (staging, self-hosting) with its own sign-in client and
+# loopback callback: scripts/staging-app.sh.
+for var in RENO_EDGE_URL RENO_WORKOS_CLIENT_ID RENO_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    plutil -insert "LSEnvironment.$var" -string "${!var}" "$CONTENTS/Info.plist"
+  fi
+done
+
+mkdir -p "$CONTENTS/Resources/licenses"
+cp "$ROOT/crates/voice/NOTICE.md" "$CONTENTS/Resources/licenses"/parakeet-v3.txt
+
+if [[ ! -f "$CONTENTS/Resources/Assets.car" ]]; then
+  "$ROOT/scripts/macos-app-icon.sh" "$CONTENTS/Resources" || echo "warning: no app icon (it takes Xcode 26 or later)" >&2
+fi
+
+# A real Apple Development identity gives TCC a stable signing requirement
+# across rebuilds. Set RENO_DEV_CODESIGN_IDENTITY explicitly when more than
+# one identity is installed; otherwise fall back to an ad-hoc signature.
+IDENTITY="${RENO_DEV_CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+  IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
+fi
+# Inside out: the engine first, then the bundle that seals it.
+if [[ -n "$IDENTITY" ]]; then
+  codesign --entitlements "$ROOT/dist/macos/Reno.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID.engine" "$ENGINE"
+  codesign --entitlements "$ROOT/dist/macos/Reno.entitlements" --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+else
+  codesign --entitlements "$ROOT/dist/macos/Reno.entitlements" --force --sign - --identifier "$BUNDLE_ID.engine" "$ENGINE"
+  codesign --entitlements "$ROOT/dist/macos/Reno.entitlements" --force --sign - --identifier "$BUNDLE_ID" "$APP"
+  echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
+fi
+
+if [[ "${RENO_DEV_BUILD_ONLY:-0}" == "1" ]]; then
+  echo "built: $APP" >&2
+  exit 0
+fi
+
+echo "running Reno Dev (bundle $BUNDLE_ID, data $DATA_DIR, IPC $IPC_PORT)" >&2
+# LaunchServices must own the process. Launching Contents/MacOS/reno directly
+# makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
+# -W keeps the script attached until the app exits. Runtime logs remain in the
+# isolated data directory (`target/macos-dev/data/logs/reno-headed.log`).
+OPEN_ENV=(
+  --env "RENO_AUTO_UPDATE=0"
+  --env "RENO_DATA_DIR=$DATA_DIR"
+  --env "RENO_IPC_PORT=$IPC_PORT"
+)
+if [[ -n "${CODEX_EXECUTABLE:-}" ]]; then
+  OPEN_ENV+=(--env "CODEX_EXECUTABLE=$CODEX_EXECUTABLE")
+fi
+for var in RENO_EDGE_URL RENO_WORKOS_CLIENT_ID RENO_CALLBACK_PORT; do
+  if [[ -n "${!var:-}" ]]; then
+    OPEN_ENV+=(--env "$var=${!var}")
+  fi
+done
+if [[ -n "${RENO_OPEN_ROUTE:-}" ]]; then
+  OPEN_ENV+=(--env "RENO_OPEN_ROUTE=$RENO_OPEN_ROUTE")
+fi
+exec open -W "${OPEN_ENV[@]}" "$APP" --args "$@"

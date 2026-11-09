@@ -1,0 +1,26 @@
+[package]
+name = "reno-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reno-proto.workspace = true
+reno-doc.workspace = true
+reno-rpc.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+base64 = "0.22"
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+reno-theme.workspace = true
+reno-visual.workspace = true
+tempfile.workspace = true

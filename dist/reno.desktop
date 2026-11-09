@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Reno
+GenericName=Coding Agent Controller
+Comment=Multi-device controller for coding agents
+Exec=reno %u
+TryExec=reno
+Icon=reno
+Terminal=false
+StartupNotify=true
+Categories=Development;Utility;
+Keywords=agent;claude;codex;ai;coding;
+StartupWMClass=reno
+MimeType=x-scheme-handler/reno;
