@@ -1,12 +1,17 @@
-//! MCP elicitations (`mcpServer/elicitation/request`): an MCP server asking
-//! the person for input in the middle of its tool call, whatever the
-//! approval policy. A flat form of choices, yes/no and short text becomes
-//! questions for the input bridge; any other shape is declined — a valid
-//! answer the server handles, where a JSON-RPC error failed its tool call.
+//! MCP elicitations (`mcpServer/elicitation/request`): an MCP server asking the person for
+//! input in the middle of its tool call, whatever the approval policy. A flat form of choices,
+//! yes/no and short text becomes `NeedsInput` questions; any other shape is declined (a valid
+//! answer the server handles, where a JSON-RPC error failed its tool call).
+//!
+//! Sans-IO (ARCH-6). Elicitations that are really approvals (their `_meta` names a privileged
+//! kind) never get here: see [`super::permission::classify_elicitation`].
 
-use crate::upstream_proto::{UserInputAnswer, UserInputQuestion};
+use reno_proto::Question;
 use serde_json::{Map, Value, json};
 
+use crate::exec::InputAnswer;
+
+#[derive(Debug)]
 enum Kind {
     Text,
     Number {
@@ -25,6 +30,7 @@ enum Kind {
     },
 }
 
+#[derive(Debug)]
 struct Field {
     key: String,
     required: bool,
@@ -33,11 +39,12 @@ struct Field {
     question_id: String,
 }
 
-/// A form the input bridge can ask; [`Form::response`] turns the answers
-/// into the elicitation's reply.
+/// A form `NeedsInput` can ask; [`Form::response`] turns the answers into the elicitation's
+/// reply.
+#[derive(Debug)]
 pub(crate) struct Form {
     fields: Vec<Field>,
-    pub(crate) questions: Vec<UserInputQuestion>,
+    pub(crate) questions: Vec<Question>,
     /// An empty form: a plain confirmation, asked as Accept / Decline.
     confirm_id: Option<String>,
 }
@@ -46,9 +53,15 @@ pub(crate) fn decline() -> Value {
     json!({ "action": "decline" })
 }
 
-/// `None` for anything but a flat `form` of supported fields (URL and
-/// device-verification modes, nested or free-form schemas).
-pub(crate) fn form(params: &Value) -> Option<Form> {
+/// The reply that accepts an elicitation which is an approval (no form to fill).
+pub(crate) fn accept() -> Value {
+    json!({ "action": "accept", "content": null })
+}
+
+/// `None` for anything but a flat `form` of supported fields (URL and device-verification
+/// modes, nested or free-form schemas). Question ids are `<request_id>:<index>`: stable, and
+/// unique within the run.
+pub(crate) fn form(request_id: &str, params: &Value) -> Option<Form> {
     match params.get("mode").and_then(Value::as_str) {
         Some("form") | None => {}
         Some(_) => return None,
@@ -79,17 +92,17 @@ pub(crate) fn form(params: &Value) -> Option<Form> {
     let header = format!("{server} asks");
 
     if properties.is_empty() {
-        let question = UserInputQuestion {
-            id: super::new_message_id(),
-            header,
-            question: if message.is_empty() {
-                format!("{server} asks to continue. Accept?")
-            } else {
-                message.to_owned()
-            },
+        let question = Question {
+            id: format!("{request_id}:0"),
+            prompt: format!(
+                "{header}: {}",
+                if message.is_empty() {
+                    format!("{server} asks to continue. Accept?")
+                } else {
+                    message.to_owned()
+                }
+            ),
             options: vec!["Accept".into(), "Decline".into()],
-            prefill: None,
-            multiline: false,
             multi_select: false,
         };
         return Some(Form {
@@ -123,17 +136,10 @@ pub(crate) fn form(params: &Value) -> Option<Form> {
             Kind::Choices { labels, .. } => (labels.clone(), true),
             Kind::Text | Kind::Number { .. } => (Vec::new(), false),
         };
-        let question = UserInputQuestion {
-            id: super::new_message_id(),
-            header: header.clone(),
-            question: text,
+        let question = Question {
+            id: format!("{request_id}:{index}"),
+            prompt: format!("{header}: {text}"),
             options,
-            prefill: match (&kind, &default) {
-                (Kind::Text | Kind::Number { .. }, Some(Value::String(s))) => Some(s.clone()),
-                (Kind::Number { .. }, Some(Value::Number(n))) => Some(n.to_string()),
-                _ => None,
-            },
-            multiline: false,
             multi_select,
         };
         fields.push(Field {
@@ -211,9 +217,9 @@ fn kind(field: &Value) -> Option<Kind> {
 }
 
 impl Form {
-    /// The elicitation reply for `answers`. No answer at all (the person
-    /// went away), a missing required field or an unreadable one declines.
-    pub(crate) fn response(&self, answers: &[UserInputAnswer]) -> Value {
+    /// The elicitation reply for `answers`. No answer at all (the person went away), a missing
+    /// required field or an unreadable one declines.
+    pub(crate) fn response(&self, answers: &[InputAnswer]) -> Value {
         let labels = |id: &str| -> Option<&[String]> {
             answers
                 .iter()
@@ -288,14 +294,15 @@ impl Form {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
-    fn answer(form: &Form, labels: &[&[&str]]) -> Vec<UserInputAnswer> {
+    fn answer(form: &Form, labels: &[&[&str]]) -> Vec<InputAnswer> {
         form.questions
             .iter()
             .zip(labels)
-            .map(|(q, l)| UserInputAnswer {
+            .map(|(q, l)| InputAnswer {
                 question_id: q.id.clone(),
                 labels: l.iter().map(|s| (*s).to_owned()).collect(),
             })
@@ -315,15 +322,22 @@ mod tests {
                 "note": {"type": "string", "default": "none"}
             }}
         });
-        let form = form(&params).expect("supported form");
+        let form = form("r9", &params).expect("supported form");
         assert_eq!(form.questions.len(), 5);
         // The server's message leads the first question.
-        assert!(form.questions[0].question.starts_with("Pick a target\n\n"));
+        assert!(
+            form.questions[0]
+                .prompt
+                .starts_with("deploy asks: Pick a target\n\n")
+        );
         assert!(
             form.questions[1..]
                 .iter()
-                .all(|q| !q.question.contains("Pick a target"))
+                .all(|q| !q.prompt.contains("Pick a target"))
         );
+        // Ids are stable: the request's, then the field's index.
+        assert_eq!(form.questions[0].id, "r9:0");
+        assert_eq!(form.questions[4].id, "r9:4");
         let by_key = |key: &str| {
             form.fields
                 .iter()
@@ -332,19 +346,19 @@ mod tests {
                 .unwrap()
         };
         let answers = vec![
-            UserInputAnswer {
+            InputAnswer {
                 question_id: by_key("env"),
                 labels: vec!["Development".into()],
             },
-            UserInputAnswer {
+            InputAnswer {
                 question_id: by_key("count"),
                 labels: vec![" 3 ".into()],
             },
-            UserInputAnswer {
+            InputAnswer {
                 question_id: by_key("force"),
                 labels: vec!["Yes".into()],
             },
-            UserInputAnswer {
+            InputAnswer {
                 question_id: by_key("tags"),
                 labels: vec!["a".into(), "b".into()],
             },
@@ -367,12 +381,13 @@ mod tests {
     #[test]
     fn empty_forms_are_confirmations() {
         let form = form(
+            "r1",
             &json!({"serverName": "s", "message": "Proceed?", "mode": "form",
             "requestedSchema": {"type": "object", "properties": {}}}),
         )
         .unwrap();
         assert_eq!(form.questions[0].options, vec!["Accept", "Decline"]);
-        assert_eq!(form.questions[0].question, "Proceed?");
+        assert_eq!(form.questions[0].prompt, "s asks: Proceed?");
         assert_eq!(
             form.response(&answer(&form, &[&["Accept"]])),
             json!({"action": "accept", "content": {}})
@@ -384,16 +399,31 @@ mod tests {
     #[test]
     fn unsupported_modes_and_schemas_are_not_asked() {
         assert!(
-            form(&json!({"mode": "url", "url": "https://x", "message": "m", "elicitationId": "e"}))
-                .is_none()
+            form(
+                "r",
+                &json!({"mode": "url", "url": "https://x", "message": "m", "elicitationId": "e"})
+            )
+            .is_none()
         );
-        assert!(form(&json!({"mode": "openai/userVerification", "challenge": "c"})).is_none());
         assert!(
             form(
+                "r",
+                &json!({"mode": "openai/userVerification", "challenge": "c"})
+            )
+            .is_none()
+        );
+        assert!(
+            form(
+                "r",
                 &json!({"mode": "form", "message": "m", "requestedSchema": {"type": "object",
             "properties": {"nested": {"type": "object"}}}})
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn accepting_an_approval_sends_no_content() {
+        assert_eq!(accept(), json!({"action": "accept", "content": null}));
     }
 }

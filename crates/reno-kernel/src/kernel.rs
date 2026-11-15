@@ -399,10 +399,8 @@ impl Kernel {
         events::run_events(Arc::clone(&self.shared), run.clone(), from).await
     }
 
-    /// Queue a steering prompt for a live run's executor. Errors if the run is not live.
-    ///
-    /// The prompt is not journaled as an event yet: `ExecEvent` has no variant for a user
-    /// message in this tree. The supervisor's `Steer` command is where it goes once it does.
+    /// Queue a steering prompt for a live run's executor. Errors if the run is not live. Once
+    /// the executor takes it, the supervisor journals it as `ExecEvent::UserMessage`.
     pub async fn steer(&self, run: &RunId, prompt: impl Into<String>) -> Result<()> {
         let commands = self
             .shared

@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::task::TaskTracker;
 
 use crate::HarnessError;
 use crate::process::{ChildStdin, ChildStdout};
@@ -63,6 +64,19 @@ pub(crate) fn transport_lost(error: &HarnessError) -> bool {
         .is_some_and(|(_, reason)| reason.starts_with(EXITED) || reason.starts_with(STDIN_CLOSED))
 }
 
+/// The writer and reader tasks of one [`RpcClient`].
+pub(crate) struct RpcTasks([tokio::task::JoinHandle<()>; 2]);
+
+impl RpcTasks {
+    /// Stop both. Pending requests already failed when the pipes closed; an abort only ends
+    /// what a held-open pipe would keep alive.
+    pub(crate) fn abort(&self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RpcClient {
     next_id: Arc<AtomicI64>,
@@ -83,23 +97,44 @@ impl RpcClient {
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
+        let (client, incoming, _tasks) = Self::start(None, stdin, stdout, observer);
+        (client, incoming)
+    }
+
+    /// [`Self::new`], with the writer and reader tasks on `tracker`, so the owner can wait for
+    /// them at shutdown (ARCH-11). They end when the child's pipes close, which a descendant
+    /// that escaped teardown can hold open forever: the owner aborts them through the returned
+    /// handles once the child is reaped.
+    pub(crate) fn tracked(
+        tracker: &TaskTracker,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+    ) -> (Self, mpsc::Receiver<Incoming>, RpcTasks) {
+        Self::start(Some(tracker), stdin, stdout, None)
+    }
+
+    fn start(
+        tracker: Option<&TaskTracker>,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        observer: Option<StdoutObserver>,
+    ) -> (Self, mpsc::Receiver<Incoming>, RpcTasks) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         let closed = Arc::new(AtomicBool::new(false));
-        tokio::spawn(write_loop(
-            stdin,
-            writer_rx,
-            Arc::clone(&pending),
-            closed.clone(),
-        ));
-        tokio::spawn(read_loop(
+        let writer = write_loop(stdin, writer_rx, Arc::clone(&pending), closed.clone());
+        let reader = read_loop(
             stdout,
             Arc::clone(&pending),
             incoming_tx,
             closed.clone(),
             observer,
-        ));
+        );
+        let tasks = match tracker {
+            Some(tracker) => RpcTasks([tracker.spawn(writer), tracker.spawn(reader)]),
+            None => RpcTasks([tokio::spawn(writer), tokio::spawn(reader)]),
+        };
         (
             Self {
                 next_id: Arc::new(AtomicI64::new(0)),
@@ -108,6 +143,7 @@ impl RpcClient {
                 closed,
             },
             incoming_rx,
+            tasks,
         )
     }
 

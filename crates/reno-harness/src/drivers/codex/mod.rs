@@ -1,103 +1,140 @@
-//! Codex harness: spawns the installed `codex` CLI as `codex app-server` and
-//! speaks JSON-RPC 2.0 over stdio — the same interface the Codex IDE extension
-//! uses. Resurrected from the pre-ACP driver and modernized.
+//! The native Codex executor: spawns the installed `codex` CLI as `codex app-server` and speaks
+//! JSON-RPC 2.0 over stdio, the interface the Codex IDE extension uses, and implements
+//! [`Executor`] without going through the imported `Harness` trait (stage B, ARCHITECTURE
+//! sections 2.1 and 5.1).
 //!
-//! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
-//! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
-//! imageGeneration additionally follows the 0.154.0 schema (savedPath only).
-//! Revalidate the method/notification surface when bumping past it. A CLI
-//! older than [`MIN_CODEX_VERSION`] is refused up front.
+//! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.experimentalApi`). The request
+//! shapes were read from the 0.164.0 schema and the driver's live fixtures start at 0.146.1;
+//! [`MIN_CLI_VERSION`] is the oldest CLI refused up front, [`VERIFIED_CLI_VERSION`] the newest
+//! this driver targets (the one installed where the native contract was written: no live run
+//! against it has been made, so it is a claim to confirm with the live tests, `--ignored`).
+//! Revalidate the method and notification surface when bumping.
 //!
-//! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`,
-//!   opting out of the high-volume notifications nothing consumes) then the
-//!   `initialized` notification; unknown notification methods tolerated.
-//! - `thread/start` (or `thread/resume`, unarchiving an archived thread; only
-//!   a conversation that is gone falls back to a fresh thread, with a visible
-//!   notice) → `SessionStarted`; `turn/start` carries the prompt, model,
-//!   effort, `sandboxPolicy`, approval policy and (plan mode) the
-//!   `collaborationMode`.
-//! - Notifications map to [`AgentEvent`]s: agentMessage/reasoning deltas (both
-//!   `delta`/`textDelta` spellings), item lifecycles → typed ToolCall/ToolResult,
-//!   `thread/tokenUsage/updated` → Usage, turn/completed|failed|aborted → Done.
-//!   An `error` Codex will retry is progress, not an error; a final one is
-//!   reported once, by the turn's Done.
-//! - Approvals + sandbox follow the run's [`AccessMode`], on every
-//!   `turn/start` (so a change applies from the next turn in place): full
-//!   access is `"never"` + `danger-full-access`, as every run was before
-//!   modes; auto-accept edits is `"untrusted"` + `workspace-write` (every
-//!   command but codex's known-safe reads is asked, even inside the
-//!   sandbox; file changes are accepted); supervised is `"untrusted"` +
-//!   `read-only`. A title run stays `"never"`
-//!   + `read-only`. `item/commandExecution/requestApproval`,
-//!   `item/fileChange/requestApproval` and `item/permissions/requestApproval`
-//!   the mode does not cover round-trip through
-//!   [`RunControls::request_input`] as a yes/no question (a refusal
-//!   declines); auto-accept edits accepts file changes outright. MCP
-//!   elicitations (sent whatever the policy) are asked when they are a flat
-//!   form and declined otherwise.
-//! - Plan mode is Codex's `plan` collaboration mode. It sticks to the thread
-//!   (across a resume too), so once a thread has planned every turn names
-//!   its mode. The proposed plan arrives as its own `plan` item, rendered
-//!   as reply text.
-//! - Subagents are full child app-server threads. Parent spawn items establish
-//!   their stable ownership; content arriving before the spawn is buffered.
-//!   A registered child's notifications route through an EXPLICIT table
-//!   ([`normalize::route_child_notification`]) — content, errors and child turns
-//!   become tagged [`AgentEvent::Subagent`] events; unrelated child bookkeeping is
-//!   consumed so it can never settle the parent turn, and unknown methods
-//!   fall through to the parent path (fail open, never silent loss).
-//! - Steering: `turn/steer { expectedTurnId, clientUserMessageId }` into the
-//!   live turn, confirmed when its userMessage item (carrying that id) joins
-//!   the turn; a rejected steer (the turn-completed race) is queued and
-//!   delivered as the next `turn/start` on the same thread. The session is
-//!   persistent across turns while the steering mailbox lives; a steer's
-//!   changed model/effort/tier rides the next `turn/start`.
-//! - Only the turn in flight settles: a stale or duplicate completion is
-//!   ignored. Commands still running past their turn report as background
-//!   work, so the host never reaps the app-server from under them.
-//! - Turn stop ([`crate::TurnControl::stop_turn`]): `turn/interrupt` ends the
-//!   turn `Interrupted`; the app-server and its threads (child agents
-//!   included) stay up for the next `turn/start`.
-//! - Interrupt: cancelling [`RunControls::interrupt`] tears the runtime down —
-//!   `turn/interrupt`, escalating to SIGTERM → SIGKILL if the child is
-//!   unresponsive; the stream always ends with `Done { status: Interrupted }`.
+//! - `wire::codex` is sans-IO: notifications and items become [`ExecEvent`]s there, requests
+//!   become `ApprovalSubject`s and question lists. This module only does the I/O.
+//! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`, opting out of the
+//!   high-volume notifications nothing consumes) then the `initialized` notification; unknown
+//!   notification methods tolerated. An app-server that dies before answering is relaunched
+//!   (1, 3, 8 s apart), and every launch is reported as a process record.
+//! - `thread/start` (or `thread/resume`, unarchiving an archived thread; only a conversation
+//!   that is gone falls back to a fresh thread, and `Started` names the thread the run really
+//!   has) then `turn/start`, carrying the prompt, model, effort, `sandboxPolicy` and approval
+//!   policy. A resumed thread still in plan mode is taken out of it: the turn names `default`.
+//! - APPROVALS ARE STRUCTURED. A command, file-change or permission request, and an MCP tool
+//!   approval (an elicitation tagged by its `_meta`), become `NeedsApproval` with a structured
+//!   [`reno_proto::ApprovalSubject`] and are answered through `ExecHandle::decide` as Codex's
+//!   `accept` or `decline`, never `acceptForSession`. An elicitation form and the agent's own
+//!   questions become `NeedsInput`, answered through `ExecHandle::answer_input`. No prose is
+//!   written or parsed on this path.
+//! - ONE RUN IS ONE `Done`. The imported driver kept the app-server and its thread for the next
+//!   turn; the run does not. The end of the turn ends the run and the app-server's process group
+//!   is torn down, so what the agent left running ends with it. The one exception is a steer
+//!   Codex refused because its turn just ended: that steer starts the next turn inside the same
+//!   run, and the first turn's end is not the run's.
+//! - Steering: `turn/steer { expectedTurnId }` into the live turn. A rejected steer (the
+//!   turn-completed race) is queued and delivered as the next `turn/start` on the same thread.
+//!   Steers queue in order.
+//! - Subagents are full child app-server threads. Their notifications are consumed by an
+//!   explicit table ([`crate::wire::codex::normalize::route_child_notification`]) so a child's
+//!   turn end can never settle the run's turn, and unknown methods fall through to the run (fail
+//!   open, never silent loss). A child's approval request is answered like the run's own.
+//! - Only the turn in flight settles: a stale or duplicate completion is ignored.
+//! - Cancel: cancelling `ExecControls::cancel` declines every open request (and any that arrives
+//!   later), sends `turn/interrupt`, then SIGTERM and SIGKILL after their graces. The stream
+//!   ends with `Done { stop: Interrupted }`.
+//! - Process records: every app-server this module spawns for a run is reported through
+//!   `ExecControls::processes` as soon as it exists, so a crash of the daemon leaves a row for
+//!   the orphan sweep (ARCHITECTURE 17.3). The short-lived `model/list` probe is not a run and
+//!   reports none: it is bounded by its own timeout and reaped before it returns.
 
 pub mod npm_repair;
 
-use crate::wire::codex::{catalog, elicitation, new_message_id, normalize, subagents};
+use crate::wire::codex::catalog;
+use crate::wire::codex::elicitation;
+use crate::wire::codex::normalize::{
+    ChildRoute, Normalizer, Phase, TurnEnd, notification_thread_id, route_child_notification,
+    turn_id,
+};
+use crate::wire::codex::permission::{self, Asked, Authority, Elicitation};
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use reno_proto::{
+    AccessMode, ApprovalSubject, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
+    McpServerSpec, ModelInfo, SandboxLevel, SessionRef, Steering, StopReason, VersionRange,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
-use crate::upstream_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputAnswer,
-    UserInputQuestion,
+use crate::exec::{
+    Decision, ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, InputAnswer, Open,
+    OpenRequests, ProcessSink, Resolved, require_access,
 };
-
-use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
+use crate::jsonrpc::{Incoming, RpcClient, RpcTasks, transport_lost};
 use crate::process::owned::Child as OwnedChild;
-use crate::process::{Child, Command, Stdio};
-use crate::{Harness, HarnessError, RunControls};
-use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
-use normalize::{
-    ChildRoute, Phase, ReasoningStream, delta_text, item_id, item_type, notification_thread_id,
-    route_child_notification, settle_turn_error, turn_error_message, turn_id, usage_event,
-};
+use crate::process::{Command, Stdio};
+use crate::{HarnessError, Signal, send_signal};
 
-/// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own
-/// PATH, then the login-shell PATH snapshot (the user's shell init shapes
-/// PATH in ways a GUI/service launch never sees — see [`crate::shell_env`]),
-/// then known install locations as a last resort. Resolved per call — cheap
-/// after the snapshot is cached.
+/// The oldest Codex CLI whose app-server speaks the wire this driver maps: nested `error`
+/// notifications, `turn/steer`, child-thread routing (the live captures under
+/// `tests/fixtures/codex` start at 0.146.1). An older CLI fails confusingly mid-run instead of
+/// saying it needs an update.
+pub const MIN_CLI_VERSION: &str = "0.146.0";
+
+/// The newest Codex CLI version this driver targets: the one installed where the native contract
+/// was written. The request shapes were read from the 0.164.0 schema and the fixtures follow the
+/// 0.146 to 0.164 wire; nothing was run against 0.169.0, so this is a claim to confirm with the
+/// live tests (`--ignored`).
+pub const VERIFIED_CLI_VERSION: &str = "0.169.0";
+
+/// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
+const CONTRACT_VERSION: u32 = 1;
+
+/// The id this executor registers under.
+pub const EXECUTOR_ID: &str = "codex";
+
+static ID: LazyLock<ExecutorId> = LazyLock::new(|| match EXECUTOR_ID.parse() {
+    Ok(id) => id,
+    Err(error) => unreachable!("{EXECUTOR_ID} is a valid executor id: {error}"),
+});
+
+/// What the stream carries before the consumer reads: room for a burst of notifications.
+const EVENT_CAPACITY: usize = 256;
+
+/// Requests the app-server may have open on a person at once (ARCH-11). A flood beyond this (a
+/// misbehaving MCP server) is refused as overloaded instead of growing without bound.
+const MAX_OPEN_REQUESTS: usize = 32;
+
+/// The longest a Reno MCP tool may take: its longest wait (an hour) plus margin for the reply.
+/// Codex gives up on a tool call after 60 s by default.
+const RENO_TOOL_TIMEOUT_SECS: u64 = 3600 + 120;
+
+/// Waits before relaunching an app-server that died before answering `initialize`: a
+/// just-started machine can lose the first launch (a CLI still finishing its install, a cold
+/// disk), and nothing has run yet.
+const STARTUP_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+];
+
+/// High-volume notifications nothing here consumes: the turn's running diff and every patch's
+/// output stream. Opting out at `initialize` spares the wire (and the reader) from parsing them
+/// only to drop them.
+const OPTED_OUT_NOTIFICATIONS: &[&str] = &["turn/diff/updated", "item/fileChange/outputDelta"];
+
+/// Locate the device's installed Codex CLI: `CODEX_EXECUTABLE`, then our own PATH, then the
+/// login-shell PATH snapshot (the user's shell init shapes PATH in ways a GUI/service launch
+/// never sees, see [`crate::shell_env`]), then known install locations as a last resort.
+/// Resolved per call: cheap after the snapshot is cached.
 pub fn resolve_codex_executable() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CODEX_EXECUTABLE").filter(|p| !p.is_empty()) {
         return crate::executable::validate_native_override(&PathBuf::from(p)).ok();
@@ -113,149 +150,203 @@ pub fn resolve_codex_executable() -> Option<PathBuf> {
     crate::executable::find_on_paths("codex", extra)
 }
 
-/// `thread/start` / `thread/resume` config keys that, set to false, take the
-/// agent tools away (title runs, side-chats-only runs). The app-server merges
-/// that `config` into its `-c` overrides (openai/codex rust-v0.153.4,
-/// codex-rs/app-server/src/config_manager.rs `load_with_cli_overrides`), and
-/// "Setting `agents.enabled=false` disables agent tools"
-/// (docs/research/codex-subagents.md). An enabled `features.multi_agent_v2`
-/// takes precedence over `agents.enabled` (codex-rs/core/config.schema.json).
-const AGENT_TOOLS: [&str; 3] = [
-    "features.multi_agent",
-    "features.multi_agent_v2",
-    "agents.enabled",
-];
-
-/// [`AGENT_TOOLS`] as config overrides that switch them off.
-fn agent_tools_off() -> [(String, Value); 3] {
-    AGENT_TOOLS.map(|key| (key.to_owned(), Value::Bool(false)))
+/// Dotted `thread/start` config overrides that add the injected MCP servers to the user's
+/// `mcp_servers` table. Reno's own server is the first of `servers`; the rest are a plugin's.
+///
+/// Reno's server is pre-approved (`default_tools_approval_mode`) only when `pre_approve` says
+/// nobody is asked: under any mode that asks, a call to it is an approval like any other and
+/// reaches Reno as `NeedsApproval`. A plugin's tools are never pre-approved. Only Reno's server
+/// gets the long tool timeout and the generous start-up time.
+fn mcp_overrides(servers: &[McpServerSpec], pre_approve: bool) -> Vec<(String, Value)> {
+    let mut seen = HashSet::new();
+    let mut overrides = Vec::new();
+    for (at, server) in servers.iter().enumerate() {
+        // A name that repeats keeps its first entry: Reno's own server is first.
+        if !seen.insert(server.name.as_str()) {
+            continue;
+        }
+        let key = |field: &str| format!("mcp_servers.{}.{field}", server.name);
+        overrides.push((key("command"), server.command.clone().into()));
+        overrides.push((key("args"), json!(server.args)));
+        overrides.push((key("env"), json!(server.env)));
+        if at == 0 {
+            if pre_approve {
+                overrides.push((key("default_tools_approval_mode"), "approve".into()));
+            }
+            // Reno's `wait_for_turn` (or a send that waits) may block for up to an hour while
+            // another chat works.
+            overrides.push((key("tool_timeout_sec"), RENO_TOOL_TIMEOUT_SECS.into()));
+            // A cold start (a fresh machine paging the binary in) can outlast the 10 s default
+            // before the server answers `initialize`.
+            overrides.push((key("startup_timeout_sec"), 30.into()));
+        }
+    }
+    overrides
 }
-
-/// Dotted `thread/start` config overrides that add an injected MCP server
-/// to the user's `mcp_servers` table.
-fn codex_mcp_overrides(mcp: &crate::upstream_proto::McpServer) -> Vec<(String, Value)> {
-    let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-    vec![
-        (key("command"), mcp.command.clone().into()),
-        (key("args"), json!(mcp.args)),
-        (key("env"), json!(mcp.env)),
-        // Our injected server's tools are Reno's own: approve them in every
-        // access mode, so Codex neither rejects a call under `never` nor
-        // asks about one under the others.
-        (key("default_tools_approval_mode"), "approve".into()),
-        // Codex gives up on a tool call after 60 s by default, and a Reno
-        // `wait_for_turn` (or a send that waits) may block for up to an hour
-        // while another chat works: past the longest wait, plus margin.
-        (key("tool_timeout_sec"), RENO_TOOL_TIMEOUT_SECS.into()),
-        // A cold start (a fresh machine paging the binary in) can outlast
-        // the 10 s default before the server answers `initialize`.
-        (key("startup_timeout_sec"), 30.into()),
-    ]
-}
-
-/// Dotted `thread/start` config overrides for the plugins' native MCP
-/// servers ([`RunRequest::extra_mcp`]). Unlike Reno's own server they get no
-/// `default_tools_approval_mode`: their tools are a plugin's, so Codex asks
-/// (or refuses) under the chat's access mode like any user-configured server.
-fn codex_extra_mcp_overrides(extras: &[crate::upstream_proto::McpServer]) -> Vec<(String, Value)> {
-    extras
-        .iter()
-        .flat_map(|mcp| {
-            let key = |field: &str| format!("mcp_servers.{}.{field}", mcp.name);
-            [
-                (key("command"), mcp.command.clone().into()),
-                (key("args"), json!(mcp.args)),
-                (key("env"), json!(mcp.env)),
-            ]
-        })
-        .collect()
-}
-
-/// The longest a Reno MCP tool may take: its longest wait (an hour) plus
-/// margin for the reply.
-const RENO_TOOL_TIMEOUT_SECS: u64 = 3600 + 120;
 
 /// A ready-to-spawn `codex login` command for the engine's account flow.
 ///
-/// Shares the harness's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell
-/// snapshot, install locations) and
-/// its child-PATH composition, so "Add account" launches exactly the binary
-/// the harness itself would run. `CODEX_HOME` isolates the login from the live
-/// `~/.codex` session; the caller owns stdio wiring and cancellation.
-pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessError> {
-    let exe = CodexHarness::new().resolve_executable()?;
+/// Shares the executor's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell snapshot,
+/// install locations) and its child-PATH composition, so "Add account" launches exactly the
+/// binary a run would. `CODEX_HOME` isolates the login from the live `~/.codex` session; the
+/// caller owns stdio wiring and cancellation.
+pub fn login_command(codex_home: &Path) -> Result<Command, HarnessError> {
+    let exe = CodexExecutor::new()
+        .resolve_executable()
+        .map_err(|error| HarnessError::NotInstalled(error.to_string()))?;
     let mut cmd = Command::new(&exe);
     crate::compose_child_path(&mut cmd, &exe);
     cmd.arg("login").env("CODEX_HOME", codex_home);
     Ok(cmd)
 }
 
-/// The Codex harness. Construct with [`CodexHarness::new`]; tests point it at a
-/// fake app server with [`CodexHarness::with_executable`].
-pub struct CodexHarness {
-    models_cache: crate::catalog::Catalog,
+/// `Some(why)` when `version` is a CLI older than [`MIN_CLI_VERSION`]; an unknown version (a
+/// wrapper, a dev build) is given the benefit of the doubt. A pre-release counts as its release:
+/// `0.146.0-alpha.2` already speaks the wire, though semver orders it before `0.146.0`.
+fn too_old_message(version: Option<&semver::Version>) -> Option<String> {
+    let version = version?;
+    let release = semver::Version::new(version.major, version.minor, version.patch);
+    let min = semver::Version::parse(MIN_CLI_VERSION).ok()?;
+    (release < min).then(|| {
+        format!(
+            "Codex CLI {version} is too old; update it to {min} or newer \
+             (npm install -g @openai/codex@latest)"
+        )
+    })
+}
+
+/// The Codex executor. Construct with [`CodexExecutor::new`]; tests point it at a fake
+/// app-server with [`CodexExecutor::with_executable`].
+///
+/// # Access modes
+///
+/// Codex decides what runs without asking from its approval policy and its sandbox; whatever
+/// they do not cover is sent to Reno as a server request. Reno's access mode picks both, and the
+/// spec's sandbox can only narrow the sandbox (Codex is never launched with more than asked,
+/// ARCH-15):
+///
+/// | `AccessMode` | `approvalPolicy` | Sandbox before the spec's ceiling | Codex asks about | Reaches Reno as `NeedsApproval` | This driver answers itself |
+/// |---|---|---|---|---|---|
+/// | `FullAccess` | `never` | `danger-full-access` | nothing | nothing | every command, file change and permission request that arrives anyway, when the sandbox is unrestricted; MCP tool approvals always |
+/// | `AutoAcceptEdits` | `untrusted` | `workspace-write` (network on) | everything but its known-safe reads, file changes included | commands, permission grants, MCP tool calls, and file changes that are not provably inside the working directory | file changes whose every path, symlinks followed, is inside the working directory |
+/// | `Supervised` | `untrusted` | `read-only` | everything but its known-safe reads | all of it | nothing |
+///
+/// A run whose mode asks routes its approvals to the person explicitly (`approvalsReviewer:
+/// user`): a configured reviewer could otherwise hand them to an AI. Under `FullAccess` with a
+/// sandbox narrower than unrestricted, Codex never asks, so a request that arrives anyway asks
+/// to leave the sandbox the spec asked for: it is asked, not accepted (its file changes inside
+/// the working directory excepted, as under `AutoAcceptEdits`). Whatever the mode, an approval
+/// that is neither a command, a file change, a permission grant nor an MCP tool call (another
+/// privileged elicitation, `browser_auth` for one) is asked: no mode answers it unseen. The
+/// table is applied by `wire::codex::permission`, and the symlinks by this module. An access
+/// mode is never widened mid-run.
+///
+/// [`Self::with_access_modes`] narrows what an instance will honour; `start` refuses any other
+/// mode with [`ExecError::UnsupportedAccess`] before spawning (ARCH-15).
+pub struct CodexExecutor {
     executable: Option<PathBuf>,
     /// Grace between `turn/interrupt` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
     kill_grace: Duration,
+    /// Waits before each relaunch of an app-server that died before answering `initialize`.
+    startup_retry_delays: Vec<Duration>,
+    access_modes: Vec<AccessMode>,
+    /// The CLI version `probe` last read, for the descriptor.
+    cli_version: Arc<Mutex<Option<String>>>,
+    /// The models `model/list` last returned, for the descriptor.
+    models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
+    tracker: TaskTracker,
 }
 
-impl Default for CodexHarness {
+impl std::fmt::Debug for CodexExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexExecutor")
+            .field("executable", &self.executable)
+            .field("access_modes", &self.access_modes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for CodexExecutor {
     fn default() -> Self {
         Self {
-            models_cache: crate::catalog::Catalog::default(),
             executable: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
+            startup_retry_delays: STARTUP_RETRY_DELAYS.to_vec(),
+            access_modes: vec![
+                AccessMode::Supervised,
+                AccessMode::AutoAcceptEdits,
+                AccessMode::FullAccess,
+            ],
+            cli_version: Arc::new(Mutex::new(None)),
+            models: Arc::new(Mutex::new(None)),
+            tracker: TaskTracker::new(),
         }
     }
 }
 
-impl CodexHarness {
+impl CodexExecutor {
+    /// An executor that finds the CLI on PATH, in the login shell's PATH or in a known install
+    /// location.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
+    #[must_use]
     pub fn with_executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
         self
     }
 
-    /// Tune the interrupt→SIGTERM→SIGKILL escalation timing.
+    /// Tune the interrupt, SIGTERM, SIGKILL escalation timing.
+    #[must_use]
     pub fn with_graces(mut self, interrupt_grace: Duration, kill_grace: Duration) -> Self {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
         self
     }
 
-    fn resolve_executable(&self) -> Result<PathBuf, HarnessError> {
-        if let Some(p) = &self.executable {
-            return crate::executable::validate_native_override(p);
-        }
-        if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
-            && !p.is_empty()
-        {
-            return crate::executable::validate_native_override(&PathBuf::from(p));
-        }
-        resolve_codex_executable().ok_or_else(|| {
-            HarnessError::NotInstalled(
-                "codex (searched PATH, the login shell's PATH, ~/.local/bin, \
-                 ~/.codex/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, \
-                 and fnm/nvm/volta/pnpm/bun install dirs; set CODEX_EXECUTABLE \
-                 to override)"
-                    .into(),
-            )
-        })
+    /// Tune the waits before relaunching an app-server that died before answering `initialize`:
+    /// one relaunch per entry.
+    #[must_use]
+    pub fn with_startup_retry_delays(mut self, delays: Vec<Duration>) -> Self {
+        self.startup_retry_delays = delays;
+        self
     }
 
-    /// Short-lived live catalog probe. `model/list` is paginated and already
-    /// applies the signed-in account's rollout/visibility policy, so hidden or
-    /// unavailable models (including staged Astra rollouts) never leak into a
-    /// successful picker response.
-    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let exe = self.resolve_executable()?;
+    /// Honour only these access modes: the descriptor lists them and `start` refuses the rest.
+    #[must_use]
+    pub fn with_access_modes(mut self, modes: Vec<AccessMode>) -> Self {
+        self.access_modes = modes;
+        self
+    }
+
+    /// Whether the CLI can be launched now: the launch resolver, not bare discovery, so a valid
+    /// `CODEX_EXECUTABLE` (or a fixed `executable`) reports installed and an invalid one does
+    /// not.
+    pub fn installed(&self) -> bool {
+        self.resolve_executable().is_ok()
+    }
+
+    fn resolve_executable(&self) -> Result<PathBuf, ExecError> {
+        resolve_executable(self.executable.as_deref())
+    }
+
+    /// Ask the app-server which models the signed-in account may use (`model/list`, paged;
+    /// hidden models are skipped, the account's default leads) and keep the answer for the
+    /// descriptor. A failure leaves what the descriptor already offered: the last discovery, or
+    /// the curated list.
+    ///
+    /// Spawns a short-lived app-server, reaped before this returns; it is not a run, so it
+    /// reports no process record. Nothing calls it on its own: tests never reach a real binary
+    /// (ARCH-16).
+    pub async fn discover_models(&self) -> Result<Vec<ModelInfo>, HarnessError> {
+        let exe = self
+            .resolve_executable()
+            .map_err(|error| HarnessError::NotInstalled(error.to_string()))?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
@@ -267,50 +358,36 @@ impl CodexHarness {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            shutdown_child(&mut child, self.kill_grace).await;
+            child.shutdown(self.kill_grace).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
-        let (client, _incoming) = RpcClient::new(stdin, stdout);
+        let (client, _incoming, rpc_tasks) = RpcClient::tracked(&self.tracker, stdin, stdout);
         let discovery = async {
             client
-                .request(
-                    "initialize",
-                    json!({
-                        "clientInfo": {
-                            "name": "reno-native",
-                            "title": "Reno",
-                            "version": env!("CARGO_PKG_VERSION"),
-                        },
-                        "capabilities": { "experimentalApi": true },
-                    }),
-                )
+                .request("initialize", initialize_params(false))
                 .await?;
             client.notify("initialized", None);
 
-            let mut models = Vec::new();
-            let mut model_ids = HashSet::new();
+            let mut models: Vec<ModelInfo> = Vec::new();
             let mut seen_cursors = HashSet::new();
             let mut cursor: Option<String> = None;
-            let mut default_model_id: Option<String> = None;
+            let mut default_model: Option<String> = None;
             loop {
                 let mut params = json!({ "limit": 20, "includeHidden": false });
                 if let Some(cursor) = cursor.as_deref() {
                     params["cursor"] = Value::String(cursor.to_owned());
                 }
                 let page = client.request("model/list", params).await?;
-                if legacy_model_page(&page) {
-                    tracing::warn!(binary_path = %exe.display(), binary_version = ?crate::executable::binary_version(&exe), "Model discovery response lacks hidden flags; CLI may be outdated");
-                }
-                let (page_models, next_cursor) = parse_model_list_page(&page);
-                for (model, is_default) in page_models {
-                    if model_ids.insert(model.id.clone()) {
-                        if is_default && default_model_id.is_none() {
-                            default_model_id = Some(model.id.clone());
+                let (found, next) = catalog::parse_model_page(&page);
+                for (model, is_default) in found {
+                    if models.iter().all(|known| known.id != model.id) {
+                        if is_default && default_model.is_none() {
+                            default_model = Some(model.id.clone());
                         }
                         models.push(model);
                     }
                 }
-                let Some(next) = next_cursor.filter(|next| !next.is_empty()) else {
+                let Some(next) = next.filter(|next| !next.is_empty()) else {
                     break;
                 };
                 if !seen_cursors.insert(next.clone()) {
@@ -318,13 +395,12 @@ impl CodexHarness {
                 }
                 cursor = Some(next);
             }
-
-            if let Some(default_id) = default_model_id
-                && let Some(index) = models.iter().position(|model| model.id == default_id)
-                && index != 0
+            if let Some(default) = default_model
+                && let Some(at) = models.iter().position(|model| model.id == default)
+                && at != 0
             {
-                let default_model = models.remove(index);
-                models.insert(0, default_model);
+                let model = models.remove(at);
+                models.insert(0, model);
             }
             if models.is_empty() {
                 return Err(crate::CatalogFailure {
@@ -333,563 +409,42 @@ impl CodexHarness {
                 }
                 .into());
             }
-            Ok::<Vec<Model>, HarnessError>(models)
+            Ok::<Vec<ModelInfo>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
-        shutdown_child(&mut child, self.kill_grace).await;
-        match result {
-            Ok(inner) => inner,
-            Err(_) => Err(HarnessError::Protocol("model discovery timed out".into())),
-        }
+        child.shutdown(self.kill_grace).await;
+        rpc_tasks.abort();
+        let models = match result {
+            Ok(inner) => inner?,
+            Err(_) => return Err(HarnessError::Protocol("model discovery timed out".into())),
+        };
+        *self.models.lock().unwrap_or_else(PoisonError::into_inner) = Some(models.clone());
+        Ok(models)
     }
 }
 
-/// The `serviceTier` a request runs with; "default" (Standard) is omitted.
-fn service_tier(request: &RunRequest) -> Option<String> {
-    request
-        .model_options
-        .get("serviceTier")
-        .and_then(Value::as_str)
-        .filter(|t| *t != "default")
-        .map(str::to_owned)
-}
-
-/// What a request may do without asking: `auto_approve` still means full
-/// access.
-fn run_access(request: &RunRequest) -> AccessMode {
-    if request.auto_approve {
-        AccessMode::FullAccess
-    } else {
-        request.access
+/// The CLI to launch: the fixed `executable` if there is one, else `CODEX_EXECUTABLE`, else
+/// wherever it is installed.
+fn resolve_executable(executable: Option<&Path>) -> Result<PathBuf, ExecError> {
+    let not_installed = |error: HarnessError| ExecError::NotInstalled(error.to_string());
+    if let Some(p) = executable {
+        return crate::executable::validate_native_override(p).map_err(not_installed);
     }
-}
-
-/// The approval policy and sandbox a run's thread and turns get. Full access
-/// is codex's `--dangerously-bypass-approvals-and-sandbox`, as every run was
-/// before modes; auto-accept edits writes the workspace and, like
-/// supervised, asks before anything but codex's known-safe reads (under
-/// `"on-request"` a sandboxed `rm -rf` or `git push` would run unasked).
-/// A title run never asks and never writes, whatever its chat's mode.
-fn permissions(access: AccessMode, title_only: bool) -> (&'static str, SandboxLevel) {
-    match access {
-        _ if title_only => ("never", SandboxLevel::ReadOnly),
-        AccessMode::FullAccess => ("never", SandboxLevel::DangerFullAccess),
-        AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
-        AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
-    }
-}
-
-/// `turn/start`'s `collaborationMode` (`plan` or `default`). Its settings
-/// take precedence over the turn's model and effort, so they repeat them;
-/// a null `developer_instructions` keeps the mode's built-in ones (0.164.0
-/// schema).
-fn collaboration_mode(plan: bool, model: &str, effort: Option<&str>) -> Value {
-    json!({
-        "mode": if plan { "plan" } else { "default" },
-        "settings": {
-            "model": model,
-            "reasoning_effort": effort,
-            "developer_instructions": null,
-        },
-    })
-}
-
-fn reasoning_level(value: &str) -> Option<ReasoningLevel> {
-    Some(match value {
-        "minimal" => ReasoningLevel::Minimal,
-        "low" => ReasoningLevel::Low,
-        "medium" => ReasoningLevel::Medium,
-        "high" => ReasoningLevel::High,
-        "xhigh" => ReasoningLevel::XHigh,
-        "max" => ReasoningLevel::Max,
-        "ultra" => ReasoningLevel::Ultra,
-        "ultracode" => ReasoningLevel::Ultracode,
-        "ultrathink" => ReasoningLevel::Ultrathink,
-        _ => return None,
-    })
-}
-
-/// Codex accepts both names, but Reno has historically persisted `fast`.
-/// Normalize the app server's `priority` id so live and fallback catalogs do
-/// not produce two different settings for the same tier.
-fn normalized_service_tier(value: &str) -> &str {
-    match value {
-        "priority" => "fast",
-        other => other,
-    }
-}
-
-fn service_tier_label(value: &str) -> String {
-    match value {
-        "fast" | "priority" => "Fast".into(),
-        "flex" => "Flex".into(),
-        "ultrafast" => "Ultra Fast".into(),
-        other => other.to_owned(),
-    }
-}
-
-fn model_service_tier(item: &Value) -> Option<ModelOption> {
-    let mut choices = vec![ModelOptionChoice {
-        id: "default".into(),
-        label: "Standard".into(),
-    }];
-    let mut seen = HashSet::from(["default".to_owned()]);
-    for tier in item
-        .get("serviceTiers")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+    if let Some(p) = std::env::var_os("CODEX_EXECUTABLE")
+        && !p.is_empty()
     {
-        let Some(wire_id) = tier.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let id = normalized_service_tier(wire_id).to_owned();
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let label = tier
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| service_tier_label(wire_id));
-        choices.push(ModelOptionChoice { id, label });
+        return crate::executable::validate_native_override(&PathBuf::from(p))
+            .map_err(not_installed);
     }
-    for tier in item
-        .get("additionalSpeedTiers")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
-        let Some(wire_id) = tier.as_str() else {
-            continue;
-        };
-        let id = normalized_service_tier(wire_id).to_owned();
-        if seen.insert(id.clone()) {
-            choices.push(ModelOptionChoice {
-                id,
-                label: service_tier_label(wire_id),
-            });
-        }
-    }
-    if choices.len() == 1 {
-        return None;
-    }
-    let default_choice = item
-        .get("defaultServiceTier")
-        .and_then(Value::as_str)
-        .map(normalized_service_tier)
-        .filter(|id| seen.contains(*id))
-        .unwrap_or("default")
-        .to_owned();
-    Some(ModelOption {
-        id: "serviceTier".into(),
-        label: "Service Tier".into(),
-        choices,
-        default_choice,
+    resolve_codex_executable().ok_or_else(|| {
+        ExecError::NotInstalled(
+            "codex (searched PATH, the login shell's PATH, ~/.local/bin, \
+             ~/.codex/bin, ~/.npm-global/bin, /opt/homebrew/bin, /usr/local/bin, \
+             and fnm/nvm/volta/pnpm/bin install dirs; set CODEX_EXECUTABLE \
+             to override)"
+                .into(),
+        )
     })
-}
-
-fn legacy_model_page(page: &Value) -> bool {
-    page.get("data")
-        .and_then(Value::as_array)
-        .is_some_and(|items| {
-            !items.is_empty() && items.iter().all(|item| item.get("hidden").is_none())
-        })
-}
-
-/// Parse one `model/list` page. Unknown future reasoning levels are ignored
-/// independently instead of invalidating the complete catalog.
-fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>) {
-    let mut models = Vec::new();
-    for item in result
-        .get("data")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
-        if item.get("hidden").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-        let Some(id) = item
-            .get("model")
-            .and_then(Value::as_str)
-            .or_else(|| item.get("id").and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            continue;
-        };
-        let label = item
-            .get("displayName")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-            .unwrap_or(id)
-            .to_owned();
-        let description = item
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|description| !description.is_empty())
-            .map(str::to_owned);
-        let description = match item
-            .get("upgrade")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        {
-            Some(upgrade) => Some(format!(
-                "{}(upgrade: {upgrade})",
-                description.map(|d| format!("{d} ")).unwrap_or_default()
-            )),
-            None => description,
-        };
-        let reasoning_levels = item
-            .get("supportedReasoningEfforts")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|effort| {
-                effort
-                    .get("reasoningEffort")
-                    .and_then(Value::as_str)
-                    .or_else(|| effort.as_str())
-                    .and_then(reasoning_level)
-            })
-            .collect();
-        let options = model_service_tier(item).into_iter().collect();
-        models.push((
-            Model {
-                default: false,
-                id: id.to_owned(),
-                label,
-                provider: None,
-                description,
-                reasoning_levels,
-                options,
-            },
-            item.get("isDefault").and_then(Value::as_bool) == Some(true),
-        ));
-    }
-    let next_cursor = result
-        .get("nextCursor")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    (models, next_cursor)
-}
-
-#[async_trait]
-impl Harness for CodexHarness {
-    fn id(&self) -> HarnessId {
-        HarnessId::Codex
-    }
-    fn display_name(&self) -> &str {
-        // "Codex" (not "Codex CLI"): must also match the registry's lazy
-        // descriptor so the catalog entry doesn't change after the first resolve.
-        "Codex"
-    }
-    fn supports_steering(&self) -> bool {
-        true
-    }
-    /// Native `turn/steer` injects into the active turn; a steer that misses
-    /// the turn falls back to a follow-up `turn/start` on the same thread.
-    fn steering_mode(&self) -> SteeringMode {
-        SteeringMode::StepBoundary
-    }
-    fn reasoning_levels(&self) -> &[ReasoningLevel] {
-        REASONING_LEVELS
-    }
-    fn installed(&self) -> bool {
-        self.resolve_executable().is_ok()
-    }
-    fn executable_path(&self) -> Option<PathBuf> {
-        self.resolve_executable().ok()
-    }
-    /// Done is the CLI's own terminal frame, for wake turns too.
-    fn deterministic_turn_end(&self) -> bool {
-        true
-    }
-    /// `turn/interrupt` ends the turn; the app-server and its thread — child
-    /// agent threads included — stay up for the next `turn/start`.
-    fn stops_turn_in_place(&self) -> bool {
-        true
-    }
-    /// Supervised asks before what codex does not know to be safe, and
-    /// auto-accept edits before stepping outside the workspace sandbox.
-    fn access_modes(&self) -> &[AccessMode] {
-        &AccessMode::ALL
-    }
-    /// Codex's own `plan` collaboration mode.
-    fn supports_plan(&self) -> bool {
-        true
-    }
-    /// What the app-server launch and its turns read: the sandbox follows
-    /// the access mode, and `serviceTier` is the only model option used.
-    fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd
-            && live.model == next.model
-            && to_effort(live.reasoning) == to_effort(next.reasoning)
-            && service_tier(live) == service_tier(next)
-            && run_access(live) == run_access(next)
-            && live.plan == next.plan
-    }
-    /// `turn/start` carries model, effort, service tier, approval policy,
-    /// sandbox and collaboration mode, and each sticks for later turns — so
-    /// a change applies from the next turn without a new app-server.
-    /// Clearing a model, effort or tier back to the default cannot be
-    /// expressed that way (an omitted parameter keeps the previous value).
-    fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
-        live.cwd == next.cwd
-            && (next.model.is_some() || live.model.is_none())
-            && (to_effort(next.reasoning).is_some() || to_effort(live.reasoning).is_none())
-            && (service_tier(next).is_some() || service_tier(live).is_none())
-    }
-
-    /// The signed-in account's visible `model/list` is authoritative. A
-    /// curated snapshot keeps the picker operational when the experimental
-    /// discovery call is unavailable and no last-good catalog exists. Explicit
-    /// picker refreshes bypass cooldowns while overlapping callers coalesce.
-    fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
-    }
-    fn fallback_models(&self) -> Vec<Model> {
-        static_models()
-    }
-    async fn model_catalog(&self, force: bool) -> Result<crate::ModelCatalog, HarnessError> {
-        self.model_context()?.unwrap().log();
-        self.models_cache
-            .get_with(
-                force,
-                || self.model_context().map(|c| c.unwrap().key()),
-                || self.discover_models(),
-            )
-            .await
-    }
-    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
-        self.resolve_executable()?;
-        match self.model_catalog(false).await {
-            Ok(catalog) => Ok(catalog.models),
-            Err(error) if !crate::CatalogFailure::classify(&error).allows_stale() => Err(error),
-            Err(error) => {
-                tracing::warn!(%error, source = "static", "Model discovery failed");
-                Ok(self.fallback_models())
-            }
-        }
-    }
-
-    async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
-        Ok(vec![
-            SlashCommand {
-                name: "compact".into(),
-                description: "Compact this conversation's context".into(),
-                input_hint: None,
-            },
-            SlashCommand {
-                name: "review".into(),
-                description: "Review uncommitted changes, or supply review instructions".into(),
-                input_hint: Some("optional instructions".into()),
-            },
-        ])
-    }
-
-    async fn run(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, false).await
-    }
-
-    async fn start_idle(
-        &self,
-        request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        self.run_with_mode(request, controls, false, true).await
-    }
-
-    async fn run_title(
-        &self,
-        mut request: RunRequest,
-        controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        request.resume = None;
-        request.worktree = None;
-        request.attachments.clear();
-        request.mcp = None;
-        request.extra_mcp.clear();
-        request.model_options.clear();
-        // Its policy never asks; anything that still would is the person's.
-        request.auto_approve = false;
-        request.access = AccessMode::Supervised;
-        request.plan = false;
-        self.run_with_mode(request, controls, true, false).await
-    }
-}
-
-impl CodexHarness {
-    async fn run_with_mode(
-        &self,
-        mut request: RunRequest,
-        controls: RunControls,
-        title_only: bool,
-        idle: bool,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let native = command_request(&request.prompt, "")?;
-        if native
-            .as_ref()
-            .is_some_and(|(method, _)| *method == "thread/compact/start")
-            && request.resume.is_none()
-        {
-            return Err(HarnessError::Protocol(
-                "/compact needs an existing Codex conversation".into(),
-            ));
-        }
-        if native.is_some() && !request.attachments.is_empty() {
-            return Err(HarnessError::Protocol(
-                "Codex commands cannot include attachments; send them in a separate prompt".into(),
-            ));
-        }
-        // Pin the physical release for this process: an installer may move
-        // the current symlink while this runtime stays warm.
-        let exe = self
-            .resolve_executable()?
-            .canonicalize()
-            .map_err(HarnessError::Io)?;
-        // Cached per binary; a fixed test executable is never version-probed.
-        if self.executable.is_none() {
-            let probe = exe.clone();
-            let version =
-                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
-                    .await
-                    .ok()
-                    .flatten();
-            check_codex_version(version.as_ref())?;
-        }
-        // The sandbox is the access mode's (see [`permissions`]), never the
-        // request's own level.
-        request.sandbox = permissions(run_access(&request), title_only).1;
-        let AppServer {
-            child,
-            client,
-            incoming,
-            stderr_tail,
-        } = spawn_app_server(&exe, &request)?;
-        let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
-        tokio::spawn(run_session(Session {
-            title_only,
-            idle,
-            executable: exe,
-            child,
-            client,
-            incoming,
-            event_tx,
-            controls,
-            request,
-            interrupt_grace: self.interrupt_grace,
-            kill_grace: self.kill_grace,
-            stderr_tail,
-        }));
-
-        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
-            rx.recv().await.map(|ev| (ev, rx))
-        })
-        .boxed())
-    }
-}
-
-/// One `codex app-server` process and its wire.
-struct AppServer {
-    child: OwnedChild,
-    client: RpcClient,
-    incoming: mpsc::Receiver<Incoming>,
-    stderr_tail: crate::StderrTail,
-}
-
-fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, HarnessError> {
-    let mut cmd = Command::new(exe);
-    cmd.arg("app-server");
-    crate::compose_child_path(&mut cmd, exe);
-    // Host-resolved credentials (a Cloud device's managed CODEX_HOME,
-    // GH_TOKEN, …). Absent on laptops: the CLI's own login is used.
-    crate::apply_run_env(&mut cmd, &request.env);
-    if !request.cwd.is_empty() {
-        cmd.current_dir(&request.cwd);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
-        let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
-        crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
-    })?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| HarnessError::Protocol("codex child has no stdin".into()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| HarnessError::Protocol("codex child has no stdout".into()))?;
-    let stderr_tail = crate::StderrTail::default();
-    if let Some(stderr) = child.stderr.take() {
-        let tail = stderr_tail.clone();
-        tokio::spawn(async move {
-            let mut lines = crate::lossy_lines::lossy_lines(stderr);
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "reno_harness::codex", "stderr: {line}");
-                tail.push(&line);
-            }
-            // The tail is complete: a crash report need not wait it out.
-            tail.close();
-        });
-    }
-    let (client, incoming) = RpcClient::new(stdin, stdout);
-    Ok(AppServer {
-        child,
-        client,
-        incoming,
-        stderr_tail,
-    })
-}
-
-/// Waits before relaunching an app-server that died before answering
-/// `initialize`: a just-started machine can lose the first launch (a CLI
-/// still finishing its install, a cold disk), and nothing has run yet.
-const STARTUP_RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(3),
-    Duration::from_secs(8),
-];
-
-/// High-volume notifications nothing here consumes: the turn's running diff
-/// and every patch's output stream. Opting out at `initialize` spares the
-/// wire (and the reader) from parsing them only to drop them. Command output
-/// is kept: a command that outlives its turn shows its tail.
-const OPTED_OUT_NOTIFICATIONS: &[&str] = &["turn/diff/updated", "item/fileChange/outputDelta"];
-
-/// The oldest Codex CLI whose app-server speaks the wire this driver maps:
-/// nested `error` notifications, `turn/steer`, child-thread routing (the
-/// live captures under `tests/fixtures/codex` start at 0.146.1). An older
-/// CLI fails confusingly mid-run instead of saying it needs an update.
-const MIN_CODEX_VERSION: semver::Version = semver::Version::new(0, 146, 0);
-
-/// `Err` when `version` is known and older than [`MIN_CODEX_VERSION`]; an
-/// unknown version (a wrapper, a dev build) is given the benefit of the doubt.
-/// A pre-release counts as its release: `0.146.0-alpha.2` already speaks the
-/// wire, though semver orders it before `0.146.0`.
-fn check_codex_version(version: Option<&semver::Version>) -> Result<(), HarnessError> {
-    let release = version.map(|v| semver::Version::new(v.major, v.minor, v.patch));
-    match (version, release) {
-        (Some(version), Some(release)) if release < MIN_CODEX_VERSION => {
-            Err(HarnessError::Protocol(format!(
-                "Codex CLI {version} is too old; update it to {MIN_CODEX_VERSION} or newer \
-                 (npm install -g @openai/codex@latest)"
-            )))
-        }
-        _ => Ok(()),
-    }
 }
 
 fn initialize_params(opt_out: bool) -> Value {
@@ -907,42 +462,294 @@ fn initialize_params(opt_out: bool) -> Value {
     })
 }
 
-/// A setup request's failure as display text. When the app-server died
-/// under it, "exited before responding" says nothing: report its exit
-/// status and last stderr lines instead.
-async fn setup_failure(
-    error: HarnessError,
-    client: &RpcClient,
-    child: &mut Child,
-    stderr_tail: &crate::StderrTail,
-) -> String {
+#[async_trait]
+impl Executor for CodexExecutor {
+    fn descriptor(&self) -> ExecutorDescriptor {
+        let cli = self
+            .cli_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let models = self
+            .models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(catalog::static_model_infos);
+        ExecutorDescriptor {
+            id: ID.clone(),
+            contract_version: CONTRACT_VERSION,
+            adapter_version: match cli {
+                Some(cli) => format!(
+                    "reno-harness {} codex driver (CLI {cli})",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                None => format!("reno-harness {} codex driver", env!("CARGO_PKG_VERSION")),
+            },
+            cli_verified: VersionRange {
+                min: MIN_CLI_VERSION.into(),
+                verified: VERIFIED_CLI_VERSION.into(),
+            },
+            caps: ExecutorCaps {
+                // `turn/steer` lands in the running turn; a steer that misses it starts the next
+                // turn.
+                steering: Steering::StepBoundary,
+                resume: true,
+                access_modes: self.access_modes.clone(),
+                // The spec's sandbox is a ceiling: each level is what a run gets at most, and
+                // the access mode can only narrow it (see the table on the type).
+                sandbox_levels: vec![
+                    SandboxLevel::ReadOnly,
+                    SandboxLevel::WorkspaceWrite,
+                    SandboxLevel::Unrestricted,
+                ],
+                mcp_injection: true,
+                structured_output: false,
+                // Done is the app-server's own terminal `turn/completed`.
+                deterministic_turn_end: true,
+                // Codex has a plan collaboration mode, but `ExecSpec` cannot request it; never
+                // declare a capability a caller cannot use (ARCH-15).
+                plan_mode: false,
+                models,
+            },
+        }
+    }
+
+    /// Installed, and the CLI's version. Whether the CLI is signed in is not knowable without
+    /// starting a run, so `signed_in` stays `None`.
+    async fn probe(&self) -> ExecutorHealth {
+        let fixed = self.executable.clone();
+        let probed = tokio::task::spawn_blocking(move || {
+            resolve_executable(fixed.as_deref()).map(|exe| crate::executable::binary_version(&exe))
+        })
+        .await;
+        let version = match probed {
+            Ok(Ok(version)) => version,
+            Ok(Err(error)) => {
+                return ExecutorHealth {
+                    detail: Some(error.to_string()),
+                    ..ExecutorHealth::default()
+                };
+            }
+            Err(error) => {
+                return ExecutorHealth {
+                    detail: Some(format!("probe failed: {error}")),
+                    ..ExecutorHealth::default()
+                };
+            }
+        };
+        *self
+            .cli_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = version.as_ref().map(ToString::to_string);
+        ExecutorHealth {
+            installed: true,
+            detail: too_old_message(version.as_ref()),
+            version: version.map(|v| v.to_string()),
+            signed_in: None,
+        }
+    }
+
+    async fn start(
+        &self,
+        spec: ExecSpec,
+        controls: ExecControls,
+    ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
+        // Fail closed before anything is resolved or spawned (ARCH-15).
+        require_access(spec.access, &self.access_modes)?;
+        if spec.output_schema.is_some() {
+            return Err(ExecError::UnsupportedOutputSchema);
+        }
+        let cwd = spec
+            .cwd
+            .to_str()
+            .ok_or_else(|| ExecError::InvalidSpec("cwd is not valid UTF-8".into()))?
+            .to_owned();
+        let exe = self.resolve_executable()?;
+        // Pin the physical release for this run: an installer may move the current symlink.
+        let exe = exe
+            .canonicalize()
+            .map_err(|error| ExecError::NotInstalled(format!("{}: {error}", exe.display())))?;
+        // Cached per binary; a fixed test executable is never version-probed.
+        if self.executable.is_none() {
+            let probe = exe.clone();
+            let version =
+                tokio::task::spawn_blocking(move || crate::executable::binary_version(&probe))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(why) = too_old_message(version.as_ref()) {
+                return Err(ExecError::NotInstalled(why));
+            }
+        }
+        let ExecControls {
+            steering,
+            cancel,
+            answers,
+            processes,
+        } = controls;
+
+        let app = match launch(&self.tracker, &exe, &spec, &processes).await {
+            Ok(app) => app,
+            // Any failure to launch is a failed run, not an ineligible executor.
+            Err(error) => {
+                let diagnostic = crate::redact_secrets(&error.to_string());
+                return Ok(futures::stream::once(async move {
+                    ExecEvent::Done {
+                        stop: StopReason::Error,
+                        result: None,
+                        diagnostic: Some(diagnostic),
+                    }
+                })
+                .boxed());
+            }
+        };
+
+        let (event_tx, event_rx) = mpsc::channel::<ExecEvent>(EVENT_CAPACITY);
+        let session = Session {
+            exe,
+            cwd,
+            authority: Authority::new(spec.access, spec.sandbox, &spec.cwd),
+            spec,
+            event_tx,
+            steering,
+            cancel,
+            answers,
+            processes,
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            startup_retry_delays: self.startup_retry_delays.clone(),
+            tracker: self.tracker.clone(),
+        };
+        self.tracker.spawn(run_session(session, app));
+
+        Ok(futures::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+
+    async fn shutdown(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The app-server process
+// ---------------------------------------------------------------------------
+
+/// One `codex app-server` process and its wire.
+struct AppServer {
+    child: OwnedChild,
+    client: RpcClient,
+    incoming: mpsc::Receiver<Incoming>,
+    stderr_tail: crate::StderrTail,
+    /// The JSON-RPC writer and reader. Like the stderr reader they end when the child's pipes
+    /// close, which a grandchild that escaped teardown can hold open forever: the run aborts
+    /// them with [`Self::release`], so `shutdown` is bounded.
+    rpc_tasks: RpcTasks,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl AppServer {
+    /// Stop the tasks that read and write the child's pipes, once the child is reaped.
+    fn release(&mut self) {
+        self.rpc_tasks.abort();
+        if let Some(handle) = self.stderr_task.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Start one app-server for a run, wire its stdio up and report it for the orphan sweep.
+async fn launch(
+    tracker: &TaskTracker,
+    exe: &Path,
+    spec: &ExecSpec,
+    processes: &ProcessSink,
+) -> Result<AppServer, std::io::Error> {
+    let mut cmd = Command::new(exe);
+    cmd.arg("app-server");
+    crate::compose_child_path(&mut cmd, exe);
+    // The allowlisted environment of the run (host-resolved credentials: a Cloud device's
+    // managed CODEX_HOME, GH_TOKEN, ...). Absent on laptops: the CLI's own login is used.
+    crate::apply_run_env(&mut cmd, &spec.env);
+    let has_cwd = !spec.cwd.as_os_str().is_empty();
+    if has_cwd {
+        cmd.current_dir(&spec.cwd);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
+        let cwd = has_cwd.then_some(spec.cwd.as_path());
+        match crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe)) {
+            HarnessError::Io(error) => error,
+            other => std::io::Error::other(other.to_string()),
+        }
+    })?;
+    // Reported at once: a daemon that dies from here on still leaves its row.
+    #[cfg(unix)]
+    if let Some(record) = child.record() {
+        let _ = processes.report(record).await;
+    }
+    let missing = |what: &str| std::io::Error::other(format!("codex child has no {what}"));
+    let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
+    let stderr_tail = crate::StderrTail::default();
+    let stderr_task = child.stderr.take().map(|stderr| {
+        let tail = stderr_tail.clone();
+        tracker.spawn(async move {
+            let mut lines = crate::lossy_lines::lossy_lines(stderr);
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "reno_harness::codex", "stderr: {line}");
+                tail.push(&line);
+            }
+            // The tail is complete: a crash report need not wait it out.
+            tail.close();
+        })
+    });
+    let (client, incoming, rpc_tasks) = RpcClient::tracked(tracker, stdin, stdout);
+    Ok(AppServer {
+        child,
+        client,
+        incoming,
+        stderr_tail,
+        rpc_tasks,
+        stderr_task,
+    })
+}
+
+/// A setup request's failure as display text. When the app-server died under it, "exited before
+/// responding" says nothing: report its exit status and last stderr lines instead.
+async fn setup_failure(error: HarnessError, app: &mut AppServer) -> String {
     // Only a lost answer: a refusal that arrived before the exit says more.
-    if !client.is_closed() || !transport_lost(&error) {
+    if !app.client.is_closed() || !transport_lost(&error) {
         return error.to_string();
     }
-    crash_report(child, stderr_tail).await
+    crash_report(app).await
 }
 
-/// The exited app-server's status and last stderr lines, once its stderr
-/// has drained and it has been reaped (each briefly waited for).
-async fn crash_report(child: &mut Child, stderr_tail: &crate::StderrTail) -> String {
-    stderr_tail.wait_closed().await;
-    let status = match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+/// The exited app-server's status and last stderr lines, once its stderr has drained and it has
+/// been reaped (each briefly waited for).
+async fn crash_report(app: &mut AppServer) -> String {
+    app.stderr_tail.wait_closed().await;
+    let status = match tokio::time::timeout(Duration::from_millis(500), app.child.wait()).await {
         Ok(Ok(status)) => Some(status),
-        _ => child.try_wait().ok().flatten(),
+        _ => app.child.try_wait().ok().flatten(),
     };
-    crate::crash_message("codex app-server", status, stderr_tail)
+    crate::crash_message("codex app-server", status, &app.stderr_tail)
 }
 
-/// Why a `thread/resume` failure means the conversation is gone for good,
-/// in words for the restore notice: no rollout on this machine, one Codex
-/// can't read (empty, not UTF-8, unparseable — live, 0.164.0: "failed to
-/// read thread: thread-store internal error: …"), a thread id Codex never
-/// issued. A fresh thread is the only way forward then. `None` for anything
-/// else — a dead process, a config error — which would fail a fresh start
-/// too, or lose history needlessly. A bare "not found" is no such sign: an
-/// I/O error ("entity not found"), a missing environment variable or helper
-/// binary say it too.
+/// Why a `thread/resume` failure means the conversation is gone for good, in words for the
+/// restore notice: no rollout on this machine, one Codex can't read (empty, not UTF-8,
+/// unparseable; live, 0.164.0: "failed to read thread: thread-store internal error: ..."), a
+/// thread id Codex never issued. A fresh thread is the only way forward then. `None` for
+/// anything else (a dead process, a config error), which would fail a fresh start too, or lose
+/// history needlessly. A bare "not found" is no such sign: an I/O error ("entity not found"), a
+/// missing environment variable or helper binary say it too.
 fn resume_unrecoverable(error: &HarnessError) -> Option<&'static str> {
     let HarnessError::Protocol(message) = error else {
         return None;
@@ -960,9 +767,8 @@ fn resume_unrecoverable(error: &HarnessError) -> Option<&'static str> {
     ]) {
         Some("it isn't saved on this device")
     } else if says(&["failed to read thread", "rollout at"]) {
-        // Only a history that is empty or unreadable as data is gone. One
-        // the OS would not hand over (permissions, a lock, a busy disk) is
-        // still there for the next message.
+        // Only a history that is empty or unreadable as data is gone. One the OS would not hand
+        // over (permissions, a lock, a busy disk) is still there for the next message.
         if says(&[
             "os error",
             "permission denied",
@@ -993,8 +799,8 @@ fn resume_unrecoverable(error: &HarnessError) -> Option<&'static str> {
     }
 }
 
-/// `thread/resume`, unarchiving the thread first when Codex reports it
-/// archived (the CLI's own archive command, or another client's).
+/// `thread/resume`, unarchiving the thread first when Codex reports it archived (the CLI's own
+/// archive command, or another client's).
 async fn resume_thread(client: &RpcClient, params: Value) -> Result<Value, HarnessError> {
     match client.request("thread/resume", params.clone()).await {
         Err(HarnessError::Protocol(message)) if message.contains("is archived") => {
@@ -1015,37 +821,15 @@ async fn resume_thread(client: &RpcClient, params: Value) -> Result<Value, Harne
 }
 
 // ---------------------------------------------------------------------------
-// Session
+// Turns
 // ---------------------------------------------------------------------------
 
-struct Session {
-    executable: PathBuf,
-    title_only: bool,
-    idle: bool,
-    child: OwnedChild,
-    client: RpcClient,
-    incoming: mpsc::Receiver<Incoming>,
-    event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
-    controls: RunControls,
-    request: RunRequest,
-    interrupt_grace: Duration,
-    kill_grace: Duration,
-    /// Rolling stderr tail for the crash message on an unexpected exit.
-    stderr_tail: crate::StderrTail,
-}
-
-/// Turn-routing state (port of codex.ts's activeTurnId/completedTurnIds): the
-/// `turn/start` response and the turn lifecycle notifications are separate
-/// app-server messages that may arrive in either order — never revive a turn
-/// that `turn/completed` already declared finished.
+/// Turn-routing state: the `turn/start` response and the turn lifecycle notifications are
+/// separate app-server messages that may arrive in either order. Never revive a turn that
+/// `turn/completed` already declared finished.
 #[derive(Default)]
 struct TurnRouter {
     active: Option<String>,
-    /// The app-server announced `active` (`turn/started`). Until then it may
-    /// not have registered the turn: `turn/interrupt` answers "no active
-    /// turn to interrupt" (live, 0.159.3, an interrupt right after the
-    /// `turn/start` response) and the turn would run to its end.
-    announced: bool,
     completed: VecDeque<String>,
 }
 
@@ -1058,15 +842,14 @@ impl TurnRouter {
         if id.is_empty() || self.is_completed(&id) {
             return;
         }
-        // A replacement `turn/started` is authoritative evidence that a stale
-        // active turn is over, even if its completion notification was lost.
+        // A replacement `turn/started` is authoritative evidence that a stale active turn is
+        // over, even if its completion notification was lost.
         if let Some(prev) = self.active.take()
             && prev != id
         {
             self.remember_completed(prev);
         }
         self.active = Some(id);
-        self.announced = true;
     }
 
     fn note_completed(&mut self, id: &str) {
@@ -1076,498 +859,110 @@ impl TurnRouter {
         self.remember_completed(id.to_owned());
         if self.active.as_deref() == Some(id) {
             self.active = None;
-            self.announced = false;
         }
     }
 
-    /// Adopt a turn id from a `turn/start` RESPONSE (the notification is
-    /// allowed to beat it). A turn already running keeps its id: a follow-up
-    /// `turn/start` folds into it and answers with that same id anyway, and
-    /// an announced turn is authoritative.
+    /// Adopt a turn id from a `turn/start` RESPONSE (the notification is allowed to beat it). A
+    /// turn already running keeps its id: a follow-up `turn/start` folds into it and answers
+    /// with that same id anyway, and an announced turn is authoritative.
     fn adopt_started(&mut self, id: String) {
         if self.active.is_some() || id.is_empty() || self.is_completed(&id) {
             return;
         }
         self.active = Some(id);
-        self.announced = false;
     }
 
-    /// Whether a `turn/completed` (or failed/aborted) for `id` ends the turn
-    /// in flight. A completion for a turn already settled, or for another
-    /// turn while ours runs, is stale: settling on it marked the running
-    /// turn done mid-way.
+    /// Whether a `turn/completed` (or failed/aborted) for `id` ends the turn in flight. A
+    /// completion for a turn already settled, or for another turn while ours runs, is stale:
+    /// settling on it marked the running turn done mid-way.
     fn settles(&self, id: &str) -> bool {
         id.is_empty() || (!self.is_completed(id) && self.active.as_deref().is_none_or(|a| a == id))
     }
 
     fn remember_completed(&mut self, id: String) {
         self.completed.push_back(id);
-        // Bounded so a months-long persistent session can't grow it forever.
+        // Bounded, however many turns a steer-heavy run starts.
         while self.completed.len() > 32 {
             self.completed.pop_front();
         }
     }
 }
 
-/// Rotate the assistant message id; returns (previous, next).
-/// Seconds since the Unix epoch, for the pure normalizer's rate-limit reset text.
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
-}
-
-fn rotate(id: &mut String) -> (String, String) {
-    let prev = std::mem::replace(id, new_message_id());
-    (prev, id.clone())
-}
-
-async fn send(tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>, ev: AgentEvent) -> bool {
-    tx.send(Ok(ev)).await.is_ok()
-}
-
-/// Preserve the selected path in the app-server's native skill input. Text
-/// stays first for command routing; repeated selections do not load a skill twice.
-fn prompt_input(text: &str) -> Value {
-    use crate::upstream_proto::invocation::{Invocation, invocation_links, invocation_prompt};
-    let mut input = vec![json!({"type": "text", "text": invocation_prompt(text)})];
-    let mut seen = std::collections::HashSet::new();
-    for (_, invocation) in invocation_links(text) {
-        if let Invocation::Skill { name, path, .. } = invocation {
-            if !crate::upstream_proto::invocation::native_skill_identity(&path)
-                && seen.insert((name.clone(), path.clone()))
-            {
-                input.push(json!({"type": "skill", "name": name, "path": path}));
-            }
-        }
-    }
-    Value::Array(input)
-}
-
-/// Map supported leading commands to native app-server operations.
-fn command_request(
-    text: &str,
-    thread_id: &str,
-) -> Result<Option<(&'static str, Value)>, HarnessError> {
-    let decoded = crate::upstream_proto::invocation::invocation_prompt(text);
-    let Some((name, args)) = crate::upstream_proto::invocation::leading_command(&decoded) else {
-        return Ok(None);
-    };
-    if matches!(name, "compact" | "review")
-        && crate::upstream_proto::invocation::invocation_links(text)
-            .iter()
-            .any(|(_, invocation)| {
-                matches!(
-                    invocation,
-                    crate::upstream_proto::invocation::Invocation::Skill { .. }
-                )
-            })
-    {
-        return Err(HarnessError::Protocol(
-            "Codex commands cannot include skill selections; send them in a separate prompt".into(),
-        ));
-    }
-    match name {
-        "compact" if args.is_empty() => Ok(Some((
-            "thread/compact/start",
-            json!({"threadId": thread_id}),
-        ))),
-        "compact" => Err(HarnessError::Protocol(
-            "/compact takes no arguments; send other text separately".into(),
-        )),
-        "review" => Ok(Some((
-            "review/start",
-            json!({
-                "threadId": thread_id, "delivery": "inline",
-                "target": if args.is_empty() { json!({"type":"uncommittedChanges"}) }
-                    else { json!({"type":"custom", "instructions":args}) },
-            }),
-        ))),
-        // Known client commands need explicit UI mappings. Do not silently
-        // send those to the model; unknown slash tokens and paths stay literal.
-        "model" | "permissions" | "approvals" | "new" | "clear" | "resume" | "fork" | "status"
-        | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
-        | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
-            Err(HarnessError::Protocol(format!(
-                "/{name} is not mapped in Reno's Codex integration. Available commands: /compact and /review."
-            )))
-        }
-        _ => Ok(None),
-    }
-}
-
-async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
-    let text = params
-        .pointer("/input/0/text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let thread_id = params["threadId"].as_str().unwrap_or_default();
-    let native = command_request(text, thread_id)?;
-    if native.is_some()
-        && params["input"]
-            .as_array()
-            .is_some_and(|input| input.len() > 1)
-    {
-        return Err(HarnessError::Protocol(
-            "Codex commands cannot include skill selections; send them in a separate prompt".into(),
-        ));
-    }
-    let (method, params) = native.unwrap_or(("turn/start", params));
-    let started = client.request(method, params).await?;
-    Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
-}
-
-/// What `thread/start` / `thread/resume` reports the thread runs with: the
-/// model and effort a collaboration mode falls back to when the request
-/// names none, and whether a resumed thread is still in plan mode.
+/// What `thread/start` / `thread/resume` reports the thread runs with: the model and effort a
+/// collaboration mode falls back to when the request names none, and whether a resumed thread is
+/// still in plan mode.
 struct ThreadMode {
     model: String,
     effort: Option<String>,
     plan: bool,
 }
 
-/// The per-run event loop: one task multiplexing app-server messages, the
-/// steering mailbox, the interrupt token, and consumer liveness.
-async fn run_session(session: Session) {
-    let Session {
-        executable,
-        title_only,
-        idle,
-        mut child,
-        mut client,
-        mut incoming,
-        event_tx,
-        controls,
-        request,
-        interrupt_grace,
-        kill_grace,
-        mut stderr_tail,
-    } = session;
-    let RunControls {
-        execution_lease: _execution_lease,
-        request_input,
-        mut steering,
-        interrupt,
-        turn,
-    } = controls;
-    let request_input = Arc::new(request_input);
-
-    // ---- wire params ------------------------------------------------------
-    // The access mode's approval policy and sandbox (see [`permissions`]).
-    // A mode that asks routes its approvals to the person explicitly: a
-    // configured `approvals_reviewer` could otherwise hand them to an AI
-    // reviewer instead.
-    let (approval_policy, sandbox) = permissions(run_access(&request), title_only);
-    let asks_person = |live: &RunRequest| !title_only && !run_access(live).is_full_access();
-    let start_tier = service_tier(&request);
-
-    let start_params = {
-        let mut p = serde_json::Map::new();
-        if title_only {
-            p.insert("baseInstructions".into(), crate::TITLE_INSTRUCTIONS.into());
-            p.insert(
-                "developerInstructions".into(),
-                crate::TITLE_INSTRUCTIONS.into(),
-            );
-            p.insert("ephemeral".into(), true.into());
-            let mut config = json!({
-                "project_doc_max_bytes": 0,
-                "web_search": "disabled",
-                "features.shell_tool": false,
-                "features.apply_patch_freeform": false,
-                "features.apps": false,
-                "features.browser_use": false,
-                "features.computer_use": false,
-                "features.js_repl": false,
-                "features.image_generation": false,
-                "features.memories": false
-            });
-            config
-                .as_object_mut()
-                .expect("title config overrides are an object")
-                .extend(agent_tools_off());
-            p.insert("config".into(), config);
-        }
-        p.insert("cwd".into(), Value::String(request.cwd.clone()));
-        if let Some(mcp) = request.mcp.as_ref().filter(|_| !title_only) {
-            // Reno's own MCP server as dotted config overrides on top of the
-            // user's `mcp_servers` table (the same layer the title run uses
-            // to switch servers off).
-            let overrides = p
-                .entry("config")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .expect("thread/start config overrides are an object");
-            overrides.extend(codex_mcp_overrides(mcp));
-            // Delegation goes through that server's side chats only. The
-            // engine doesn't ask this of Codex yet: see
-            // `crate::switches_native_subagents`.
-            if mcp.side_chats_only() {
-                overrides.extend(agent_tools_off());
-            }
-        }
-        if !title_only && !request.extra_mcp.is_empty() {
-            p.entry("config")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-                .expect("thread/start config overrides are an object")
-                .extend(codex_extra_mcp_overrides(&request.extra_mcp));
-        }
-        p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandbox".into(), sandbox_mode(sandbox).into());
-        if asks_person(&request) {
-            p.insert("approvalsReviewer".into(), "user".into());
-        }
-        if let Some(model) = &request.model {
-            p.insert("model".into(), Value::String(model.clone()));
-        }
-        if let Some(tier) = &start_tier {
-            p.insert("serviceTier".into(), Value::String(tier.clone()));
-        }
-        p
-    };
-
-    // ---- handshake (interruptible; relaunches a process that died first) ---
-    let mut attempt = 0;
-    let mut opt_out = true;
-    loop {
-        let handshake = client.request("initialize", initialize_params(opt_out));
-        let failed = tokio::select! {
-            res = handshake => match res {
-                Ok(_) => break,
-                Err(e) => e,
-            },
-            _ = interrupt.cancelled() => {
-                let _ = event_tx
-                    .send(Ok(AgentEvent::Done {
-                        status: DoneStatus::Interrupted,
-                        result: None,
-                        error: None,
-                        session_id: None,
-                    }))
-                    .await;
-                shutdown_child(&mut child, kill_grace).await;
-                return;
-            }
-        };
-        // Only a process that is gone gets another launch: an answer that
-        // refuses (bad config, unsupported version) would refuse again.
-        let exited = client.is_closed();
-        // An app-server that predates notification opt-outs may reject the
-        // capability outright; the opt-out is an optimization, so ask again
-        // without it.
-        if !exited && std::mem::take(&mut opt_out) {
-            tracing::debug!(
-                target: "reno_harness::codex",
-                "initialize refused ({failed}); retrying without notification opt-outs"
-            );
-            continue;
-        }
-        if exited && attempt < STARTUP_RETRY_DELAYS.len() {
-            let status = child.try_wait().ok().flatten();
-            tracing::warn!(
-                target: "reno_harness::codex",
-                attempt = attempt + 1,
-                error = %crate::crash_message("codex app-server", status, &stderr_tail),
-                "app-server died before initialize; relaunching"
-            );
-            shutdown_child(&mut child, kill_grace).await;
-            tokio::select! {
-                _ = tokio::time::sleep(STARTUP_RETRY_DELAYS[attempt]) => {}
-                _ = interrupt.cancelled() => {
-                    let _ = event_tx
-                        .send(Ok(AgentEvent::Done {
-                            status: DoneStatus::Interrupted,
-                            result: None,
-                            error: None,
-                            session_id: None,
-                        }))
-                        .await;
-                    return;
-                }
-            }
-            attempt += 1;
-            match spawn_app_server(&executable, &request) {
-                Ok(next) => {
-                    child = next.child;
-                    client = next.client;
-                    incoming = next.incoming;
-                    stderr_tail = next.stderr_tail;
-                    continue;
-                }
-                Err(e) => {
-                    let _ = event_tx
-                        .send(Ok(AgentEvent::Done {
-                            status: DoneStatus::Errored,
-                            result: None,
-                            error: Some(e.to_string()),
-                            session_id: None,
-                        }))
-                        .await;
-                    return;
-                }
-            }
-        }
-        // Out of launches: say why, with what the process printed.
-        let error = if exited {
-            stderr_tail.wait_closed().await;
-            format!(
-                "initialize: {}",
-                crate::crash_message(
-                    "codex app-server",
-                    child.try_wait().ok().flatten(),
-                    &stderr_tail
-                )
-            )
-        } else {
-            failed.to_string()
-        };
-        let _ = event_tx
-            .send(Ok(AgentEvent::Done {
-                status: DoneStatus::Errored,
-                result: None,
-                error: Some(error),
-                session_id: None,
-            }))
-            .await;
-        shutdown_child(&mut child, kill_grace).await;
-        return;
-    }
-    client.notify("initialized", None);
-
-    // ---- thread + first turn (interruptible) ------------------------------
-    let setup = async {
-        let mut start_params = start_params.clone();
-        if title_only {
-            // Disable each configured MCP server explicitly: an empty table
-            // would merge with user configuration and leave servers enabled.
-            let config = client
-                .request("config/read", json!({"includeLayers": false}))
-                .await?;
-            if let Some(servers) = config["config"]["mcp_servers"].as_object() {
-                let overrides = start_params
-                    .get_mut("config")
-                    .and_then(Value::as_object_mut)
-                    .unwrap();
-                for name in servers.keys() {
-                    overrides.insert(format!("mcp_servers.{name}.enabled"), false.into());
-                }
-            }
-        }
-        let mut restore_notice = None;
-        let thread = if let Some(resume) = &request.resume {
-            let mut p = start_params.clone();
-            p.insert("threadId".into(), Value::String(resume.clone()));
-            match resume_thread(&client, Value::Object(p))
-                .await
-                .map_err(|e| (resume_unrecoverable(&e), e))
-            {
-                Ok(thread) => thread,
-                // A missing/unreadable/foreign rollout falls back to a fresh
-                // thread — visibly: the reply will not know the earlier
-                // conversation. The log keeps Codex's own words.
-                Err((Some(reason), e)) => {
-                    if command_request(&request.prompt, resume)?.is_some() {
-                        return Err(e);
-                    }
-                    tracing::warn!(
-                        target: "reno_harness::codex",
-                        "thread/resume failed (starting fresh): {e}"
-                    );
-                    restore_notice = Some(format!(
-                        "Couldn't restore the earlier Codex conversation ({reason}), so this \
-                         reply starts a new one without its context."
-                    ));
-                    client
-                        .request("thread/start", Value::Object(start_params.clone()))
-                        .await?
-                }
-                // A dead process or a refusal a fresh thread would hit too:
-                // fail the run rather than silently dropping its history.
-                Err((None, e)) => return Err(e),
-            }
-        } else {
-            client
-                .request("thread/start", Value::Object(start_params.clone()))
-                .await?
-        };
-        let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
-        let mut children = subagents::Subagents::new(thread_id.clone());
-        children.restore(&thread["thread"]);
-        let thread_mode = ThreadMode {
-            model: thread["model"].as_str().unwrap_or_default().to_owned(),
-            effort: thread["reasoningEffort"].as_str().map(str::to_owned),
-            plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
-        };
-        Ok::<_, HarnessError>((thread_id, children, restore_notice, thread_mode))
-    };
-    let (thread_id, mut children, restore_notice, thread_mode) = tokio::select! {
-        res = setup => match res {
-            Ok(thread_id) => thread_id,
-            Err(e) => {
-                let error = setup_failure(e, &client, &mut child, &stderr_tail).await;
-                let _ = event_tx
-                    .send(Ok(AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some(error),
-                        session_id: None,
-                    }))
-                    .await;
-                shutdown_child(&mut child, kill_grace).await;
-                return;
-            }
+/// `turn/start`'s `collaborationMode` (`plan` or `default`). Its settings take precedence over
+/// the turn's model and effort, so they repeat them; a null `developer_instructions` keeps the
+/// mode's built-in ones (0.164.0 schema).
+fn collaboration_mode(plan: bool, model: &str, effort: Option<&str>) -> Value {
+    json!({
+        "mode": if plan { "plan" } else { "default" },
+        "settings": {
+            "model": model,
+            "reasoning_effort": effort,
+            "developer_instructions": null,
         },
-        _ = interrupt.cancelled() => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Interrupted,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                }))
-                .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
-        }
-    };
+    })
+}
 
-    // Model, effort, service tier, access and plan ride every `turn/start`
-    // (each sticks for later turns): a steer's in-place `config` takes
-    // effect from the next turn the runtime starts.
-    let mut live = request.clone();
-    // Plan mode sticks to the thread, across a resume too (live, 0.164.0).
-    // Once this runtime has asked for it, or the resumed thread is in it,
-    // every turn names its mode so that leaving plan is explicit; a thread
-    // that never planned is sent none, as before modes.
-    let mut names_mode = thread_mode.plan;
-    let mut turn_params = |live: &RunRequest, text: &str| -> Value {
+/// What every `turn/start` of the run carries: the policy, the model and the effort. Each sticks
+/// to the thread for later turns, so a queued steer's turn repeats them rather than relying on
+/// that.
+struct TurnParams {
+    thread_id: String,
+    policy: permission::Policy,
+    asks_person: bool,
+    model: Option<String>,
+    effort: Option<&'static str>,
+    /// The thread is (or was resumed) in plan mode: every turn names its mode, so that leaving
+    /// plan is explicit. A thread that never planned is sent none.
+    names_mode: bool,
+    thread: ThreadMode,
+}
+
+impl TurnParams {
+    fn new(spec: &ExecSpec, thread_id: String, thread: ThreadMode) -> Self {
+        Self {
+            thread_id,
+            policy: permission::policy(spec.access, spec.sandbox),
+            asks_person: permission::asks_person(spec.access),
+            model: spec.model.clone(),
+            effort: spec.effort.map(catalog::effort),
+            names_mode: thread.plan,
+            thread,
+        }
+    }
+
+    fn build(&self, text: &str) -> Value {
         let mut p = serde_json::Map::new();
-        p.insert("threadId".into(), Value::String(thread_id.clone()));
-        p.insert("input".into(), prompt_input(text));
-        let (approval_policy, sandbox) = permissions(run_access(live), title_only);
-        p.insert("approvalPolicy".into(), approval_policy.into());
-        p.insert("sandboxPolicy".into(), sandbox_policy_value(sandbox));
-        if asks_person(live) {
+        p.insert("threadId".into(), Value::String(self.thread_id.clone()));
+        p.insert("input".into(), json!([{ "type": "text", "text": text }]));
+        p.insert("approvalPolicy".into(), self.policy.approval_policy.into());
+        p.insert(
+            "sandboxPolicy".into(),
+            catalog::sandbox_policy_value(self.policy.sandbox),
+        );
+        if self.asks_person {
             p.insert("approvalsReviewer".into(), "user".into());
         }
-        // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only
-        // when asked for — without this codex "thinks" in silence for minutes:
-        // nothing renders and the UI's 45s staleness gate flips Working off.
+        // Reasoning summaries stream (`item/reasoning/summaryTextDelta`) only when asked for;
+        // without this codex "thinks" in silence for minutes.
         p.insert("summary".into(), "auto".into());
-        if let Some(model) = &live.model {
+        if let Some(model) = &self.model {
             p.insert("model".into(), Value::String(model.clone()));
         }
-        if let Some(effort) = to_effort(live.reasoning) {
+        if let Some(effort) = self.effort {
             p.insert("effort".into(), effort.into());
         }
-        if let Some(tier) = service_tier(live) {
-            p.insert("serviceTier".into(), Value::String(tier));
-        }
-        names_mode |= live.plan;
-        if names_mode {
-            let model = live.model.as_deref().unwrap_or(&thread_mode.model);
-            let effort = to_effort(live.reasoning).or(thread_mode.effort.as_deref());
+        if self.names_mode {
+            let model = self.model.as_deref().unwrap_or(&self.thread.model);
+            let effort = self.effort.or(self.thread.effort.as_deref());
             if model.is_empty() {
                 tracing::warn!(
                     target: "reno_harness::codex",
@@ -1576,1521 +971,1099 @@ async fn run_session(session: Session) {
             } else {
                 p.insert(
                     "collaborationMode".into(),
-                    collaboration_mode(live.plan, model, effort),
+                    collaboration_mode(false, model, effort),
                 );
             }
         }
         Value::Object(p)
+    }
+}
+
+async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
+    let started = client.request("turn/start", params).await?;
+    Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
+}
+
+/// Seconds since the Unix epoch, for the normalizer's rate-limit reset text.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+// ---------------------------------------------------------------------------
+// Requests
+// ---------------------------------------------------------------------------
+
+/// How an answer goes back for an open approval.
+#[derive(Debug)]
+enum ApprovalKind {
+    /// `{ decision: accept | decline }`: a command or a file change.
+    Decision,
+    /// A permission request, granted for the turn or refused with an empty grant; holds the
+    /// request's params.
+    Permissions(Value),
+    /// An approval filed as an elicitation: `accept` or `decline`.
+    Elicitation,
+}
+
+/// What the driver needs to answer an approval later.
+#[derive(Debug)]
+struct ApprovalPayload {
+    rpc_id: Value,
+    kind: ApprovalKind,
+}
+
+impl ApprovalPayload {
+    fn reply(&self, accept: bool) -> Value {
+        match &self.kind {
+            ApprovalKind::Decision => permission::decision(accept),
+            ApprovalKind::Permissions(params) => permission::permissions_reply(params, accept),
+            ApprovalKind::Elicitation => {
+                if accept {
+                    elicitation::accept()
+                } else {
+                    elicitation::decline()
+                }
+            }
+        }
+    }
+}
+
+/// What the driver needs to answer a question later.
+#[derive(Debug)]
+struct InputPayload {
+    rpc_id: Value,
+    kind: InputKind,
+}
+
+#[derive(Debug)]
+enum InputKind {
+    /// `item/tool/requestUserInput`.
+    Agent(Vec<Asked>),
+    /// An elicitation form.
+    Form(elicitation::Form),
+}
+
+impl InputPayload {
+    /// The reply for `answers`; an empty list declines.
+    fn reply(&self, answers: &[InputAnswer]) -> Value {
+        match &self.kind {
+            InputKind::Agent(asked) => permission::user_input_reply(asked, answers),
+            InputKind::Form(form) => form.response(answers),
+        }
+    }
+}
+
+type Requests = OpenRequests<ApprovalPayload, InputPayload>;
+
+/// The id an open request is known by to the consumer: the JSON-RPC id, unquoted.
+fn request_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A request id the app-server reused while its first request was still open: the new request
+/// supersedes the old one, which it can no longer be waiting on under that id. Declining it
+/// would be read as the answer to the new request.
+fn note_superseded(replaced: Option<Open<ApprovalPayload, InputPayload>>, request_id: &str) {
+    if replaced.is_some() {
+        tracing::warn!(
+            target: "reno_harness::codex",
+            request_id,
+            "the app-server reused the id of a request still open; the earlier one is dropped"
+        );
+    }
+}
+
+/// Whether every path leads inside `cwd` once symlinks are followed. A path that does not exist
+/// yet (a new file, a new directory) is judged by its deepest ancestor that does, so a link
+/// above it is followed too; a `..` below that ancestor, or anything that cannot be resolved,
+/// is not inside (the change is asked about instead).
+async fn resolves_inside(paths: &[PathBuf], cwd: &Path) -> bool {
+    use std::path::Component;
+    let Ok(root) = tokio::fs::canonicalize(cwd).await else {
+        return false;
     };
-
-    let mut assistant_message_id = new_message_id();
-    if !send(
-        &event_tx,
-        AgentEvent::SessionStarted {
-            harness: HarnessId::Codex,
-            model: request.model.clone().unwrap_or_default(),
-            tools: Vec::new(),
-            cwd: request.cwd.clone(),
-            session_id: thread_id.clone(),
-            assistant_message_id: assistant_message_id.clone(),
-        },
-    )
-    .await
-    {
-        shutdown_child(&mut child, kill_grace).await;
-        return;
+    for path in paths {
+        let mut existing = path.as_path();
+        let real = loop {
+            match tokio::fs::canonicalize(existing).await {
+                Ok(real) => break real,
+                Err(_) => match existing.parent() {
+                    Some(parent) => existing = parent,
+                    None => return false,
+                },
+            }
+        };
+        let Ok(tail) = path.strip_prefix(existing) else {
+            return false;
+        };
+        if tail
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+            || !real.join(tail).starts_with(&root)
+        {
+            return false;
+        }
     }
-    if let Some(message) = restore_notice
-        && !send(&event_tx, AgentEvent::Error { message }).await
-    {
-        shutdown_child(&mut child, kill_grace).await;
-        return;
+    true
+}
+
+/// The reply that refuses a request nobody can be asked about: after cancel, or past the cap.
+/// `None` for a method this driver does not serve (answered with an error instead).
+fn refusal(method: &str, params: &Value) -> Option<Value> {
+    Some(match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            permission::decision(false)
+        }
+        "item/permissions/requestApproval" => permission::permissions_reply(params, false),
+        "item/tool/requestUserInput" => json!({ "answers": {} }),
+        "mcpServer/elicitation/request" => elicitation::decline(),
+        _ => return None,
+    })
+}
+
+/// What the loop does next.
+enum Step {
+    Continue,
+    /// The run's `Done` went out.
+    Finished,
+    /// The consumer is gone.
+    Gone,
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+struct Session {
+    exe: PathBuf,
+    /// `spec.cwd` as the wire carries it.
+    cwd: String,
+    spec: ExecSpec,
+    authority: Authority,
+    event_tx: mpsc::Sender<ExecEvent>,
+    steering: mpsc::Receiver<String>,
+    cancel: CancellationToken,
+    answers: mpsc::Receiver<ExecAnswer>,
+    processes: ProcessSink,
+    interrupt_grace: Duration,
+    kill_grace: Duration,
+    startup_retry_delays: Vec<Duration>,
+    tracker: TaskTracker,
+}
+
+/// The state of the turn loop, and the parts of it that talk to the app-server.
+struct Run {
+    client: RpcClient,
+    event_tx: mpsc::Sender<ExecEvent>,
+    authority: Authority,
+    cwd: PathBuf,
+    thread_id: String,
+    turn_params: TurnParams,
+    norm: Normalizer,
+    router: TurnRouter,
+    requests: Requests,
+    /// Steers whose `turn/steer` lost the turn-completed race; delivered, in order, as the next
+    /// `turn/start` when the expected turn's end arrives.
+    queued_steers: VecDeque<String>,
+    interrupted: bool,
+}
+
+impl Run {
+    async fn emit(&self, event: ExecEvent) -> bool {
+        self.event_tx.send(event).await.is_ok()
     }
 
-    let mut router = TurnRouter::default();
-    if !idle {
-        match start_turn(&client, turn_params(&live, &request.prompt)).await {
-            Ok(id) => router.adopt_started(id),
-            Err(e) => {
-                let error = setup_failure(e, &client, &mut child, &stderr_tail).await;
-                let _ = event_tx
-                    .send(Ok(AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some(error),
-                        session_id: Some(thread_id.clone()),
-                    }))
-                    .await;
-                shutdown_child(&mut child, kill_grace).await;
-                return;
+    async fn emit_all(&self, events: Vec<ExecEvent>) -> bool {
+        for event in events {
+            if !self.emit(event).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Answer every open request with a refusal: the run is over or was cancelled, and nothing
+    /// is allowed by default.
+    fn deny_all(&mut self) {
+        for (_, open) in self.requests.drain() {
+            match open {
+                Open::Approval(payload) => {
+                    self.client.respond(&payload.rpc_id, payload.reply(false))
+                }
+                Open::Input(payload) => self.client.respond(&payload.rpc_id, payload.reply(&[])),
             }
         }
     }
 
-    // ---- main loop --------------------------------------------------------
-    // Deltas seen per agent-message item, so a model that never streams
-    // (item/completed only) still emits its text exactly once.
-    let mut streamed_text: HashSet<String> = HashSet::new();
-    let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
-    // Token usage is held until the turn ends, emitted just before Done.
-    let mut pending_usage: Option<AgentEvent> = None;
-    // The turn's last final `error` notification, reported by its end (see
-    // [`settle_turn_error`]): never as an error part AND the Done's error.
-    let mut held_error: Option<String> = None;
-    // The account's rate-limit windows (`account/rateLimits/updated`), for
-    // a limit error's reset time.
-    let mut rate_limits: Option<Value> = None;
-    // Server→client requests answered from their own task (approvals and
-    // questions waiting on a person), bounded.
-    let request_slots = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_SERVER_REQUESTS));
-    // An interrupted turn's background-terminal query in flight: the turn
-    // and the process ids Codex still runs (`None`: it could not say).
-    let mut prune_query: Option<tokio::sync::oneshot::Receiver<(String, Option<HashSet<String>>)>> =
-        None;
-    // Steers whose `turn/steer` lost the turn-completed race; delivered as the
-    // next `turn/start` when the expected turn's end notification arrives.
-    // Each carries the configuration it was sent with, adopted when its own
-    // `turn/start` goes out.
-    let mut queued_steers: VecDeque<(String, Option<Box<RunRequest>>)> = VecDeque::new();
-    // Steers the app-server accepted into the running turn, by the
-    // `clientUserMessageId` they were sent with. Each is confirmed
-    // (`Steered`) when its userMessage item joins the turn — not when
-    // `turn/steer` returns, which split the reply still streaming ahead of
-    // it into the steer's segment.
-    let mut accepted_steers: VecDeque<String> = VecDeque::new();
-    // A turn stop waiting for the app-server to announce the turn.
-    let mut stop_when_announced = false;
-    // Commands the parent thread started and the app-server has not reported
-    // finished, with their process id and the turn that started them. One
-    // still open after its turn is background work (a dev server, a
-    // watcher): its `item/completed` arrives when the process exits, turns
-    // later (live, 0.159.3). The host's idle reaper must not retire the
-    // app-server — and the process with it — while it runs.
-    let mut open_commands: HashMap<String, OpenCommand> = HashMap::new();
-    // An interrupted turn's foreground command is killed WITHOUT an
-    // `item/completed`: once its process has had a moment to go, drop the
-    // turn's commands whose process is gone (background ones live on).
-    let mut prune_at: Option<(tokio::time::Instant, String)> = None;
-    // The turn being pruned: its commands are not listed as background
-    // processes until the prune says which of them still run.
-    let mut pruning: Option<String> = None;
-    let mut steering_open = true;
-    let mut interrupted = false;
-    let mut interrupt_sent = false;
-    // A turn stop (`TurnControl::stop_turn`) in flight: the turn's end reads
-    // as Interrupted and the app-server stays up for the next turn.
-    let mut stopping = false;
-    // A Done has been emitted for the turn currently/last in flight.
-    let mut done_current = idle;
-    let mut current_native = command_request(&request.prompt, &thread_id)
-        .ok()
-        .flatten()
-        .is_some();
-    let mut done_after_interrupt = false;
+    /// Start a turn with `text` (the next queued steer, or one that found no turn to join).
+    async fn begin_turn(&mut self, text: &str) -> Result<(), HarnessError> {
+        let id = start_turn(&self.client, self.turn_params.build(text)).await?;
+        self.router.adopt_started(id);
+        Ok(())
+    }
+
+    /// A steer: into the live turn, or as the next turn when there is none to join.
+    async fn steer(&mut self, text: String) -> Step {
+        // Later messages stay behind queued ones: they are delivered in order.
+        if !self.queued_steers.is_empty() {
+            self.queued_steers.push_back(text);
+            return Step::Continue;
+        }
+        let Some(expected) = self.router.active.clone() else {
+            return match self.begin_turn(&text).await {
+                Ok(()) => Step::Continue,
+                Err(error) => self.fail(format!("Steering failed: {error}")).await,
+            };
+        };
+        let steer = json!({
+            "threadId": self.thread_id,
+            "expectedTurnId": expected,
+            "clientUserMessageId": uuid::Uuid::new_v4().to_string(),
+            "input": [{ "type": "text", "text": text }],
+        });
+        match self.client.request("turn/steer", steer).await {
+            Ok(_) => Step::Continue,
+            // A failed `turn/steer` does NOT mean the text is bad: most commonly the active turn
+            // finished between the send and this request. Queue it for redelivery as the next
+            // `turn/start` when the expected turn's end arrives (also the safe fallback for an
+            // older Codex without steering).
+            Err(error) => {
+                tracing::debug!(
+                    target: "reno_harness::codex",
+                    "turn/steer rejected (queued as next turn): {error}"
+                );
+                if self.router.active.as_deref() == Some(expected.as_str())
+                    && !self.router.is_completed(&expected)
+                {
+                    self.queued_steers.push_back(text);
+                    Step::Continue
+                } else {
+                    match self.begin_turn(&text).await {
+                        Ok(()) => Step::Continue,
+                        Err(error) => self.fail(format!("Steering failed: {error}")).await,
+                    }
+                }
+            }
+        }
+    }
+
+    /// End the run in error.
+    async fn fail(&mut self, diagnostic: String) -> Step {
+        self.deny_all();
+        let done = ExecEvent::Done {
+            stop: StopReason::Error,
+            result: None,
+            diagnostic: Some(crate::redact_secrets(&diagnostic)),
+        };
+        if self.emit(done).await {
+            Step::Finished
+        } else {
+            Step::Gone
+        }
+    }
+
+    /// One notification from the app-server.
+    async fn notification(&mut self, method: &str, params: Value) -> Step {
+        // Foreign-thread traffic FIRST: a child thread's turn and thread bookkeeping must never
+        // reach the turn router below (a child's turn/completed would settle the RUN's turn).
+        if let Some(thread) = notification_thread_id(method, &params)
+            && !thread.is_empty()
+            && thread != self.thread_id
+            && route_child_notification(method) == ChildRoute::Dropped
+        {
+            return Step::Continue;
+        }
+        let events = match method {
+            "turn/started" => {
+                self.router.note_started(turn_id(&params));
+                Vec::new()
+            }
+            "item/agentMessage/delta" => self.norm.agent_delta(&params),
+            "item/reasoning/textDelta"
+            | "item/reasoning/summaryTextDelta"
+            | "item/reasoning/summaryPartAdded" => self.norm.reasoning(method, &params),
+            "item/started" | "item/completed" => {
+                let phase = if method == "item/started" {
+                    Phase::Started
+                } else {
+                    Phase::Completed
+                };
+                self.norm
+                    .item(phase, params.get("item").unwrap_or(&Value::Null))
+            }
+            "thread/tokenUsage/updated" => {
+                self.norm.token_usage(&params);
+                Vec::new()
+            }
+            "turn/completed" | "turn/failed" | "turn/aborted" => {
+                return self.settle(method, &params).await;
+            }
+            "error" => {
+                self.norm.error(&params, unix_now());
+                Vec::new()
+            }
+            "account/rateLimits/updated" => {
+                self.norm.rate_limits(&params);
+                Vec::new()
+            }
+            // thread/status, mcpServer startup, account noise, ...: unknown notification
+            // methods are tolerated by design.
+            _ => Vec::new(),
+        };
+        if self.emit_all(events).await {
+            Step::Continue
+        } else {
+            Step::Gone
+        }
+    }
+
+    /// A turn ended. Only the turn in flight settles; and a completed turn with a queued steer
+    /// is not the run's end: the steer is the next turn.
+    async fn settle(&mut self, method: &str, params: &Value) -> Step {
+        let id = turn_id(params);
+        if !self.router.settles(&id) {
+            tracing::debug!(
+                target: "reno_harness::codex",
+                turn = %id,
+                "stale {method} ignored (not the turn in flight)"
+            );
+            self.router.note_completed(&id);
+            return Step::Continue;
+        }
+        self.router.note_completed(&id);
+        let mut end: TurnEnd = self
+            .norm
+            .finish_turn(method, params, self.interrupted, unix_now());
+        if let Some(usage) = end.usage.take()
+            && !self.emit(usage).await
+        {
+            return Step::Gone;
+        }
+        if end.stop == StopReason::Completed
+            && !self.interrupted
+            && let Some(next) = self.queued_steers.pop_front()
+        {
+            return match self.begin_turn(&next).await {
+                Ok(()) => Step::Continue,
+                Err(error) => self.fail(format!("Steering failed: {error}")).await,
+            };
+        }
+        self.deny_all();
+        if self.emit(end.done()).await {
+            Step::Finished
+        } else {
+            Step::Gone
+        }
+    }
+
+    /// One server-to-client request. The app-server blocks until SOME response arrives, so every
+    /// request is answered or recorded as open.
+    ///
+    /// What the run's access mode covers is accepted at once (see [`CodexExecutor`]); anything
+    /// else becomes a `NeedsApproval` and waits for `ExecHandle::decide`. Questions become
+    /// `NeedsInput`. A request after cancel is refused at once; one of an unknown method is
+    /// answered with an error, so the server never wedges awaiting a reply.
+    async fn request(&mut self, id: Value, method: &str, params: Value) -> Step {
+        let key = request_key(&id);
+        if self.interrupted {
+            return self.refuse(&id, method, &params);
+        }
+        let item = params
+            .get("itemId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let ask = match method {
+            "item/commandExecution/requestApproval" => {
+                if self.authority.accepts_command() {
+                    return self.accept(&id, method, &params);
+                }
+                Ask::Approval(permission::command_subject(&params), ApprovalKind::Decision)
+            }
+            "item/fileChange/requestApproval" => {
+                let change =
+                    permission::file_change(&params, self.norm.file_paths(item), &self.cwd);
+                // Lexically inside is not enough: a link inside the working directory can lead
+                // out of it, and what is accepted unseen must stay where the run was confined.
+                if self
+                    .authority
+                    .accepts_file_change(&change.subject.paths, change.grant_root)
+                    && (!self.authority.judges_file_changes_by_path()
+                        || resolves_inside(&change.subject.paths, &self.cwd).await)
+                {
+                    return self.accept(&id, method, &params);
+                }
+                Ask::Approval(change.subject, ApprovalKind::Decision)
+            }
+            "item/permissions/requestApproval" => {
+                if self.authority.accepts_permissions() {
+                    return self.accept(&id, method, &params);
+                }
+                Ask::Approval(
+                    permission::permissions_subject(&params),
+                    ApprovalKind::Permissions(params.clone()),
+                )
+            }
+            "mcpServer/elicitation/request" => {
+                match permission::classify_elicitation(&key, &params) {
+                    Elicitation::Decline => {
+                        tracing::info!(
+                            target: "reno_harness::codex",
+                            mode = params["mode"].as_str().unwrap_or_default(),
+                            "declining an MCP elicitation Reno can't ask"
+                        );
+                        self.client.respond(&id, elicitation::decline());
+                        return Step::Continue;
+                    }
+                    Elicitation::Form(form) => Ask::Form(form),
+                    Elicitation::Approval(subject) => {
+                        if subject.action == reno_proto::ActionClass::McpTool
+                            && self.authority.accepts_mcp_tool()
+                        {
+                            self.client.respond(&id, elicitation::accept());
+                            return Step::Continue;
+                        }
+                        Ask::Approval(subject, ApprovalKind::Elicitation)
+                    }
+                }
+            }
+            "item/tool/requestUserInput" => {
+                let asked = permission::user_input_questions(&key, &params);
+                if asked.is_empty() {
+                    self.client.respond(&id, json!({ "answers": {} }));
+                    return Step::Continue;
+                }
+                Ask::Agent(asked)
+            }
+            _ => {
+                tracing::debug!(
+                    target: "reno_harness::codex",
+                    "unhandled server request: {method}"
+                );
+                self.client
+                    .respond_error(&id, -32601, &format!("unsupported method: {method}"));
+                return Step::Continue;
+            }
+        };
+        if self.requests.len() >= MAX_OPEN_REQUESTS {
+            tracing::warn!(
+                target: "reno_harness::codex",
+                "too many open requests; refusing {method}"
+            );
+            self.client
+                .respond_error(&id, -32000, "client overloaded: too many pending requests");
+            return Step::Continue;
+        }
+        let event = match ask {
+            Ask::Approval(subject, kind) => {
+                let replaced = self
+                    .requests
+                    .open_approval(key.clone(), ApprovalPayload { rpc_id: id, kind });
+                note_superseded(replaced, &key);
+                ExecEvent::NeedsApproval {
+                    request_id: key,
+                    subject,
+                }
+            }
+            Ask::Form(form) => {
+                let questions = form.questions.clone();
+                let replaced = self.requests.open_input(
+                    key.clone(),
+                    InputPayload {
+                        rpc_id: id,
+                        kind: InputKind::Form(form),
+                    },
+                );
+                note_superseded(replaced, &key);
+                ExecEvent::NeedsInput {
+                    request_id: key,
+                    questions,
+                }
+            }
+            Ask::Agent(asked) => {
+                let questions = asked.iter().map(|a| a.question.clone()).collect();
+                let replaced = self.requests.open_input(
+                    key.clone(),
+                    InputPayload {
+                        rpc_id: id,
+                        kind: InputKind::Agent(asked),
+                    },
+                );
+                note_superseded(replaced, &key);
+                ExecEvent::NeedsInput {
+                    request_id: key,
+                    questions,
+                }
+            }
+        };
+        if self.emit(event).await {
+            Step::Continue
+        } else {
+            Step::Gone
+        }
+    }
+
+    /// Accept an approval the run's access mode covers.
+    fn accept(&self, id: &Value, method: &str, params: &Value) -> Step {
+        let reply = match method {
+            "item/permissions/requestApproval" => permission::permissions_reply(params, true),
+            _ => permission::decision(true),
+        };
+        self.client.respond(id, reply);
+        Step::Continue
+    }
+
+    fn refuse(&self, id: &Value, method: &str, params: &Value) -> Step {
+        match refusal(method, params) {
+            Some(reply) => self.client.respond(id, reply),
+            None => self
+                .client
+                .respond_error(id, -32601, &format!("unsupported method: {method}")),
+        }
+        Step::Continue
+    }
+
+    /// Apply one answer from the consumer.
+    fn answer(&mut self, answer: ExecAnswer) {
+        let request_id = answer.request_id.clone();
+        match self.requests.resolve(answer) {
+            Resolved::Decision(payload, decision) => self
+                .client
+                .respond(&payload.rpc_id, payload.reply(decision == Decision::Allow)),
+            Resolved::Input(payload, given) => {
+                self.client.respond(&payload.rpc_id, payload.reply(&given))
+            }
+            Resolved::WrongKind => tracing::warn!(
+                target: "reno_harness::codex",
+                request_id,
+                "an answer of the wrong kind for this request is ignored; it stays open"
+            ),
+            Resolved::Unknown => tracing::warn!(
+                target: "reno_harness::codex",
+                request_id,
+                "answer for an unknown or already resolved request"
+            ),
+        }
+    }
+}
+
+/// What a request becomes.
+enum Ask {
+    Approval(ApprovalSubject, ApprovalKind),
+    Form(elicitation::Form),
+    Agent(Vec<Asked>),
+}
+
+/// A `Done { Error }` and the teardown of a run that never got a thread.
+async fn end_early(
+    session: &Session,
+    stop: StopReason,
+    diagnostic: Option<String>,
+    app: &mut AppServer,
+) {
+    let _ = session
+        .event_tx
+        .send(ExecEvent::Done {
+            stop,
+            result: None,
+            diagnostic,
+        })
+        .await;
+    app.child.shutdown(session.kill_grace).await;
+    app.release();
+}
+
+/// The handshake, interruptible, relaunching an app-server that died first. `Err` carries the
+/// diagnostic of the `Done` that ends the run, or `None` when the run was cancelled.
+async fn handshake(session: &Session, app: &mut AppServer) -> Result<(), Option<String>> {
+    let mut attempt = 0;
+    let mut opt_out = true;
+    loop {
+        let handshake = app.client.request("initialize", initialize_params(opt_out));
+        let failed = tokio::select! {
+            res = handshake => match res {
+                Ok(_) => return Ok(()),
+                Err(e) => e,
+            },
+            () = session.cancel.cancelled() => return Err(None),
+        };
+        // Only a process that is gone gets another launch: an answer that refuses (bad config,
+        // unsupported version) would refuse again.
+        let exited = app.client.is_closed();
+        // An app-server that predates notification opt-outs may reject the capability
+        // outright; the opt-out is an optimization, so ask again without it.
+        if !exited && std::mem::take(&mut opt_out) {
+            tracing::debug!(
+                target: "reno_harness::codex",
+                "initialize refused ({failed}); retrying without notification opt-outs"
+            );
+            continue;
+        }
+        if exited && attempt < session.startup_retry_delays.len() {
+            let status = app.child.try_wait().ok().flatten();
+            tracing::warn!(
+                target: "reno_harness::codex",
+                attempt = attempt + 1,
+                error = %crate::crash_message("codex app-server", status, &app.stderr_tail),
+                "app-server died before initialize; relaunching"
+            );
+            app.child.shutdown(session.kill_grace).await;
+            app.release();
+            tokio::select! {
+                () = tokio::time::sleep(session.startup_retry_delays[attempt]) => {}
+                () = session.cancel.cancelled() => return Err(None),
+            }
+            attempt += 1;
+            // The relaunch is a child the orphan sweep must know about, like the first.
+            match launch(
+                &session.tracker,
+                &session.exe,
+                &session.spec,
+                &session.processes,
+            )
+            .await
+            {
+                Ok(next) => {
+                    *app = next;
+                    continue;
+                }
+                Err(error) => return Err(Some(error.to_string())),
+            }
+        }
+        // Out of launches: say why, with what the process printed.
+        return Err(Some(if exited {
+            app.stderr_tail.wait_closed().await;
+            format!(
+                "initialize: {}",
+                crate::crash_message(
+                    "codex app-server",
+                    app.child.try_wait().ok().flatten(),
+                    &app.stderr_tail
+                )
+            )
+        } else {
+            failed.to_string()
+        }));
+    }
+}
+
+/// `thread/start` or `thread/resume`: the thread and what it runs with.
+async fn open_thread(
+    client: &RpcClient,
+    spec: &ExecSpec,
+    cwd: &str,
+    policy: permission::Policy,
+) -> Result<(String, ThreadMode), HarnessError> {
+    let mut p = serde_json::Map::new();
+    if !cwd.is_empty() {
+        p.insert("cwd".into(), Value::String(cwd.to_owned()));
+    }
+    let overrides = mcp_overrides(&spec.mcp, spec.access == AccessMode::FullAccess);
+    if !overrides.is_empty() {
+        // Reno's own MCP server and the plugins' as dotted config overrides on top of the user's
+        // `mcp_servers` table.
+        p.insert(
+            "config".into(),
+            Value::Object(overrides.into_iter().collect()),
+        );
+    }
+    p.insert("approvalPolicy".into(), policy.approval_policy.into());
+    p.insert(
+        "sandbox".into(),
+        catalog::sandbox_mode(policy.sandbox).into(),
+    );
+    // A mode that asks routes its approvals to the person explicitly: a configured
+    // `approvals_reviewer` could otherwise hand them to an AI reviewer instead.
+    if permission::asks_person(spec.access) {
+        p.insert("approvalsReviewer".into(), "user".into());
+    }
+    if let Some(model) = &spec.model {
+        p.insert("model".into(), Value::String(model.clone()));
+    }
+    let thread = if let Some(resume) = &spec.resume {
+        let mut resume_params = p.clone();
+        resume_params.insert("threadId".into(), Value::String(resume.0.clone()));
+        match resume_thread(client, Value::Object(resume_params))
+            .await
+            .map_err(|e| (resume_unrecoverable(&e), e))
+        {
+            Ok(thread) => thread,
+            // A missing, unreadable or foreign rollout falls back to a fresh thread; `Started`
+            // names the thread the run really has. The log keeps Codex's own words.
+            Err((Some(reason), e)) => {
+                tracing::warn!(
+                    target: "reno_harness::codex",
+                    "thread/resume failed (starting fresh): {e}"
+                );
+                tracing::warn!(
+                    target: "reno_harness::codex",
+                    "Couldn't restore the earlier Codex conversation ({reason}), so this run \
+                     starts a new one without its context."
+                );
+                client
+                    .request("thread/start", Value::Object(p.clone()))
+                    .await?
+            }
+            // A dead process or a refusal a fresh thread would hit too: fail the run rather
+            // than silently dropping its history.
+            Err((None, e)) => return Err(e),
+        }
+    } else {
+        client.request("thread/start", Value::Object(p)).await?
+    };
+    let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
+    let mode = ThreadMode {
+        model: thread["model"].as_str().unwrap_or_default().to_owned(),
+        effort: thread["reasoningEffort"].as_str().map(str::to_owned),
+        plan: thread.pointer("/collaborationMode/mode") == Some(&json!("plan")),
+    };
+    Ok((thread_id, mode))
+}
+
+/// The per-run event loop: one task multiplexing app-server messages, the steering queue, the
+/// answers, the cancel token and consumer liveness.
+async fn run_session(mut session: Session, mut app: AppServer) {
+    // ---- handshake (interruptible; relaunches a process that died first) ----
+    if let Err(why) = handshake(&session, &mut app).await {
+        let (stop, diagnostic) = match why {
+            None => (StopReason::Interrupted, None),
+            Some(why) => (StopReason::Error, Some(crate::redact_secrets(&why))),
+        };
+        end_early(&session, stop, diagnostic, &mut app).await;
+        return;
+    }
+    app.client.notify("initialized", None);
+
+    // ---- thread (interruptible) ----------------------------------------------
+    let policy = permission::policy(session.spec.access, session.spec.sandbox);
+    let opened = tokio::select! {
+        res = open_thread(&app.client, &session.spec, &session.cwd, policy) => res,
+        () = session.cancel.cancelled() => {
+            end_early(&session, StopReason::Interrupted, None, &mut app).await;
+            return;
+        }
+    };
+    let (thread_id, thread_mode) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            let error = setup_failure(e, &mut app).await;
+            end_early(
+                &session,
+                StopReason::Error,
+                Some(crate::redact_secrets(&error)),
+                &mut app,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let started = ExecEvent::Started {
+        session: SessionRef(thread_id.clone()),
+        model: session
+            .spec
+            .model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| thread_mode.model.clone()),
+    };
+    if session.event_tx.send(started).await.is_err() {
+        end_early_silent(&session, &mut app).await;
+        return;
+    }
+
+    let mut run = Run {
+        client: app.client.clone(),
+        event_tx: session.event_tx.clone(),
+        authority: session.authority.clone(),
+        cwd: session.spec.cwd.clone(),
+        turn_params: TurnParams::new(&session.spec, thread_id.clone(), thread_mode),
+        thread_id,
+        norm: Normalizer::new(),
+        router: TurnRouter::default(),
+        requests: Requests::new(),
+        queued_steers: VecDeque::new(),
+        interrupted: false,
+    };
+
+    // ---- the turn --------------------------------------------------------------
+    let mut ended = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
-    // The runtime's process tree when its teardown began (see
-    // [`crate::shutdown_agent`]).
+    // The runtime's process tree when its teardown began (see [`crate::shutdown_agent`]).
     #[cfg_attr(not(unix), allow(unused_mut))]
     let mut torn_down: Vec<crate::process::Tracked> = Vec::new();
+    let prompt = session.spec.prompt.clone();
+    // A run cancelled before its turn is acknowledged has no turn to interrupt: it ends at once
+    // (the bookkeeping below says `Interrupted`, and teardown reaps the app-server).
+    let mut cancelled = false;
+    let started = tokio::select! {
+        started = run.begin_turn(&prompt) => Some(started),
+        () = session.cancel.cancelled() => None,
+    };
+    match started {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            let error = setup_failure(e, &mut app).await;
+            ended = matches!(run.fail(error).await, Step::Finished);
+        }
+        None => {
+            cancelled = true;
+            run.interrupted = true;
+        }
+    }
 
-    'main: loop {
-        tokio::select! {
-            inc = incoming.recv() => match inc {
+    let mut steering_open = true;
+    let mut answers_open = true;
+    let mut interrupt_sent = false;
+    'main: while !ended && !cancelled {
+        let step = tokio::select! {
+            inc = app.incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
-                // Foreign-thread traffic FIRST: a child thread's turn/thread
-                // bookkeeping must never reach the parent turn router below
-                // (a child's turn/completed would settle the PARENT turn).
-                if let Some(nthread) = notification_thread_id(&method, &params)
-                    && !nthread.is_empty()
-                    && nthread != thread_id
-                {
-                    match route_child_notification(&method) {
-                        ChildRoute::Parent => {
-                            // Unknown/parent-owned: fall through so a codex
-                            // update degrades to "the parent sees it",
-                            // never silent loss.
-                        }
-                        ChildRoute::Consumed => continue,
-                        ChildRoute::Subagent => {
-                            for event in children.notification(&nthread, &method, &params) {
-                                if !send(&event_tx, event).await {
-                                    break 'main;
-                                }
-                            }
-                            continue;
-                        }
-                    }
+                    run.notification(&method, params).await
                 }
-                match method.as_str() {
-                    "turn/started" => {
-                        let id = turn_id(&params);
-                        // The app-server can start a turn without going through turn/start.
-                        // Publish the boundary before its text/tool deltas reach the parked engine.
-                        if done_current && !id.is_empty() && !router.is_completed(&id) {
-                            done_current = false;
-                            let (prev, next) = rotate(&mut assistant_message_id);
-                            if !send(&event_tx, AgentEvent::Steered {
-                                assistant_message_id: Some(prev),
-                                next_assistant_message_id: Some(next),
-                            }).await {
-                                break 'main;
-                            }
-                        }
-                        router.note_started(id);
-                        if std::mem::take(&mut stop_when_announced)
-                            && let Some(active) = router.active.clone()
-                        {
-                            send_turn_interrupt(&client, &thread_id, active);
-                        }
-                    }
-
-                    // Kept for commands still open: one that outlives its
-                    // turn shows its tail (`TurnControl::background_output`).
-                    "item/commandExecution/outputDelta" => {
-                        if let (Some(id), Some(delta)) = (
-                            params.get("itemId").and_then(Value::as_str),
-                            params.get("delta").and_then(Value::as_str),
-                        ) && open_commands.contains_key(id)
-                        {
-                            turn.append_background_output(id, delta);
-                        }
-                    }
-
-                    "item/agentMessage/delta" => {
-                        streamed_text.insert(item_id(&params));
-                        if let Some(text) = delta_text(&params)
-                            && !send(&event_tx, AgentEvent::TextDelta { text }).await
-                        {
-                            break 'main;
-                        }
-                    }
-
-                    "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta"
-                    | "item/reasoning/summaryPartAdded" => {
-                        for event in reasoning_streams.entry(thread_id.clone()).or_default()
-                            .map(&method, &params)
-                        {
-                            if !send(&event_tx, event).await {
-                                break 'main;
-                            }
-                        }
-                    }
-
-                    "item/started" | "item/completed" => {
-                        let phase = if method == "item/started" {
-                            Phase::Started
-                        } else {
-                            Phase::Completed
-                        };
-                        let item = params.get("item").unwrap_or(&Value::Null);
-                        if matches!(item_type(item), "commandExecution" | "command_execution") {
-                            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
-                            let changed = if phase == Phase::Started {
-                                let command = OpenCommand {
-                                    process: item.get("processId").and_then(Value::as_str).map(str::to_owned),
-                                    turn: router.active.clone(),
-                                    command: shown_command(
-                                        item.get("command").and_then(Value::as_str).unwrap_or_default(),
-                                    ),
-                                    since: chrono::Utc::now(),
-                                };
-                                open_commands.insert(id.to_owned(), command).is_none()
-                            } else {
-                                turn.clear_background_output(id);
-                                open_commands.remove(id).is_some()
-                            };
-                            if changed {
-                                turn.set_background(open_commands.len());
-                                publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
-                            }
-                        }
-                        if matches!(item_type(item), "userMessage" | "user_message")
-                            && let Some(at) = item
-                                .get("clientId")
-                                .and_then(Value::as_str)
-                                .and_then(|id| accepted_steers.iter().position(|s| s == id))
-                        {
-                            for _ in 0..=at {
-                                accepted_steers.pop_front();
-                                let (prev, next) = rotate(&mut assistant_message_id);
-                                if !send(&event_tx, AgentEvent::Steered {
-                                    assistant_message_id: Some(prev),
-                                    next_assistant_message_id: Some(next),
-                                }).await {
-                                    break 'main;
-                                }
-                            }
-                        }
-                        if phase == Phase::Completed {
-                            let output = match item_type(item) {
-                                "exitedReviewMode" => {
-                                    item.get("review").and_then(Value::as_str).map(str::to_owned)
-                                }
-                                "contextCompaction" => Some("Context compacted.".to_owned()),
-                                // Plan mode's proposed plan: Codex lifts it
-                                // out of the agent message into its own item
-                                // (the completed one is authoritative, its
-                                // `item/plan/delta`s may not add up to it).
-                                "plan" => item.get("text").and_then(Value::as_str)
-                                    .filter(|text| !text.trim().is_empty())
-                                    .map(|text| format!("{}\n\n", text.trim_end())),
-                                _ => None,
-                            };
-                            if let Some(text) = output
-                                && !send(&event_tx, AgentEvent::TextDelta { text }).await
-                            { break 'main; }
-                        }
-                        if matches!(item_type(item), "agentMessage" | "agent_message") {
-                            if phase == Phase::Completed {
-                                // Fallback for non-streamed messages only.
-                                let id = item.get("id").and_then(Value::as_str).unwrap_or("");
-                                let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-                                if !streamed_text.contains(id)
-                                    && !text.is_empty()
-                                    && !send(&event_tx, AgentEvent::TextDelta { text: text.into() }).await
-                                {
-                                    break 'main;
-                                }
-                                // Codex emits several assistant messages per
-                                // turn (commentary, final answer); their
-                                // deltas carry no separator, so consecutive
-                                // messages rendered concatenated
-                                // ("…waiting.Beta's 90-second…" — live
-                                // finding). Close each message as a
-                                // paragraph.
-                                if !send(
-                                    &event_tx,
-                                    AgentEvent::TextDelta {
-                                        text: "\n\n".into(),
-                                    },
-                                )
-                                .await
-                                {
-                                    break 'main;
-                                }
-                                // Deltas are token chunks, not steering
-                                // boundaries: the completed item is the
-                                // provider-authoritative end of the text part.
-                                let (prev, _next) = rotate(&mut assistant_message_id);
-                                if !send(
-                                    &event_tx,
-                                    AgentEvent::AssistantMessageCompleted {
-                                        assistant_message_id: prev,
-                                    },
-                                )
-                                .await
-                                {
-                                    break 'main;
-                                }
-                            }
-                        } else {
-                            for ev in children.parent_item(phase, item) {
-                                if !send(&event_tx, ev).await {
-                                    break 'main;
-                                }
-                            }
-                        }
-                    }
-
-                    "thread/tokenUsage/updated" => {
-                        if let Some(usage) = normalize::context_usage_event(&params)
-                            && !send(&event_tx, usage).await { break 'main; }
-                        if let Some(usage) = usage_event(&params) {
-                            pending_usage = Some(usage);
-                        }
-                    }
-
-                    // Codex's `update_plan` tool: the whole checklist, replaced
-                    // on every call, with an in-progress step.
-                    "turn/plan/updated" => {
-                        for ev in normalize::plan_update_events(&params) {
-                            if !send(&event_tx, ev).await { break 'main; }
-                        }
-                    }
-
-                    "turn/completed" => {
-                        let id = turn_id(&params);
-                        if !router.settles(&id) {
-                            tracing::debug!(
-                                target: "reno_harness::codex",
-                                turn = %id,
-                                "stale turn/completed ignored (not the turn in flight)"
-                            );
-                            router.note_completed(&id);
-                            continue 'main;
-                        }
-                        router.note_completed(&id);
-                        stop_when_announced = false;
-                        // Its commands still open are background work now.
-                        let interrupted_turn = interrupted
-                            || stopping
-                            || params.pointer("/turn/status").and_then(Value::as_str) == Some("interrupted");
-                        if interrupted_turn {
-                            pruning = Some(id.clone());
-                        }
-                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
-                        // Accepted steers whose item never surfaced still
-                        // joined this turn: confirm them before its end.
-                        while accepted_steers.pop_front().is_some() {
-                            let (prev, next) = rotate(&mut assistant_message_id);
-                            if !send(&event_tx, AgentEvent::Steered {
-                                assistant_message_id: Some(prev),
-                                next_assistant_message_id: Some(next),
-                            }).await {
-                                break 'main;
-                            }
-                        }
-                        // Item ids never span turns; without this the set grew
-                        // one entry per message for a persistent session's life.
-                        streamed_text.clear();
-                        if let Some(usage) = pending_usage.take()
-                            && !send(&event_tx, usage).await
-                        {
-                            break 'main;
-                        }
-                        let (error, notice) =
-                            settle_turn_error(&params, held_error.take(), rate_limits.as_ref(), unix_now());
-                        let status = if interrupted || stopping {
-                            DoneStatus::Interrupted
-                        } else if error.is_some() {
-                            DoneStatus::Errored
-                        } else if params.pointer("/turn/status").and_then(Value::as_str)
-                            == Some("interrupted")
-                        {
-                            // Interrupted by someone else (another client of the
-                            // thread, Codex itself): still not a finished answer.
-                            DoneStatus::Interrupted
-                        } else {
-                            DoneStatus::Completed
-                        };
-                        if status == DoneStatus::Interrupted {
-                            prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
-                        }
-                        if let Some(message) = notice.filter(|_| status == DoneStatus::Completed)
-                            && !send(&event_tx, AgentEvent::Error { message }).await
-                        {
-                            break 'main;
-                        }
-                        stopping = false;
-                        done_current = true;
-                        if !send(
-                            &event_tx,
-                            AgentEvent::Done {
-                                status,
-                                result: None,
-                                error,
-                                session_id: Some(thread_id.clone()),
-                            },
-                        )
-                        .await
-                        {
-                            break 'main;
-                        }
-                        if interrupted {
-                            done_after_interrupt = true;
-                            break 'main;
-                        }
-                        // Persistent session: a steer that lost the race with
-                        // this turn's end becomes the next turn now; otherwise
-                        // stay alive for the mailbox — the caller owns teardown.
-                        current_native = false;
-                        if let Some((text, config)) = queued_steers.pop_front() {
-                            if let Some(next) = config {
-                                live = *next;
-                            }
-                            current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                            if !steer_as_new_turn(
-                                &client,
-                                turn_params(&live, &text),
-                                &mut router,
-                                &event_tx,
-                                &mut assistant_message_id,
-                                &mut done_current,
-                            )
-                            .await
-                            {
-                                break 'main;
-                            }
-                        } else if !steering_open {
-                            break 'main;
-                        }
-                    }
-
-                    "turn/failed" => {
-                        let id = turn_id(&params);
-                        if !router.settles(&id) {
-                            router.note_completed(&id);
-                            continue 'main;
-                        }
-                        router.note_completed(&id);
-                        stop_when_announced = false;
-                        accepted_steers.clear();
-                        let held = held_error.take();
-                        if let Some(usage) = pending_usage.take()
-                            && !send(&event_tx, usage).await
-                        {
-                            break 'main;
-                        }
-                        done_current = true;
-                        if std::mem::take(&mut stopping) && !interrupted {
-                            // The stopped turn's end: the thread lives on.
-                            if !send(&event_tx, AgentEvent::Done {
-                                status: DoneStatus::Interrupted,
-                                result: None,
-                                error: None,
-                                session_id: Some(thread_id.clone()),
-                            }).await {
-                                break 'main;
-                            }
-                            continue 'main;
-                        }
-                        if interrupted {
-                            done_after_interrupt = true;
-                        }
-                        let _ = send(
-                            &event_tx,
-                            AgentEvent::Done {
-                                status: if interrupted {
-                                    DoneStatus::Interrupted
-                                } else {
-                                    DoneStatus::Errored
-                                },
-                                result: None,
-                                error: Some(
-                                    turn_error_message(&params, rate_limits.as_ref(), unix_now())
-                                        .or(held)
-                                        .unwrap_or_else(|| "Codex turn failed".into()),
-                                ),
-                                session_id: Some(thread_id.clone()),
-                            },
-                        )
-                        .await;
-                        break 'main;
-                    }
-
-                    "turn/aborted" => {
-                        let id = turn_id(&params);
-                        if !router.settles(&id) {
-                            router.note_completed(&id);
-                            continue 'main;
-                        }
-                        router.note_completed(&id);
-                        stop_when_announced = false;
-                        accepted_steers.clear();
-                        held_error = None;
-                        done_current = true;
-                        prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, id.clone()));
-                        pruning = Some(id.clone());
-                        publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
-                        if std::mem::take(&mut stopping) && !interrupted {
-                            if !send(&event_tx, AgentEvent::Done {
-                                status: DoneStatus::Interrupted,
-                                result: None,
-                                error: None,
-                                session_id: Some(thread_id.clone()),
-                            }).await {
-                                break 'main;
-                            }
-                            continue 'main;
-                        }
-                        if interrupted {
-                            done_after_interrupt = true;
-                        }
-                        let _ = send(
-                            &event_tx,
-                            AgentEvent::Done {
-                                status: DoneStatus::Interrupted,
-                                result: None,
-                                error: None,
-                                session_id: Some(thread_id.clone()),
-                            },
-                        )
-                        .await;
-                        break 'main;
-                    }
-
-                    "error" => {
-                        let notice = normalize::error_notice(&params, rate_limits.as_ref(), unix_now());
-                        if notice.will_retry {
-                            // "Reconnecting… 2/5": Codex is on it. Not an
-                            // outcome, so not a permanent error in the
-                            // transcript (nor a sign-in prompt).
-                            tracing::info!(
-                                target: "reno_harness::codex",
-                                "codex retrying: {}", notice.message
-                            );
-                        } else if !done_current {
-                            // The turn's end reports it (turn/completed
-                            // usually repeats it as `turn.error`).
-                            held_error = Some(notice.message);
-                        } else if !send(&event_tx, AgentEvent::Error { message: notice.message }).await {
-                            break 'main;
-                        }
-                    }
-
-                    "account/rateLimits/updated" => {
-                        normalize::merge_rate_limits(&mut rate_limits, &params);
-                    }
-
-                    // thread/status, mcpServer startup, account noise, … —
-                    // unknown notification methods are tolerated by design.
-                    _ => {}
-                }
-                }
-
                 Some(Incoming::Request { id, method, params }) => {
-                    handle_server_request(
-                        &client,
-                        id,
-                        &method,
-                        &params,
-                        run_access(&live),
-                        &request_input,
-                        &request_slots,
-                    );
+                    run.request(id, &method, params).await
                 }
-
                 // stdout EOF or reader gone: the app server exited.
                 Some(Incoming::Eof) | None => break 'main,
             },
 
-            steer = steering.recv(), if steering_open && !interrupted => match steer {
-                Some(msg) => {
-                    let text = msg.prompt;
-                    // Native operations run at a turn boundary, never as text
-                    // injected into an already running model turn. So does a
-                    // changed configuration: `turn/steer` carries no model,
-                    // effort or tier, and only a `turn/start` applies them.
-                    // Later messages must stay behind queued ones: Steered
-                    // acknowledgments retire the engine's accepted-message
-                    // ledger in FIFO order.
-                    if !done_current
-                        && (!queued_steers.is_empty()
-                            || current_native
-                            || msg.config.is_some()
-                            || !matches!(command_request(&text, &thread_id), Ok(None)))
-                    {
-                        queued_steers.push_back((text, msg.config));
-                        continue 'main;
-                    }
-                    if let Some(next) = msg.config {
-                        live = *next;
-                    }
-                    if let Some(expected) = router.active.clone() {
-                        let client_id = new_message_id();
-                        let steer_params = json!({
-                            "threadId": thread_id,
-                            "expectedTurnId": expected,
-                            "clientUserMessageId": client_id,
-                            "input": prompt_input(&text),
-                        });
-                        match client.request("turn/steer", steer_params).await {
-                            Ok(_) => accepted_steers.push_back(client_id),
-                            // A failed `turn/steer` does NOT mean the text is
-                            // bad: most commonly the active turn finished
-                            // between the UI send and this request. Queue it
-                            // for redelivery as the next `turn/start` when the
-                            // expected turn's end arrives (also the safe
-                            // fallback for older Codex without steering).
-                            Err(e) => {
-                                tracing::debug!(
-                                    target: "reno_harness::codex",
-                                    "turn/steer rejected (queued as next turn): {e}"
-                                );
-                                if router.active.as_deref() == Some(expected.as_str())
-                                    && !router.is_completed(&expected)
-                                {
-                                    queued_steers.push_back((text, None));
-                                } else {
-                                    current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                                    if !steer_as_new_turn(
-                                        &client, turn_params(&live, &text), &mut router, &event_tx,
-                                        &mut assistant_message_id, &mut done_current,
-                                    ).await { break 'main; }
-                                }
-                            }
-                        }
-                    } else {
-                        current_native = command_request(&text, &thread_id).ok().flatten().is_some();
-                        if !steer_as_new_turn(
-                            &client, turn_params(&live, &text), &mut router, &event_tx,
-                            &mut assistant_message_id, &mut done_current,
-                        ).await { break 'main; }
-                    }
+            prompt = session.steering.recv(), if steering_open && !run.interrupted => match prompt {
+                // A steer waiting on a wedged app-server must not hold off a cancel: dropped
+                // here, the cancelled token fires the arm below on the next turn of the loop.
+                Some(prompt) => tokio::select! {
+                    step = run.steer(prompt) => step,
+                    () = session.cancel.cancelled() => Step::Continue,
+                },
+                // The queue closed. The run goes on: approvals and answers still need it, and it
+                // ends with its `Done`.
+                None => {
+                    steering_open = false;
+                    Step::Continue
+                }
+            },
+
+            answer = session.answers.recv(), if answers_open => match answer {
+                Some(answer) => {
+                    run.answer(answer);
+                    Step::Continue
                 }
                 None => {
-                    // Mailbox closed (the caller's graceful idle-reap): finish
-                    // once nothing is in flight — mirrors codex.ts's steer loop
-                    // `finish()` on a null take.
-                    steering_open = false;
-                    if done_current && router.active.is_none() && queued_steers.is_empty() {
-                        break 'main;
-                    }
+                    answers_open = false;
+                    Step::Continue
                 }
             },
 
-            // End the in-flight turn, not the app-server: its threads (child
-            // agents included) keep running. Steers still waiting for this
-            // turn's end go with it — a stopped turn never continues.
-            _ = turn.stop_requested(), if !interrupted => {
-                queued_steers.clear();
-                match router.active.clone() {
-                    Some(active) if !done_current => {
-                        stopping = true;
-                        if router.announced {
-                            send_turn_interrupt(&client, &thread_id, active);
-                        } else {
-                            stop_when_announced = true;
-                        }
-                    }
-                    // Between turns: nothing to interrupt. Settle the stop so
-                    // the host sees the turn over.
-                    _ => {
-                        done_current = true;
-                        if !send(&event_tx, AgentEvent::Done {
-                            status: DoneStatus::Interrupted,
-                            result: None,
-                            error: None,
-                            session_id: Some(thread_id.clone()),
-                        }).await {
-                            break 'main;
-                        }
-                    }
-                }
-            },
-
-            // The person stopped one background command: Codex terminates
-            // its exec session, and the command's `item/completed` (or the
-            // prune, if none comes) takes it off the list.
-            item = turn.background_stop_requested(), if !interrupted => {
-                if let Some(open) = open_commands.get(&item) {
-                    let Some(process) = open.process.clone() else {
-                        tracing::debug!(target: "reno_harness::codex", item = %item, "no process id to terminate");
-                        continue 'main;
-                    };
-                    let client = client.clone();
-                    let thread = thread_id.clone();
-                    tokio::spawn(async move {
-                        let params = json!({ "threadId": thread, "processId": process });
-                        if let Err(e) = client.request("thread/backgroundTerminals/terminate", params).await {
-                            tracing::debug!(target: "reno_harness::codex", "terminate failed: {e}");
-                        }
-                    });
-                    if prune_at.is_none() && prune_query.is_none()
-                        && let Some(started_in) = open.turn.clone()
-                    {
-                        prune_at = Some((tokio::time::Instant::now() + COMMAND_EXIT_GRACE, started_in));
-                    }
-                }
-            },
-
-            _ = interrupt.cancelled(), if !interrupt_sent => {
+            () = session.cancel.cancelled(), if !interrupt_sent => {
                 interrupt_sent = true;
-                interrupted = true;
+                run.interrupted = true;
+                // A request still open when the run is cancelled is refused, before anything
+                // else reaches the app-server.
+                run.deny_all();
                 // The runtime is going: so is everything it started.
                 #[cfg(unix)]
-                if let Some(pid) = child.id() {
+                if let Some(pid) = app.child.id() {
                     torn_down = crate::process::descendants(pid).await;
                 }
-                if let Some(turn) = router.active.clone() {
-                    let client = client.clone();
-                    let thread = thread_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = client
-                            .request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }))
-                            .await
-                        {
-                            tracing::debug!(
-                                target: "reno_harness::codex",
-                                "turn/interrupt failed (escalation will reap): {e}"
-                            );
+                match run.router.active.clone() {
+                    Some(turn) => {
+                        let client = app.client.clone();
+                        let thread = run.thread_id.clone();
+                        session.tracker.spawn(async move {
+                            if let Err(e) = client
+                                .request("turn/interrupt", json!({ "threadId": thread, "turnId": turn }))
+                                .await
+                            {
+                                tracing::debug!(
+                                    target: "reno_harness::codex",
+                                    "turn/interrupt failed (escalation will reap): {e}"
+                                );
+                            }
+                        });
+                        // Escalate if the app server doesn't wind down (turn/aborted) within the
+                        // grace periods: SIGTERM, then SIGKILL. Aborted once the child is reaped.
+                        if let Some(pid) = crate::process::signal_target(&app.child) {
+                            let (interrupt_grace, kill_grace) =
+                                (session.interrupt_grace, session.kill_grace);
+                            escalation = Some(session.tracker.spawn(async move {
+                                tokio::time::sleep(interrupt_grace).await;
+                                send_signal(&pid, Signal::Term);
+                                tokio::time::sleep(kill_grace).await;
+                                send_signal(&pid, Signal::Kill);
+                            }));
                         }
-                    });
-                    // Escalate if the app server doesn't wind down (turn/aborted)
-                    // within the grace periods: SIGTERM, then SIGKILL.
-                    if let Some(pid) = crate::process::signal_target(&child) {
-                        escalation = Some(tokio::spawn(async move {
-                            tokio::time::sleep(interrupt_grace).await;
-                            send_signal(&pid, Signal::Term);
-                            tokio::time::sleep(kill_grace).await;
-                            send_signal(&pid, Signal::Kill);
-                        }));
+                        Step::Continue
                     }
-                } else {
-                    // Idle between turns: nothing to interrupt — the terminal
-                    // bookkeeping below still guarantees Done { Interrupted }.
-                    break 'main;
+                    // No turn is known to interrupt: the terminal bookkeeping below still
+                    // guarantees Done { Interrupted }.
+                    None => break 'main,
                 }
             },
 
-            _ = tokio::time::sleep_until(
-                prune_at.as_ref().map_or_else(tokio::time::Instant::now, |(at, _)| *at)
-            ), if prune_at.is_some() => {
-                let (_, stopped) = prune_at.take().expect("guarded by if");
-                // Ask from a task: the answer may take a moment, and the turn
-                // stream keeps flowing meanwhile.
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let client = client.clone();
-                let thread = thread_id.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send((stopped, background_terminals(&client, &thread).await));
-                });
-                prune_query = Some(rx);
-            },
-
-            answer = async { prune_query.as_mut().expect("guarded by if").await }, if prune_query.is_some() => {
-                prune_query = None;
-                if let Ok((stopped, live)) = answer {
-                    open_commands.retain(|item, open| {
-                        let keep = open.turn.as_deref() != Some(stopped.as_str())
-                            || match &live {
-                                Some(live) => {
-                                    live.contains(item.as_str())
-                                        || open.process.as_deref().is_some_and(|pid| live.contains(pid))
-                                }
-                                None => open.process.as_deref().is_some_and(process_alive),
-                            };
-                        if !keep {
-                            turn.clear_background_output(item);
-                        }
-                        keep
-                    });
-                    turn.set_background(open_commands.len());
-                    if pruning.as_deref() == Some(stopped.as_str()) {
-                        pruning = None;
-                    }
-                    publish_background(&turn, &open_commands, router.active.as_deref(), pruning.as_deref());
-                }
-            },
-
-            _ = event_tx.closed() => break 'main,
+            () = run.event_tx.closed() => break 'main,
+        };
+        match step {
+            Step::Continue => {}
+            Step::Finished => ended = true,
+            Step::Gone => break 'main,
         }
     }
 
-    // Terminal bookkeeping: never end the stream without a Done unless the
-    // consumer already hung up.
-    if !event_tx.is_closed() {
-        if interrupted && !done_after_interrupt {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Interrupted,
-                    result: None,
-                    error: None,
-                    session_id: Some(thread_id.clone()),
-                }))
-                .await;
-        } else if !interrupted && !done_current {
-            // A child KILLED mid-turn (OS memory pressure, `killall codex`)
-            // must not read as a silent success — codex.ts's signal-death
-            // handling, reduced to the turn-in-flight case. A final error
-            // the turn already reported (and its end never came to carry)
-            // leads: it is usually why the turn went nowhere.
-            let crash = crash_report(&mut child, &stderr_tail).await;
-            let error = match held_error.take() {
+    // Terminal bookkeeping: never end the stream without a Done unless the consumer already hung
+    // up.
+    if !run.event_tx.is_closed() && !ended {
+        let done = if run.interrupted {
+            ExecEvent::Done {
+                stop: StopReason::Interrupted,
+                result: None,
+                diagnostic: None,
+            }
+        } else {
+            // The app-server died mid-turn (OS memory pressure, `killall codex`): never a
+            // silent success. A final error the turn already reported (and its end never came
+            // to carry) leads: it is usually why the turn went nowhere.
+            let crash = crash_report(&mut app).await;
+            let diagnostic = match run.norm.take_held_error() {
                 Some(held) => format!("{held}\n\n{crash}"),
                 None => crash,
             };
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(error),
-                    session_id: Some(thread_id.clone()),
-                }))
-                .await;
-        }
+            ExecEvent::Done {
+                stop: StopReason::Error,
+                result: None,
+                diagnostic: Some(crate::redact_secrets(&diagnostic)),
+            }
+        };
+        let _ = run.event_tx.send(done).await;
     }
 
-    crate::shutdown_agent(&mut child, torn_down, kill_grace).await;
+    // Whatever is still open is refused: the run is over.
+    run.deny_all();
+
+    // Its whole process group goes with it, and whatever was traced before, on every exit path.
+    crate::shutdown_agent(&mut app.child, torn_down, session.kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();
     }
+    app.release();
 }
 
-/// How long an interrupted turn's commands get to exit before a process
-/// still running counts as background work.
-const COMMAND_EXIT_GRACE: Duration = Duration::from_secs(3);
-
-/// A command the parent thread started that has not reported finished.
-struct OpenCommand {
-    /// Codex's exec-session id (`processId`): what
-    /// `thread/backgroundTerminals/*` address. Not an OS pid.
-    process: Option<String>,
-    /// The turn that started it.
-    turn: Option<String>,
-    command: String,
-    since: chrono::DateTime<chrono::Utc>,
+/// Tear down a run whose consumer left before it began.
+async fn end_early_silent(session: &Session, app: &mut AppServer) {
+    app.child.shutdown(session.kill_grace).await;
+    app.release();
 }
-
-/// Publish the open commands whose turn is over — the background processes —
-/// oldest first. `pruning`: an interrupted turn whose killed commands have
-/// not been told apart from the ones still running yet.
-fn publish_background(
-    turn: &crate::TurnControl,
-    open: &HashMap<String, OpenCommand>,
-    active: Option<&str>,
-    pruning: Option<&str>,
-) {
-    let mut listed: Vec<_> = open
-        .iter()
-        .filter(|(_, c)| {
-            c.turn
-                .as_deref()
-                .is_none_or(|t| Some(t) != active && Some(t) != pruning)
-        })
-        .map(|(id, c)| crate::upstream_proto::BackgroundTask {
-            id: id.clone(),
-            command: c.command.clone(),
-            description: None,
-            started_at: c.since,
-        })
-        .collect();
-    listed.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    turn.set_background_processes(listed);
-}
-
-/// A command as the person would have typed it: Codex runs each one through
-/// the login shell (`/usr/bin/zsh -lc '…'`), which says nothing.
-fn shown_command(command: &str) -> String {
-    let command = command.trim();
-    let Some((shell, rest)) = command
-        .split_once(" -lc ")
-        .or_else(|| command.split_once(" -c "))
-    else {
-        return command.to_owned();
-    };
-    let shell = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
-    if !matches!(shell, "bash" | "zsh" | "sh" | "fish" | "dash") {
-        return command.to_owned();
-    }
-    let rest = rest.trim();
-    match rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
-        Some(inner) => inner.replace("'\\''", "'"),
-        None => rest
-            .strip_prefix('"')
-            .and_then(|r| r.strip_suffix('"'))
-            .unwrap_or(rest)
-            .to_owned(),
-    }
-}
-
-/// Server→client requests answered from their own task at once. A flood
-/// beyond this (a misbehaving MCP server) is refused instead of growing
-/// without bound.
-const MAX_PENDING_SERVER_REQUESTS: usize = 32;
-
-/// The `processId`s and item ids of the commands Codex still runs for
-/// `thread` (`thread/backgroundTerminals/list`, paged). The authority on a
-/// command item's `processId`, which names Codex's own exec session rather
-/// than promising an OS pid. `None` when the app-server can't answer (an
-/// older build without the method).
-async fn background_terminals(client: &RpcClient, thread: &str) -> Option<HashSet<String>> {
-    let mut live = HashSet::new();
-    let mut cursor: Option<String> = None;
-    for _ in 0..100 {
-        let mut params = json!({ "threadId": thread });
-        if let Some(cursor) = &cursor {
-            params["cursor"] = cursor.clone().into();
-        }
-        let page = match tokio::time::timeout(
-            Duration::from_secs(5),
-            client.request("thread/backgroundTerminals/list", params),
-        )
-        .await
-        {
-            Ok(Ok(page)) => page,
-            Ok(Err(e)) => {
-                tracing::debug!(target: "reno_harness::codex", "background terminals unavailable: {e}");
-                return None;
-            }
-            Err(_) => return None,
-        };
-        for terminal in page["data"].as_array().into_iter().flatten() {
-            for key in ["processId", "itemId"] {
-                if let Some(id) = terminal[key].as_str().filter(|id| !id.is_empty()) {
-                    live.insert(id.to_owned());
-                }
-            }
-        }
-        match page["nextCursor"].as_str().filter(|next| !next.is_empty()) {
-            Some(next) if cursor.as_deref() != Some(next) => cursor = Some(next.to_owned()),
-            _ => return Some(live),
-        }
-    }
-    Some(live)
-}
-
-/// Fallback for an app-server that can't list its terminals: whether the
-/// command's reported process id names a running OS process.
-fn process_alive(pid: &str) -> bool {
-    // SAFETY: signal 0 only probes for existence; nothing is delivered.
-    pid.parse::<i32>()
-        .is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
-}
-
-/// Ask the app-server to end `turn` (fire-and-forget: its end arrives as the
-/// turn's own completion notification).
-fn send_turn_interrupt(client: &RpcClient, thread_id: &str, turn: String) {
-    let client = client.clone();
-    let thread = thread_id.to_owned();
-    tokio::spawn(async move {
-        if let Err(e) = client
-            .request(
-                "turn/interrupt",
-                json!({ "threadId": thread, "turnId": turn }),
-            )
-            .await
-        {
-            tracing::warn!(target: "reno_harness::codex", "turn/interrupt failed: {e}");
-        }
-    });
-}
-
-/// Deliver a steer as a fresh `turn/start` on the same thread (the fallback
-/// leg of the steer race, and the between-turns delivery path). Returns false
-/// when the loop should end (turn/start failed or the consumer hung up).
-async fn steer_as_new_turn(
-    client: &RpcClient,
-    params: Value,
-    router: &mut TurnRouter,
-    event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
-    assistant_message_id: &mut String,
-    done_current: &mut bool,
-) -> bool {
-    match start_turn(client, params).await {
-        Ok(id) => {
-            router.adopt_started(id);
-            *done_current = false;
-            let (prev, next) = rotate(assistant_message_id);
-            send(
-                event_tx,
-                AgentEvent::Steered {
-                    assistant_message_id: Some(prev),
-                    next_assistant_message_id: Some(next),
-                },
-            )
-            .await
-        }
-        Err(e) => {
-            let _ = send(
-                event_tx,
-                AgentEvent::Error {
-                    message: format!("Steering failed: {e}"),
-                },
-            )
-            .await;
-            false
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Approvals (approval-as-input parity with reno's UX)
-// ---------------------------------------------------------------------------
-
-type RequestInputFn = Box<
-    dyn Fn(Vec<UserInputQuestion>) -> tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>
-        + Send
-        + Sync,
->;
-
-/// What an approval request asks to do, for
-/// [`crate::approval::allowed_without_asking`].
-fn approval_action(method: &str) -> crate::approval::Action {
-    if method == "item/fileChange/requestApproval" {
-        crate::approval::Action::Edit
-    } else {
-        crate::approval::Action::Other
-    }
-}
-
-/// Serve one server→client request. An approval the run's `access` covers
-/// is accepted outright (full access: belt to the wire-level `"never"`;
-/// auto-accept edits: file changes); any other round-trips through
-/// `request_input` as a yes/no question (in a subtask so the message loop
-/// keeps flowing), a refusal declining. MCP elicitations are asked or
-/// declined. Anything else is rejected as unsupported so the server never
-/// wedges awaiting a reply. At most [`MAX_PENDING_SERVER_REQUESTS`] wait on
-/// a person at once; the rest are refused as overloaded.
-fn handle_server_request(
-    client: &RpcClient,
-    id: Value,
-    method: &str,
-    params: &Value,
-    access: AccessMode,
-    request_input: &Arc<RequestInputFn>,
-    slots: &Arc<tokio::sync::Semaphore>,
-) {
-    let slot = || {
-        let permit = Arc::clone(slots).try_acquire_owned().ok();
-        if permit.is_none() {
-            tracing::warn!(
-                target: "reno_harness::codex",
-                "too many pending server requests; refusing {method}"
-            );
-            client.respond_error(&id, -32000, "client overloaded: too many pending requests");
-        }
-        permit
-    };
-    // A tool's user-input request (EXPERIMENTAL, codex 0.146.x) is a CONTENT
-    // question, never auto-approvable — route it to the input bridge and
-    // answer keyed by question id, `{ answers: { <id>: { answers: [..] } } }`.
-    if method == "item/tool/requestUserInput" {
-        let questions = user_input_questions(params);
-        if questions.is_empty() {
-            client.respond(&id, json!({ "answers": {} }));
-            return;
-        }
-        let Some(permit) = slot() else { return };
-        let client = client.clone();
-        let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let asked: Vec<UserInputQuestion> = questions.iter().map(|(_, q)| q.clone()).collect();
-            let answers = (request_input)(asked).await.unwrap_or_default();
-            let mut by_id = serde_json::Map::new();
-            for (wire_id, q) in &questions {
-                let labels: Vec<Value> = answers
-                    .iter()
-                    .find(|a| a.question_id == q.id)
-                    .map(|a| a.labels.iter().cloned().map(Value::String).collect())
-                    .unwrap_or_default();
-                by_id.insert(wire_id.clone(), json!({ "answers": labels }));
-            }
-            client.respond(&id, json!({ "answers": by_id }));
-        });
-        return;
-    }
-    // MCP servers elicit regardless of the approval policy. A form the input
-    // bridge can ask is asked; anything else is declined — a reply the
-    // server handles, where an error failed its tool call.
-    if method == "mcpServer/elicitation/request" {
-        let Some(form) = elicitation::form(params) else {
-            let mode = params["mode"].as_str().unwrap_or_default();
-            tracing::info!(
-                target: "reno_harness::codex",
-                mode, "declining an MCP elicitation Reno can't ask"
-            );
-            client.respond(&id, elicitation::decline());
-            return;
-        };
-        let Some(permit) = slot() else { return };
-        let client = client.clone();
-        let request_input = Arc::clone(request_input);
-        tokio::spawn(async move {
-            let _permit = permit;
-            let answers = (request_input)(form.questions.clone())
-                .await
-                .unwrap_or_default();
-            client.respond(&id, form.response(&answers));
-        });
-        return;
-    }
-    // Each approval's own accept / decline reply.
-    let reply: fn(&Value, bool) -> Value = match method {
-        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-            |_, accept| json!({ "decision": if accept { "accept" } else { "decline" } })
-        }
-        // Granting means granting what was asked, for this turn; an empty
-        // grant is the refusal.
-        "item/permissions/requestApproval" => |params, accept| {
-            json!({
-                "permissions": if accept { params["permissions"].clone() } else { json!({}) },
-                "scope": "turn",
-            })
-        },
-        _ => {
-            tracing::debug!(
-                target: "reno_harness::codex",
-                "unhandled server request: {method}"
-            );
-            client.respond_error(&id, -32601, &format!("unsupported method: {method}"));
-            return;
-        }
-    };
-    if crate::approval::allowed_without_asking(access, approval_action(method)) {
-        client.respond(&id, reply(params, true));
-        return;
-    }
-
-    let Some(permit) = slot() else { return };
-    let question = approval_question(method, params);
-    let params = params.clone();
-    let client = client.clone();
-    let request_input = Arc::clone(request_input);
-    tokio::spawn(async move {
-        let _permit = permit;
-        // The engine's input bridge owns the `InputRequested`/`InputResolved`
-        // lifecycle (it mints the request id the resolver is parked under);
-        // emitting our own copy here doubled the doc's input part with an id
-        // `respond_input` could never match.
-        //
-        // A dropped sender (caller went away) degrades to a decline so the
-        // agent is unblocked — never silently allowed.
-        let answers = (request_input)(vec![question.clone()])
-            .await
-            .unwrap_or_default();
-        let accept = crate::approval::approved(&question, &answers);
-        client.respond(&id, reply(&params, accept));
-    });
-}
-
-/// Parse `item/tool/requestUserInput` questions into (wire id, question)
-/// pairs, tolerant of field spellings; answers key by the WIRE id.
-fn user_input_questions(params: &Value) -> Vec<(String, UserInputQuestion)> {
-    params
-        .get("questions")
-        .and_then(Value::as_array)
-        .map(|a| a.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .enumerate()
-        .map(|(ix, q)| {
-            let field = |keys: [&str; 3]| {
-                keys.iter()
-                    .find_map(|k| q.get(*k).and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_owned()
-            };
-            let wire_id = {
-                let id = field(["id", "questionId", "question_id"]);
-                if id.is_empty() { format!("q{ix}") } else { id }
-            };
-            let question = UserInputQuestion {
-                id: new_message_id(),
-                header: {
-                    let h = field(["header", "title", "label"]);
-                    if h.is_empty() {
-                        "Codex question".into()
-                    } else {
-                        h
-                    }
-                },
-                question: field(["question", "prompt", "text"]),
-                options: q
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|a| a.as_slice())
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|op| match op {
-                        Value::String(s) => s.clone(),
-                        other => other
-                            .get("label")
-                            .or_else(|| other.get("value"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .into(),
-                    })
-                    .collect(),
-                prefill: None,
-                multiline: false,
-                multi_select: ["multiSelect", "multi_select"]
-                    .iter()
-                    .find_map(|k| q.get(*k).and_then(Value::as_bool))
-                    .unwrap_or(false),
-            };
-            (wire_id, question)
-        })
-        .collect()
-}
-
-/// Synthesize the yes/no question an approval request surfaces to the user
-/// (the shared [`crate::approval`] wording; permissions spell out what
-/// they grant).
-fn approval_question(method: &str, params: &Value) -> UserInputQuestion {
-    if method.contains("commandExecution") {
-        let command = match params.get("command") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(parts)) => parts
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ => String::new(),
-        };
-        crate::approval::command("Codex", &command)
-    } else if method.contains("permissions") {
-        let permissions = &params["permissions"];
-        let mut asks = Vec::new();
-        if permissions.pointer("/network/enabled") == Some(&Value::Bool(true)) {
-            asks.push("network access".to_owned());
-        }
-        let fs = &permissions["fileSystem"];
-        for (key, access) in [("write", "write"), ("read", "read")] {
-            let paths: Vec<&str> = fs[key]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect();
-            if !paths.is_empty() {
-                asks.push(format!("{access} access to {}", paths.join(", ")));
-            }
-        }
-        for entry in fs["entries"].as_array().into_iter().flatten() {
-            if let (Some(access), Some(path)) = (
-                entry["access"].as_str().filter(|a| *a != "deny"),
-                entry.pointer("/path/path").and_then(Value::as_str),
-            ) {
-                asks.push(format!("{access} access to {path}"));
-            }
-        }
-        let what = if asks.is_empty() {
-            "additional permissions".to_owned()
-        } else {
-            asks.join("; ")
-        };
-        let why = params["reason"]
-            .as_str()
-            .filter(|r| !r.is_empty())
-            .map(|r| format!(" ({r})"))
-            .unwrap_or_default();
-        crate::approval::question(
-            "Approve permissions",
-            format!("Codex wants {what}{why}. Allow it?"),
-        )
-    } else {
-        let paths: Vec<&str> = params
-            .get("changes")
-            .and_then(Value::as_array)
-            .map(|a| a.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|c| c.get("path").and_then(Value::as_str))
-            .collect();
-        crate::approval::edit("Codex", &paths)
-    }
-}
-
-use crate::{Signal, send_signal, shutdown_child};
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use reno_proto::{Effort, RunId};
 
-    /// Codex takes a steer mid-command in its own turn, so a steer must not
-    /// interrupt: a backgrounded command's call stays open for the rest of
-    /// its turn, and the stop would abort a turn that was only writing.
-    #[test]
-    fn a_steer_stays_in_the_turn() {
-        assert!(!CodexHarness::new().steer_stops_tool());
-    }
-
-    #[test]
-    fn shown_commands_drop_the_login_shell() {
-        assert_eq!(
-            shown_command("/usr/bin/zsh -lc 'npm run dev'"),
-            "npm run dev"
-        );
-        assert_eq!(
-            shown_command("/bin/bash -lc 'echo '\\''hi'\\'' && sleep 5'"),
-            "echo 'hi' && sleep 5"
-        );
-        assert_eq!(shown_command("bash -c \"cargo watch\""), "cargo watch");
-        assert_eq!(shown_command("echo beta"), "echo beta");
-        assert_eq!(
-            shown_command("python -c 'print(1)'"),
-            "python -c 'print(1)'"
-        );
-    }
-    use serde_json::json;
-
-    #[test]
-    fn current_schema_and_legacy_visibility_are_compatible() {
-        let page = json!({"data":[{"model":"current", "hidden":false, "isDefault":true,
-            "description":"Current model", "upgrade":"next", "upgradeInfo":{"retirementAt":"2026-12-01"},
-            "availabilityNux":{"message":"Available"}, "serviceTiers":["default","fast"],
-            "defaultServiceTier":"default", "inputModalities":["text","image"]}], "nextCursor":"next-page"});
-        let (models, next) = parse_model_list_page(&page);
-        assert_eq!(
-            models[0].0.description.as_deref(),
-            Some("Current model (upgrade: next)")
-        );
-        assert!(models[0].1);
-        assert_eq!(next.as_deref(), Some("next-page"));
-        assert!(!legacy_model_page(&page));
-        assert!(legacy_model_page(&json!({"data":[{"model":"old"}]})));
-        assert!(!legacy_model_page(&json!({"data":[]})));
-    }
-
-    fn run_request(access: AccessMode, plan: bool) -> RunRequest {
-        RunRequest {
-            mcp: None,
-            prompt: String::new(),
-            harness: None,
+    fn spec(access: AccessMode, sandbox: SandboxLevel) -> ExecSpec {
+        ExecSpec {
+            run_id: RunId::from_suffix("01HZX9").unwrap(),
+            prompt: "do it".into(),
+            cwd: PathBuf::from("/work"),
             model: Some("gpt-5.6-sol".into()),
-            reasoning: None,
-            model_options: serde_json::Map::new(),
-            cwd: "/repo".into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: false,
+            effort: Some(Effort::High),
             access,
-            plan,
-            attachments: Vec::new(),
-            worktree: None,
+            sandbox,
             resume: None,
+            mcp: Vec::new(),
             env: Default::default(),
-            extra_mcp: Vec::new(),
+            output_schema: None,
+        }
+    }
+
+    fn server(name: &str, command: &str) -> McpServerSpec {
+        McpServerSpec {
+            name: name.into(),
+            command: command.into(),
+            args: vec!["mcp".into()],
+            env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
         }
     }
 
     #[test]
-    fn each_access_mode_has_its_own_policy_and_sandbox() {
-        let wire = |access, title_only| {
-            let (policy, sandbox) = permissions(access, title_only);
-            (policy, sandbox_mode(sandbox), sandbox_policy_value(sandbox))
-        };
+    fn mcp_overrides_use_the_dotted_mcp_servers_keys() {
+        let overrides: serde_json::Map<String, Value> = mcp_overrides(
+            &[
+                server("reno", "/opt/reno/reno"),
+                server("plugin-focus", "/p/server"),
+            ],
+            true,
+        )
+        .into_iter()
+        .collect();
+        assert_eq!(overrides["mcp_servers.reno.command"], "/opt/reno/reno");
+        assert_eq!(overrides["mcp_servers.reno.args"], json!(["mcp"]));
         assert_eq!(
-            wire(AccessMode::FullAccess, false),
-            (
-                "never",
-                "danger-full-access",
-                json!({"type": "dangerFullAccess"})
-            )
+            overrides["mcp_servers.reno.env"],
+            json!({ "RENO_RUN": "r1" })
         );
+        // Long Reno waits must outlive Codex's 60 s default tool timeout.
+        assert!(
+            overrides["mcp_servers.reno.tool_timeout_sec"]
+                .as_u64()
+                .unwrap()
+                > 3600
+        );
+        assert_eq!(overrides["mcp_servers.reno.startup_timeout_sec"], 30);
         assert_eq!(
-            wire(AccessMode::AutoAcceptEdits, false),
-            (
-                "untrusted",
-                "workspace-write",
-                json!({"type": "workspaceWrite", "networkAccess": true})
-            )
+            overrides["mcp_servers.reno.default_tools_approval_mode"],
+            "approve"
         );
-        assert_eq!(
-            wire(AccessMode::Supervised, false),
-            ("untrusted", "read-only", json!({"type": "readOnly"}))
-        );
-        for access in AccessMode::ALL {
-            assert_eq!(
-                wire(access, true),
-                ("never", "read-only", json!({"type": "readOnly"}))
-            );
-        }
-        // `auto_approve` still means full access, whatever the mode says.
-        let mut request = run_request(AccessMode::Supervised, false);
-        assert_eq!(run_access(&request), AccessMode::Supervised);
-        request.auto_approve = true;
-        assert_eq!(run_access(&request), AccessMode::FullAccess);
+        // A plugin's server: the three launch keys, no timeouts, never pre-approved.
+        assert_eq!(overrides["mcp_servers.plugin-focus.command"], "/p/server");
+        let plugin_keys = overrides
+            .keys()
+            .filter(|k| k.starts_with("mcp_servers.plugin-focus."))
+            .count();
+        assert_eq!(plugin_keys, 3, "{overrides:?}");
     }
 
     #[test]
-    fn auto_accept_edits_accepts_file_changes_and_asks_the_rest() {
-        use crate::approval::allowed_without_asking;
-        let methods = [
-            "item/fileChange/requestApproval",
-            "item/commandExecution/requestApproval",
-            "item/permissions/requestApproval",
-        ];
-        let allowed =
-            |access| methods.map(|method| allowed_without_asking(access, approval_action(method)));
-        assert_eq!(allowed(AccessMode::FullAccess), [true, true, true]);
-        assert_eq!(allowed(AccessMode::AutoAcceptEdits), [true, false, false]);
-        assert_eq!(allowed(AccessMode::Supervised), [false, false, false]);
+    fn reno_s_server_is_not_pre_approved_when_someone_is_asked() {
+        let overrides = mcp_overrides(&[server("reno", "/r")], false);
+        assert!(
+            !overrides
+                .iter()
+                .any(|(k, _)| k.ends_with("default_tools_approval_mode")),
+            "{overrides:?}"
+        );
+        assert!(mcp_overrides(&[], true).is_empty());
     }
 
     #[test]
-    fn access_and_plan_changes_apply_in_place() {
-        let harness = CodexHarness::new();
-        let live = run_request(AccessMode::FullAccess, false);
-        for next in [
-            run_request(AccessMode::Supervised, false),
-            run_request(AccessMode::AutoAcceptEdits, false),
-            run_request(AccessMode::FullAccess, true),
-        ] {
-            assert!(!harness.same_runtime(&live, &next), "{next:?}");
-            assert!(harness.reconfigures_in_place(&live, &next), "{next:?}");
-        }
-        // A request that auto-approves is the same full-access runtime.
-        let mut auto = run_request(AccessMode::Supervised, false);
-        auto.auto_approve = true;
-        assert!(harness.same_runtime(&live, &auto));
-        let mut moved = run_request(AccessMode::Supervised, false);
-        moved.cwd = "/elsewhere".into();
-        assert!(!harness.reconfigures_in_place(&live, &moved));
-        assert_eq!(harness.access_modes(), &AccessMode::ALL);
-        assert!(harness.supports_plan());
-    }
-
-    #[test]
-    fn collaboration_modes_repeat_the_turn_model_and_effort() {
-        assert_eq!(
-            collaboration_mode(true, "gpt-5.6-sol", Some("high")),
-            json!({"mode": "plan", "settings": {
-                "model": "gpt-5.6-sol", "reasoning_effort": "high", "developer_instructions": null,
-            }})
-        );
-        assert_eq!(
-            collaboration_mode(false, "gpt-5.6-sol", None),
-            json!({"mode": "default", "settings": {
-                "model": "gpt-5.6-sol", "reasoning_effort": null, "developer_instructions": null,
-            }})
-        );
-    }
-
-    #[test]
-    fn approval_questions_are_yes_no() {
-        let q = approval_question(
-            "item/commandExecution/requestApproval",
-            &json!({"itemId": "c1", "command": "rm -rf /tmp/x"}),
-        );
-        assert_eq!(q.header, "Approve command");
-        assert_eq!(q.question, "Codex wants to run `rm -rf /tmp/x`. Allow it?");
-        assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
-        assert!(!q.multi_select);
-
-        let q = approval_question(
-            "item/fileChange/requestApproval",
-            &json!({"changes": [{"path": "/a.rs"}, {"path": "/b.rs"}]}),
-        );
-        assert_eq!(q.header, "Approve file change");
-        assert!(q.question.contains("/a.rs, /b.rs"));
-
-        // Command as argv array joins with spaces.
-        let q = approval_question(
-            "item/commandExecution/requestApproval",
-            &json!({"command": ["git", "push", "--force"]}),
-        );
-        assert!(q.question.contains("git push --force"));
-
-        let q = approval_question(
-            "item/permissions/requestApproval",
-            &json!({"reason": "install deps", "permissions": {
-                "network": {"enabled": true},
-                "fileSystem": {"write": ["/repo/.cache"], "entries": [
-                    {"access": "read", "path": {"type": "path", "path": "/etc/hosts"}},
-                    {"access": "deny", "path": {"type": "path", "path": "/secret"}}
-                ]}
-            }}),
-        );
-        assert_eq!(q.header, "Approve permissions");
-        assert_eq!(
-            q.question,
-            "Codex wants network access; write access to /repo/.cache; read access to /etc/hosts (install deps). Allow it?"
-        );
+    fn reno_wins_a_name_clash_because_it_is_first() {
+        let overrides: serde_json::Map<String, Value> = mcp_overrides(
+            &[server("reno", "/first"), server("reno", "/second")],
+            false,
+        )
+        .into_iter()
+        .collect();
+        assert_eq!(overrides["mcp_servers.reno.command"], "/first");
     }
 
     #[test]
     fn only_a_known_old_cli_is_turned_away() {
-        assert!(check_codex_version(None).is_ok());
-        assert!(check_codex_version(Some(&semver::Version::new(0, 164, 0))).is_ok());
-        assert!(check_codex_version(Some(&MIN_CODEX_VERSION)).is_ok());
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert!(too_old_message(None).is_none());
+        assert!(too_old_message(Some(&v("0.169.0"))).is_none());
+        assert!(too_old_message(Some(&v(MIN_CLI_VERSION))).is_none());
         // A pre-release of the minimum is that release, not an older one.
-        let alpha = semver::Version::parse("0.146.0-alpha.2").unwrap();
-        assert!(check_codex_version(Some(&alpha)).is_ok());
-        let old_alpha = semver::Version::parse("0.145.0-alpha.9").unwrap();
-        assert!(check_codex_version(Some(&old_alpha)).is_err());
-        let err = check_codex_version(Some(&semver::Version::new(0, 120, 3)))
-            .unwrap_err()
-            .to_string();
+        assert!(too_old_message(Some(&v("0.146.0-alpha.2"))).is_none());
+        assert!(too_old_message(Some(&v("0.145.0-alpha.9"))).is_some());
+        let message = too_old_message(Some(&v("0.120.3"))).unwrap();
         assert!(
-            err.contains("Codex CLI 0.120.3 is too old") && err.contains("0.146.0"),
-            "{err}"
+            message.contains("Codex CLI 0.120.3 is too old") && message.contains("0.146.0"),
+            "{message}"
         );
+        assert!(v(MIN_CLI_VERSION) <= v(VERIFIED_CLI_VERSION));
     }
 
     #[test]
@@ -3159,52 +2132,10 @@ mod tests {
     }
 
     #[test]
-    fn model_page_skips_hidden_and_unknown_efforts() {
-        let page = json!({
-            "data": [
-                {
-                    "id": "hidden",
-                    "model": "hidden",
-                    "displayName": "Hidden",
-                    "hidden": true,
-                    "supportedReasoningEfforts": [{ "reasoningEffort": "high" }]
-                },
-                {
-                    "id": "gpt-6-astra",
-                    "model": "gpt-6-astra",
-                    "displayName": "GPT-6-Astra",
-                    "description": "  Most capable  ",
-                    "hidden": false,
-                    "supportedReasoningEfforts": [
-                        { "reasoningEffort": "high" },
-                        { "reasoningEffort": "future" }
-                    ],
-                    "serviceTiers": [{ "id": "priority", "name": "Fast" }],
-                    "additionalSpeedTiers": ["fast"],
-                    "defaultServiceTier": null,
-                    "isDefault": true
-                }
-            ],
-            "nextCursor": "next"
-        });
-        let (models, cursor) = parse_model_list_page(&page);
-        assert_eq!(cursor.as_deref(), Some("next"));
-        assert_eq!(models.len(), 1);
-        let (astra, is_default) = &models[0];
-        assert_eq!(astra.id, "gpt-6-astra");
-        assert_eq!(astra.description.as_deref(), Some("Most capable"));
-        assert_eq!(astra.reasoning_levels, vec![ReasoningLevel::High]);
-        assert!(*is_default);
-        assert_eq!(astra.options[0].choices.len(), 2);
-        assert_eq!(astra.options[0].choices[1].id, "fast");
-    }
-
-    #[test]
     fn turn_router_never_revives_completed_turns() {
         let mut r = TurnRouter::default();
         r.note_completed("t-1");
-        // The turn/start response arriving after turn/completed must not
-        // resurrect the turn.
+        // The turn/start response arriving after turn/completed must not resurrect the turn.
         r.adopt_started("t-1".into());
         assert_eq!(r.active, None);
         // Nor may a late turn/started notification.
@@ -3217,176 +2148,148 @@ mod tests {
         r.note_started("t-3".into());
         assert_eq!(r.active.as_deref(), Some("t-3"));
         assert!(r.is_completed("t-2"));
-    }
-}
-
-#[cfg(test)]
-mod mcp_injection_tests {
-    use super::*;
-
-    #[test]
-    fn codex_mcp_overrides_use_the_dotted_mcp_servers_keys() {
-        let mcp = crate::upstream_proto::McpServer {
-            name: "reno".into(),
-            command: "/opt/reno/reno".into(),
-            args: vec!["mcp".into()],
-            env: [("RENO_CHAT_ID".to_owned(), "chat-1".to_owned())]
-                .into_iter()
-                .collect(),
-        };
-        let overrides: serde_json::Map<String, Value> =
-            codex_mcp_overrides(&mcp).into_iter().collect();
-        assert_eq!(overrides["mcp_servers.reno.command"], "/opt/reno/reno");
-        assert_eq!(overrides["mcp_servers.reno.args"], json!(["mcp"]));
-        assert_eq!(
-            overrides["mcp_servers.reno.env"],
-            json!({ "RENO_CHAT_ID": "chat-1" })
-        );
-        assert_eq!(
-            overrides["mcp_servers.reno.default_tools_approval_mode"],
-            "approve"
-        );
-        // Long Reno waits must outlive Codex's 60 s default tool timeout.
-        assert!(
-            overrides["mcp_servers.reno.tool_timeout_sec"]
-                .as_u64()
-                .unwrap()
-                > 3600
-        );
-        assert_eq!(overrides["mcp_servers.reno.startup_timeout_sec"], 30);
-    }
-    #[test]
-    fn codex_extra_mcp_overrides_leave_approval_to_the_access_mode() {
-        let extra = crate::upstream_proto::McpServer {
-            name: "plugin-focus".into(),
-            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
-            args: vec!["--stdio".into()],
-            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
-        };
-        let overrides: serde_json::Map<String, Value> =
-            codex_extra_mcp_overrides(&[extra]).into_iter().collect();
-        assert_eq!(
-            overrides["mcp_servers.plugin-focus.command"],
-            "/data/plugins/.loaded/focus/0123/bin/server"
-        );
-        assert_eq!(
-            overrides["mcp_servers.plugin-focus.args"],
-            json!(["--stdio"])
-        );
-        assert_eq!(
-            overrides["mcp_servers.plugin-focus.env"],
-            json!({ "FOCUS": "1" })
-        );
-        assert!(
-            !overrides
-                .keys()
-                .any(|k| k.ends_with("default_tools_approval_mode")),
-            "a plugin's tools are never pre-approved"
-        );
-        assert_eq!(overrides.len(), 3);
-    }
-}
-
-#[cfg(test)]
-mod invocation_input_tests {
-    use super::*;
-    #[test]
-    fn selected_skills_use_native_identity_for_initial_and_steered_inputs() {
-        use crate::upstream_proto::invocation::Invocation;
-        let a = Invocation::Skill {
-            command: None,
-            name: "review".into(),
-            path: "/repo/a b/SKILL.md".into(),
-        };
-        let b = Invocation::Skill {
-            command: None,
-            name: "review".into(),
-            path: "/repo/other/SKILL.md".into(),
-        };
-        let raw = format!("Use {} then {} and {}", a.link(), b.link(), a.link());
-        let input = prompt_input(&raw);
-        assert_eq!(input.as_array().unwrap().len(), 3);
-        assert_eq!(
-            input[1],
-            json!({"type":"skill","name":"review","path":"/repo/a b/SKILL.md"})
-        );
-        assert_eq!(input[2]["path"], "/repo/other/SKILL.md");
-        assert!(!input[0]["text"].as_str().unwrap().contains("reno-invoke:"));
-        for raw in [
-            "$review".into(),
-            format!("`{}`", a.link()),
-            format!("\\{}", a.link()),
-            format!("![skill example {}](example.png)", a.link()),
-            format!("    {}", a.link()),
-        ] {
-            let input = prompt_input(&raw);
-            assert_eq!(input.as_array().unwrap().len(), 1);
-            assert_eq!(input[0]["text"], raw);
+        // Only the turn in flight settles.
+        assert!(r.settles("t-3") && r.settles(""));
+        assert!(!r.settles("t-2") && !r.settles("t-9"));
+        // Bounded.
+        for at in 0..100 {
+            r.note_completed(&format!("old-{at}"));
         }
-        let command = Invocation::Command {
-            name: "review".into(),
-        };
-        assert_eq!(
-            command_request(&format!("  {} check", command.link()), "t")
-                .unwrap()
-                .unwrap()
-                .0,
-            "review/start"
-        );
-        assert!(command_request(&format!("/review {}", a.link()), "t").is_err());
+        assert!(r.completed.len() <= 32);
     }
 
     #[test]
-    fn backtick_labels_keep_native_skill_identity_with_repeated_selections() {
-        use crate::upstream_proto::invocation::{Invocation, harness_prompt};
-        let skill = Invocation::Skill {
-            command: None,
-            name: "review`ui".into(),
-            path: "/repo/é skill/SKILL.md".into(),
+    fn a_turn_names_its_policy_model_and_effort() {
+        let mode = ThreadMode {
+            model: "gpt-resumed".into(),
+            effort: Some("medium".into()),
+            plan: false,
         };
-        let file = crate::upstream_proto::file_mentions::local_file_link("src/a`b.rs", false);
-        let raw = format!("{} on {file} and {}", skill.link(), skill.link());
-        let input = prompt_input(&harness_prompt(&raw, HarnessId::Codex));
-        assert_eq!(input.as_array().unwrap().len(), 2);
-        assert_eq!(
-            input[1],
-            json!({"type":"skill", "name":"review`ui", "path":"/repo/é skill/SKILL.md"})
-        );
-        let text = input[0]["text"].as_str().unwrap();
-        assert!(!text.contains("reno-invoke:"));
-        assert!(!text.contains("reno-file:"));
-        assert_eq!(text.matches("/repo/%C3%A9%20skill/SKILL.md").count(), 2);
+        let params = TurnParams::new(
+            &spec(AccessMode::Supervised, SandboxLevel::WorkspaceWrite),
+            "th-1".into(),
+            mode,
+        )
+        .build("hello");
+        assert_eq!(params["threadId"], "th-1");
+        assert_eq!(params["input"], json!([{"type": "text", "text": "hello"}]));
+        assert_eq!(params["approvalPolicy"], "untrusted");
+        assert_eq!(params["sandboxPolicy"], json!({"type": "readOnly"}));
+        assert_eq!(params["approvalsReviewer"], "user");
+        assert_eq!(params["summary"], "auto");
+        assert_eq!(params["model"], "gpt-5.6-sol");
+        assert_eq!(params["effort"], "high");
+        // A thread that never planned is sent no mode.
+        assert!(params.get("collaborationMode").is_none());
+
+        let full = TurnParams::new(
+            &spec(AccessMode::FullAccess, SandboxLevel::Unrestricted),
+            "th-1".into(),
+            ThreadMode {
+                model: String::new(),
+                effort: None,
+                plan: false,
+            },
+        )
+        .build("x");
+        assert_eq!(full["approvalPolicy"], "never");
+        assert_eq!(full["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
+        assert!(full.get("approvalsReviewer").is_none());
     }
 
     #[test]
-    fn commands_map_arguments_and_leave_inline_mentions_literal() {
+    fn a_thread_left_in_plan_mode_is_named_default_with_the_specs_model_else_the_threads() {
+        let plan = |model: Option<&str>, effort: Option<Effort>| {
+            let mut s = spec(AccessMode::FullAccess, SandboxLevel::Unrestricted);
+            s.model = model.map(str::to_owned);
+            s.effort = effort;
+            TurnParams::new(
+                &s,
+                "th-1".into(),
+                ThreadMode {
+                    model: "gpt-resumed".into(),
+                    effort: Some("medium".into()),
+                    plan: true,
+                },
+            )
+            .build("x")
+        };
+        assert_eq!(
+            plan(None, None)["collaborationMode"],
+            collaboration_mode(false, "gpt-resumed", Some("medium"))
+        );
+        assert_eq!(
+            plan(Some("gpt-x"), Some(Effort::Low))["collaborationMode"],
+            collaboration_mode(false, "gpt-x", Some("low"))
+        );
+        assert_eq!(
+            collaboration_mode(false, "m", None),
+            json!({"mode": "default", "settings": {
+                "model": "m", "reasoning_effort": null, "developer_instructions": null,
+            }})
+        );
+    }
+
+    #[test]
+    fn a_request_is_known_by_its_json_rpc_id() {
+        assert_eq!(request_key(&json!(101)), "101");
+        assert_eq!(request_key(&json!("abc")), "abc");
+    }
+
+    #[test]
+    fn a_refusal_exists_for_every_request_the_driver_serves() {
+        let params = json!({"permissions": {"network": {"enabled": true}}});
+        for method in [
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        ] {
+            assert_eq!(
+                refusal(method, &params),
+                Some(json!({"decision": "decline"}))
+            );
+        }
+        assert_eq!(
+            refusal("item/permissions/requestApproval", &params),
+            Some(json!({"permissions": {}, "scope": "turn"}))
+        );
+        assert_eq!(
+            refusal("item/tool/requestUserInput", &params),
+            Some(json!({"answers": {}}))
+        );
+        assert_eq!(
+            refusal("mcpServer/elicitation/request", &params),
+            Some(json!({"action": "decline"}))
+        );
+        assert_eq!(refusal("brand/newRequest", &params), None);
+    }
+
+    #[test]
+    fn the_handshake_opts_out_of_what_nothing_consumes() {
+        let with = initialize_params(true);
+        assert_eq!(with["clientInfo"]["name"], "reno-native");
+        assert_eq!(with["capabilities"]["experimentalApi"], true);
+        assert_eq!(
+            with["capabilities"]["optOutNotificationMethods"],
+            json!(["turn/diff/updated", "item/fileChange/outputDelta"])
+        );
         assert!(
-            command_request("please /review this", "t")
-                .unwrap()
+            initialize_params(false)["capabilities"]
+                .get("optOutNotificationMethods")
                 .is_none()
         );
-        for code in [
-            "    /review",
-            "\t/review",
-            "\n    /compact",
-            "\u{a0}/review",
-            "`/review`",
-            "```\n/review\n```",
-        ] {
-            assert!(command_request(code, "t").unwrap().is_none());
-        }
-        assert!(command_request("/tmp/file.rs", "t").unwrap().is_none());
-        assert!(command_request("/tmp", "t").unwrap().is_none());
-        assert!(command_request("/compact extra", "t").is_err());
-        assert!(command_request("/model", "t").is_err());
-        let (method, params) = command_request("/review check errors", "t")
-            .unwrap()
-            .unwrap();
-        assert_eq!(method, "review/start");
+    }
+
+    #[test]
+    fn the_descriptor_lists_only_what_the_instance_will_honour() {
+        let restricted = CodexExecutor::new().with_access_modes(vec![AccessMode::Supervised]);
         assert_eq!(
-            params["target"],
-            json!({"type":"custom","instructions":"check errors"})
+            restricted.descriptor().caps.access_modes,
+            vec![AccessMode::Supervised]
         );
-        assert_eq!(params["delivery"], "inline");
+        let cli = CodexExecutor::new().descriptor().cli_verified;
+        assert_eq!(
+            (cli.min.as_str(), cli.verified.as_str()),
+            ("0.146.0", "0.169.0")
+        );
     }
 }

@@ -108,13 +108,16 @@ impl Fx {
         .await
     }
 
-    fn journal(&self, run: &RunId) -> Vec<ExecEvent> {
-        self.store
-            .journals()
-            .replay(run, Seq(0))
-            .unwrap()
-            .map(|entry| entry.unwrap().1)
-            .collect()
+    /// The run's journal through its `Done`. Read from the kernel's event stream, which ends
+    /// after `Done`: a terminal status commits before `Done` is journaled, so reading the file
+    /// as soon as the status shows would race the append.
+    async fn journal(&self, run: &RunId) -> Vec<ExecEvent> {
+        use futures::StreamExt as _;
+        let stream = self.kernel.run_events(run, None).await.unwrap();
+        within(&format!("{run} to end"), async {
+            stream.map(|item| item.unwrap().event).collect().await
+        })
+        .await
     }
 }
 
@@ -138,7 +141,7 @@ async fn a_supervised_run_asks_the_kernel_decides_approve_and_the_run_succeeds()
         .unwrap();
     fx.status(&run, RunStatus::Succeeded).await;
 
-    let journal = fx.journal(&run);
+    let journal = fx.journal(&run).await;
     assert!(
         journal
             .iter()
@@ -169,11 +172,11 @@ async fn a_denied_approval_reaches_the_cli_as_a_deny() {
     fx.status(&run, RunStatus::Succeeded).await;
     assert!(
         matches!(
-            fx.journal(&run).last(),
+            fx.journal(&run).await.last(),
             Some(ExecEvent::Done { result: Some(r), .. }) if r == "refused"
         ),
         "{:?}",
-        fx.journal(&run)
+        fx.journal(&run).await
     );
     fx.kernel.shutdown().await;
 }

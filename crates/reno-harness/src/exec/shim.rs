@@ -34,14 +34,11 @@
 //! # Process records
 //!
 //! The shim reports no `ProcessRecord` through `ExecControls::processes`. The imported drivers
-//! spawn their child deep inside their own tasks (`spawn_grouped` has call sites in the codex
-//! driver, and some of those sites are logins and model probes, not runs), and none of them
-//! receives anything the shim could hand a sink to. Forwarding would mean threading a sink
-//! through `RunControls` into every driver, which is not a small edit. Until Codex gets a
-//! native `Executor` that owns its spawn (T1.0b), a run through this shim leaves no process row,
-//! so the orphan sweep after a crash has nothing to find for it. `ClaudeExecutor` and
-//! `AcpExecutor` are native and report their child, `ClaudeExecutor` including a relaunched
-//! one, and `MockExecutor` reports records through `MockStep::Spawned`.
+//! spawn their child deep inside their own tasks, and none of them receives anything the shim
+//! could hand a sink to. No production driver runs through this shim any more: `ClaudeExecutor`,
+//! `CodexExecutor` and `AcpExecutor` are native and report their children, including a
+//! relaunched one, and `MockExecutor` reports records through `MockStep::Spawned`. A run through
+//! this shim leaves no process row; the shim is removed in T1.0d.
 //!
 //! # Guarantees
 //!
@@ -121,8 +118,8 @@ pub const DROPPED_AGENT_EVENTS: &[&str] = &[
 /// request to `ExecEvent::NeedsInput` carrying that question. It does **not** parse the prose
 /// into `NeedsApproval`: Reno never reads prose to make a security decision. Structured approvals
 /// (`NeedsApproval` with an `ApprovalSubject`, answered by `ExecHandle::decide`) come with a
-/// native driver: `ClaudeExecutor` (T1.0a) and `AcpExecutor` (T1.0c) have them; Codex gets
-/// them in T1.0b. A `Decision` sent for a shim request is ignored with a warning; the request stays
+/// native driver: `ClaudeExecutor` (T1.0a), `CodexExecutor` (T1.0b) and `AcpExecutor` (T1.0c)
+/// have them. A `Decision` sent for a shim request is ignored with a warning; the request stays
 /// open for an `Answer::Input`.
 ///
 /// # Declared capabilities

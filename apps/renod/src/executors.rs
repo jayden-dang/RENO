@@ -4,9 +4,8 @@
 //!   default it plays a short canned run and finishes. With `hold` it stops after its first text
 //!   and waits to be steered or cancelled, which gives tests and demos a run that stays live
 //!   without any timer.
-//! - `claude-code` is the native [`ClaudeExecutor`] and `codex` still runs through the stage A
-//!   [`HarnessExecutor`] shim (until its driver goes native, T1.0b); both are registered when
-//!   their CLIs are found. Nothing here starts them.
+//! - `claude-code` is the native [`ClaudeExecutor`] and `codex` the native [`CodexExecutor`]; both
+//!   are registered when their CLIs are found. Nothing here starts them.
 //! - The agents built on ACP are native [`AcpExecutor`]s, one per agent, each under its own id:
 //!   `acp.grok`, `acp.devin`, `acp.hermes`, `acp.fx`, `acp.antigravity`, and `acp.<registry id>`
 //!   for each agent added from the ACP registry. They are registered when found, like the
@@ -17,9 +16,9 @@
 use std::sync::Arc;
 
 use reno_harness::acp_registry::Record;
-use reno_harness::exec::{Executor, HarnessExecutor, MockExecutor, MockStep};
+use reno_harness::exec::{Executor, MockExecutor, MockStep};
 use reno_harness::upstream_proto::RegistryAgent;
-use reno_harness::{AcpExecutor, ClaudeExecutor, CodexHarness};
+use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ActionClass, ExecEvent, ExecutorId, IdError, StopReason, ToolCall};
 use serde_json::json;
@@ -29,7 +28,7 @@ pub const MOCK_ID: &str = "mock";
 /// The id of the Claude Code executor.
 pub const CLAUDE_ID: &str = reno_harness::claude::EXECUTOR_ID;
 /// The id of the Codex executor.
-pub const CODEX_ID: &str = "codex";
+pub const CODEX_ID: &str = reno_harness::codex::EXECUTOR_ID;
 
 /// The model the mock reports.
 pub const MOCK_MODEL: &str = "mock-1";
@@ -114,7 +113,7 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
     }
     let mut candidates: Vec<Arc<dyn Executor>> = vec![
         Arc::new(ClaudeExecutor::new()),
-        Arc::new(HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?)),
+        Arc::new(CodexExecutor::new()),
         Arc::new(AcpExecutor::grok()),
         Arc::new(AcpExecutor::devin()),
         Arc::new(AcpExecutor::hermes()),

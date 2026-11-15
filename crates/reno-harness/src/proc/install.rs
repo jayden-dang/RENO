@@ -5,7 +5,7 @@ use crate::upstream_proto::HarnessId;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
-    CancellationToken, Harness, HarnessError, StderrTail,
+    CancellationToken, HarnessError, StderrTail,
     process::{Command, Stdio},
 };
 
@@ -141,7 +141,7 @@ pub fn installed(id: HarnessId) -> bool {
     use HarnessId::*;
     match id {
         ClaudeCode => crate::ClaudeExecutor::new().installed(),
-        Codex => crate::CodexHarness::new().installed(),
+        Codex => crate::CodexExecutor::new().installed(),
         Grok => crate::AcpExecutor::grok().installed(),
         Hermes => crate::AcpExecutor::hermes().installed(),
         Devin => crate::AcpExecutor::devin().installed(),

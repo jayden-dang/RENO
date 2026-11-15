@@ -4,15 +4,16 @@
 //!
 //! - [`crate::ClaudeExecutor`] is native (stage B, ARCHITECTURE sections 2.1 and 5.1): it
 //!   speaks Claude Code's wire directly and emits `ExecEvent`s, with structured approvals.
+//! - [`crate::CodexExecutor`] is native too: it speaks the `codex app-server` JSON-RPC.
 //! - [`crate::AcpExecutor`] is native too, one instance per ACP agent (Grok, Devin, Hermes,
 //!   Antigravity, the agents of the ACP registry).
-//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A) and still serves Codex
-//!   until its driver goes native too. Then the shim goes away.
+//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A). No production driver
+//!   runs through it any more; it goes away in T1.0d.
 //! - [`MockExecutor`] plays a scripted run for kernel tests and the CLI's `--executor mock`.
 //!
 //! # What a native driver plugs into
 //!
-//! Everything a driver shares is here, so Codex follows without changing the contract:
+//! Everything a driver shares is here, so a new driver follows without changing the contract:
 //! [`Executor`], [`ExecControls`] (steering, cancel, answers, process records),
 //! [`require_access`] (fail closed before spawning, ARCH-15), and [`OpenRequests`], the table
 //! that keeps approvals and input requests apart, never lets a wrong-kind answer approve, and

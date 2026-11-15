@@ -2,8 +2,8 @@
 //!
 //! Native drivers speak each agent's own wire directly: Claude Code over
 //! stream-json ([`ClaudeExecutor`], native to the executor contract) and Codex over the app-server JSON-RPC
-//! ([`CodexHarness`]). The shared [`AcpExecutor`], also native to the executor contract, serves
-//! agents built ground-up on ACP: Devin (`devin acp`), Grok (`grok agent stdio`), Hermes
+//! ([`CodexExecutor`], native too). The shared [`AcpExecutor`], also native to the executor
+//! contract, serves agents built ground-up on ACP: Devin (`devin acp`), Grok (`grok agent stdio`), Hermes
 //! (`hermes acp`), Antigravity and the ACP registry agents. Adapter-mediated
 //! ACP for Claude and Codex is not used: the adapters hold prompt turns open
 //! for background work the CLIs themselves settle eagerly, which manufactures
@@ -412,7 +412,6 @@ pub mod acp_registry;
 pub mod approval;
 mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
-mod catalog;
 mod catalog_failure;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 mod drivers;
@@ -421,7 +420,6 @@ pub mod exec;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
-mod model_context;
 pub mod proc;
 #[cfg(unix)]
 pub use proc::{
@@ -707,7 +705,7 @@ pub(crate) fn crash_message(
 
 pub use acp::AcpExecutor;
 pub use claude::ClaudeExecutor;
-pub use codex::CodexHarness;
+pub use codex::CodexExecutor;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

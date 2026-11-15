@@ -127,10 +127,10 @@ fn config_root(env: &std::collections::BTreeMap<String, String>) -> PathBuf {
     if let Some(home) = env.get("HOME").filter(|h| !h.is_empty()) {
         return PathBuf::from(home).join(".claude");
     }
-    crate::model_context::root(
-        "CLAUDE_CONFIG_DIR",
-        crate::executable::home_or_current_dir().join(".claude"),
-    )
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"))
 }
 
 /// The inline `--mcp-config` JSON for the injected servers (the CLI accepts a JSON string as
