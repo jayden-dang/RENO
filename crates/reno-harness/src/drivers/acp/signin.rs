@@ -3,7 +3,13 @@
 //! run that finds its agent signed out ends with a diagnostic and never starts a sign-in.
 //!
 //! These spawn short-lived agent processes of their own (a sign-in client is not a run), which
-//! no `ExecControls` exists to report.
+//! no `ExecControls` exists to report: process records are reported through a run's
+//! `ProcessSink`, and sign-in has no run, no supervisor to store a record and no fence to put on
+//! one. Instead every child is owned by the call that spawned it: it is spawned as a group
+//! leader (`owned::spawn_grouped`) that is signalled on drop, so a call that ends, errors, times
+//! out or is dropped by its caller takes the agent and its descendants with it, and its pipe
+//! readers are aborted with it. (A daemon that dies mid sign-in leaves such a child; sign-in is
+//! user-driven and short, and the next sign-in starts its own.)
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
