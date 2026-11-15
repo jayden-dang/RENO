@@ -328,7 +328,9 @@ async fn ask_creates_a_pending_approval_and_a_human_approves_it() {
         (run.clone(), command("git push"))
     );
     rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
-    assert_eq!(view.borrow_and_update().clone(), vec![pending.clone()]);
+    // The watch follows the store: it is refreshed just after the row is written.
+    until(async || (view.borrow_and_update().len() == 1).then_some(())).await;
+    assert_eq!(view.borrow().clone(), vec![pending.clone()]);
     assert!(rig.decisions().is_empty(), "the harness is still held");
 
     // The stored record is pending, with a deadline 30 minutes out.
@@ -541,10 +543,11 @@ async fn the_policy_may_set_its_own_time_limit_and_the_config_sets_the_default()
 #[tokio::test(start_paused = true)]
 async fn several_waiting_approvals_each_expire_at_their_own_deadline() {
     // Two approvals open at once, 5 minutes apart: the one timer is re-armed for the second.
+    // The mock asks for the second only once it is steered, which the test does 5 minutes later.
     let steps = vec![
         MockStep::started("s", "mock-1"),
         asks("r1", command("a")),
-        MockStep::Sleep(Duration::from_secs(5 * 60)),
+        MockStep::AwaitSteer,
         asks("r2", command("b")),
         awaits("r1"),
         awaits("r2"),
@@ -555,6 +558,7 @@ async fn several_waiting_approvals_each_expire_at_their_own_deadline() {
     until(async || (rig.fx.kernel.pending_approvals().await.unwrap().len() == 1).then_some(()))
         .await;
     advance(Duration::from_secs(5 * 60)).await;
+    rig.fx.kernel.steer(&run, "ask the second").await.unwrap();
     until(async || (rig.fx.kernel.pending_approvals().await.unwrap().len() == 2).then_some(()))
         .await;
 

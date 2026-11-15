@@ -288,7 +288,8 @@ async fn approval_flow(decision: ApprovalDecision, expect: Decision) {
     assert_eq!(approval.run_id, run);
     assert_eq!(approval.subject.tool, "bash");
     fx.wait_status(&run, RunStatus::WaitingApproval).await;
-    assert_eq!(watch.borrow_and_update().len(), 1);
+    // The watch follows the store: it is refreshed just after the row is written.
+    until(async || (watch.borrow_and_update().len() == 1).then_some(())).await;
 
     fx.kernel.decide(&approval.id, decision).await.unwrap();
     assert!(fx.kernel.pending_approvals().await.unwrap().is_empty());
