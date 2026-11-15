@@ -45,7 +45,7 @@ fn agents() -> &'static Path {
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let root = tempfile::tempdir().unwrap();
-        for mode in ["droid", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini"] {
+        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini"] {
             let dir = root.path().join(format!("fake-{mode}"));
             std::fs::create_dir_all(&dir).unwrap();
             let state = dir.join("state");
@@ -316,4 +316,45 @@ async fn a_page_the_agent_asks_to_open_is_reported_accepted_and_signs_it_in() {
         "its page, to open: {:?}",
         run.progress
     );
+}
+
+/// Sign-in is not run-scoped: no run exists to report to, so its child never becomes a process
+/// record (the records belong to a run's `ExecControls`). What it owes instead is that the child
+/// dies with its owner. Abandoning the call, here by a timeout while the agent waits for a
+/// pairing nobody completes, ends the agent and its whole process group.
+#[tokio::test]
+async fn an_abandoned_sign_in_kills_its_agent() {
+    agents();
+    let scratch = tempfile::tempdir().unwrap();
+    let agent = RegistryAgent::new("fake-droid-hang").unwrap();
+    let harness = AcpExecutor::registry(agent, "Fake droid-hang").unwrap();
+    let options = SignInOptions {
+        browser: None,
+        method: None,
+        env: vec![("HOME".into(), scratch.path().into())],
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let abandoned = tokio::time::timeout(
+        Duration::from_secs(3),
+        harness.sign_in_registry(options, move |p| log.lock().unwrap().push(p)),
+    )
+    .await;
+    assert!(abandoned.is_err(), "the sign-in waits for a pairing");
+
+    let pid_file = agents().join("fake-droid-hang/state/pid");
+    let pid: i32 = std::fs::read_to_string(pid_file)
+        .expect("the agent ran")
+        .trim()
+        .parse()
+        .unwrap();
+    // Gone once the dropped call has signalled its group; allow it a moment to be reaped.
+    for _ in 0..100 {
+        // SAFETY: signal 0 only tests whether the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the sign-in agent {pid} outlived the abandoned call");
 }
