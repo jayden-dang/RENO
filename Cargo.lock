@@ -5028,6 +5028,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures",
+ "globset",
  "mimalloc",
  "notify",
  "reno-client",

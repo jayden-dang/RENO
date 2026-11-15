@@ -18,6 +18,9 @@
 //! | `def.get` | `get_definition` |
 //! | `def.validate` | `validate_definition` |
 //! | `defs.watch` | `watch_defs` |
+//! | `trigger.list` | `list_triggers` |
+//! | `trigger.fire` | `fire_trigger` |
+//! | `triggers.watch` | `watch_triggers` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
 //! handler for it. Every kernel failure goes through [`crate::errors`].
@@ -46,7 +49,11 @@ use reno_proto::{
     RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult, RunSummary,
     RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
 };
-use reno_proto::{DefGet, DefList, DefValidate, DefsWatch};
+use reno_proto::{
+    DefGet, DefList, DefValidate, DefsWatch, TriggerFire, TriggerFireParams, TriggerFireResult,
+    TriggerInfo, TriggerList, TriggerListResult, TriggersSnapshot, TriggersWatch,
+    TriggersWatchParams,
+};
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -105,10 +112,13 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<DefList, _, _>(bind(ctx, def_list))
         .method::<DefGet, _, _>(bind(ctx, def_get))
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
+        .method::<TriggerList, _, _>(bind(ctx, trigger_list))
+        .method::<TriggerFire, _, _>(bind(ctx, trigger_fire))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
         .subscription::<DefsWatch, _, _, _>(bind(ctx, defs_watch))
+        .subscription::<TriggersWatch, _, _, _>(bind(ctx, triggers_watch))
 }
 
 type Reply<T> = Result<T, ErrorObject>;
@@ -294,6 +304,20 @@ async fn def_validate(ctx: Arc<Ctx>, p: DefValidateParams) -> Reply<DefValidateR
     Ok(ctx.kernel.validate_definition(p.kind, &p.name, &p.body))
 }
 
+async fn trigger_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<TriggerListResult> {
+    Ok(TriggerListResult {
+        triggers: ctx.kernel.list_triggers(),
+    })
+}
+
+async fn trigger_fire(ctx: Arc<Ctx>, p: TriggerFireParams) -> Reply<TriggerFireResult> {
+    tracing::info!(trigger = %p.name, "trigger fire requested");
+    ctx.kernel
+        .fire_trigger(&p.name)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
 // ---- subscriptions -------------------------------------------------------------------------
 
 async fn run_events(
@@ -386,6 +410,18 @@ async fn defs_watch(
     Ok(latest(
         ctx.kernel.watch_defs(),
         |current: &Arc<CurrentDefs>| current.snapshot(None),
+    ))
+}
+
+async fn triggers_watch(
+    ctx: Arc<Ctx>,
+    _: TriggersWatchParams,
+) -> Reply<impl Stream<Item = SubItem<TriggersSnapshot>> + Send + use<>> {
+    Ok(latest(
+        ctx.kernel.watch_triggers(),
+        |all: &Arc<Vec<TriggerInfo>>| TriggersSnapshot {
+            triggers: all.as_ref().clone(),
+        },
     ))
 }
 

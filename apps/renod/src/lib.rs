@@ -13,6 +13,7 @@
 //! - [`executors`]: `mock`, and the harnesses that are installed.
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
+//! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
 //! - [`daemon`]: [`Daemon`], start-up and the shutdown sequence.
@@ -24,6 +25,7 @@ pub mod daemon;
 pub mod defs;
 pub mod errors;
 pub mod executors;
+pub mod fswatch;
 mod handlers;
 pub mod lock;
 pub mod logging;
@@ -34,4 +36,5 @@ pub use daemon::{
 };
 pub use defs::{Bootstrapped, FsDefinitions, GitInit, GitOutcome};
 pub use executors::ExecutorSet;
+pub use fswatch::FsWatch;
 pub use paths::Paths;

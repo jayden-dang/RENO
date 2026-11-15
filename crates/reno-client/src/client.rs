@@ -210,6 +210,43 @@ impl Client {
         Ok(())
     }
 
+    /// `trigger.list`: every trigger and its state. Needs feature `triggers`.
+    pub async fn list_triggers(&self) -> Result<Vec<reno_proto::TriggerInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_TRIGGERS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::TriggerList>(NoParams {})
+            .await?
+            .triggers)
+    }
+
+    /// `trigger.fire`: fires a manual trigger, or any enabled one, now. Needs feature
+    /// `triggers`.
+    pub async fn fire_trigger(
+        &self,
+        name: &str,
+    ) -> Result<reno_proto::TriggerFireResult, ClientError> {
+        self.require(reno_proto::FEATURE_TRIGGERS)?;
+        let params = reno_proto::TriggerFireParams {
+            name: name.to_owned(),
+        };
+        Ok(self.rpc.call::<reno_proto::TriggerFire>(params).await?)
+    }
+
+    /// `triggers.watch`: every trigger and its state, then a new full list on every change.
+    /// Latest-value, like [`Client::watch_runs`]. Needs feature `triggers`.
+    pub async fn watch_triggers(
+        &self,
+    ) -> Result<BoxStream<'static, Result<reno_proto::TriggersSnapshot, ClientError>>, ClientError>
+    {
+        self.require(reno_proto::FEATURE_TRIGGERS)?;
+        let sub = self
+            .rpc
+            .subscribe::<reno_proto::TriggersWatch>(reno_proto::TriggersWatchParams::default())
+            .await?;
+        Ok(watch_stream(sub))
+    }
+
     /// `approval.list`: the pending approvals, oldest first.
     pub async fn list_approvals(&self) -> Result<Vec<Approval>, ClientError> {
         self.require(reno_proto::FEATURE_APPROVALS)?;
