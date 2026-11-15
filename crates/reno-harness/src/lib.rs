@@ -9,7 +9,10 @@
 //! for background work the CLIs themselves settle eagerly, which manufactures
 //! done-status bugs the native wires do not have.
 //!
-//! Layout: `wire/` is the sans-IO layer (frame types, normalizers, permission
+//! The kernel does not use [`Harness`]: it uses [`exec::Executor`]. [`exec::HarnessExecutor`]
+//! adapts any imported harness to it (stage A), and [`exec::MockExecutor`] plays scripted runs.
+//!
+//! Layout: `exec/` is Reno's executor port; `wire/` is the sans-IO layer (frame types, normalizers, permission
 //! mapping, name tables); `drivers/` holds the I/O shells that spawn and pump
 //! each harness; `proc/` owns process lifecycle, executable lookup, installs,
 //! signatures, shell environment and scratch space.
@@ -415,12 +418,15 @@ mod command_discovery;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 mod drivers;
 pub use drivers::{acp, claude, codex};
+pub mod exec;
 pub(crate) mod jsonl_tail;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
 mod model_context;
 mod proc;
+#[cfg(unix)]
+pub use proc::record::{ProcessRecord, SweepReport, sweep_orphans, sweep_orphans_with_grace};
 pub(crate) use proc::{adapter_install, code_signature, executable};
 pub use proc::{archive_install, install, process, shell_env};
 /// Secret redaction, shared with the doc fold (command output tails).

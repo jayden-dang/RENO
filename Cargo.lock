@@ -4538,6 +4538,7 @@ dependencies = [
  "futures",
  "libc",
  "pulldown-cmark",
+ "reno-proto",
  "reqwest",
  "semver",
  "serde",

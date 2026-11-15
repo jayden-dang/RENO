@@ -22,6 +22,7 @@ manual_pattern_char_comparison = "allow" # a char-class closure in the redactor
 type_complexity = "allow" # nested channel/future types in the driver loops
 
 [dependencies]
+reno-proto.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bzip2.workspace = true
