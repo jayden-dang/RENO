@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{ApprovalId, ApprovalOutcome, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId};
 use reno_store::{
-    Applied, Claim, DefinitionRecord, ExpireScope, Expired, FireResult, FiringRecord, Journals,
-    NewApproval, NewDefinition, NewFiring, NewTask, RunRecord, Store, StoreError, StoredApproval,
-    TriggerRow,
+    Applied, Claim, DefinitionRecord, ExpireScope, Expired, FireResult, Journals, NewApproval,
+    NewDefinition, NewFiring, NewTask, RunRecord, Store, StoreError, StoredApproval, TriggerRow,
 };
 
 use crate::clock::Clock;
@@ -243,9 +242,7 @@ impl Db {
         removed: Vec<String>,
     ) -> Result<()> {
         self.wrote();
-        self.store
-            .plan_triggers(rows, removed, self.now_ms())
-            .await
+        self.store.plan_triggers(rows, removed, self.now_ms()).await
     }
 
     pub(crate) async fn fire_trigger(&self, fire: NewFiring) -> Result<FireResult> {
@@ -269,17 +266,7 @@ impl Db {
 
     pub(crate) async fn trigger_recovered(&self, name: &str, run: &RunId) -> Result<bool> {
         self.wrote();
-        self.store
-            .trigger_recovered(name, run, self.now_ms())
-            .await
-    }
-
-    pub(crate) async fn firings(
-        &self,
-        trigger: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<FiringRecord>> {
-        self.store.firings(trigger, limit).await
+        self.store.trigger_recovered(name, run, self.now_ms()).await
     }
 
     pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {

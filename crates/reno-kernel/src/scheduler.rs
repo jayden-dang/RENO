@@ -50,14 +50,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reno_proto::defs::{
-    PromptVars, TriggerDef, TriggerKind, format_instant, format_span, lateness_note,
-    render_prompt,
-};
 use reno_proto::defs::DefKind;
-use reno_proto::{
-    FiringOutcome, RunId, TaskId, TriggerFireResult, TriggerInfo, TriggerStatus,
+use reno_proto::defs::{
+    PromptVars, TriggerDef, TriggerKind, format_instant, format_span, lateness_note, render_prompt,
 };
+use reno_proto::{FiringOutcome, RunId, TaskId, TriggerFireResult, TriggerInfo, TriggerStatus};
 use reno_store::{FiringRun, NewFiring, NewTask, StoreError, TriggerRow};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::sleep;
@@ -366,19 +363,20 @@ impl Scheduler {
     fn sync_watches(&mut self) {
         let names: Vec<String> = self.plans.keys().cloned().collect();
         for name in names {
-            let wanted = self.plans.get(&name).and_then(|plan| {
-                match (&plan.def.when, plan.running()) {
-                    (TriggerKind::Fs { paths, debounce }, true) => {
-                        let debounce = reno_proto::defs::parse_duration(debounce).ok()?;
-                        Some(WatchSpec {
-                            trigger: name.clone(),
-                            paths: paths.clone(),
-                            debounce,
-                        })
-                    }
-                    _ => None,
-                }
-            });
+            let wanted =
+                self.plans
+                    .get(&name)
+                    .and_then(|plan| match (&plan.def.when, plan.running()) {
+                        (TriggerKind::Fs { paths, debounce }, true) => {
+                            let debounce = reno_proto::defs::parse_duration(debounce).ok()?;
+                            Some(WatchSpec {
+                                trigger: name.clone(),
+                                paths: paths.clone(),
+                                debounce,
+                            })
+                        }
+                        _ => None,
+                    });
             let Some(plan) = self.plans.get_mut(&name) else {
                 continue;
             };
@@ -428,7 +426,10 @@ impl Scheduler {
             SchedCmd::FsChanged { name, generation } => {
                 let now = self.now();
                 if let Some(plan) = self.plans.get_mut(&name)
-                    && plan.watch.as_ref().is_some_and(|w| w.generation == generation)
+                    && plan
+                        .watch
+                        .as_ref()
+                        .is_some_and(|w| w.generation == generation)
                 {
                     plan.pending_fs.get_or_insert(now);
                 }
@@ -565,8 +566,7 @@ impl Scheduler {
                 self.restore_pending(name, &occurrence);
                 if let Some(plan) = self.plans.get_mut(name) {
                     plan.retry_at = Some(now.saturating_add(
-                        i64::try_from(self.shared.config.store_retry.as_millis())
-                            .unwrap_or(1_000),
+                        i64::try_from(self.shared.config.store_retry.as_millis()).unwrap_or(1_000),
                     ));
                 }
             }
@@ -630,7 +630,9 @@ impl Scheduler {
             .config
             .trigger_cwd
             .to_str()
-            .ok_or_else(|| KernelError::Invalid("the trigger working directory is not UTF-8".into()))?
+            .ok_or_else(|| {
+                KernelError::Invalid("the trigger working directory is not UTF-8".into())
+            })?
             .to_owned();
         let spec = serde_json::json!({ "cwd": cwd, "model": null, "trigger": name });
 
@@ -766,9 +768,7 @@ fn plan_row(
     if !def.enabled {
         return row;
     }
-    let unchanged = known
-        .as_ref()
-        .filter(|k| k.schedule == when && k.enabled);
+    let unchanged = known.as_ref().filter(|k| k.schedule == when && k.enabled);
     match (unchanged, schedule) {
         (Some(k), Some(Schedule::After { delay_ms })) if k.last_fired_at.is_none() => {
             // An unfired `after` counts its delay from the version now in force.

@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn at_is_once_and_a_past_instant_is_due_now() {
         let s = schedule(r#"{"kind":"at","at":"2026-12-01T09:00:00+07:00"}"#);
-        let at = 1_795_053_600_000; // 2026-12-01T02:00:00Z
+        let at = 1_796_090_400_000; // 2026-12-01T02:00:00Z
         assert_eq!(s.first_due(0, 0), Some(at));
         assert_eq!(s.first_due(0, at + 5 * HOUR), Some(at), "late, not skipped");
         assert_eq!(

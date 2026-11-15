@@ -118,10 +118,7 @@ fn bot(name: &str, instructions: &str) -> DefFile {
 }
 
 pub(super) fn setup(port: &Arc<FakePort>) -> DefsSetup {
-    DefsSetup {
-        port: port.clone(),
-        context: ValidationContext::with_builtin([]),
-    }
+    DefsSetup::new(port.clone(), ValidationContext::with_builtin([]))
 }
 
 async fn fx_with(port: &Arc<FakePort>) -> Fx {

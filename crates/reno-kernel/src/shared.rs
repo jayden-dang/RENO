@@ -11,7 +11,7 @@ use reno_harness::exec::Decision;
 use reno_proto::defs::ValidationContext;
 use reno_proto::{
     ApprovalId, ExecEvent, PROMPT_SUMMARY_CHARS, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RunId,
-    RunStatus, RunSummary, Seq, StopReason,
+    RunStatus, RunSummary, Seq, StopReason, TriggerInfo,
 };
 use reno_store::{RunRecord, StoreError};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -25,6 +25,7 @@ use crate::defs::CurrentDefs;
 use crate::error::{KernelError, Result};
 use crate::ids::IdMint;
 use crate::registry::ExecutorRegistry;
+use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
 
 /// Commands a run supervisor accepts. Bounded (`COMMAND_QUEUE`); the sender waits for room, and
 /// the supervisor never sends to its callers, so the queue cannot form a cycle (ARCH-11).
@@ -123,6 +124,11 @@ pub(crate) struct Shared {
     /// What validation may assume about the world: the executors a bot may name.
     pub(crate) defs_ctx: ValidationContext,
     pub(crate) mint: IdMint,
+    /// The scheduler's inbox. The dispatcher uses `try_send`: it never waits for the scheduler.
+    pub(crate) sched_tx: mpsc::Sender<SchedCmd>,
+    sched_rx: Mutex<Option<mpsc::Receiver<SchedCmd>>>,
+    /// Every trigger and its state, as the scheduler last published it.
+    pub(crate) triggers_tx: watch::Sender<Arc<Vec<TriggerInfo>>>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -143,6 +149,7 @@ impl Shared {
     ) -> Self {
         config.max_concurrent = config.max_concurrent.max(1);
         config.subscriber_queue = config.subscriber_queue.max(1);
+        let (sched_tx, sched_rx) = mpsc::channel(SCHED_QUEUE);
         Self {
             db,
             executors,
@@ -159,6 +166,25 @@ impl Shared {
             defs_tx: watch::channel(Arc::default()).0,
             defs_ctx,
             mint: IdMint::default(),
+            sched_tx,
+            sched_rx: Mutex::new(Some(sched_rx)),
+            triggers_tx: watch::channel(Arc::default()).0,
+        }
+    }
+
+    /// The scheduler's inbox, once; `None` if a scheduler already has it.
+    pub(crate) fn take_sched_commands(&self) -> Option<mpsc::Receiver<SchedCmd>> {
+        self.sched_rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Tells the scheduler about a run, without waiting. A full inbox drops the message: the
+    /// scheduler is behind and the next backoff or start will say the same.
+    pub(crate) fn signal_scheduler(&self, command: SchedCmd) {
+        if self.sched_tx.try_send(command).is_err() {
+            tracing::debug!("the scheduler inbox is full or closed; dropping a run signal");
         }
     }
 
