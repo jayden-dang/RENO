@@ -10,7 +10,7 @@
 // Tokens are consumed screen by screen; the unreached ones are listed in the brief.
 #![allow(dead_code)]
 
-use gpui::{Hsla, WindowAppearance, rgb};
+use gpui::{App, Global, Hsla, WindowAppearance, rgb};
 
 use super::motion::mix;
 
@@ -23,6 +23,13 @@ pub(crate) enum Appearance {
 impl Appearance {
     pub(crate) fn is_dark(self) -> bool {
         self == Self::Dark
+    }
+
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
     }
 }
 
@@ -150,11 +157,34 @@ impl Theme {
         }
     }
 
+    /// The selected sidebar row: `raised` pulled halfway toward `shell`, still opaque.
+    pub(crate) fn row_selected(&self) -> Hsla {
+        mix(self.shell, self.raised, 0.45)
+    }
+
     /// A semantic colour pulled toward the text colour, for message copy on a tinted wash of
     /// that colour (the role the source's `*_muted` tokens played).
     pub(crate) fn soften(&self, tone: Hsla) -> Hsla {
         mix(tone, self.text, 0.35)
     }
+}
+
+/// The theme in force, set by the root view each frame so child views read it without
+/// threading it through every constructor.
+#[derive(Clone, Copy, Debug)]
+struct CurrentTheme(Theme);
+
+impl Global for CurrentTheme {}
+
+/// Publishes `theme` for [`current`].
+pub(crate) fn set_current(theme: Theme, cx: &mut App) {
+    cx.set_global(CurrentTheme(theme));
+}
+
+/// The theme in force; dark before the root has published one.
+pub(crate) fn current(cx: &App) -> Theme {
+    cx.try_global::<CurrentTheme>()
+        .map_or_else(|| Theme::for_appearance(Appearance::Dark), |t| t.0)
 }
 
 #[cfg(test)]

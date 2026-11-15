@@ -4503,10 +4503,15 @@ version = "0.0.0"
 name = "reno-app"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "gpui",
  "gpui_platform",
  "gpui_tokio",
+ "reno-client",
+ "reno-proto",
+ "serde_json",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]

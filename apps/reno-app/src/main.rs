@@ -1,74 +1,32 @@
-//! T0.10 GPUI spike: opaque two-tone window, theme tokens, tokio bridge, headless model test.
+//! Reno's desktop app: the shell and the Home screen on GPUI.
+//!
+//! `reno-app --fake` runs an in-process fake daemon. With no flag the app looks for the daemon
+//! socket and, until `renod` exists, shows a "daemon not running" Home.
 
-mod bridge;
-mod model;
+mod actions;
+mod app;
+mod nav;
+mod route;
+mod screens;
+mod store;
+mod summary;
 mod ui;
 
-use std::time::Duration;
+#[cfg(test)]
+mod tests;
 
-use gpui::prelude::*;
-use gpui::{
-    App, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowOptions, point,
-    px, size,
-};
-use gpui_platform::application;
+use std::process::ExitCode;
 
-use model::Model;
-use ui::spike::SpikeView;
-use ui::theme::Appearance;
-
-fn main() {
-    // `RENO_APPEARANCE=light|dark` previews the palette without touching system settings.
-    let appearance_override = match std::env::var("RENO_APPEARANCE").as_deref() {
-        Ok("light") => Some(Appearance::Light),
-        Ok("dark") => Some(Appearance::Dark),
-        _ => None,
+#[allow(clippy::print_stderr)]
+fn main() -> ExitCode {
+    let options = match app::Options::parse(std::env::args().skip(1), |key| std::env::var(key).ok())
+    {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("reno-app: {message}\nusage: reno-app [--fake]");
+            return ExitCode::from(2);
+        }
     };
-    // `RENO_QUIT_AFTER_MS` exercises the clean-quit path without a human.
-    let quit_after = std::env::var("RENO_QUIT_AFTER_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis);
-
-    application().run(move |cx: &mut App| {
-        gpui_tokio::init(cx);
-
-        let model = cx.new(|_| Model::default());
-        bridge::start_ticker(&model, cx);
-
-        let bounds = Bounds::centered(None, size(px(520.0), px(420.0)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Reno".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
-                }),
-                window_background: WindowBackgroundAppearance::Opaque,
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| SpikeView::new(model, appearance_override, window, cx)),
-        );
-        if opened.is_err() {
-            cx.quit();
-            return;
-        }
-
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-
-        if let Some(after) = quit_after {
-            cx.spawn(async move |cx| {
-                cx.background_executor().timer(after).await;
-                cx.update(|cx| cx.quit());
-            })
-            .detach();
-        }
-        cx.activate(true);
-    });
+    app::run(options);
+    ExitCode::SUCCESS
 }

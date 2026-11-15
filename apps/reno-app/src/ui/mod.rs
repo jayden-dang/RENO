@@ -1,11 +1,16 @@
 //! Views and the small design-system pieces they use.
 
-pub(crate) mod glass;
+pub(crate) mod attention;
+pub(crate) mod composer;
+pub(crate) mod kit;
 pub(crate) mod motion;
 pub(crate) mod notice;
+pub(crate) mod palette;
 pub(crate) mod running_pill;
-pub(crate) mod spike;
+pub(crate) mod sidebar;
+pub(crate) mod text_model;
 pub(crate) mod theme;
+pub(crate) mod toast;
 
 #[cfg(test)]
 mod tests {
@@ -48,22 +53,6 @@ mod tests {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let theme = Theme::for_appearance(appearance);
             let (_view, cx) = cx.add_window_view(|_, _| Gallery(theme));
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.draw(cx).clear(cx);
-            });
-        }
-    }
-
-    #[gpui::test]
-    fn spike_view_draws_in_both_appearances(cx: &mut TestAppContext) {
-        use gpui::AppContext as _;
-
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let model = cx.new(|_| crate::model::Model::default());
-            let (_view, cx) = cx.add_window_view(|window, cx| {
-                super::spike::SpikeView::new(model, Some(appearance), window, cx)
-            });
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);

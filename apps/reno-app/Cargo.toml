@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+reno-proto.workspace = true
+reno-client = { workspace = true, features = ["fake"] }
+futures.workspace = true
+unicode-segmentation.workspace = true
 gpui.workspace = true
 # `runtime_shaders`: this Mac has Xcode but no Metal Toolchain component, so the build-time
 # `metal` compile fails. Shaders are compiled at launch instead. See decision 0001.
@@ -16,6 +20,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true
