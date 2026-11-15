@@ -24,6 +24,8 @@ pub(crate) enum Tone {
     NotYet,
     /// Something failed.
     Error,
+    /// Something happened that the screen does not show by itself.
+    Info,
 }
 
 #[derive(Clone, Debug)]
@@ -128,7 +130,7 @@ impl Render for Toasts {
             // whatever it covers.
             let body = div().rounded(px(12.0)).bg(theme.surface).child(notice_chip(
                 &theme,
-                toast.tone == Tone::NotYet,
+                toast.tone != Tone::Error,
                 toast.label,
                 toast.message.clone(),
                 NoticeChipIcon::Plain,

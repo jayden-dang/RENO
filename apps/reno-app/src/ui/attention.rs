@@ -74,41 +74,25 @@ impl AttentionDock {
         let id = approval.id.to_string();
         let deny = approval.clone();
         let approve = approval.clone();
-        let button = |label: &'static str, id: SharedString| {
-            div()
-                .id(id.clone())
-                .debug_selector(move || id.to_string())
-                .h(px(28.0))
-                .px(px(13.0))
-                .flex()
-                .items_center()
-                .rounded(px(999.0))
-                .text_size(px(13.0))
-                .font_weight(FontWeight::MEDIUM)
-                .child(label)
-        };
-        let deny_button = button("Deny", format!("deny-{id}").into())
-            .border_1()
-            .border_color(theme.danger.opacity(0.5))
-            .text_color(theme.danger)
+        let deny_button = kit::pill_button(theme, format!("deny-{id}"), "Deny", kit::Tone::Danger)
             .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| {
-                b.cursor_pointer()
-                    .hover(|s| s.bg(theme.danger.opacity(0.1)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.decide(&deny, ApprovalDecision::Deny, cx);
-                    }))
+                b.on_click(cx.listener(move |this, _, _, cx| {
+                    this.decide(&deny, ApprovalDecision::Deny, cx);
+                }))
             });
-        let approve_button = button("Approve", format!("approve-{id}").into())
-            .bg(theme.accent)
-            .text_color(gpui::white())
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| {
-                b.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.decide(&approve, ApprovalDecision::ApproveOnce, cx);
-                    }))
-            });
+        let approve_button = kit::pill_button(
+            theme,
+            format!("approve-{id}"),
+            "Approve",
+            kit::Tone::Primary,
+        )
+        .when(busy, |b| b.opacity(0.4))
+        .when(!busy, |b| {
+            b.on_click(cx.listener(move |this, _, _, cx| {
+                this.decide(&approve, ApprovalDecision::ApproveOnce, cx);
+            }))
+        });
 
         div()
             .id(SharedString::from(format!("approval-{id}")))

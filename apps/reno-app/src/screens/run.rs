@@ -12,8 +12,9 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
     ListState, Render, SharedString, Subscription, Window, div, list, prelude::*, px,
 };
-use reno_proto::{Approval, ApprovalDecision, RunId, RunStatus, RunSummary, StopReason};
+use reno_proto::{Approval, ApprovalDecision, RunId, RunSummary, StopReason};
 
+use crate::actions::GoRuns;
 use crate::store::Store;
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Outcome, Row, ToolEntry};
@@ -23,6 +24,7 @@ use crate::ui::kit::{self, MONO};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
 use crate::ui::toast;
+use crate::vm::runs as run_facts;
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
@@ -214,7 +216,7 @@ impl RunScreen {
                     .id("crumb-runs")
                     .text_color(theme.muted)
                     .cursor_pointer()
-                    .on_click(|_, _, cx| toast::not_yet(cx, "The runs list"))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(GoRuns), cx))
                     .child("Runs"),
             )
             .child(div().text_color(theme.faint).child("/"))
@@ -230,7 +232,8 @@ impl RunScreen {
             )
             .when_some(status, |h, status| {
                 h.child(
-                    status_pill(theme, status).id(SharedString::from(format!("status-{run_id}"))),
+                    kit::status_pill(theme, status)
+                        .id(SharedString::from(format!("status-{run_id}"))),
                 )
             })
             .child(div().flex_1())
@@ -386,34 +389,12 @@ impl RunScreen {
                 .update(cx, |s, cx| s.decide(id, ApprovalDecision::ApproveOnce, cx));
         });
 
-        let button = |label: &'static str, selector: &'static str| {
-            div()
-                .id(SharedString::from(format!("{selector}-{}", key.0)))
-                .debug_selector(|| selector.to_owned())
-                .h(px(34.0))
-                .px(px(16.0))
-                .flex()
-                .items_center()
-                .rounded(px(999.0))
-                .text_size(px(14.0))
-                .font_weight(FontWeight::MEDIUM)
-                .child(label)
-        };
-        let deny_button = button("Deny", "deny")
-            .border_1()
-            .border_color(theme.danger.opacity(0.5))
-            .text_color(theme.danger)
+        let deny_button = kit::pill_button(theme, "deny", "Deny", kit::Tone::Danger)
             .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| {
-                b.cursor_pointer()
-                    .hover(|s| s.bg(theme.danger.opacity(0.1)))
-                    .on_click(deny)
-            });
-        let approve_button = button("Approve once", "approve")
-            .bg(theme.accent)
-            .text_color(gpui::white())
+            .when(!busy, |b| b.on_click(deny));
+        let approve_button = kit::pill_button(theme, "approve", "Approve once", kit::Tone::Primary)
             .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.cursor_pointer().on_click(approve));
+            .when(!busy, |b| b.on_click(approve));
 
         div()
             .id(SharedString::from(format!("approval-card-{}", key.0)))
@@ -552,6 +533,13 @@ impl RunScreen {
         } else {
             now
         };
+        // The access mode is the bot's: a run without a bot has none to show, and a bot whose
+        // definition is not read yet shows an ellipsis.
+        let access = run.bot.as_ref().map(|_| {
+            run_facts::access_label(store.state(), &self.run)
+                .unwrap_or("\u{2026}")
+                .to_owned()
+        });
 
         pane = pane
             .child(kv(
@@ -579,9 +567,13 @@ impl RunScreen {
                     .child(summary::executor_name(run.executor.as_str()).to_owned())
                     .into_any_element(),
             ))
+            .when_some(access, |p, access| p.child(kv("Access", text(access))))
             .when_some(model, |p, model| p.child(kv("Model", text(model))))
             .when_some(parts.repo, |p, repo| {
                 p.child(kv("Repository", text(repo.to_owned())))
+            })
+            .when(run.attempt > 1, |p| {
+                p.child(kv("Attempt", text(run.attempt.to_string())))
             })
             .child(kv(
                 "Started",
@@ -628,19 +620,6 @@ fn group_digits(n: u64) -> String {
         out.push(c);
     }
     out
-}
-
-fn status_pill(theme: &Theme, status: RunStatus) -> gpui::Div {
-    let color = kit::status_color(theme, status);
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .text_size(px(14.0))
-        .text_color(color)
-        .child(kit::dot(color, 8.0))
-        .child(summary::status_label(status))
 }
 
 /// A user message: right-aligned bubble.

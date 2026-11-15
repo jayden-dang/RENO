@@ -29,13 +29,18 @@ pub(crate) struct Entry {
 pub(crate) fn entries() -> Vec<Entry> {
     let go = |nav: Nav| Entry {
         label: nav.label(),
-        hint: if nav.is_built() { "Go to" } else { "Phase 1" },
+        hint: if nav.is_built() {
+            "Go to"
+        } else {
+            "Coming soon"
+        },
         icon: nav.icon(),
         action: PaletteAction::Go(nav),
     };
     Nav::MAIN
         .into_iter()
         .chain(Nav::ORCHESTRATION)
+        .chain([Nav::Settings])
         .map(go)
         .chain([
             Entry {

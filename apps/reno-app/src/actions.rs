@@ -2,7 +2,17 @@
 
 use gpui::{App, KeyBinding, actions};
 
-actions!(reno, [OpenPalette, ToggleSidebar, ToggleTheme, Quit]);
+actions!(
+    reno,
+    [
+        OpenPalette,
+        ToggleSidebar,
+        ToggleTheme,
+        GoInbox,
+        GoRuns,
+        Quit
+    ]
+);
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
