@@ -106,6 +106,8 @@ allow = [
     "Unicode-3.0",
     "MPL-2.0",
     "CC0-1.0",
+    "bzip2-1.0.6", # libbz2-rs-sys, via bzip2 for .tar.bz2 registry archives; BSD-style
+    "CDLA-Permissive-2.0", # webpki-roots, via reqwest's rustls; permissive data license
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the

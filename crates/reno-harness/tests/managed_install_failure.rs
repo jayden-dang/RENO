@@ -1,0 +1,80 @@
+//! The silent-npm-failure condition, reproduced: npm dying silently with an
+//! errno-encoded exit (254 = ENOENT) during the adapter
+//! fallback. A bare `npx -y` path surfaced this as "harness protocol error:
+//! initialize: app-server exited before responding; Codex exited unexpectedly
+//! (exit code 254)" with nothing actionable. The managed install must instead
+//! fail the run with the decoded errno and a recovery hint.
+//!
+//! Single-test binary: it mutates PATH/SHELL/RENO_* env process-wide.
+
+#![cfg(unix)]
+
+use std::os::unix::fs::PermissionsExt;
+
+use reno_harness::upstream_proto::{RunRequest, SandboxLevel};
+use reno_harness::{AcpHarness, Harness, HarnessError, RunControls};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+#[tokio::test]
+async fn silent_npm_enoent_death_surfaces_decoded_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // npm as users hit it: dies with 254 and says nothing.
+    let npm = bin.join("npm");
+    std::fs::write(&npm, "#!/bin/sh\nexit 254\n").unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // SAFETY: single-test binary — nothing else reads env concurrently.
+    unsafe {
+        std::env::set_var("RENO_ADAPTERS_DIR", dir.path().join("adapters"));
+        std::env::set_var("RENO_NO_LOGIN_SHELL", "1");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("HOME", dir.path());
+        std::env::remove_var("GROK_EXECUTABLE");
+    }
+
+    let harness = AcpHarness::grok();
+    let (_steer_tx, steering) = mpsc::channel(1);
+    let controls = RunControls {
+        execution_lease: None,
+        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
+        steering,
+        interrupt: CancellationToken::new(),
+        turn: Default::default(),
+    };
+    let request = RunRequest {
+        mcp: None,
+        prompt: "hi".into(),
+        harness: None,
+        model: None,
+        reasoning: None,
+        model_options: serde_json::Map::new(),
+        cwd: "/tmp".into(),
+        sandbox: SandboxLevel::WorkspaceWrite,
+        auto_approve: true,
+        access: Default::default(),
+        plan: false,
+        attachments: Vec::new(),
+        worktree: None,
+        resume: None,
+        env: Default::default(),
+        extra_mcp: Vec::new(),
+    };
+
+    let err = match harness.run(request, controls).await {
+        Err(e) => e,
+        Ok(_) => panic!("run() must fail when the adapter install fails"),
+    };
+    let HarnessError::Install(message) = &err else {
+        panic!("expected an Install error, got: {err}");
+    };
+    assert!(message.contains("exit code 254"), "{message}");
+    assert!(message.contains("ENOENT"), "{message}");
+    assert!(message.contains("failed silently"), "{message}");
+    assert!(
+        message.contains("@xai-official/grok"),
+        "names the package: {message}"
+    );
+}

@@ -62,6 +62,8 @@ const WIRE_TOKENS: &[&str] = &[
     "std::process",
     "Instant::now",
     "SystemTime::now",
+    "Utc::now",
+    "Local::now",
     ".await",
 ];
 
