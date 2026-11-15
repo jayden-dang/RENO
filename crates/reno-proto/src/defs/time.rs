@@ -125,15 +125,22 @@ fn show(d: Duration) -> String {
     }
 }
 
-/// Checks an RFC 3339 timestamp with an offset or `Z`, such as `2026-12-01T09:00:00+07:00`.
-/// A timestamp with no offset is ambiguous and is refused.
+/// Parses an RFC 3339 timestamp with an offset or `Z`, such as `2026-12-01T09:00:00+07:00`, into
+/// milliseconds since the Unix epoch. A timestamp with no offset is ambiguous and is refused.
+pub fn parse_instant_ms(text: &str) -> Result<i64, String> {
+    text.parse::<jiff::Timestamp>()
+        .map(|instant| instant.as_millisecond())
+        .map_err(|e| {
+            format!(
+                "{text:?} is not an RFC 3339 timestamp with an offset, \
+                 such as 2026-12-01T09:00:00+07:00 ({e})"
+            )
+        })
+}
+
+/// Checks that `text` is an RFC 3339 timestamp with an offset (see [`parse_instant_ms`]).
 pub(super) fn check_instant(text: &str) -> Result<(), String> {
-    text.parse::<jiff::Timestamp>().map(|_| ()).map_err(|e| {
-        format!(
-            "{text:?} is not an RFC 3339 timestamp with an offset, \
-             such as 2026-12-01T09:00:00+07:00 ({e})"
-        )
-    })
+    parse_instant_ms(text).map(|_| ())
 }
 
 /// Checks an IANA time zone name against the bundled database.

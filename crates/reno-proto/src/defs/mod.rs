@@ -76,7 +76,9 @@ pub use bot::{BotDef, Budget};
 pub use eval::{DEFAULT_RULE, EvalContext, PolicyDecision, RuleRef, evaluate};
 pub use hash::{canonical_json, content_hash};
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
-pub use time::{CronSchedule, MIN_EVERY, format_instant, format_span, parse_duration};
+pub use time::{
+    CronSchedule, MIN_EVERY, format_instant, format_span, parse_duration, parse_instant_ms,
+};
 pub use trigger::{
     LATE_GRACE, MAX_MISSED_COUNT, PROMPT_PLACEHOLDERS, PromptVars, TriggerDef, TriggerKind,
     TriggerTarget, lateness_note, render_prompt,

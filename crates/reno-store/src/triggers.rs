@@ -384,7 +384,7 @@ fn tx_fire(conn: &Connection, fire: &NewFiring, now: i64) -> Result<FireResult> 
 fn tx_start_failed(
     conn: &Connection,
     name: &str,
-    run: &RunId,
+    run: Option<&RunId>,
     failures: u32,
     backoff_until: i64,
     reason: &str,
@@ -393,21 +393,28 @@ fn tx_start_failed(
     let changed = conn
         .prepare_cached(
             "UPDATE triggers SET failures = ?3, backoff_until = ?4
-             WHERE name = ?1 AND last_run_id = ?2",
+             WHERE name = ?1 AND (?2 IS NULL OR last_run_id = ?2)",
         )
         .db()?
-        .execute(params![name, run.as_str(), failures, backoff_until])
+        .execute(params![
+            name,
+            run.map(RunId::as_str),
+            failures,
+            backoff_until
+        ])
         .db()?;
     if changed == 0 {
         return Ok(false);
     }
-    conn.prepare_cached(
-        "UPDATE firings SET outcome = 'backed_off'
-         WHERE trigger_name = ?1 AND run_id = ?2 AND outcome = 'fired'",
-    )
-    .db()?
-    .execute(params![name, run.as_str()])
-    .db()?;
+    if let Some(run) = run {
+        conn.prepare_cached(
+            "UPDATE firings SET outcome = 'backed_off'
+             WHERE trigger_name = ?1 AND run_id = ?2 AND outcome = 'fired'",
+        )
+        .db()?
+        .execute(params![name, run.as_str()])
+        .db()?;
+    }
     events::insert(
         conn,
         now,
@@ -498,24 +505,36 @@ impl Store {
             .await
     }
 
-    /// Records that the run `run`, which trigger `name` last started, could not start for an
-    /// account-level reason: the trigger has now failed `failures` times in a row and is backed
-    /// off until `backoff_until`. The firing of that run becomes `backed_off`. The first failure
-    /// of an episode (`failures == 1`) writes `trigger.backoff_started`, the one notification;
-    /// later ones write `trigger.backoff_extended`. Returns `false`, writing nothing, when `run`
-    /// is no longer the trigger's last run.
+    /// Records that trigger `name` could not start a run for an account-level reason: it has now
+    /// failed `failures` times in a row and is backed off until `backoff_until`.
+    ///
+    /// With `run`, the run it last started failed to start: the firing of that run becomes
+    /// `backed_off`, and nothing is written when `run` is no longer the trigger's last run
+    /// (the answer is `false`). With no `run`, no run could be made (no executor of the bot is
+    /// here), so there is no firing to mark.
+    ///
+    /// The first failure of an episode (`failures == 1`) writes `trigger.backoff_started`, the
+    /// one notification; later ones write `trigger.backoff_extended`.
     pub async fn trigger_start_failed(
         &self,
         name: &str,
-        run: &RunId,
+        run: Option<&RunId>,
         failures: u32,
         backoff_until: i64,
         reason: &str,
         now: i64,
     ) -> Result<bool> {
-        let (name, run, reason) = (name.to_owned(), run.clone(), reason.to_owned());
+        let (name, run, reason) = (name.to_owned(), run.cloned(), reason.to_owned());
         self.write(Durability::Normal, move |c| {
-            tx_start_failed(c, &name, &run, failures, backoff_until, &reason, now)
+            tx_start_failed(
+                c,
+                &name,
+                run.as_ref(),
+                failures,
+                backoff_until,
+                &reason,
+                now,
+            )
         })
         .await
     }

@@ -43,6 +43,12 @@ pub enum KernelError {
         /// The version, when one was asked for.
         version: Option<u32>,
     },
+    /// No trigger by this name is in force.
+    #[error("trigger {0:?} not found")]
+    TriggerNotFound(String),
+    /// The trigger is disabled in its definition, so it cannot be fired.
+    #[error("trigger {0:?} is disabled")]
+    TriggerDisabled(String),
     /// The `Definitions` port failed.
     #[error("definitions: {0}")]
     Definitions(String),

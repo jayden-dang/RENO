@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::error::{KernelError, Result};
 use crate::shared::Shared;
+use crate::watch::Watch;
 
 /// The principal named on definition events that come from files.
 const FILE_PRINCIPAL: &str = "definitions:files";
@@ -73,6 +74,26 @@ pub struct DefsSetup {
     pub port: Arc<dyn Definitions>,
     /// What validation may assume about the world: the executors a bot may name.
     pub context: ValidationContext,
+    /// How `fs` triggers watch files. Without it they cannot fire, and are shown as failed.
+    pub watch: Option<Arc<dyn Watch>>,
+}
+
+impl DefsSetup {
+    /// Definitions from `port`, with no file watching for triggers.
+    pub fn new(port: Arc<dyn Definitions>, context: ValidationContext) -> Self {
+        Self {
+            port,
+            context,
+            watch: None,
+        }
+    }
+
+    /// The same, with `watch` serving the `fs` triggers.
+    #[must_use]
+    pub fn with_watch(mut self, watch: Arc<dyn Watch>) -> Self {
+        self.watch = Some(watch);
+        self
+    }
 }
 
 /// One stored version of a definition that is part of the current set.
@@ -177,7 +198,11 @@ struct Loader {
 /// Starts loading definitions: restores the last good set from the store, begins watching, does
 /// the first load, and spawns the task that follows the watch. Returns after the first load.
 pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> {
-    let DefsSetup { port, context } = setup;
+    let DefsSetup {
+        port,
+        context,
+        watch: _,
+    } = setup;
     let stored = shared.db.current_definitions().await?;
     let known = versions_of(&stored);
 

@@ -365,7 +365,14 @@ async fn a_start_failure_backs_the_trigger_off_once_per_episode() {
         .unwrap();
 
     let applied = store
-        .trigger_start_failed("nightly", &run_id(1), 1, 301_001, "not signed in", 1_002)
+        .trigger_start_failed(
+            "nightly",
+            Some(&run_id(1)),
+            1,
+            301_001,
+            "not signed in",
+            1_002,
+        )
         .await
         .unwrap();
     assert!(applied);
@@ -378,7 +385,14 @@ async fn a_start_failure_backs_the_trigger_off_once_per_episode() {
 
     // A second failure extends the backoff and writes no second notification.
     store
-        .trigger_start_failed("nightly", &run_id(1), 2, 601_001, "not signed in", 301_100)
+        .trigger_start_failed(
+            "nightly",
+            Some(&run_id(1)),
+            2,
+            601_001,
+            "not signed in",
+            301_100,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -391,13 +405,26 @@ async fn a_start_failure_backs_the_trigger_off_once_per_episode() {
         ]
     );
 
+    // With no run to name (nothing could be made), the trigger is backed off all the same, and
+    // no firing is touched.
+    assert!(
+        store
+            .trigger_start_failed("nightly", None, 3, 1_201_001, "no executor", 301_150)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store.firings(None, 1).await.unwrap()[0].outcome,
+        FiringOutcome::BackedOff
+    );
+
     // A run that is not the trigger's last one changes nothing.
     let stale = store
-        .trigger_start_failed("nightly", &run_id(9), 3, 9, "x", 301_200)
+        .trigger_start_failed("nightly", Some(&run_id(9)), 4, 9, "x", 301_200)
         .await
         .unwrap();
     assert!(!stale);
-    assert_eq!(trigger(&store, "nightly").await.failures, 2);
+    assert_eq!(trigger(&store, "nightly").await.failures, 3);
 
     // Starting ends it.
     assert!(
