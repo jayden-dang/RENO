@@ -67,7 +67,7 @@ impl RunStatus {
                     WaitingInput | WaitingApproval | Evaluating | Interrupted
                 )
                 | (WaitingInput | WaitingApproval, Running | Interrupted)
-                | (Evaluating, Succeeded | Failed)
+                | (Evaluating, Succeeded | Failed | Interrupted)
                 | (Failed, Queued)
                 | (Interrupted, Queued | Cancelled)
         )
@@ -110,6 +110,8 @@ mod tests {
         (WaitingApproval, Interrupted),
         (Evaluating, Succeeded),
         (Evaluating, Failed),
+        // The daemon can die while checks run; recovery must be able to mark that run.
+        (Evaluating, Interrupted),
         (Failed, Queued),
         (Interrupted, Queued),
         (Interrupted, Cancelled),
