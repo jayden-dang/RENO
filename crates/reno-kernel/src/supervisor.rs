@@ -265,14 +265,17 @@ impl Supervisor {
         let suffix = self.shared.mint.suffix(requested);
         match ApprovalId::from_suffix(&suffix) {
             Ok(id) => {
+                // State before visibility: commit `waiting_approval`, then publish the approval,
+                // so no client ever sees a pending approval on a run that still reads `running`.
+                self.open_approvals
+                    .push((id.clone(), request_id.to_owned()));
+                self.enter_wait(RunStatus::WaitingApproval).await;
                 self.shared.approvals.add(Approval {
-                    id: id.clone(),
+                    id,
                     run_id: self.run.clone(),
                     subject: subject.clone(),
                     requested_at_ms: u64::try_from(requested).unwrap_or(0),
                 });
-                self.open_approvals.push((id, request_id.to_owned()));
-                self.enter_wait(RunStatus::WaitingApproval).await;
             }
             Err(error) => self.fail(format!("cannot mint an approval id: {error}")),
         }
@@ -370,8 +373,9 @@ impl Supervisor {
         };
         sent.map_err(|_| KernelError::RunEnded(self.run.clone()))?;
         self.open_approvals.remove(at);
-        self.shared.approvals.remove(&approval);
+        // State before visibility, as when raising: commit `running`, then drop it from the list.
         self.resolve_wait().await;
+        self.shared.approvals.remove(&approval);
         Ok(())
     }
 
