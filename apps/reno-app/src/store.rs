@@ -688,10 +688,13 @@ impl Store {
     }
 }
 
+type OnOk<T> = Box<dyn FnOnce(&mut Store, T, &mut Context<Store>)>;
+type OnErr = Box<dyn FnOnce(&mut Store, &mut Context<Store>)>;
+
 /// What to do with the answer of one request.
 struct D<T> {
-    ok: Box<dyn FnOnce(&mut Store, T, &mut Context<Store>)>,
-    err: Box<dyn FnOnce(&mut Store, &mut Context<Store>)>,
+    ok: OnOk<T>,
+    err: OnErr,
     /// Do not report a failure as a [`StoreEvent::Failed`].
     quiet: bool,
 }

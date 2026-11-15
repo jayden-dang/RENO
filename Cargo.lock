@@ -4863,6 +4863,7 @@ dependencies = [
  "reno-client",
  "reno-markdown",
  "reno-proto",
+ "reno-syntax",
  "serde_json",
  "tokio",
  "unicode-segmentation",

@@ -53,6 +53,7 @@ impl SettingsScreen {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn tab(&self) -> Tab {
         self.tab
     }

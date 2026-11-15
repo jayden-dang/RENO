@@ -33,10 +33,6 @@ impl RunsScreen {
         }
     }
 
-    pub(crate) fn filter(&self) -> RunFilter {
-        self.filter
-    }
-
     /// Called when the screen is shown: reads the first page of the current filter.
     pub(crate) fn shown(&self, cx: &mut Context<Self>) {
         self.load_more(cx);
@@ -73,13 +69,12 @@ impl RunsScreen {
             .children(view.counts.iter().map(|(filter, n)| {
                 let filter = *filter;
                 let on = filter == view.filter;
-                let chip = kit::chip(theme, format!("{} {n}", filter.label()))
+                kit::chip(theme, format!("{} {n}", filter.label()))
                     .id(SharedString::from(format!("filter-{}", filter.label())))
                     .debug_selector(move || format!("filter-{}", filter.label()))
                     .cursor_pointer()
                     .when(on, |c| c.bg(theme.raised).font_weight(FontWeight::MEDIUM))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)));
-                chip
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
             }))
             .into_any_element()
     }

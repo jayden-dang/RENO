@@ -2,15 +2,27 @@
 //!
 //! [`Streaming`] is the per-message cache: an [`IncrementalParser`] that re-parses only from the
 //! last stable block when text is appended, and the display tree it yields (the stable blocks are
-//! shared `Arc`s, only the tail is new). [`blocks`] turns a tree into elements. Syntax
-//! highlighting of code blocks (`reno-syntax`) is not wired yet; code is plain monospace.
+//! shared `Arc`s, only the tail is new). [`blocks`] turns a tree into elements.
+//!
+//! Code blocks are highlighted with `reno-syntax` when the fence names a language it knows; the
+//! result is cached per (language, code), so a repaint does not parse again. Links are clickable:
+//! only `http`, `https` and `mailto` URLs open, and a link whose URL is still streaming never
+//! does.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, FontStyle, FontWeight, IntoElement, SharedString, StrikethroughStyle, StyledText,
-    TextRun, UnderlineStyle, Window, div, prelude::*, px,
+    AnyElement, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, SharedString,
+    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*, px,
 };
+use reno_markdown::mend::PENDING_LINK_URL;
 use reno_markdown::parser::TableAlign;
 use reno_markdown::{Block, BlockTree, IncrementalParser, InlineRun};
+use reno_syntax::{HighlightKind, HighlightRequest, HighlightSpan, HighlightedDocument};
 
 use super::kit::MONO;
 use super::theme::Theme;
@@ -67,7 +79,7 @@ pub(crate) fn blocks(tree: &BlockTree, theme: &Theme, window: &Window) -> AnyEle
 
 fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
     match node {
-        Block::Paragraph { runs } => inline(runs, theme, window).into_any_element(),
+        Block::Paragraph { runs } => inline(runs, theme, window),
         Block::Heading { level, runs } => {
             let size = match level {
                 1 => 20.0,
@@ -82,8 +94,13 @@ fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
                 .child(inline(runs, theme, window))
                 .into_any_element()
         }
-        Block::CodeBlock { code, .. } => code_block(code.trim_end_matches('\n'), theme),
-        Block::Math { tex } => code_block(tex, theme),
+        Block::CodeBlock { code, language } => code_block(
+            code.trim_end_matches('\n'),
+            language.as_deref(),
+            theme,
+            window,
+        ),
+        Block::Math { tex } => code_block(tex, None, theme, window),
         Block::BlockQuote { children } => div()
             .pl(px(12.0))
             .border_l_2()
@@ -140,8 +157,112 @@ fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
     }
 }
 
-fn code_block(code: &str, theme: &Theme) -> AnyElement {
-    div()
+/// What a code token looks like. Accent is not spent here (UI brief); tokens differ by weight and
+/// by the semantic colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Token {
+    Plain,
+    Comment,
+    Str,
+    Number,
+    Keyword,
+    Type,
+    Function,
+}
+
+pub(crate) fn token_of(kind: HighlightKind) -> Token {
+    use HighlightKind as K;
+    match kind {
+        K::Comment => Token::Comment,
+        K::String | K::StringSpecial | K::Escape | K::MarkupRaw => Token::Str,
+        K::Number | K::Boolean | K::Constant => Token::Number,
+        K::Keyword | K::Tag | K::MarkupHeading | K::MarkupStrong => Token::Keyword,
+        K::Type | K::TypeBuiltin | K::Constructor => Token::Type,
+        K::Function | K::FunctionBuiltin | K::Macro => Token::Function,
+        _ => Token::Plain,
+    }
+}
+
+fn token_look(theme: &Theme, token: Token) -> (Hsla, FontWeight) {
+    match token {
+        Token::Plain | Token::Function => (theme.text, FontWeight::NORMAL),
+        Token::Comment => (theme.faint, FontWeight::NORMAL),
+        Token::Str => (theme.success, FontWeight::NORMAL),
+        Token::Number => (theme.warning, FontWeight::NORMAL),
+        Token::Keyword => (theme.text, FontWeight::SEMIBOLD),
+        Token::Type => (theme.muted, FontWeight::MEDIUM),
+    }
+}
+
+/// Splits a line into consecutive `(byte range, token)` pieces that cover all of it. Overlapping
+/// or out-of-range spans are skipped, so the pieces always tile the line.
+pub(crate) fn line_pieces(line: &str, spans: &[HighlightSpan]) -> Vec<(Range<usize>, Token)> {
+    let mut sorted: Vec<&HighlightSpan> = spans.iter().collect();
+    sorted.sort_by_key(|span| (span.range.start, span.range.end));
+    let mut pieces = Vec::new();
+    let mut at = 0;
+    for span in sorted {
+        let Range { start, end } = span.range;
+        if start < at
+            || end > line.len()
+            || start >= end
+            || !line.is_char_boundary(start)
+            || !line.is_char_boundary(end)
+        {
+            continue;
+        }
+        if start > at {
+            pieces.push((at..start, Token::Plain));
+        }
+        pieces.push((start..end, token_of(span.kind)));
+        at = end;
+    }
+    if at < line.len() {
+        pieces.push((at..line.len(), Token::Plain));
+    }
+    pieces
+}
+
+/// Most distinct code blocks kept highlighted; the cache is emptied when it grows past this.
+const HIGHLIGHT_CACHE: usize = 128;
+/// Code longer than this is shown plain: highlighting runs on every change of a streaming block.
+const HIGHLIGHT_MAX_BYTES: usize = 64 * 1024;
+
+type Cache = HashMap<(String, String), Option<Rc<HighlightedDocument>>>;
+
+thread_local! {
+    static HIGHLIGHTS: RefCell<Cache> = RefCell::new(HashMap::new());
+}
+
+/// The highlighted lines of `code`, or `None` when the fence names no known language.
+pub(crate) fn highlighted(code: &str, language: Option<&str>) -> Option<Rc<HighlightedDocument>> {
+    let tag = language?.trim();
+    if tag.is_empty() || code.len() > HIGHLIGHT_MAX_BYTES {
+        return None;
+    }
+    let key = (tag.to_owned(), code.to_owned());
+    HIGHLIGHTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+        if cache.len() >= HIGHLIGHT_CACHE {
+            cache.clear();
+        }
+        let doc = reno_syntax::highlight(HighlightRequest {
+            source: code,
+            path: None,
+            fence_tag: Some(tag),
+        })
+        .ok()
+        .map(Rc::new);
+        cache.insert(key, doc.clone());
+        doc
+    })
+}
+
+fn code_block(code: &str, language: Option<&str>, theme: &Theme, window: &Window) -> AnyElement {
+    let frame = div()
         .w_full()
         .px(px(14.0))
         .py(px(10.0))
@@ -151,8 +272,44 @@ fn code_block(code: &str, theme: &Theme) -> AnyElement {
         .border_color(theme.hairline)
         .font_family(MONO)
         .text_size(px(12.5))
-        .line_height(px(19.0))
-        .child(SharedString::from(code.to_owned()))
+        .line_height(px(19.0));
+    let doc = highlighted(code, language);
+    let lines: Vec<&str> = code.split('\n').collect();
+    let Some(doc) = doc.filter(|d| d.lines.len() == lines.len()) else {
+        return frame
+            .child(SharedString::from(code.to_owned()))
+            .into_any_element();
+    };
+    let base = window.text_style();
+    frame
+        .flex()
+        .flex_col()
+        .children(lines.iter().zip(doc.lines.iter()).map(|(line, spans)| {
+            if line.is_empty() {
+                // An empty line still takes its height.
+                return div().h(px(19.0)).into_any_element();
+            }
+            let runs: Vec<TextRun> = line_pieces(line, spans)
+                .into_iter()
+                .map(|(range, token)| {
+                    let (color, weight) = token_look(theme, token);
+                    let mut font = base.font();
+                    font.family = MONO.into();
+                    font.weight = weight;
+                    TextRun {
+                        len: range.len(),
+                        font,
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }
+                })
+                .collect();
+            StyledText::new(SharedString::from((*line).to_owned()))
+                .with_runs(runs)
+                .into_any_element()
+        }))
         .into_any_element()
 }
 
@@ -191,11 +348,25 @@ fn table(
         .into_any_element()
 }
 
-/// One paragraph of styled runs.
-fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> StyledText {
+/// Whether a link may be opened from the transcript: web and mail links only. Anything else
+/// (`file:`, custom schemes) could launch another program, and a link still streaming has no
+/// destination yet.
+pub(crate) fn openable(url: &str) -> bool {
+    if url == PENDING_LINK_URL {
+        return false;
+    }
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
+/// One paragraph of styled runs; links that may be opened are clickable.
+fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> AnyElement {
     let base = window.text_style();
     let mut text = String::new();
     let mut spans = Vec::with_capacity(runs.len());
+    let mut links: Vec<(Range<usize>, String)> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
@@ -212,6 +383,9 @@ fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> StyledText {
             font.family = MONO.into();
         }
         let link = style.link.is_some();
+        if let Some(url) = style.link.as_deref().filter(|u| openable(u)) {
+            links.push((text.len()..text.len() + run.text.len(), url.to_owned()));
+        }
         spans.push(TextRun {
             len: run.text.len(),
             font,
@@ -229,7 +403,20 @@ fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> StyledText {
         });
         text.push_str(&run.text);
     }
-    StyledText::new(SharedString::from(text)).with_runs(spans)
+    let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
+    if links.is_empty() {
+        return styled.into_any_element();
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+    InteractiveText::new(("md-text", hasher.finish() as usize), styled)
+        .on_click(ranges, move |ix, _, cx| {
+            if let Some(url) = urls.get(ix) {
+                cx.open_url(url);
+            }
+        })
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -241,6 +428,81 @@ mod tests {
             Block::Paragraph { runs } => plain(runs),
             other => panic!("expected a paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        assert!(openable("https://example.org/a"));
+        assert!(openable("HTTP://example.org"));
+        assert!(openable("mailto:a@example.org"));
+        assert!(!openable("file:///etc/passwd"));
+        assert!(!openable("javascript:alert(1)"));
+        assert!(!openable("zed://x"));
+        assert!(
+            !openable(PENDING_LINK_URL),
+            "a link still streaming is not clickable"
+        );
+        assert!(!openable(""));
+    }
+
+    #[test]
+    fn rust_code_is_highlighted_and_cached() {
+        let code = "fn main() {\n    let n = 1; // one\n}";
+        let doc = highlighted(code, Some("rust")).expect("rust is bundled");
+        assert_eq!(doc.lines.len(), 3);
+        let kinds: Vec<Token> = line_pieces("fn main() {", &doc.lines[0])
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert!(kinds.contains(&Token::Keyword), "{kinds:?}");
+        let second = line_pieces("    let n = 1; // one", &doc.lines[1]);
+        assert!(second.iter().any(|(_, t)| *t == Token::Comment));
+        assert!(second.iter().any(|(_, t)| *t == Token::Number));
+        // The same code again is the same allocation.
+        let again = highlighted(code, Some("rust")).unwrap();
+        assert!(Rc::ptr_eq(&doc, &again));
+    }
+
+    #[test]
+    fn unknown_or_missing_languages_stay_plain() {
+        assert!(highlighted("x", None).is_none());
+        assert!(highlighted("x", Some("klingon")).is_none());
+        assert!(highlighted("x", Some("  ")).is_none());
+    }
+
+    #[test]
+    fn pieces_always_tile_the_line() {
+        let spans = vec![
+            HighlightSpan {
+                range: 2..4,
+                kind: HighlightKind::Keyword,
+            },
+            // Overlaps the previous one: skipped.
+            HighlightSpan {
+                range: 3..6,
+                kind: HighlightKind::String,
+            },
+            // Out of range: skipped.
+            HighlightSpan {
+                range: 8..99,
+                kind: HighlightKind::Number,
+            },
+        ];
+        let pieces = line_pieces("abcdefgh", &spans);
+        let total: usize = pieces.iter().map(|(r, _)| r.len()).sum();
+        assert_eq!(total, 8);
+        assert_eq!(pieces[0], (0..2, Token::Plain));
+        assert_eq!(pieces[1], (2..4, Token::Keyword));
+        assert_eq!(pieces[2], (4..8, Token::Plain));
+        // Multi-byte text is split only on character boundaries.
+        let pieces = line_pieces(
+            "é1",
+            &[HighlightSpan {
+                range: 1..2,
+                kind: HighlightKind::Number,
+            }],
+        );
+        assert_eq!(pieces, vec![(0..3, Token::Plain)]);
     }
 
     #[test]
