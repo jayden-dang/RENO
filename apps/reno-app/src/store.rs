@@ -14,7 +14,10 @@
 //!    returned `Changed` says a view shows (connection, daemon, runs, approvals). A transcript-only
 //!    change redraws nothing on Home.
 //!
-//! Actions (`decide`, `run_task`) run on tokio and report back. A decided approval is not removed
+//! The open run (the Run screen) is followed through the mirror, and a transcript event of that
+//! run notifies too; a transcript of any other run still redraws nothing.
+//!
+//! Actions (`decide`, `run_task`, `steer`, `cancel_run`) run on tokio and report back. A decided approval is not removed
 //! locally: the card goes away when the daemon's `approvals.watch` update arrives.
 //!
 //! Dropping the store drops its task, the `Mirror` (which cancels its tracked tasks) and the
@@ -30,7 +33,8 @@ use gpui::{Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
 use reno_client::fake::FakeDaemon;
 use reno_client::{
-    Changed, Client, ClientError, ConnectionStatus, Mirror, MirrorConfig, State, Update, Updates,
+    Changed, Client, ClientError, ConnectionStatus, Mirror, MirrorConfig, State, Transcript, Update,
+    Updates,
 };
 use reno_proto::{ApprovalDecision, ApprovalId, RunId, TaskRunParams};
 
@@ -54,6 +58,8 @@ pub(crate) struct Store {
     deciding: BTreeSet<ApprovalId>,
     /// Ages use the system clock (a real daemon) or the state's newest timestamp (the fake).
     system_clock: bool,
+    /// The run the Run screen shows: its transcript changes notify.
+    open: Option<RunId>,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
     bridge: Option<Task<()>>,
 }
@@ -70,6 +76,7 @@ impl Store {
             offline_reason: None,
             deciding: BTreeSet::new(),
             system_clock: false,
+            open: None,
             bridge: None,
         }
     }
@@ -98,7 +105,13 @@ impl Store {
     /// Applies one update and notifies only for what changed on screen.
     pub(crate) fn apply(&mut self, update: Update, cx: &mut Context<Self>) -> Changed {
         let changed = self.state.apply(update);
-        if changed.connection || changed.daemon || changed.runs || changed.approvals {
+        let open_run_changed = self.open.as_ref().is_some_and(|run| changed.run(run));
+        if changed.connection
+            || changed.daemon
+            || changed.runs
+            || changed.approvals
+            || open_run_changed
+        {
             cx.notify();
         }
         changed
@@ -175,6 +188,61 @@ impl Store {
             })
             .ok();
         }));
+    }
+
+    /// Shows `run`: starts following its transcript from where the state has it. The mirror's
+    /// tasks live on tokio, so the call enters the runtime first. A run already followed is left
+    /// alone.
+    pub(crate) fn open_run(&mut self, run: RunId, cx: &mut Context<Self>) {
+        self.open = Some(run.clone());
+        let from = self.state.transcript(&run).map(Transcript::resume_from);
+        if let Some(mirror) = &self.mirror {
+            let _entered = Tokio::handle(cx).enter();
+            mirror.follow_run(run, from);
+        }
+        cx.notify();
+    }
+
+    /// `run.steer`. A failure is reported as a store event.
+    pub(crate) fn steer(&mut self, run: RunId, prompt: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            cx.emit(StoreEvent::Failed("The daemon is not running.".to_owned()));
+            return;
+        };
+        let call = Tokio::spawn(cx, async move { client.steer(&run, prompt).await });
+        Self::report(call, "Could not steer the run", cx);
+    }
+
+    /// `run.cancel`: Stop. The run's new state arrives through `runs.watch`.
+    pub(crate) fn cancel_run(&mut self, run: RunId, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            cx.emit(StoreEvent::Failed("The daemon is not running.".to_owned()));
+            return;
+        };
+        let call = Tokio::spawn(cx, async move {
+            client
+                .cancel_run(&run, Some("stopped from the app".to_owned()))
+                .await
+                .map(|_| ())
+        });
+        Self::report(call, "Could not stop the run", cx);
+    }
+
+    /// Turns the outcome of a fire-and-forget call into a `Failed` event.
+    fn report(
+        call: Task<Result<Result<(), ClientError>, gpui_tokio::JoinError>>,
+        what: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            if let Err(reason) = flatten(call.await) {
+                this.update(cx, |_, cx| {
+                    cx.emit(StoreEvent::Failed(format!("{what}: {reason}")));
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Answers a held action. The card leaves when the daemon reports the new list.

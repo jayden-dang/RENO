@@ -27,7 +27,8 @@
 //!
 //! `approval.decide` removes the approval and resumes the run: approve ends `succeeded`, deny ends
 //! `failed` with `Done(error, "approval denied")`. Held demo runs resume the same way.
-//! `run.cancel` ends a run `cancelled` with `Done(interrupted)`.
+//! `run.steer` on a live run journals a `UserMessage` at once, then a short scripted reply one
+//! step later; on a finished run it is a conflict. `run.cancel` ends a run `cancelled` with `Done(interrupted)`.
 //!
 //! # Lifecycle (ARCH-11)
 //!
@@ -49,8 +50,8 @@ use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideResult, ApprovalList, ApprovalListResult,
     ApprovalsSnapshot, ApprovalsWatch, DaemonHello, DaemonStatus, DaemonStatusInfo, ErrorCode,
     ErrorObject, FEATURES, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelResult,
-    RunEventItem, RunEvents, RunGet, RunId, RunList, RunListResult, RunSummary, RunsSnapshot,
-    RunsWatch, SubGap, SubGapParams, TaskRun, TaskRunResult,
+    RunEventItem, RunEvents, RunGet, RunId, RunList, RunListResult, RunSteer, RunSteerResult,
+    RunSummary, RunsSnapshot, RunsWatch, SubGap, SubGapParams, TaskRun, TaskRunResult,
 };
 use reno_rpc::{Router, Server, ServerConfig, ServerStats, SubItem, connect_in_memory_with_buffer};
 use tokio::sync::watch;
@@ -370,6 +371,23 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let run_steer = move |p: reno_proto::RunSteerParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            if s.read(|w| w.run(&p.run_id).is_none()) {
+                return Err(not_found("run"));
+            }
+            // The message is journalled at once; the reply follows on the script's pace.
+            let live = s.with(|w| w.steer(&p.run_id, &p.prompt)).ok_or_else(|| {
+                ErrorObject::new(ErrorCode::Conflict, "the run has already ended")
+            })?;
+            s.tracker
+                .spawn(script::reply_to_steer(Arc::clone(&s), live));
+            Ok(RunSteerResult {})
+        }
+    };
+
+    let s = Arc::clone(shared);
     let approval_list = move |_: NoParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -442,6 +460,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunGet, _, _>(run_get)
         .method::<RunList, _, _>(run_list)
         .method::<RunCancel, _, _>(run_cancel)
+        .method::<RunSteer, _, _>(run_steer)
         .method::<ApprovalList, _, _>(approval_list)
         .method::<ApprovalDecide, _, _>(approval_decide)
         .subscription::<RunEvents, _, _, _>(run_events)

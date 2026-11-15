@@ -1,10 +1,11 @@
-//! The ⌘K command palette: the nav destinations and a few actions, filtered as you type.
+//! The Cmd-K command palette: the nav destinations and a few actions, filtered as you type.
 
 use gpui::{
     Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString,
     Window, div, prelude::*, px,
 };
 
+use super::icon::{Icon, icon};
 use super::theme;
 use crate::nav::Nav;
 
@@ -20,6 +21,7 @@ pub(crate) enum PaletteAction {
 pub(crate) struct Entry {
     pub(crate) label: &'static str,
     pub(crate) hint: &'static str,
+    pub(crate) icon: Icon,
     pub(crate) action: PaletteAction,
 }
 
@@ -28,6 +30,7 @@ pub(crate) fn entries() -> Vec<Entry> {
     let go = |nav: Nav| Entry {
         label: nav.label(),
         hint: if nav.is_built() { "Go to" } else { "Phase 1" },
+        icon: nav.icon(),
         action: PaletteAction::Go(nav),
     };
     Nav::MAIN
@@ -38,11 +41,13 @@ pub(crate) fn entries() -> Vec<Entry> {
             Entry {
                 label: "Toggle theme",
                 hint: "Action",
+                icon: Icon::Settings,
                 action: PaletteAction::ToggleTheme,
             },
             Entry {
                 label: "Hide or show sidebar",
                 hint: "⌘B",
+                icon: Icon::Sidebar,
                 action: PaletteAction::ToggleSidebar,
             },
         ])
@@ -201,7 +206,14 @@ impl Render for Palette {
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.emit(PaletteEvent::Run(action));
                     }))
-                    .child(entry.label)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(icon(entry.icon, 15.0, theme.muted))
+                            .child(entry.label),
+                    )
                     .child(
                         div()
                             .text_size(px(12.0))

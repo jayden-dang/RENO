@@ -53,6 +53,11 @@ pub(crate) fn is_live(status: RunStatus) -> bool {
     )
 }
 
+/// Whether a run can still be steered: it has not ended, and has not been interrupted.
+pub(crate) fn is_steerable(status: RunStatus) -> bool {
+    !status.is_terminal() && status != RunStatus::Interrupted
+}
+
 pub(crate) fn attention(state: &State) -> Attention {
     let runs = state.runs();
     let bots: BTreeSet<&str> = runs
@@ -93,6 +98,53 @@ pub(crate) fn age_label(age_ms: u64) -> String {
         format!("{}h", (age_ms + HOUR / 2) / HOUR)
     } else {
         format!("{}d", age_ms / DAY)
+    }
+}
+
+/// The state pill's words.
+pub(crate) fn status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Queued => "queued",
+        RunStatus::Leased => "starting",
+        RunStatus::Running => "running",
+        RunStatus::WaitingInput => "needs input",
+        RunStatus::WaitingApproval => "held for you",
+        RunStatus::Evaluating => "evaluating",
+        RunStatus::Succeeded => "passed",
+        RunStatus::Failed => "failed",
+        RunStatus::Interrupted => "interrupted",
+        RunStatus::Cancelled => "stopped",
+    }
+}
+
+/// An executor's display name.
+pub(crate) fn executor_name(id: &str) -> &str {
+    match id {
+        "claude-code" => "Claude Code",
+        "codex" => "Codex",
+        "grok" => "Grok",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
+
+/// "06:00 UTC": the time of day of a timestamp. The app has no time-zone data yet, so the zone is
+/// said out loud.
+pub(crate) fn clock_utc(ms: u64) -> String {
+    let minutes = ms / 60_000 % (24 * 60);
+    format!("{:02}:{:02} UTC", minutes / 60, minutes % 60)
+}
+
+/// "6h 26m", "14m 05s", "9s": how long something took.
+pub(crate) fn duration_label(ms: u64) -> String {
+    let secs = ms / 1_000;
+    let (h, m, s) = (secs / 3_600, secs / 60 % 60, secs % 60);
+    if h > 0 {
+        format!("{h}h {m:02}m")
+    } else if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
     }
 }
 

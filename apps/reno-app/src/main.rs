@@ -10,6 +10,7 @@ mod route;
 mod screens;
 mod store;
 mod summary;
+mod transcript;
 mod ui;
 
 #[cfg(test)]

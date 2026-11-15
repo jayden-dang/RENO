@@ -15,12 +15,15 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
+use reno_proto::RunId;
 
 use crate::actions::{self, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
 use crate::nav::Nav;
 use crate::screens::home::HomeScreen;
+use crate::screens::run::RunScreen;
 use crate::store::{Store, StoreEvent};
 use crate::ui::composer;
+use crate::ui::icon::{Assets, Icon};
 use crate::ui::kit::{self, SANS};
 use crate::ui::motion::{self, ReduceMotion};
 use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
@@ -85,7 +88,7 @@ fn register_fonts(cx: &mut App) {
 }
 
 pub(crate) fn run(options: Options) {
-    application().run(move |cx: &mut App| {
+    application().with_assets(Assets).run(move |cx: &mut App| {
         gpui_tokio::init(cx);
         register_fonts(cx);
         let preference = if options.reduce_motion {
@@ -152,11 +155,18 @@ pub(crate) fn run(options: Options) {
     });
 }
 
+/// What the canvas panel shows.
+#[derive(Clone)]
+enum Screen {
+    Home,
+    Run(Entity<RunScreen>),
+}
+
 pub(crate) struct RootView {
     store: Entity<Store>,
     home: Entity<HomeScreen>,
     toasts: Entity<Toasts>,
-    nav: Nav,
+    screen: Screen,
     sidebar_hidden: bool,
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
     appearance_override: Option<Appearance>,
@@ -178,7 +188,7 @@ impl RootView {
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
-            cx.subscribe(&store, |_, _, event: &StoreEvent, cx| match event {
+            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| match event {
                 StoreEvent::Failed(message) => {
                     toast::push(
                         cx,
@@ -187,21 +197,14 @@ impl RootView {
                         message.clone(),
                     );
                 }
-                StoreEvent::RunStarted(run) => {
-                    toast::push(
-                        cx,
-                        toast::Tone::Info,
-                        "Run started",
-                        format!("{run} is queued."),
-                    );
-                }
+                StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
             }),
         ];
         Self {
             store,
             home,
             toasts,
-            nav: Nav::Home,
+            screen: Screen::Home,
             sidebar_hidden: false,
             appearance_override,
             palette: None,
@@ -210,9 +213,20 @@ impl RootView {
         }
     }
 
-    #[cfg(test)]
+    /// The sidebar destination the screen belongs to.
     pub(crate) fn nav(&self) -> Nav {
-        self.nav
+        match self.screen {
+            Screen::Home => Nav::Home,
+            Screen::Run(_) => Nav::Runs,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_screen(&self) -> Option<&Entity<RunScreen>> {
+        match &self.screen {
+            Screen::Run(run) => Some(run),
+            Screen::Home => None,
+        }
     }
 
     #[cfg(test)]
@@ -235,20 +249,39 @@ impl RootView {
             .unwrap_or_else(|| Appearance::from(window.appearance()))
     }
 
+    /// Focuses the screen's text input: Home's composer or the run's steer input.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.home.read(cx).composer().focus_handle(cx);
+        let handle = match &self.screen {
+            Screen::Home => self.home.read(cx).composer().focus_handle(cx),
+            Screen::Run(run) => run.read(cx).focus_handle(cx),
+        };
         window.focus(&handle, cx);
     }
 
-    /// Home is the only built screen; every other destination is a toast.
+    /// Home is the only destination with a screen of its own (runs open from the sidebar or
+    /// after a send); every other destination is a toast.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         if nav.is_built() {
-            self.nav = nav;
+            self.screen = Screen::Home;
             self.focus_composer(window, cx);
             cx.notify();
         } else {
             toast::not_yet(cx, nav.label());
         }
+    }
+
+    /// Shows one run and follows its transcript.
+    pub(crate) fn open_run(&mut self, run: RunId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Run(open) = &self.screen
+            && open.read(cx).run_id() == &run
+        {
+            return;
+        }
+        let store = self.store.clone();
+        let screen = cx.new(|cx| RunScreen::new(store, run, cx));
+        self.screen = Screen::Run(screen);
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -320,7 +353,12 @@ impl RootView {
         SidebarHandlers {
             navigate,
             hide,
-            recent_run: Rc::new(|_, cx| toast::not_yet(cx, "The run view")),
+            recent_run: {
+                let this = this.clone();
+                Rc::new(move |run: RunId, window: &mut Window, cx: &mut App| {
+                    this.update(cx, |root, cx| root.open_run(run, window, cx));
+                })
+            },
             settings: Rc::new(|_, cx| toast::not_yet(cx, "Settings")),
         }
     }
@@ -336,7 +374,7 @@ impl RootView {
             .pl(px(84.0))
             .window_control_area(WindowControlArea::Drag)
             .child(
-                kit::icon_button(theme, "show-sidebar", "◧", 28.0).on_click(move |_, _, cx| {
+                kit::icon_button(theme, "show-sidebar", Icon::Sidebar, 28.0).on_click(move |_, _, cx| {
                     this.update(cx, |root, cx| root.toggle_sidebar(cx));
                 }),
             )
@@ -368,7 +406,10 @@ impl Render for RootView {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
-            .child(self.home.clone());
+            .child(match &self.screen {
+                Screen::Home => self.home.clone().into_any_element(),
+                Screen::Run(run) => run.clone().into_any_element(),
+            });
 
         let main = div()
             .flex_1()
@@ -404,7 +445,7 @@ impl Render for RootView {
                 root.child(sidebar::sidebar(
                     &theme,
                     self.store.read(cx),
-                    self.nav,
+                    self.nav(),
                     &handlers,
                 ))
             })

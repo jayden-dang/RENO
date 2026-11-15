@@ -12,6 +12,7 @@ use gpui::{
 use reno_client::ConnectionStatus;
 use reno_proto::{Approval, ApprovalDecision};
 
+use super::icon::{Icon, icon};
 use super::kit::{self, MONO};
 use super::running_pill::running_pill;
 use super::theme::{self, Theme};
@@ -75,7 +76,8 @@ impl AttentionDock {
         let approve = approval.clone();
         let button = |label: &'static str, id: SharedString| {
             div()
-                .id(id)
+                .id(id.clone())
+                .debug_selector(move || id.to_string())
                 .h(px(28.0))
                 .px(px(13.0))
                 .flex()
@@ -269,12 +271,11 @@ impl Render for AttentionDock {
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .child(summary_row)
             .when(!approvals.is_empty(), |pill| {
-                pill.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.muted)
-                        .child(if open { "⌄" } else { "⌃" }),
-                )
+                pill.child(icon(
+                    if open { Icon::ChevDown } else { Icon::ChevUp },
+                    14.0,
+                    theme.muted,
+                ))
             });
 
         div()

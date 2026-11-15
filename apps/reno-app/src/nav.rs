@@ -1,4 +1,6 @@
-//! Navigation destinations. Only Home is built in Phase 0.
+//! Navigation destinations. Home and a single run are built in Phase 0.
+
+use crate::ui::icon::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Nav {
@@ -54,21 +56,21 @@ impl Nav {
         }
     }
 
-    /// A text glyph standing in for the row icon (no icon set is bundled yet).
-    pub(crate) const fn glyph(self) -> &'static str {
+    /// The row icon.
+    pub(crate) const fn icon(self) -> Icon {
         match self {
-            Self::Home => "⌂",
-            Self::Inbox => "▤",
-            Self::Runs => "▷",
-            Self::Flows => "⑂",
-            Self::Bots => "◉",
-            Self::Teams => "⚇",
-            Self::Boards => "▦",
-            Self::Messages => "✉",
-            Self::Evaluations => "▮",
-            Self::Improvements => "✦",
-            Self::Triggers => "◷",
-            Self::Executors => "⚙",
+            Self::Home => Icon::Home,
+            Self::Inbox => Icon::Inbox,
+            Self::Runs => Icon::Terminal,
+            Self::Flows => Icon::Flow,
+            Self::Bots => Icon::Bot,
+            Self::Teams => Icon::Team,
+            Self::Boards => Icon::Board,
+            Self::Messages => Icon::Msg,
+            Self::Evaluations => Icon::Eval,
+            Self::Improvements => Icon::Wand,
+            Self::Triggers => Icon::Clock,
+            Self::Executors => Icon::Cpu,
         }
     }
 

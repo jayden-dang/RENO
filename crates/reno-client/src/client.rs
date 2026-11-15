@@ -18,8 +18,8 @@ use reno_proto::{
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonStatus,
     DaemonStatusInfo, FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel,
     RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunId,
-    RunList, RunListParams, RunStatus, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, Seq,
-    TaskRun, TaskRunParams,
+    RunList, RunListParams, RunStatus, RunSteer, RunSteerParams, RunSummary, RunsSnapshot,
+    RunsWatch, RunsWatchParams, Seq, TaskRun, TaskRunParams,
 };
 use reno_rpc::{SubEvent, SubStream};
 use serde::de::DeserializeOwned;
@@ -143,6 +143,17 @@ impl Client {
             reason,
         };
         Ok(self.rpc.call::<RunCancel>(params).await?.status)
+    }
+
+    /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
+    pub async fn steer(&self, run_id: &RunId, prompt: String) -> Result<(), ClientError> {
+        self.require(reno_proto::FEATURE_RUN_STEER)?;
+        let params = RunSteerParams {
+            run_id: run_id.clone(),
+            prompt,
+        };
+        self.rpc.call::<RunSteer>(params).await?;
+        Ok(())
     }
 
     /// `approval.list`: the pending approvals, oldest first.

@@ -496,3 +496,32 @@ async fn dropping_the_mirror_stops_its_tasks() {
             .is_none()
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn steering_a_live_run_journals_the_message_and_a_reply() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    assert!(client.supports("run.steer"));
+    let id = client.run_task(task("hello")).await.unwrap();
+    client
+        .steer(&id, "use fewer words".to_owned())
+        .await
+        .unwrap();
+    let all = events(&client, &id).await;
+    assert_consecutive(&all);
+    let steer_at = all
+        .iter()
+        .position(
+            |(_, e)| matches!(e, ExecEvent::UserMessage { text } if text == "use fewer words"),
+        )
+        .expect("the steer is journalled");
+    assert!(
+        all[steer_at + 1..]
+            .iter()
+            .any(|(_, e)| matches!(e, ExecEvent::Text { text } if text.starts_with("Understood"))),
+        "a scripted reply follows the steer"
+    );
+    assert!(is_done(&all.last().unwrap().1, StopReason::Completed));
+    // A finished run cannot be steered.
+    assert!(client.steer(&id, "late".to_owned()).await.is_err());
+    assert!(client.steer(&run("nosuch"), "x".to_owned()).await.is_err());
+}

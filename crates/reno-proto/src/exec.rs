@@ -242,6 +242,12 @@ pub enum ExecEvent {
         /// What is being approved.
         subject: ApprovalSubject,
     },
+    /// A message from the human, added by `run.steer`. Only daemons that negotiate the
+    /// `run.steer` feature emit it.
+    UserMessage {
+        /// The message text.
+        text: String,
+    },
     /// The run ended; always the last event.
     Done {
         /// Why it stopped.
