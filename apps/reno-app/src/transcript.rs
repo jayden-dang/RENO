@@ -16,10 +16,15 @@
 //!   end it.
 //! - `NeedsApproval` is a card only while a pending approval of this run has the same subject.
 //!   After that it is a one-line "asked to approve" note.
+//! - `ApprovalResolved` is one muted status line saying who decided and why ("Approved by rule
+//!   cargo in the worktree", "Denied: nobody answered in time"). It follows the note or card of
+//!   the request it answers.
 //! - `Usage` and `Started` feed [`Facts`] for the details pane and make no row.
 //! - `Done` is the last row; anything after it is ignored.
 
-use reno_proto::{Approval, ApprovalSubject, ExecEvent, Question, Seq, StopReason};
+use reno_proto::{
+    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ResolvedBy, Seq, StopReason,
+};
 
 use crate::summary;
 
@@ -81,7 +86,7 @@ pub(crate) enum Row {
     },
     /// An inline approval card: the approval is pending.
     Approval { key: Key, approval: Approval },
-    /// A past approval request, one muted line.
+    /// A past approval request or its resolution, one muted line.
     Asked { key: Key, line: String },
     /// The final status line.
     Done {
@@ -264,6 +269,15 @@ pub(crate) fn build_rows(
                     });
                 }
             }
+            ExecEvent::ApprovalResolved {
+                decision,
+                by,
+                message,
+                ..
+            } => built.rows.push(Row::Asked {
+                key,
+                line: resolved_line(*decision, by, message.as_deref()),
+            }),
             ExecEvent::Done {
                 stop,
                 result,
@@ -280,6 +294,23 @@ pub(crate) fn build_rows(
         }
     }
     built
+}
+
+/// The status line of a resolved approval: the outcome, then who decided.
+fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&str>) -> String {
+    let outcome = match decision {
+        ApprovalOutcome::Approved => "Approved",
+        ApprovalOutcome::Denied => "Denied",
+    };
+    match by {
+        ResolvedBy::Human => format!("{outcome} by you"),
+        ResolvedBy::Rule { name } => match message {
+            Some(message) => format!("{outcome} by rule {name}: {message}"),
+            None => format!("{outcome} by rule {name}"),
+        },
+        ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
+        ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
+    }
 }
 
 fn asked_line(subject: &ApprovalSubject) -> String {
@@ -574,6 +605,76 @@ mod tests {
                 questions: vec![q]
             }]
         );
+    }
+
+    #[test]
+    fn a_resolved_approval_is_one_status_line_saying_who_decided() {
+        let resolved = |decision, by, message: Option<&str>| ExecEvent::ApprovalResolved {
+            request_id: "req".into(),
+            decision,
+            by,
+            message: message.map(str::to_owned),
+        };
+        let rule = |name: &str| ResolvedBy::Rule { name: name.into() };
+        let cases = [
+            (
+                resolved(
+                    ApprovalOutcome::Approved,
+                    rule("cargo in the worktree"),
+                    None,
+                ),
+                "Approved by rule cargo in the worktree",
+            ),
+            (
+                resolved(
+                    ApprovalOutcome::Denied,
+                    rule("force push"),
+                    Some("denied by policy: force push"),
+                ),
+                "Denied by rule force push: denied by policy: force push",
+            ),
+            (
+                resolved(ApprovalOutcome::Approved, ResolvedBy::Human, None),
+                "Approved by you",
+            ),
+            (
+                resolved(ApprovalOutcome::Denied, ResolvedBy::Human, None),
+                "Denied by you",
+            ),
+            (
+                resolved(ApprovalOutcome::Denied, ResolvedBy::Expired, None),
+                "Denied: nobody answered in time",
+            ),
+            (
+                resolved(ApprovalOutcome::Denied, ResolvedBy::RepeatDenial, None),
+                "Denied: it was denied earlier in this run",
+            ),
+        ];
+        for (event, line) in cases {
+            let built = build(
+                vec![
+                    ExecEvent::NeedsApproval {
+                        request_id: "req".into(),
+                        subject: subject("cargo test"),
+                    },
+                    event,
+                ],
+                &[],
+            );
+            // The request's own note, then the resolution; nothing else.
+            assert_eq!(built.rows.len(), 2, "{line}");
+            assert!(matches!(
+                &built.rows[0],
+                Row::Asked { line, .. } if line == "Asked to approve cargo test"
+            ));
+            assert_eq!(
+                built.rows[1],
+                Row::Asked {
+                    key: Key(2),
+                    line: line.to_owned()
+                }
+            );
+        }
     }
 
     #[test]
