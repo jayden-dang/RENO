@@ -170,15 +170,31 @@ impl InboxScreen {
                             .child(SharedString::from(row.line.clone())),
                     )
                     .child(
+                        // The chips wrap among themselves; the two decisions stay together on
+                        // the right, so a narrow window never splits Deny from Approve.
                         div()
                             .flex()
-                            .flex_wrap()
-                            .items_center()
+                            .items_start()
                             .gap(px(8.0))
-                            .children(chips)
-                            .child(div().flex_1())
-                            .child(deny_button)
-                            .child(approve_button),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .children(chips),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(deny_button)
+                                    .child(approve_button),
+                            ),
                     ),
             )
             .into_any_element()
@@ -210,8 +226,10 @@ impl InboxScreen {
             .on_click(open)
             .child(
                 div()
-                    .flex_none()
-                    .w(px(96.0))
+                    .map(|d| page::cell(d, Some(96.0)))
+                    // The verdict is one short word; it keeps its width so it never runs into
+                    // the command beside it.
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .gap(px(7.0))
@@ -221,8 +239,7 @@ impl InboxScreen {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .map(|d| page::cell(d, None))
                     .truncate()
                     .font_family(MONO)
                     .text_size(px(12.5))
@@ -230,24 +247,21 @@ impl InboxScreen {
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(130.0))
+                    .map(|d| page::cell(d, Some(130.0)))
                     .truncate()
                     .text_color(theme.muted)
                     .child(row.bot.clone().unwrap_or_default()),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(190.0))
+                    .map(|d| page::cell(d, Some(190.0)))
                     .truncate()
                     .text_color(theme.muted)
                     .child(format!("by {}", row.by)),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(80.0))
+                    .map(|d| page::cell(d, Some(80.0)))
                     .text_color(theme.faint)
                     .child(row.when.clone()),
             )

@@ -216,11 +216,23 @@ pub(crate) fn table_head(theme: &Theme, cols: &[(&'static str, Option<f32>)]) ->
         )
 }
 
-/// One cell of `width` px, or a flexing cell.
+/// The narrowest a flexing cell gets: at the window's minimum width the fixed cells give way
+/// first, so the column that carries the row's meaning (a task, a schedule) never collapses.
+const FLEX_CELL_MIN: f32 = 160.0;
+
+/// How far a sized cell may shrink below its width when the table is narrow.
+const SIZED_CELL_FLOOR: f32 = 0.6;
+
+/// One cell of about `width` px, or a flexing cell. Sized cells shrink (down to
+/// [`SIZED_CELL_FLOOR`] of their width) before a flexing cell goes below [`FLEX_CELL_MIN`].
 pub(crate) fn cell(cell: Div, width: Option<f32>) -> Div {
     match width {
-        Some(w) => cell.flex_none().w(px(w)),
-        None => cell.flex_1().min_w_0(),
+        Some(w) => cell
+            .flex_grow(0.0)
+            .flex_shrink_1()
+            .flex_basis(px(w))
+            .min_w(px(w * SIZED_CELL_FLOOR)),
+        None => cell.flex_1().min_w(px(FLEX_CELL_MIN)),
     }
 }
 

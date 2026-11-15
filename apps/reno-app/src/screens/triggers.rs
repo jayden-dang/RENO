@@ -115,8 +115,7 @@ impl TriggersScreen {
             .items_start()
             .child(
                 div()
-                    .flex_none()
-                    .w(px(190.0))
+                    .map(|d| page::cell(d, Some(190.0)))
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
@@ -153,8 +152,7 @@ impl TriggersScreen {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .map(|d| page::cell(d, None))
                     .font_family(MONO)
                     .text_size(px(12.0))
                     .line_height(px(18.0))
@@ -166,8 +164,7 @@ impl TriggersScreen {
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(110.0))
+                    .map(|d| page::cell(d, Some(110.0)))
                     .text_color(if row.status == TriggerStatus::BackedOff {
                         theme.warning
                     } else {
@@ -175,11 +172,10 @@ impl TriggersScreen {
                     })
                     .child(row.next.clone().unwrap_or_else(|| "\u{2014}".to_owned())),
             )
-            .child(div().flex_none().w(px(130.0)).child(last_cell))
+            .child(page::cell(div(), Some(130.0)).child(last_cell))
             .child(
                 div()
-                    .flex_none()
-                    .w(px(190.0))
+                    .map(|d| page::cell(d, Some(190.0)))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))

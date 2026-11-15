@@ -47,6 +47,8 @@ pub(crate) struct Options {
     pub(crate) quit_after: Option<Duration>,
     /// `RENO_REDUCE_MOTION=1`: force reduced motion (the OS setting is not read, see `motion`).
     pub(crate) reduce_motion: bool,
+    /// `RENO_OPEN=inbox|runs|triggers|settings`: open on that screen (screenshots, reviews).
+    pub(crate) open: Option<Nav>,
 }
 
 impl Options {
@@ -70,6 +72,14 @@ impl Options {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis);
         options.reduce_motion = env("RENO_REDUCE_MOTION").is_some_and(|v| v == "1");
+        options.open = match env("RENO_OPEN").as_deref() {
+            None | Some("" | "home") => None,
+            Some("inbox") => Some(Nav::Inbox),
+            Some("runs") => Some(Nav::Runs),
+            Some("triggers") => Some(Nav::Triggers),
+            Some("settings") => Some(Nav::Settings),
+            Some(other) => return Err(format!("unknown RENO_OPEN screen: {other}")),
+        };
         Ok(options)
     }
 }
@@ -119,6 +129,7 @@ pub(crate) fn run(options: Options) {
 
         let bounds = default_bounds(cx);
         let appearance = options.appearance;
+        let open = options.open;
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -133,7 +144,12 @@ pub(crate) fn run(options: Options) {
             },
             |window, cx| {
                 let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
-                root.update(cx, |root, cx| root.focus_composer(window, cx));
+                root.update(cx, |root, cx| {
+                    root.focus_composer(window, cx);
+                    if let Some(nav) = open {
+                        root.navigate(nav, window, cx);
+                    }
+                });
                 root
             },
         );
@@ -616,6 +632,7 @@ mod tests {
                 ("RENO_APPEARANCE", "light"),
                 ("RENO_QUIT_AFTER_MS", "250"),
                 ("RENO_REDUCE_MOTION", "1"),
+                ("RENO_OPEN", "triggers"),
             ],
         );
         assert_eq!(
@@ -625,6 +642,7 @@ mod tests {
                 appearance: Some(Appearance::Light),
                 quit_after: Some(Duration::from_millis(250)),
                 reduce_motion: true,
+                open: Some(Nav::Triggers),
             })
         );
     }
@@ -637,6 +655,8 @@ mod tests {
             &[("RENO_APPEARANCE", "plaid"), ("RENO_QUIT_AFTER_MS", "soon")],
         );
         assert_eq!(o, Ok(Options::default()));
+        assert!(parse(&[], &[("RENO_OPEN", "flows")]).is_err());
+        assert_eq!(parse(&[], &[("RENO_OPEN", "home")]), Ok(Options::default()));
     }
 
     #[test]

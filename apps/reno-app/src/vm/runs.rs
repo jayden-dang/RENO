@@ -114,7 +114,12 @@ fn row(run: &RunSummary, now_ms: u64) -> RunRow {
         status: run.status,
         attempt: run.attempt,
         started: summary::ago_label(now_ms.saturating_sub(run.created_at_ms)),
-        took: summary::duration_label(end.saturating_sub(run.created_at_ms)),
+        // A queued run has not run yet, so it has no duration to show.
+        took: if run.status == RunStatus::Queued {
+            "\u{2014}".to_owned()
+        } else {
+            summary::duration_label(end.saturating_sub(run.created_at_ms))
+        },
     }
 }
 
@@ -242,6 +247,14 @@ mod tests {
         assert_eq!(rows[0].bot.as_deref(), Some("keeper"));
         assert_eq!(rows[0].repo.as_deref(), Some("atlas-api"));
         assert_eq!(rows[1].took, "2m 00s", "a finished run is timed to its end");
+
+        state.apply(Update::Runs(vec![run("waiting", RunStatus::Queued, 5)]));
+        let view = build(&state, RunFilter::All, false, NOW);
+        assert_eq!(
+            view.rows.rows()[0].took,
+            "\u{2014}",
+            "a queued run has not run yet"
+        );
     }
 
     #[test]

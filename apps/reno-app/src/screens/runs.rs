@@ -101,8 +101,7 @@ impl RunsScreen {
             .on_click(open)
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .map(|d| page::cell(d, None))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -122,39 +121,42 @@ impl RunsScreen {
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(110.0))
+                    .map(|d| page::cell(d, Some(110.0)))
                     .truncate()
                     .text_color(theme.muted)
                     .child(row.bot.clone().unwrap_or_default()),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(130.0))
+                    .map(|d| page::cell(d, Some(130.0)))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
+                    .overflow_hidden()
                     .child(kit::exec_glyph(theme, &row.executor, 14.0))
-                    .child(summary::executor_name(&row.executor).to_owned()),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(summary::executor_name(&row.executor).to_owned()),
+                    ),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(120.0))
+                    .map(|d| page::cell(d, Some(120.0)))
                     .child(kit::status_pill(theme, row.status)),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(90.0))
+                    .map(|d| page::cell(d, Some(90.0)))
+                    .truncate()
                     .text_color(theme.muted)
                     .child(row.started.clone()),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(70.0))
+                    .map(|d| page::cell(d, Some(70.0)))
+                    .truncate()
                     .text_color(theme.muted)
                     .child(row.took.clone()),
             )
