@@ -1,0 +1,21 @@
+[package]
+name = "reno-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+# `runtime_shaders`: this Mac has Xcode but no Metal Toolchain component, so the build-time
+# `metal` compile fails. Shaders are compiled at launch instead. See decision 0001.
+gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
+gpui_tokio.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

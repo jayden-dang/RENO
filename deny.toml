@@ -70,6 +70,13 @@ feature-depth = 1
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 ignore = [
+    # Unmaintained notices, not vulnerabilities, all inside the GPUI closure. Revisit on each
+    # GPUI rev bump; remove an entry once upstream drops the crate.
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; via gpui -> usvg" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; via gpui font stack" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; via gpui_linux (Linux only)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; via gpui_linux (Linux only)" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; via gpui_linux (Linux only)" },
     #"RUSTSEC-0000-0000",
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
@@ -236,7 +243,20 @@ unknown-git = "deny"
 # if not specified. If it is specified but empty, no registries are allowed.
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # List of URLs for allowed Git repositories
-allow-git = []
+allow-git = [
+    # gpui, gpui_platform, gpui_tokio and the rest of the pinned GPUI closure (reno-app).
+    "https://github.com/zed-industries/zed",
+    # Zed's font-kit fork: gpui_apple (macOS text) and gpui_linux.
+    "https://github.com/zed-industries/font-kit",
+    # Zed's oo7 fork: gpui_linux (Secret Service credentials).
+    "https://github.com/zed-industries/oo7",
+    # Zed's scap fork: gpui "screen-capture" feature.
+    "https://github.com/zed-industries/scap",
+    # Zed's wasm_thread fork: gpui_web.
+    "https://github.com/zed-industries/wasm_thread",
+    # wgpu snapshot pinned by Zed: gpui_wgpu (Linux/Windows/web renderer).
+    "https://github.com/gfx-rs/wgpu",
+]
 
 [sources.allow-org]
 # github.com organizations to allow git sources for
