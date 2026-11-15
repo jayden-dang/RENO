@@ -562,15 +562,15 @@ impl Store {
         .await
     }
 
-    /// Whether `run` has a request with this subject digest that was `denied` (by a person, a
-    /// rule, or as a repeat). An `expired` request does not count: nobody refused it.
+    /// Whether `run` has a request with this subject digest that was refused: `denied` (by a
+    /// person, a rule, or as a repeat) or `expired` (no answer means deny, ARCHITECTURE 8).
     pub async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {
         let run = run.clone();
         let digest = digest.to_owned();
         self.read(move |conn| {
             conn.prepare_cached(
                 "SELECT 1 FROM approvals
-                 WHERE run_id = ?1 AND subject_digest = ?2 AND status = 'denied' LIMIT 1",
+                 WHERE run_id = ?1 AND subject_digest = ?2 AND status IN ('denied', 'expired') LIMIT 1",
             )
             .db()?
             .exists(params![run.as_str(), digest])

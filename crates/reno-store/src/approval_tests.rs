@@ -250,7 +250,7 @@ async fn a_rule_decision_is_stored_decided_with_the_rules_name() {
 }
 
 #[tokio::test]
-async fn an_expiry_is_status_expired_and_is_not_a_denial_for_the_repeat_rule() {
+async fn an_expiry_is_status_expired_and_counts_as_a_refusal_for_the_repeat_rule() {
     let (_d, store) = claimed(1).await;
     store.create_approval(new(1, 0, "x"), 1, 10).await.unwrap();
     store
@@ -266,9 +266,16 @@ async fn an_expiry_is_status_expired_and_is_not_a_denial_for_the_repeat_rule() {
     let row = store.get_approval(&appr(1)).await.unwrap().unwrap();
     assert_eq!(row.status, ApprovalStatus::Expired);
     assert_eq!(row.decided_by, Some(ResolvedBy::Expired));
+    // No answer means deny, so the subject is remembered as refused for the rest of the run.
+    assert!(
+        store
+            .was_denied(&run_id(0), &subject("x").digest())
+            .await
+            .unwrap()
+    );
     assert!(
         !store
-            .was_denied(&run_id(0), &subject("x").digest())
+            .was_denied(&run_id(0), &subject("y").digest())
             .await
             .unwrap()
     );

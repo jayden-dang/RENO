@@ -107,6 +107,9 @@ pub(crate) struct Supervisor {
     open_approvals: Vec<approval::Open>,
     /// Fires at the earliest deadline in `open_approvals`; `None` while nothing waits.
     expiry: Option<Pin<Box<Sleep>>>,
+    /// An expiry could not be recorded, so a row may still be pending that `open_approvals` no
+    /// longer lists; the end of the run closes it.
+    approvals_unrecorded: bool,
     open_inputs: HashSet<String>,
     /// Something went wrong that makes the run's record untrustworthy; the run ends `error`.
     fatal: Option<String>,
@@ -170,6 +173,7 @@ impl Supervisor {
             subs: Vec::new(),
             open_approvals: Vec::new(),
             expiry: None,
+            approvals_unrecorded: false,
             open_inputs: HashSet::new(),
             fatal: None,
             lost: false,

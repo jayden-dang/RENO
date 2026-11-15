@@ -8,9 +8,11 @@
 //!    (`reno_proto::defs::evaluate`). A policy reload therefore changes the answer for requests
 //!    that come after it and never for one already waiting.
 //! 2. **Deny** by a rule: the harness is told no, with the rule named. Nobody is asked.
-//! 3. A subject whose digest was already denied in this run is denied again, unasked
-//!    (**repeat denial**). This overrides an allow rule and an ask, so a refusal stands for the
-//!    rest of the run; a deny rule keeps its own name.
+//! 3. A subject whose digest was already refused in this run, by a person, by a rule or by
+//!    running out of time (no answer means deny), is denied again, unasked (**repeat denial**).
+//!    This overrides an allow rule and an ask, so a refusal stands for the rest of the run, and
+//!    a harness that retries an unanswered action is not held for another full time limit; a
+//!    deny rule keeps its own name.
 //! 4. **Allow** by a rule: the harness is told yes. Nobody is asked.
 //! 5. **Ask**: a pending record is stored with a deadline, the run waits in
 //!    `waiting_approval`, and the pending list is published. A human's `decide` answers it; if
@@ -354,6 +356,7 @@ impl Supervisor {
                 .await
             {
                 tracing::error!(run = %self.run, approval = %open.id, %error, "could not record an expiry");
+                self.approvals_unrecorded = true;
             }
             self.answer(&open.request_id, ApprovalOutcome::Denied).await;
             self.publish(&ExecEvent::ApprovalResolved {
@@ -369,7 +372,7 @@ impl Supervisor {
 
     /// The run is over: close what it still has open, in the store and in the journal.
     pub(super) async fn close_approvals(&mut self) {
-        if self.open_approvals.is_empty() {
+        if self.open_approvals.is_empty() && !self.approvals_unrecorded {
             return;
         }
         self.open_approvals.clear();

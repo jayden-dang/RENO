@@ -144,7 +144,8 @@ CREATE TABLE approvals (
     CHECK (decided_by IS NOT 'expired' OR status = 'expired')
 );
 CREATE INDEX approvals_pending ON approvals (created_at) WHERE status = 'pending';
-CREATE INDEX approvals_denied ON approvals (run_id, subject_digest) WHERE status = 'denied';
+CREATE INDEX approvals_denied ON approvals (run_id, subject_digest)
+    WHERE status IN ('denied', 'expired');
 CREATE INDEX approvals_decided ON approvals (decided_at) WHERE status <> 'pending';
 CREATE INDEX approvals_run ON approvals (run_id, created_at);
 

@@ -695,30 +695,31 @@ async fn a_denial_is_remembered_for_its_own_run_only() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_expired_request_is_not_a_denial_and_asks_again() {
+async fn an_unanswered_request_counts_as_denied_so_a_retry_is_denied_unasked() {
     let rig = Rig::new(
         "default = \"ask\"\napproval_ttl = \"1m\"\n",
         script(vec![("r1", command("x")), ("r2", command("x"))]),
     )
     .await;
     let run = rig.run_as("keeper").await;
-    let first = rig.pending().await;
+    rig.pending().await;
     advance(Duration::from_secs(70)).await;
-    // r2 is the same subject, but nobody refused r1, so it is asked, not auto-denied.
-    let again = until(async || {
-        let all = rig.fx.kernel.pending_approvals().await.unwrap();
-        all.into_iter().find(|a| a.id != first.id)
-    })
-    .await;
-    assert_eq!(again.subject, command("x"));
-    assert_eq!(rig.history(&run).await[0].status, ApprovalStatus::Expired);
-    rig.fx
-        .kernel
-        .decide(&again.id, ApprovalDecision::ApproveOnce)
-        .await
-        .unwrap();
+    // No answer means deny, so the harness that asks again gets the same answer at once: it is
+    // not held for a second time limit.
     rig.fx.wait_status(&run, RunStatus::Succeeded).await;
-    assert_eq!(rig.decisions(), [Decision::Deny, Decision::Allow]);
+    assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny]);
+    assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+    let history = rig.history(&run).await;
+    assert_eq!(
+        history
+            .iter()
+            .map(|r| (r.request_id.as_str(), r.status, r.decided_by.clone()))
+            .collect::<Vec<_>>(),
+        [
+            ("r2", ApprovalStatus::Denied, Some(ResolvedBy::RepeatDenial)),
+            ("r1", ApprovalStatus::Expired, Some(ResolvedBy::Expired)),
+        ]
+    );
 }
 
 #[tokio::test(start_paused = true)]

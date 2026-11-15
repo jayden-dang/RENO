@@ -223,13 +223,14 @@ pub(crate) fn history_line(record: &ApprovalRecord) -> String {
     )
 }
 
-/// One approval on one line.
+/// One pending approval on one line, in the columns of [`history_line`]: nobody has decided it
+/// yet. (An `Approval` does not say which rule asked, so only a decided one can name a rule.)
 pub(crate) fn approval_line(approval: &Approval) -> String {
     let subject = &approval.subject;
     let what = subject.command.as_deref().unwrap_or("");
     format!(
-        "{}  run {}  {} {what}",
-        approval.id, approval.run_id, subject.tool
+        "{}  run {}  {:<8}  by nobody yet  {} {what}",
+        approval.id, approval.run_id, "pending", subject.tool
     )
 }
 
@@ -389,6 +390,26 @@ mod tests {
                 "type": "approval_resolved", "requestId": "r",
                 "decision": "denied", "by": {"type": "expired"}
             }})
+        );
+    }
+
+    #[test]
+    fn a_pending_approval_line_has_the_history_columns_with_nobody_yet_deciding() {
+        let approval = Approval {
+            id: "appr_a1".parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            subject: reno_proto::ApprovalSubject {
+                action: ActionClass::Command,
+                tool: "bash".into(),
+                command: Some("git push".into()),
+                paths: vec![],
+                raw: json!(null),
+            },
+            requested_at_ms: 1,
+        };
+        assert_eq!(
+            approval_line(&approval),
+            "appr_a1  run run_r1  pending   by nobody yet  bash git push"
         );
     }
 

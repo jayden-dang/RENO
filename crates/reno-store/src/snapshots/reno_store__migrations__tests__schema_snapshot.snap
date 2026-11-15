@@ -33,7 +33,8 @@ CREATE TRIGGER approvals_decided_are_final BEFORE UPDATE ON approvals
 WHEN OLD.status <> 'pending'
 BEGIN SELECT RAISE(ABORT, 'a decided approval is final'); END;
 
-CREATE INDEX approvals_denied ON approvals (run_id, subject_digest) WHERE status = 'denied';
+CREATE INDEX approvals_denied ON approvals (run_id, subject_digest)
+    WHERE status IN ('denied', 'expired');
 
 CREATE INDEX approvals_pending ON approvals (created_at) WHERE status = 'pending';
 
