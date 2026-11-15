@@ -93,4 +93,4 @@ harnesses are opt-in (`RENO_LIVE=claude,codex`).
 
 **ARCH-17 — Dependencies stay permissive and current.** `cargo-deny` allows only permissive
 licenses, rejects known advisories, and fetches git sources only from an allow-list.
-`cargo-shear` rejects unused dependencies.
+`cargo-machete` rejects unused dependencies.
