@@ -142,12 +142,12 @@ pub fn installed(id: HarnessId) -> bool {
     match id {
         ClaudeCode => crate::ClaudeExecutor::new().installed(),
         Codex => crate::CodexHarness::new().installed(),
-        Grok => crate::AcpHarness::grok().installed(),
-        Hermes => crate::AcpHarness::hermes().installed(),
-        Devin => crate::AcpHarness::devin().installed(),
-        Antigravity => crate::AcpHarness::antigravity().installed(),
+        Grok => crate::AcpExecutor::grok().installed(),
+        Hermes => crate::AcpExecutor::hermes().installed(),
+        Devin => crate::AcpExecutor::devin().installed(),
+        Antigravity => crate::AcpExecutor::antigravity().installed(),
         Mock => false,
-        Fx => crate::AcpHarness::fx().installed(),
+        Fx => crate::AcpExecutor::fx().installed(),
         Registry(agent) => crate::acp_registry::installed(agent),
     }
 }

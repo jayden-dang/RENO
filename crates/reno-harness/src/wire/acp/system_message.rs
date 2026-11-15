@@ -4,11 +4,7 @@
 //! parrots the whole block back as its own reply text (verified against
 //! agy_acp_server 1.1.1), which would otherwise land verbatim in the chat.
 
-use crate::upstream_proto::AgentEvent;
-use futures::StreamExt;
-use futures::stream::{self, BoxStream};
-
-use crate::HarnessError;
+use reno_proto::ExecEvent;
 
 const OPEN_TAG: &str = "<SYSTEM_MESSAGE>";
 const CLOSE_TAG: &str = "</SYSTEM_MESSAGE>";
@@ -89,15 +85,13 @@ pub(crate) struct SystemMessageEchoFilter {
 impl SystemMessageEchoFilter {
     /// metadata and tool updates can interleave with chunks of the same
     /// message, so only message boundaries reset the filters.
-    pub(crate) fn apply(&mut self, event: AgentEvent) -> Vec<AgentEvent> {
+    pub(crate) fn apply(&mut self, event: ExecEvent) -> Vec<ExecEvent> {
         match event {
-            AgentEvent::TextDelta { text } => text_delta(self.text.push(&text)),
-            AgentEvent::ReasoningDelta { text } => reasoning_delta(self.reasoning.push(&text)),
-            boundary @ (AgentEvent::SessionStarted { .. }
-            | AgentEvent::AssistantMessageCompleted { .. }
-            | AgentEvent::Steered { .. }
-            | AgentEvent::UserMessage { .. }
-            | AgentEvent::Done { .. }) => {
+            ExecEvent::Text { text } => text_delta(self.text.push(&text)),
+            ExecEvent::Reasoning { text } => reasoning_delta(self.reasoning.push(&text)),
+            boundary @ (ExecEvent::Started { .. }
+            | ExecEvent::UserMessage { .. }
+            | ExecEvent::Done { .. }) => {
                 let mut events = self.finish();
                 events.push(boundary);
                 events
@@ -106,50 +100,27 @@ impl SystemMessageEchoFilter {
         }
     }
 
-    pub(crate) fn finish(&mut self) -> Vec<AgentEvent> {
+    pub(crate) fn finish(&mut self) -> Vec<ExecEvent> {
         let mut events = reasoning_delta(self.reasoning.finish());
         events.extend(text_delta(self.text.finish()));
         events
     }
 }
 
-fn text_delta(text: String) -> Vec<AgentEvent> {
+fn text_delta(text: String) -> Vec<ExecEvent> {
     if text.is_empty() {
         Vec::new()
     } else {
-        vec![AgentEvent::TextDelta { text }]
+        vec![ExecEvent::Text { text }]
     }
 }
 
-fn reasoning_delta(text: String) -> Vec<AgentEvent> {
+fn reasoning_delta(text: String) -> Vec<ExecEvent> {
     if text.is_empty() {
         Vec::new()
     } else {
-        vec![AgentEvent::ReasoningDelta { text }]
+        vec![ExecEvent::Reasoning { text }]
     }
-}
-
-pub(crate) fn strip_system_message_echoes(
-    events: BoxStream<'static, Result<AgentEvent, HarnessError>>,
-) -> BoxStream<'static, Result<AgentEvent, HarnessError>> {
-    let mut filter = SystemMessageEchoFilter::default();
-    events
-        .map(Some)
-        .chain(stream::once(async { None }))
-        .flat_map(move |item| {
-            let filtered: Vec<Result<AgentEvent, HarnessError>> = match item {
-                Some(Ok(event)) => filter.apply(event).into_iter().map(Ok).collect(),
-                Some(Err(error)) => filter
-                    .finish()
-                    .into_iter()
-                    .map(Ok)
-                    .chain([Err(error)])
-                    .collect(),
-                None => filter.finish().into_iter().map(Ok).collect(),
-            };
-            stream::iter(filtered)
-        })
-        .boxed()
 }
 
 #[cfg(test)]
@@ -235,48 +206,39 @@ mod tests {
         let mut filter = SystemMessageEchoFilter::default();
         assert!(
             filter
-                .apply(AgentEvent::TextDelta { text: "x <".into() })
-                .contains(&AgentEvent::TextDelta { text: "x ".into() })
+                .apply(ExecEvent::Text { text: "x <".into() })
+                .contains(&ExecEvent::Text { text: "x ".into() })
         );
-        let done = AgentEvent::AssistantMessageCompleted {
-            assistant_message_id: "m1".into(),
+        let done = ExecEvent::Done {
+            stop: reno_proto::StopReason::Completed,
+            result: None,
+            diagnostic: None,
         };
         assert_eq!(
             filter.apply(done.clone()),
-            vec![AgentEvent::TextDelta { text: "<".into() }, done]
+            vec![ExecEvent::Text { text: "<".into() }, done]
         );
     }
 
     #[test]
     fn interleaved_updates_preserve_blocks_at_every_split() {
         let updates = [
-            AgentEvent::ContextUsage {
-                tokens: Some(42),
-                window: Some(1000),
-            },
-            AgentEvent::Usage {
+            ExecEvent::Usage {
                 input_tokens: 42,
                 output_tokens: 10,
             },
-            AgentEvent::AvailableCommands {
-                commands: Vec::new(),
-            },
-            AgentEvent::ToolResult {
+            ExecEvent::ToolResult {
                 id: "background-task".into(),
-                is_error: false,
-                output: None,
-                diff: None,
-                preview_paths: Vec::new(),
-                image_payloads: Vec::new(),
-                exit_code: None,
+                ok: true,
+                summary: None,
             },
         ];
         for reasoning in [false, true] {
             let delta = |text| {
                 if reasoning {
-                    AgentEvent::ReasoningDelta { text }
+                    ExecEvent::Reasoning { text }
                 } else {
-                    AgentEvent::TextDelta { text }
+                    ExecEvent::Text { text }
                 }
             };
             for update in &updates {
@@ -304,24 +266,24 @@ mod tests {
     fn reasoning_between_text_deltas_does_not_break_a_block() {
         let mut filter = SystemMessageEchoFilter::default();
         let (head, tail) = WAKEUP.split_at(40);
-        let mut events = filter.apply(AgentEvent::TextDelta {
+        let mut events = filter.apply(ExecEvent::Text {
             text: format!("ok {head}"),
         });
-        events.extend(filter.apply(AgentEvent::ReasoningDelta {
+        events.extend(filter.apply(ExecEvent::Reasoning {
             text: "thinking".into(),
         }));
-        events.extend(filter.apply(AgentEvent::TextDelta {
+        events.extend(filter.apply(ExecEvent::Text {
             text: format!("{tail} fine"),
         }));
         events.extend(filter.finish());
         assert_eq!(
             events,
             vec![
-                AgentEvent::TextDelta { text: "ok ".into() },
-                AgentEvent::ReasoningDelta {
+                ExecEvent::Text { text: "ok ".into() },
+                ExecEvent::Reasoning {
                     text: "thinking".into()
                 },
-                AgentEvent::TextDelta {
+                ExecEvent::Text {
                     text: " fine".into()
                 },
             ]

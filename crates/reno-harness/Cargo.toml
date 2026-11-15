@@ -24,10 +24,8 @@ type_complexity = "allow" # nested channel/future types in the driver loops
 [dependencies]
 reno-proto.workspace = true
 async-trait.workspace = true
-base64.workspace = true
 bzip2.workspace = true
 chrono.workspace = true
-deser-hjson.workspace = true
 filetime.workspace = true
 flate2.workspace = true
 futures.workspace = true

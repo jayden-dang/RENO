@@ -1,7 +1,5 @@
-//! ACP: update normalization, permission mapping, system-message handling and Devin subagents.
+//! ACP: `session/update` normalization, permission mapping and the Antigravity echo filter.
 
 pub(crate) mod normalize;
 pub(crate) mod permission;
-pub(crate) mod provider_names;
-pub(crate) mod subagent_devin;
 pub(crate) mod system_message;

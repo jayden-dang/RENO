@@ -61,10 +61,8 @@ mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 
 # Harness layer (imported).
 async-trait = "0.1"
-base64 = "0.22"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
-deser-hjson = "2.2"
 filetime = "0.2"
 flate2 = "1"
 libc = "0.2"
