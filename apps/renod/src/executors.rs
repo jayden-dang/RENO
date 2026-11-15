@@ -4,14 +4,13 @@
 //!   default it plays a short canned run and finishes. With `hold` it stops after its first text
 //!   and waits to be steered or cancelled, which gives tests and demos a run that stays live
 //!   without any timer.
-//! - `claude-code` is the native [`ClaudeExecutor`] and `codex` still runs through the stage A
-//!   [`HarnessExecutor`] shim (until its driver goes native, T1.0b); both are registered when
-//!   their CLIs are found. Nothing here starts them.
+//! - `claude-code` is the native [`ClaudeExecutor`] and `codex` the native [`CodexExecutor`]; both
+//!   are registered when their CLIs are found. Nothing here starts them.
 
 use std::sync::Arc;
 
-use reno_harness::exec::{Executor, HarnessExecutor, MockExecutor, MockStep};
-use reno_harness::{ClaudeExecutor, CodexHarness};
+use reno_harness::exec::{Executor, MockExecutor, MockStep};
+use reno_harness::{ClaudeExecutor, CodexExecutor};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ActionClass, ExecEvent, IdError, StopReason, ToolCall};
 use serde_json::json;
@@ -21,7 +20,7 @@ pub const MOCK_ID: &str = "mock";
 /// The id of the Claude Code executor.
 pub const CLAUDE_ID: &str = reno_harness::claude::EXECUTOR_ID;
 /// The id of the Codex executor.
-pub const CODEX_ID: &str = "codex";
+pub const CODEX_ID: &str = reno_harness::codex::EXECUTOR_ID;
 
 /// The model the mock reports.
 pub const MOCK_MODEL: &str = "mock-1";
@@ -106,7 +105,7 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
     }
     let candidates: [Arc<dyn Executor>; 2] = [
         Arc::new(ClaudeExecutor::new()),
-        Arc::new(HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?)),
+        Arc::new(CodexExecutor::new()),
     ];
     for executor in candidates {
         let id = executor.descriptor().id;

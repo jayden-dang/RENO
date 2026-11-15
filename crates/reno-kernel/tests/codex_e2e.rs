@@ -49,9 +49,8 @@ impl Fx {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("reno.db")).unwrap();
-        let registry = ExecutorRegistry::new().with(Arc::new(
-            CodexExecutor::new().with_executable(fake_codex()),
-        ));
+        let registry = ExecutorRegistry::new()
+            .with(Arc::new(CodexExecutor::new().with_executable(fake_codex())));
         // The default access mode is Supervised: the strictest.
         let kernel = Kernel::start(
             KernelConfig::default(),
@@ -159,7 +158,7 @@ async fn a_supervised_run_asks_the_kernel_decides_approve_and_the_run_succeeds()
 }
 
 #[tokio::test]
-async fn a_denied_approval_reaches_the_cli_as_a_deny() {
+async fn a_denied_approval_reaches_the_app_server_as_a_decline() {
     let fx = Fx::new().await;
     let run = fx.submit("scenario:one-approval").await;
     let approval = fx.pending_approval().await;
@@ -199,7 +198,11 @@ async fn the_child_process_record_is_persisted_on_the_run() {
     })
     .await;
     let pid = row.pid.expect("pid");
-    assert_eq!(row.pgid, Some(pid), "the app-server is its own group leader");
+    assert_eq!(
+        row.pgid,
+        Some(pid),
+        "the app-server is its own group leader"
+    );
     assert!(row.process_start.is_some_and(|start| start > 0));
 
     fx.kernel
