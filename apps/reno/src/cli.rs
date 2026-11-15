@@ -34,9 +34,12 @@ pub(crate) enum Command {
     /// List, follow and cancel runs.
     #[command(subcommand)]
     Run(RunCommand),
-    /// List pending approvals.
+    /// List pending approvals and the history of decided ones.
     #[command(subcommand)]
     Approval(ApprovalCommand),
+    /// Check what the policy would do with an action.
+    #[command(subcommand)]
+    Policy(PolicyCommand),
     /// List, show and check bots, triggers and the policy.
     #[command(subcommand)]
     Defs(DefsCommand),
@@ -121,6 +124,46 @@ pub(crate) struct RunCancel {
 pub(crate) enum ApprovalCommand {
     /// List the actions waiting for a decision.
     List,
+    /// Show decided approvals, newest first: who decided each, and by which rule.
+    History(ApprovalHistory),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ApprovalHistory {
+    /// Only this run's approvals.
+    #[arg(long)]
+    pub(crate) run: Option<RunId>,
+    /// Show at most this many.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) limit: u32,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PolicyCommand {
+    /// Evaluate an action against `policy.toml` and print the decision and the rule. Needs no
+    /// daemon.
+    ///
+    /// The action is a JSON approval subject, for example
+    /// '{"action":"command","tool":"bash","command":"cargo test"}'. A subject's paths are judged
+    /// against --cwd, and a rule's scope against --bot. Exits 0 whatever the decision; it fails
+    /// only when it cannot read the policy or the subject.
+    Check(PolicyCheck),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PolicyCheck {
+    /// The approval subject, as JSON: `action` (read, edit, command, network, mcp_tool or other),
+    /// `tool`, and optionally `command` and `paths`.
+    pub(crate) subject: String,
+    /// Evaluate as a run of this bot (for rules with a `scope`).
+    #[arg(long)]
+    pub(crate) bot: Option<String>,
+    /// The run's worktree [default: the current directory].
+    #[arg(long, value_name = "DIR")]
+    pub(crate) cwd: Option<PathBuf>,
+    /// The definitions directory [default: $RENO_DEFS_DIR, or ~/.reno].
+    #[arg(long, env = "RENO_DEFS_DIR", value_name = "DIR")]
+    pub(crate) dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

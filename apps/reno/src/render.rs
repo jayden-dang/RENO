@@ -7,7 +7,8 @@
 use std::io::{self, Write};
 
 use reno_proto::{
-    Approval, DaemonStatusInfo, ExecEvent, RunEventItem, RunStatus, RunSummary, StopReason,
+    Approval, ApprovalOutcome, ApprovalRecord, DaemonStatusInfo, ExecEvent, ResolvedBy,
+    RunEventItem, RunStatus, RunSummary, StopReason,
 };
 use serde::Serialize;
 
@@ -102,6 +103,16 @@ impl<W: Write> Transcript<W> {
                 let what = subject.command.as_deref().unwrap_or("");
                 writeln!(self.out, "? approval needed: {} {what}", subject.tool)
             }
+            ExecEvent::ApprovalResolved {
+                decision,
+                by,
+                message,
+                ..
+            } => writeln!(
+                self.out,
+                "  {}",
+                resolved_text(*decision, by, message.as_deref())
+            ),
             ExecEvent::NeedsInput { questions, .. } => {
                 for question in questions {
                     writeln!(self.out, "? the run asks: {}", question.prompt)?;
@@ -162,6 +173,54 @@ pub(crate) fn run_line(run: &RunSummary) -> String {
 
 pub(crate) fn status_name(status: RunStatus) -> String {
     wire_name(&status)
+}
+
+/// Who or what decided, as a short phrase: `you`, `rule cargo is fine`, `its time limit`.
+pub(crate) fn by_text(by: &ResolvedBy) -> String {
+    match by {
+        ResolvedBy::Human => "you".to_owned(),
+        ResolvedBy::Rule { name } => format!("rule {name}"),
+        ResolvedBy::Expired => "the time limit".to_owned(),
+        ResolvedBy::RepeatDenial => "the repeat-denial rule".to_owned(),
+    }
+}
+
+/// The transcript line of a resolved approval: `approved by rule cargo is fine`.
+pub(crate) fn resolved_text(
+    decision: ApprovalOutcome,
+    by: &ResolvedBy,
+    message: Option<&str>,
+) -> String {
+    let outcome = match decision {
+        ApprovalOutcome::Approved => "approved",
+        ApprovalOutcome::Denied => "denied",
+    };
+    let line = match by {
+        ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
+        ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
+        by => format!("{outcome} by {}", by_text(by)),
+    };
+    match message {
+        Some(message) => format!("{line} ({message})"),
+        None => line,
+    }
+}
+
+/// One decided approval on one line: `id  run  status  by  tool command`.
+pub(crate) fn history_line(record: &ApprovalRecord) -> String {
+    let subject = &record.subject;
+    let what = subject.command.as_deref().unwrap_or("");
+    let by = record
+        .decided_by
+        .as_ref()
+        .map_or_else(|| "nobody yet".to_owned(), by_text);
+    format!(
+        "{}  run {}  {:<8}  by {by}  {} {what}",
+        record.id,
+        record.run_id,
+        wire_name(&record.status),
+        subject.tool
+    )
 }
 
 /// One approval on one line.
@@ -276,6 +335,111 @@ mod tests {
                 stop: StopReason::Completed,
                 diagnostic: Some("boom".into())
             })
+        );
+    }
+
+    #[test]
+    fn a_resolved_approval_says_who_decided_and_why() {
+        let resolved = |decision, by, message: Option<&str>| ExecEvent::ApprovalResolved {
+            request_id: "r".into(),
+            decision,
+            by,
+            message: message.map(str::to_owned),
+        };
+        let (out, _) = render(
+            false,
+            vec![
+                resolved(
+                    ApprovalOutcome::Approved,
+                    ResolvedBy::Rule {
+                        name: "cargo is fine".into(),
+                    },
+                    None,
+                ),
+                resolved(
+                    ApprovalOutcome::Denied,
+                    ResolvedBy::Rule {
+                        name: "force push".into(),
+                    },
+                    Some("denied by policy: force push"),
+                ),
+                resolved(ApprovalOutcome::Approved, ResolvedBy::Human, None),
+                resolved(ApprovalOutcome::Denied, ResolvedBy::Expired, None),
+                resolved(ApprovalOutcome::Denied, ResolvedBy::RepeatDenial, None),
+            ],
+        );
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            [
+                "  approved by rule cargo is fine",
+                "  denied by rule force push (denied by policy: force push)",
+                "  approved by you",
+                "  denied: nobody answered in time",
+                "  denied: it was denied earlier in this run",
+            ]
+        );
+        // JSON output is the event as it is.
+        let (out, _) = render(
+            true,
+            vec![resolved(ApprovalOutcome::Denied, ResolvedBy::Expired, None)],
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap(),
+            json!({"seq": 1, "event": {
+                "type": "approval_resolved", "requestId": "r",
+                "decision": "denied", "by": {"type": "expired"}
+            }})
+        );
+    }
+
+    #[test]
+    fn a_history_line_names_the_decider_and_the_rule() {
+        let record = |status, decided_by| ApprovalRecord {
+            id: "appr_a1".parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            request_id: "q".into(),
+            subject: reno_proto::ApprovalSubject {
+                action: ActionClass::Command,
+                tool: "bash".into(),
+                command: Some("cargo test".into()),
+                paths: vec![],
+                raw: json!(null),
+            },
+            status,
+            decided_by,
+            created_at_ms: 1,
+            decided_at_ms: Some(2),
+            expires_at_ms: 3,
+        };
+        assert_eq!(
+            history_line(&record(
+                reno_proto::ApprovalStatus::Approved,
+                Some(ResolvedBy::Rule {
+                    name: "cargo is fine".into()
+                })
+            )),
+            "appr_a1  run run_r1  approved  by rule cargo is fine  bash cargo test"
+        );
+        assert_eq!(
+            history_line(&record(
+                reno_proto::ApprovalStatus::Denied,
+                Some(ResolvedBy::Human)
+            )),
+            "appr_a1  run run_r1  denied    by you  bash cargo test"
+        );
+        assert_eq!(
+            history_line(&record(
+                reno_proto::ApprovalStatus::Expired,
+                Some(ResolvedBy::Expired)
+            )),
+            "appr_a1  run run_r1  expired   by the time limit  bash cargo test"
+        );
+        assert_eq!(
+            history_line(&record(
+                reno_proto::ApprovalStatus::Denied,
+                Some(ResolvedBy::RepeatDenial)
+            )),
+            "appr_a1  run run_r1  denied    by the repeat-denial rule  bash cargo test"
         );
     }
 

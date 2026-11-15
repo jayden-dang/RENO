@@ -12,6 +12,7 @@ mod commands;
 mod daemon;
 mod defs;
 mod env;
+mod policy;
 mod render;
 
 use std::io;
@@ -51,6 +52,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Run(command) => commands::run(env, command).await,
         Command::Approval(command) => commands::approval(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
+        Command::Policy(command) => policy::run(env, command),
         Command::Approve(args) => commands::decide(env, args, ApprovalDecision::ApproveOnce).await,
         Command::Deny(args) => commands::decide(env, args, ApprovalDecision::Deny).await,
     }

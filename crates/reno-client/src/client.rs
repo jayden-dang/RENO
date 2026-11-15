@@ -216,6 +216,22 @@ impl Client {
         Ok(self.rpc.call::<ApprovalList>(NoParams {}).await?.approvals)
     }
 
+    /// `approval.history`: decided approvals, newest decision first, with who decided each and
+    /// by which rule. Only `run`'s when given. Needs feature `approval.history`.
+    pub async fn approval_history(
+        &self,
+        run: Option<RunId>,
+        limit: Option<u32>,
+    ) -> Result<Vec<reno_proto::ApprovalRecord>, ClientError> {
+        self.require(reno_proto::FEATURE_APPROVAL_HISTORY)?;
+        let params = reno_proto::ApprovalHistoryParams { run, limit };
+        Ok(self
+            .rpc
+            .call::<reno_proto::ApprovalHistory>(params)
+            .await?
+            .approvals)
+    }
+
     /// `approval.decide`: answers one pending approval.
     pub async fn decide(
         &self,

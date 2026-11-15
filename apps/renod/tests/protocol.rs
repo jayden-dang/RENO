@@ -91,7 +91,7 @@ daemon_test! {
         assert_eq!((status.active_runs, status.queued_runs), (0, 0));
         let mut names: Vec<_> = status.executors.iter().map(|e| e.as_str().to_owned()).collect();
         names.sort();
-        assert_eq!(names, ["mock", "mock-approval", "mock-burst", "mock-hold"]);
+        assert_eq!(names, ["mock", "mock-approval", "mock-burst", "mock-danger", "mock-hold"]);
         fx.stop().await;
     }
 }
@@ -207,6 +207,56 @@ daemon_test! {
         assert_eq!(answers.len(), 1);
         let again = within(fx.client.decide(&pending.id, ApprovalDecision::Deny)).await.unwrap_err();
         assert_eq!(code(&again), ErrorCode::NotFound);
+
+        // The decision is on record: who made it, and the transcript says so.
+        let history = within(fx.client.approval_history(Some(run.clone()), None)).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, pending.id);
+        assert_eq!(history[0].status, reno_proto::ApprovalStatus::Approved);
+        assert_eq!(history[0].decided_by, Some(reno_proto::ResolvedBy::Human));
+        assert!(events.iter().any(|e| matches!(
+            &e.event,
+            ExecEvent::ApprovalResolved { request_id, decision: reno_proto::ApprovalOutcome::Approved, by: reno_proto::ResolvedBy::Human, .. }
+                if request_id == "req-1"
+        )));
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
+    async fn the_default_policy_denies_a_dangerous_command_without_asking_anyone() {
+        let fx = Fixture::start().await;
+        let mut watch = within(fx.client.watch_approvals()).await.unwrap();
+        assert!(within(watch.next()).await.unwrap().unwrap().approvals.is_empty());
+
+        let run = fx.run("mock-danger", "clean up").await;
+        let events = fx.events(&run, None).await;
+        assert!(is_done(&events.last().unwrap().event, StopReason::Completed));
+        // The harness was told no, by the rule, and never waited for a person.
+        assert_eq!(fx.executors.danger.log().answers.len(), 1);
+        let resolved: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                ExecEvent::ApprovalResolved { decision, by, message, .. } => Some((*decision, by.clone(), message.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resolved,
+            [(
+                reno_proto::ApprovalOutcome::Denied,
+                reno_proto::ResolvedBy::Rule { name: "recursive force delete".into() },
+                Some("denied by policy: recursive force delete".into()),
+            )]
+        );
+        assert!(within(fx.client.list_approvals()).await.unwrap().is_empty());
+        let history = within(fx.client.approval_history(None, Some(10))).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, reno_proto::ApprovalStatus::Denied);
+        assert_eq!(
+            history[0].decided_by,
+            Some(reno_proto::ResolvedBy::Rule { name: "recursive force delete".into() })
+        );
         fx.stop().await;
     }
 }

@@ -1,4 +1,5 @@
-//! `reno task run`, `reno run ...`, `reno approval list`, `reno approve` and `reno deny`.
+//! `reno task run`, `reno run ...`, `reno approval list`, `reno approval history`,
+//! `reno approve` and `reno deny`.
 
 use std::io;
 use std::process::ExitCode;
@@ -7,13 +8,14 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
-    ApprovalDecision, ApprovalListResult, ExecEvent, RUN_LIST_MAX_LIMIT, RunCancelResult, RunId,
-    RunListParams, RunListResult, Seq, StopReason, TaskRunParams,
+    ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, ExecEvent, RUN_LIST_MAX_LIMIT,
+    RunCancelResult, RunId, RunListParams, RunListResult, Seq, StopReason, TaskRunParams,
 };
 use serde::Serialize;
 
 use crate::cli::{
-    ApprovalCommand, Decide, RunCancel, RunCommand, RunList, RunTail, TaskCommand, TaskRun,
+    ApprovalCommand, ApprovalHistory, Decide, RunCancel, RunCommand, RunList, RunTail, TaskCommand,
+    TaskRun,
 };
 use crate::env::{Env, print_json, print_line};
 use crate::render::{self, Finished, Transcript};
@@ -35,6 +37,7 @@ pub(crate) async fn run(env: &Env, command: RunCommand) -> anyhow::Result<ExitCo
 pub(crate) async fn approval(env: &Env, command: ApprovalCommand) -> anyhow::Result<ExitCode> {
     match command {
         ApprovalCommand::List => approval_list(env).await,
+        ApprovalCommand::History(args) => approval_history(env, args).await,
     }
 }
 
@@ -207,6 +210,24 @@ async fn approval_list(env: &Env) -> anyhow::Result<ExitCode> {
     } else {
         for approval in &approvals {
             print_line(render::approval_line(approval))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn approval_history(env: &Env, args: ApprovalHistory) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let approvals = client
+        .approval_history(args.run, Some(args.limit))
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&ApprovalHistoryResult { approvals })?;
+    } else if approvals.is_empty() {
+        print_line("no approvals have been decided")?;
+    } else {
+        for record in &approvals {
+            print_line(render::history_line(record))?;
         }
     }
     Ok(ExitCode::SUCCESS)

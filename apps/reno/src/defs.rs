@@ -205,7 +205,7 @@ fn read_files(dir: &Path) -> anyhow::Result<(Vec<DefFile>, Vec<DefError>)> {
     Ok((files, problems))
 }
 
-fn read_one(
+pub(crate) fn read_one(
     path: &Path,
     kind: DefKind,
     name: &str,

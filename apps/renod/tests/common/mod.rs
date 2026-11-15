@@ -42,7 +42,7 @@ pub(crate) fn approval_subject() -> ApprovalSubject {
     ApprovalSubject {
         action: ActionClass::Command,
         tool: "bash".into(),
-        command: Some("rm -rf build".into()),
+        command: Some("git push origin main".into()),
         paths: Vec::new(),
         raw: serde_json::Value::Null,
     }
@@ -54,10 +54,12 @@ pub(crate) struct Executors {
     pub(crate) mock: MockExecutor,
     /// `mock-hold`: stops after its first text until steered or cancelled.
     pub(crate) hold: MockExecutor,
-    /// `mock-approval`: asks to run `rm -rf build` and goes on once it is answered.
+    /// `mock-approval`: asks to run `git push origin main` (which the default policy leaves to a human) and goes on once it is answered.
     pub(crate) approval: MockExecutor,
     /// `mock-burst`: 400 text events, to overrun a small subscriber queue.
     pub(crate) burst: MockExecutor,
+    /// `mock-danger`: asks to run `rm -rf build`, which the default policy denies outright.
+    pub(crate) danger: MockExecutor,
 }
 
 impl Executors {
@@ -83,15 +85,39 @@ impl Executors {
                 MockStep::done(StopReason::Completed),
             ]),
             burst: named("mock-burst").with_steps(burst),
+            danger: named("mock-danger").with_steps([
+                MockStep::started("danger", "mock-1"),
+                MockStep::Emit(ExecEvent::NeedsApproval {
+                    request_id: "req-1".into(),
+                    subject: ApprovalSubject {
+                        action: ActionClass::Command,
+                        tool: "bash".into(),
+                        command: Some("rm -rf build".into()),
+                        paths: Vec::new(),
+                        raw: serde_json::Value::Null,
+                    },
+                }),
+                MockStep::AwaitAnswer {
+                    request_id: "req-1".into(),
+                },
+                MockStep::text("answered."),
+                MockStep::done(StopReason::Completed),
+            ]),
         }
     }
 
     pub(crate) fn set(&self) -> ExecutorSet {
-        let registry = [&self.mock, &self.hold, &self.approval, &self.burst]
-            .into_iter()
-            .fold(ExecutorRegistry::new(), |registry, mock| {
-                registry.with(Arc::new(mock.clone()))
-            });
+        let registry = [
+            &self.mock,
+            &self.hold,
+            &self.approval,
+            &self.burst,
+            &self.danger,
+        ]
+        .into_iter()
+        .fold(ExecutorRegistry::new(), |registry, mock| {
+            registry.with(Arc::new(mock.clone()))
+        });
         ExecutorSet::from_registry(registry)
     }
 }

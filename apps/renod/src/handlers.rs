@@ -12,6 +12,7 @@
 //! | `run.events` | `run_events` |
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
+//! | `approval.history` | `approval_history` |
 //! | `approvals.watch` | `watch_approvals` |
 //! | `def.list` | `current_defs` |
 //! | `def.get` | `get_definition` |
@@ -36,7 +37,8 @@ use reno_proto::defs::{
     DefsWatchParams,
 };
 use reno_proto::{
-    ApprovalDecide, ApprovalDecideParams, ApprovalDecideResult, ApprovalList, ApprovalListResult,
+    ApprovalDecide, ApprovalDecideParams, ApprovalDecideResult, ApprovalHistory,
+    ApprovalHistoryParams, ApprovalHistoryResult, ApprovalList, ApprovalListResult,
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
     DaemonShutdownResult, DaemonStatus, DaemonStatusInfo, ErrorCode, ErrorObject, ExecutorId,
     FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams,
@@ -99,6 +101,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
+        .method::<ApprovalHistory, _, _>(bind(ctx, approval_history))
         .method::<DefList, _, _>(bind(ctx, def_list))
         .method::<DefGet, _, _>(bind(ctx, def_get))
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
@@ -250,7 +253,21 @@ async fn run_steer(ctx: Arc<Ctx>, p: RunSteerParams) -> Reply<RunSteerResult> {
 
 async fn approval_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<ApprovalListResult> {
     Ok(ApprovalListResult {
-        approvals: ctx.kernel.pending_approvals(),
+        approvals: ctx
+            .kernel
+            .pending_approvals()
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
+}
+
+async fn approval_history(ctx: Arc<Ctx>, p: ApprovalHistoryParams) -> Reply<ApprovalHistoryResult> {
+    Ok(ApprovalHistoryResult {
+        approvals: ctx
+            .kernel
+            .approval_history(p.run.as_ref(), p.limit)
+            .await
+            .map_err(|e| kernel_error(&e))?,
     })
 }
 

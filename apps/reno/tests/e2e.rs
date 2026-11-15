@@ -392,7 +392,7 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
             "bots/keeper.toml: executors[2]: unknown executor \"x\"\n\
              bots/keeper.toml: triggers[1]: unknown trigger \"ghost\"\n\
              triggers/nightly.toml: when.cron: minute field \"61\": 61 is outside 0..=59\n\
-             policy.toml: line 1, column 1: unknown field `mode`, expected `default` or `rules`\n\
+             policy.toml: line 1, column 1: unknown field `mode`, expected one of `default`, `approval_ttl`, `rules`\n\
              4 error(s) in {}\n",
             dir.display()
         )
@@ -431,6 +431,110 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
     let json = world.json(&["defs", "check", "--executor", "acp.grok"]);
     assert_eq!(json["ok"], true);
     assert_eq!(json["definitions"], 3);
+}
+
+const POLICY: &str = r#"
+default = "ask"
+
+[[rules]]
+note = "cargo is fine"
+effect = "allow"
+match = { action = "command", command = "cargo *", scope = ["keeper"] }
+
+[[rules]]
+note = "outside the worktree"
+effect = "deny"
+match = { action = "edit", path = "/**" }
+"#;
+
+const CARGO: &str = r#"{"action":"command","tool":"bash","command":"cargo test"}"#;
+
+#[test]
+fn policy_check_evaluates_offline_and_names_the_rule() {
+    let world = World::new();
+    write_def(&world.defs_dir(), "policy.toml", POLICY);
+    // No daemon is running, and none is needed.
+    let out = world.reno(&["policy", "check", "--bot", "keeper", CARGO]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "allow (rule: cargo is fine)\n");
+
+    // Scope: another bot, and no bot at all, fall to the default.
+    let out = world.reno(&["policy", "check", "--bot", "scout", CARGO]);
+    assert_eq!(text(&out.stdout), "ask (default)\n");
+    let out = world.reno(&["policy", "check", CARGO]);
+    assert_eq!(text(&out.stdout), "ask (default)\n");
+
+    // The worktree decides what is outside it, including through `..`.
+    let escape = r#"{"action":"edit","tool":"write","paths":["../elsewhere.txt"]}"#;
+    let out = world.reno(&["policy", "check", "--cwd", "/work/tree", escape]);
+    assert_eq!(
+        text(&out.stdout),
+        "deny (rule: outside the worktree): denied by policy: outside the worktree\n"
+    );
+    let inside = r#"{"action":"edit","tool":"write","paths":["src/lib.rs"]}"#;
+    let out = world.reno(&["policy", "check", "--cwd", "/work/tree", inside]);
+    assert_eq!(text(&out.stdout), "ask (default)\n");
+
+    let json = world.json(&["policy", "check", "--bot", "keeper", CARGO]);
+    assert_eq!(json["effect"], "allow");
+    assert_eq!(json["rule"]["name"], "cargo is fine");
+    assert_eq!(json["rule"]["index"], 0);
+    assert!(json["policy"].as_str().unwrap().ends_with("policy.toml"));
+    let json = world.json(&["policy", "check", CARGO]);
+    assert_eq!(
+        (json["effect"].as_str(), json["rule"].is_null()),
+        (Some("ask"), true)
+    );
+}
+
+#[test]
+fn policy_check_without_a_policy_file_uses_the_default_and_says_so() {
+    let world = World::new();
+    std::fs::create_dir_all(world.defs_dir()).unwrap();
+    let out = world.reno(&["policy", "check", CARGO]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("no policy.toml") && said.ends_with("ask (default)\n"),
+        "{said}"
+    );
+}
+
+#[test]
+fn policy_check_fails_on_a_bad_subject_or_a_bad_policy() {
+    let world = World::new();
+    write_def(&world.defs_dir(), "policy.toml", POLICY);
+    let out = world.reno(&["policy", "check", "{\"tool\":\"x\"}"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("not a valid approval subject"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    write_def(
+        &world.defs_dir(),
+        "policy.toml",
+        "approval_ttl = \"soon\"\n",
+    );
+    let out = world.reno(&["policy", "check", CARGO]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("approval_ttl"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn approval_history_is_empty_on_a_fresh_daemon() {
+    let world = World::new();
+    world.start_daemon();
+    let out = world.reno(&["approval", "history"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "no approvals have been decided\n");
+    let json = world.json(&["approval", "history", "--limit", "5"]);
+    assert_eq!(json["approvals"].as_array().unwrap().len(), 0);
 }
 
 #[test]
