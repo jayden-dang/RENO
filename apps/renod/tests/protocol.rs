@@ -7,12 +7,14 @@ mod common;
 
 use common::{Fixture, approval_subject, config, id, is_done, seqs, within};
 use futures::StreamExt;
-use reno_client::{Client, ClientError};
+use reno_client::{Client, ClientError, ConnectionStatus, Mirror, MirrorConfig, State};
 use reno_proto::{
     ApprovalDecision, DaemonHello, ErrorCode, ExecEvent, FEATURES, HelloParams, PROTOCOL_VERSION,
     RunListParams, RunStatus, Seq, StopReason, TaskRunParams,
 };
 use renod::lock::LockError;
+use std::time::Duration;
+
 use renod::{Daemon, DaemonError};
 
 macro_rules! daemon_test {
@@ -231,8 +233,45 @@ daemon_test! {
 }
 
 daemon_test! {
-    async fn daemon_shutdown_ends_cleanly_and_the_next_start_finds_the_run_interrupted() {
+    async fn the_mirror_the_app_uses_converges_on_the_daemon() {
         let fx = Fixture::start().await;
+        let (mirror, mut updates) = Mirror::start(fx.client.clone(), MirrorConfig::default());
+        let mut state = State::new();
+        let run = fx.run("mock", "mirror me").await;
+        assert!(mirror.follow_run(run.clone(), None));
+
+        within(async {
+            while let Some(update) = updates.next().await {
+                state.apply(update);
+                let finished = state.run(&run).is_some_and(|r| r.status == RunStatus::Succeeded);
+                let closed = state.transcript(&run).is_some_and(|t| {
+                    t.events.last().is_some_and(|(_, e)| is_done(e, StopReason::Completed))
+                });
+                if finished && closed {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(state.connection(), ConnectionStatus::Connected);
+        assert_eq!(state.daemon().unwrap().hello.pid, std::process::id());
+        let summary = state.run(&run).unwrap();
+        assert_eq!(summary.prompt.as_deref(), Some("mirror me"));
+        let transcript = state.transcript(&run).unwrap();
+        let seqs: Vec<u64> = transcript.events.iter().map(|(seq, _)| seq.0).collect();
+        assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
+        assert_eq!(transcript.resume_from(), Seq(seqs.len() as u64 + 1));
+        mirror.shutdown().await;
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
+    async fn daemon_shutdown_ends_cleanly_and_the_next_start_finds_the_run_interrupted() {
+        // A long grace: the reply and the last events must arrive however slow the machine is, and
+        // the server ends as soon as the last connection closes, not when the grace does.
+        let fx = Fixture::with(|config| config.connection_grace = Duration::from_secs(30)).await;
         let held = fx.run("mock-hold", "still going").await;
         let mut events = Box::pin(fx.client.run_events(held.clone(), None));
         while !matches!(
@@ -250,10 +289,10 @@ daemon_test! {
         assert!(is_done(tail.last().unwrap(), StopReason::Interrupted));
 
         let Fixture { dir, paths, executors, daemon, client } = fx;
+        drop((client, events));
         let stopped = within(daemon.wait()).await.unwrap();
         assert!(!stopped.kernel_aborted && !stopped.server_aborted, "{stopped:?}");
         assert!(!paths.socket.exists(), "the socket is removed");
-        drop((client, events));
 
         // The lock is free, and the store kept the run.
         let again = within(Daemon::start(config(&dir, &executors))).await.unwrap();

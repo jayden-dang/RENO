@@ -183,7 +183,7 @@ process_test! {
         // The log directory exists and holds the JSON log.
         let logs: Vec<_> = std::fs::read_dir(dir.join("logs")).expect("logs").collect();
         assert!(!logs.is_empty(), "a log file is created at start");
-        daemon.signal("TERM");
+        daemon.signal("INT");
         assert!(daemon.exit().await.success());
     }
 }

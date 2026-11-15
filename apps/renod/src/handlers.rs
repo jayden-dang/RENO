@@ -277,8 +277,8 @@ impl Events {
     ///
     /// When the kernel cuts this subscriber off (`Gap`) the daemon resumes it in place at
     /// `resume_from`, so the client sees no hole. Any other failure ends the stream with a
-    /// log line: items cannot carry an error, and the client only treats a stream as complete
-    /// when it has seen the run's `Done`.
+    /// log line: items cannot carry an error, so the subscription ends as if it were done. A
+    /// consumer that must know the run finished has to have seen its `Done` (the CLI checks).
     async fn step(mut self) -> Option<(SubItem<RunEventItem>, Self)> {
         loop {
             match self.inner.next().await? {
