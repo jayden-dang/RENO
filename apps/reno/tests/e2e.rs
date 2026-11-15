@@ -391,7 +391,7 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
         format!(
             "bots/keeper.toml: executors[2]: unknown executor \"x\"\n\
              bots/keeper.toml: triggers[1]: unknown trigger \"ghost\"\n\
-             triggers/nightly.toml: when.cron: minute field \"61\": 61 is outside 0..=59\n\
+             triggers/nightly.toml: when.cron: \"61 2 * * *\" is not a cron expression: Component error: Number out of bounds. (a cron has five fields: minute hour day-of-month month day-of-week)\n\
              policy.toml: line 1, column 1: unknown field `mode`, expected one of `default`, `approval_ttl`, `rules`\n\
              4 error(s) in {}\n",
             dir.display()

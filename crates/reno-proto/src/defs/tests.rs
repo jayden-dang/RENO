@@ -564,7 +564,7 @@ fn trigger_cron_must_have_five_fields() {
             &errors,
             &format!("triggers/nightly.toml: when.cron: \"{cron}\" is not a cron expression"),
         );
-        assert!(errors[0].contains("expected five fields"), "{errors:?}");
+        assert!(errors[0].contains("a cron has five fields"), "{errors:?}");
     }
 }
 

@@ -167,7 +167,7 @@ fn parse_cron(expr: &str) -> Result<Cron, String> {
     parser().parse(expr).map_err(|e| {
         format!(
             "{expr:?} is not a cron expression: {e} \
-             (expected five fields: minute hour day-of-month month day-of-week)"
+             (a cron has five fields: minute hour day-of-month month day-of-week)"
         )
     })
 }
