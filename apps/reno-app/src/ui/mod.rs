@@ -54,4 +54,20 @@ mod tests {
             });
         }
     }
+
+    #[gpui::test]
+    fn spike_view_draws_in_both_appearances(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let model = cx.new(|_| crate::model::Model::default());
+            let (_view, cx) = cx.add_window_view(|window, cx| {
+                super::spike::SpikeView::new(model, Some(appearance), window, cx)
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
 }
