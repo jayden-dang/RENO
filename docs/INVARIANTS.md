@@ -71,6 +71,7 @@ carries it, and a stale fence is rejected. An external effect records its intent
 **ARCH-10 — Nothing polls.** Every timer is a deadline: the next trigger, the next lease expiry,
 a live run's heartbeat, a checkpoint after the last write. Changes to files and git refs arrive
 as events.
+
 The one thing a deadline cannot see is the Mac sleeping: the monotonic timer stops, the wall clock
 does not. The daemon turns the system's wake notification into a signal the scheduler hears
 (`WakeSignal`), and the scheduler then reads the clock again. There is no periodic wake: an idle

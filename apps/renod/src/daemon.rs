@@ -17,7 +17,7 @@
 //!
 //! 1. stop accepting: the listener is dropped, so the socket file goes and nobody new connects.
 //!    Connections already open stay up;
-//! 2. `Kernel::shutdown`: no more claims, every live run is cancelled and ends `interrupted`
+//! 2. the wake notifications are unregistered; `Kernel::shutdown`: no more claims, every live run is cancelled and ends `interrupted`
 //!    (subscribers see its `Done`), within the kernel's own deadline; then the definitions watch
 //!    is stopped;
 //! 3. connections get a short grace to finish what they are owed (a `daemon.shutdown` reply, a
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reno_harness::exec::Executor;
-use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, SystemClock};
+use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, SystemClock, WakeSignal};
 use reno_proto::defs::ValidationContext;
 use reno_proto::{ExecutorId, IdError};
 use reno_rpc::{RpcError, Server, UnixServer};
@@ -46,6 +46,7 @@ use crate::fswatch::FsWatch;
 use crate::handlers::{self, Ctx};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
+use crate::power::{self, PowerWatch};
 use crate::worktrees::GitWorkspace;
 
 /// How long connections get, after the kernel has stopped, to finish what they are owed before
@@ -86,6 +87,9 @@ pub struct DaemonConfig {
     pub defs_debounce: Duration,
     /// How `git init` is run on first start; tests replace it.
     pub git_init: GitInit,
+    /// Listen for the system waking from sleep and tell the scheduler. Off by default so that
+    /// tests never register with the system; the binary turns it on.
+    pub system_wake: bool,
 }
 
 impl DaemonConfig {
@@ -99,6 +103,7 @@ impl DaemonConfig {
             server_deadline: SERVER_DEADLINE,
             defs_debounce: defs::DEFAULT_DEBOUNCE,
             git_init: defs::git_init,
+            system_wake: false,
         }
     }
 }
@@ -172,6 +177,7 @@ impl Daemon {
             server_deadline,
             defs_debounce,
             git_init,
+            system_wake,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -222,7 +228,10 @@ impl Daemon {
         kernel.trigger_cwd.clone_from(&scratch);
         kernel.scratch_root = Some(scratch.clone());
         let fs_watch = Arc::new(FsWatch::new());
-        let setup = DefsSetup::new(fs_defs.clone(), context).with_watch(fs_watch.clone());
+        let wake = WakeSignal::new();
+        let setup = DefsSetup::new(fs_defs.clone(), context)
+            .with_watch(fs_watch.clone())
+            .with_wake(wake.clone());
         let kernel = match Kernel::start_with(
             kernel,
             store,
@@ -238,6 +247,19 @@ impl Daemon {
                 fs_defs.shutdown().await;
                 return Err(error.into());
             }
+        };
+
+        // After the kernel, so the scheduler is listening before the first notification.
+        let power = if system_wake {
+            match power::watch(wake) {
+                Ok(watch) => Some(watch),
+                Err(error) => {
+                    tracing::warn!(%error, "triggers due while the Mac sleeps will fire late");
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         let stop = CancellationToken::new();
@@ -286,6 +308,7 @@ impl Daemon {
             kernel,
             fs_defs,
             fs_watch,
+            power,
             harnesses,
             socket: paths.socket,
             lock,
@@ -328,6 +351,7 @@ struct Shutdown {
     kernel: Kernel,
     fs_defs: Arc<FsDefinitions>,
     fs_watch: Arc<FsWatch>,
+    power: Option<PowerWatch>,
     harnesses: Vec<Arc<dyn Executor>>,
     socket: PathBuf,
     lock: DataDirLock,
@@ -343,6 +367,7 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     s.stop_accepting.cancel();
 
     // 2. The kernel ends every live run `interrupted`, within its own deadline.
+    drop(s.power.take());
     let report = s.kernel.shutdown().await;
     s.fs_defs.shutdown().await;
     s.fs_watch.shutdown().await;

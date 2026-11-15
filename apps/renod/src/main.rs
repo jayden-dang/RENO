@@ -119,6 +119,7 @@ async fn serve(
             harnesses,
         },
     );
+    config.system_wake = true;
     if let Some(limit) = max_concurrent {
         config.kernel.max_concurrent = limit;
     }
