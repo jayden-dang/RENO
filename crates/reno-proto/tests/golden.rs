@@ -280,7 +280,8 @@ fn daemon_hello() {
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
-                            "approval.history", "run.steer", "daemon.shutdown", "defs"], "pid": 4242}),
+                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers"],
+               "pid": 4242}),
     );
 }
 
@@ -778,4 +779,88 @@ fn definition_bodies_in_file_shape() {
         .is_err()
     );
     assert!(serde_json::from_value::<RuleScope>(json!("keeper")).is_err());
+}
+
+#[test]
+fn trigger_state_on_the_wire() {
+    assert_eq!(<TriggerList as Method>::NAME, "trigger.list");
+    assert_eq!(<TriggerFire as Method>::NAME, "trigger.fire");
+    assert_eq!(<TriggersWatch as Subscription>::NAME, "triggers.watch");
+
+    golden(
+        &TriggerInfo {
+            name: "nightly".into(),
+            kind: "cron".into(),
+            bot: "keeper".into(),
+            version: 2,
+            status: TriggerStatus::BackedOff,
+            next_due_at_ms: Some(1_800_000_000_000),
+            last_fired_at_ms: Some(1_799_999_000_000),
+            last_run_id: Some(run_id()),
+            failures: 3,
+            backoff_until_ms: Some(1_800_000_600_000),
+            error: None,
+        },
+        json!({
+            "name": "nightly", "kind": "cron", "bot": "keeper", "version": 2,
+            "status": "backed_off", "nextDueAtMs": 1_800_000_000_000_u64,
+            "lastFiredAtMs": 1_799_999_000_000_u64, "lastRunId": "run_01HZX9",
+            "failures": 3, "backoffUntilMs": 1_800_000_600_000_u64
+        }),
+    );
+    // A trigger that has never fired carries only what is known.
+    golden(
+        &TriggerInfo {
+            name: "poke".into(),
+            kind: "manual".into(),
+            bot: "keeper".into(),
+            version: 1,
+            status: TriggerStatus::Manual,
+            next_due_at_ms: None,
+            last_fired_at_ms: None,
+            last_run_id: None,
+            failures: 0,
+            backoff_until_ms: None,
+            error: None,
+        },
+        json!({"name": "poke", "kind": "manual", "bot": "keeper", "version": 1,
+               "status": "manual", "failures": 0}),
+    );
+    golden(
+        &TriggerFireParams {
+            name: "poke".into(),
+        },
+        json!({"name": "poke"}),
+    );
+    golden(
+        &TriggerFireResult {
+            outcome: FiringOutcome::Coalesced,
+            run_id: Some(run_id()),
+            scheduled_at_ms: 5,
+        },
+        json!({"outcome": "coalesced", "runId": "run_01HZX9", "scheduledAtMs": 5}),
+    );
+    golden(
+        &TriggersSnapshot { triggers: vec![] },
+        json!({"triggers": []}),
+    );
+    for (outcome, wire) in [
+        (FiringOutcome::Fired, "fired"),
+        (FiringOutcome::Coalesced, "coalesced"),
+        (FiringOutcome::Duplicate, "duplicate"),
+        (FiringOutcome::BackedOff, "backed_off"),
+    ] {
+        golden(&outcome, json!(wire));
+    }
+    for (status, wire) in [
+        (TriggerStatus::Scheduled, "scheduled"),
+        (TriggerStatus::Watching, "watching"),
+        (TriggerStatus::Manual, "manual"),
+        (TriggerStatus::Done, "done"),
+        (TriggerStatus::BackedOff, "backed_off"),
+        (TriggerStatus::Disabled, "disabled"),
+        (TriggerStatus::Failed, "failed"),
+    ] {
+        golden(&status, json!(wire));
+    }
 }

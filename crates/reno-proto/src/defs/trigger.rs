@@ -1,6 +1,7 @@
 //! `triggers/<name>.toml`: something that starts a bot (ARCHITECTURE section 7).
 //!
-//! This version loads, validates and versions triggers. Firing them is T1.8.
+//! A trigger is loaded, validated and versioned here; the kernel's scheduler fires it. This module
+//! also owns the text of a firing: the prompt template and the note about a late run.
 
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::time::{
-    MAX_TIMER, MIN_EVERY, check_cron, check_duration, check_instant, check_timezone,
+    MAX_TIMER, MIN_EVERY, check_cron, check_duration, check_instant, check_timezone, format_span,
 };
 use super::{Cx, Sink, check_name, check_ref_name};
 
@@ -62,8 +63,11 @@ fn default_enabled() -> bool {
 pub struct TriggerTarget {
     /// The bot to start. It must exist.
     pub bot: String,
-    /// The prompt template for the task. Placeholders are defined with firing, in T1.8; for now
-    /// the text is only checked to be present and bounded.
+    /// The prompt template for the task. `{{trigger}}` is the trigger's name,
+    /// `{{scheduled_at}}` the occurrence it fires for (RFC 3339, in the trigger's time zone) and
+    /// `{{lateness}}` how late the run started (`0s` when on time). Any other `{{...}}` is an
+    /// error. A run that starts late or merges missed occurrences also gets a sentence saying
+    /// so after the prompt.
     pub prompt: String,
 }
 
@@ -80,7 +84,8 @@ pub enum TriggerKind {
         /// The instant.
         at: String,
     },
-    /// Once, a delay after the definition is loaded: a duration such as `30m`.
+    /// Once, a delay after this version of the definition became active: a duration such as
+    /// `30m`. Editing the definition starts the delay again, unless the trigger has fired.
     After {
         /// The delay.
         after: String,
@@ -259,6 +264,212 @@ impl TriggerDef {
                     self.target.prompt.len()
                 ),
             );
+        } else if let Err(message) = check_placeholders(&self.target.prompt) {
+            sink.err("target.prompt", message);
         }
+    }
+}
+
+// ---- the text of a firing -------------------------------------------------------------------
+
+/// The placeholders a prompt template may use.
+pub const PROMPT_PLACEHOLDERS: [&str; 3] = ["trigger", "scheduled_at", "lateness"];
+
+/// A run that starts less late than this, with nothing missed, is on time: no note is added.
+pub const LATE_GRACE: Duration = Duration::from_secs(60);
+
+/// The most occurrences the scheduler counts when it merges missed ones. A count that reaches it
+/// is shown as "at least".
+pub const MAX_MISSED_COUNT: u32 = 10_000;
+
+/// The pieces a prompt template is filled with.
+#[derive(Debug, Clone, Copy)]
+pub struct PromptVars<'a> {
+    /// The trigger's name.
+    pub trigger: &'a str,
+    /// The occurrence being fired for, as text.
+    pub scheduled_at: &'a str,
+    /// How late the run started, as text such as `6h12m`.
+    pub lateness: &'a str,
+}
+
+/// Splits `template` into literal text and `{{name}}` placeholders, calling `piece` for each.
+/// `Err` is a `{{` that is never closed.
+fn scan<'t>(template: &'t str, mut piece: impl FnMut(Piece<'t>)) -> Result<(), String> {
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        piece(Piece::Text(&rest[..open]));
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            return Err(format!(
+                "has `{{{{` with no closing `}}}}` near {:?}",
+                after.chars().take(20).collect::<String>()
+            ));
+        };
+        piece(Piece::Placeholder {
+            name: after[..close].trim(),
+            raw: &rest[open..open + 2 + close + 2],
+        });
+        rest = &after[close + 2..];
+    }
+    piece(Piece::Text(rest));
+    Ok(())
+}
+
+enum Piece<'t> {
+    Text(&'t str),
+    Placeholder { name: &'t str, raw: &'t str },
+}
+
+/// Checks that every `{{...}}` in `template` is one of [`PROMPT_PLACEHOLDERS`] and is closed.
+pub(super) fn check_placeholders(template: &str) -> Result<(), String> {
+    let mut unknown = None;
+    scan(template, |piece| {
+        if let Piece::Placeholder { name, raw } = piece
+            && unknown.is_none()
+            && !PROMPT_PLACEHOLDERS.contains(&name)
+        {
+            unknown = Some(raw.to_owned());
+        }
+    })?;
+    match unknown {
+        Some(raw) => Err(format!(
+            "has the placeholder {raw}; the known ones are {}",
+            PROMPT_PLACEHOLDERS
+                .map(|p| format!("{{{{{p}}}}}"))
+                .join(", ")
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Fills `template` with `vars`. A placeholder that is not known (validation refuses them) is
+/// left as written.
+pub fn render_prompt(template: &str, vars: &PromptVars<'_>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let scanned = scan(template, |piece| match piece {
+        Piece::Text(text) => out.push_str(text),
+        Piece::Placeholder { name, raw } => out.push_str(match name {
+            "trigger" => vars.trigger,
+            "scheduled_at" => vars.scheduled_at,
+            "lateness" => vars.lateness,
+            _ => raw,
+        }),
+    });
+    if scanned.is_err() {
+        // An unclosed `{{`: the scan stopped there; the rest is plain text.
+        return template.to_owned();
+    }
+    out
+}
+
+/// The sentence added after a prompt whose run is late or stands for several occurrences, or
+/// `None` when the run is on time and alone.
+///
+/// `missed` is how many occurrences were due when the run started, this one included (at least
+/// 1); `lateness` is the age of the earliest of them. A `missed` of [`MAX_MISSED_COUNT`] is a
+/// lower bound.
+pub fn lateness_note(
+    scheduled_at: &str,
+    lateness: Duration,
+    missed: u32,
+    trigger_name: &str,
+) -> Option<String> {
+    if lateness < LATE_GRACE && missed <= 1 {
+        return None;
+    }
+    let late = format_span(lateness);
+    let mut note = format!(
+        "This run (trigger {trigger_name}) was scheduled for {scheduled_at} and started {late} late"
+    );
+    if missed > 1 {
+        let count = if missed >= MAX_MISSED_COUNT {
+            format!("at least {MAX_MISSED_COUNT}")
+        } else {
+            missed.to_string()
+        };
+        note.push_str(&format!(
+            "; {count} occurrences were missed and merged into this one"
+        ));
+    }
+    note.push('.');
+    Some(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VARS: PromptVars<'static> = PromptVars {
+        trigger: "nightly",
+        scheduled_at: "2026-12-01T02:00:00+07:00",
+        lateness: "6h12m",
+    };
+
+    #[test]
+    fn placeholders_are_filled() {
+        assert_eq!(
+            render_prompt(
+                "{{trigger}} at {{ scheduled_at }}, {{lateness}} late; {{trigger}}",
+                &VARS
+            ),
+            "nightly at 2026-12-01T02:00:00+07:00, 6h12m late; nightly"
+        );
+        assert_eq!(
+            render_prompt("no placeholders { } {x}", &VARS),
+            "no placeholders { } {x}"
+        );
+    }
+
+    #[test]
+    fn unknown_and_unclosed_placeholders_are_refused() {
+        assert!(check_placeholders("{{trigger}} and {{lateness}}").is_ok());
+        let unknown = check_placeholders("hello {{ name }}").unwrap_err();
+        assert!(
+            unknown.contains("{{ name }}") && unknown.contains("{{scheduled_at}}"),
+            "{unknown}"
+        );
+        let unclosed = check_placeholders("hello {{trigger").unwrap_err();
+        assert!(unclosed.contains("no closing"), "{unclosed}");
+        // Left alone when rendered, never half-filled.
+        assert_eq!(render_prompt("a {{trigger", &VARS), "a {{trigger");
+    }
+
+    #[test]
+    fn the_note_says_how_late_and_how_many() {
+        let on_time = lateness_note("t", Duration::from_secs(2), 1, "n");
+        assert_eq!(on_time, None);
+        assert_eq!(
+            lateness_note(
+                "2026-12-01T02:00:00+07:00",
+                Duration::from_secs(6 * 3600 + 12 * 60),
+                1,
+                "nightly"
+            )
+            .unwrap(),
+            "This run (trigger nightly) was scheduled for 2026-12-01T02:00:00+07:00 and started 6h12m late."
+        );
+        assert_eq!(
+            lateness_note(
+                "02:00",
+                Duration::from_secs(6 * 3600 + 12 * 60),
+                3,
+                "nightly"
+            )
+            .unwrap(),
+            "This run (trigger nightly) was scheduled for 02:00 and started 6h12m late; \
+             3 occurrences were missed and merged into this one."
+        );
+        // Several merged occurrences are noted even when the run started at once.
+        assert!(
+            lateness_note("02:00", Duration::ZERO, 2, "n")
+                .unwrap()
+                .contains("2 occurrences")
+        );
+        assert!(
+            lateness_note("02:00", Duration::from_secs(1), MAX_MISSED_COUNT, "n")
+                .unwrap()
+                .contains("at least 10000 occurrences")
+        );
     }
 }
