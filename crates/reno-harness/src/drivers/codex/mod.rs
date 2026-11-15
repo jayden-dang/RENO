@@ -77,7 +77,7 @@ use crate::exec::{
     Decision, ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, InputAnswer, Open,
     OpenRequests, ProcessSink, Resolved, require_access,
 };
-use crate::jsonrpc::{Incoming, RpcClient, RpcTasks, transport_lost};
+use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::owned::Child as OwnedChild;
 use crate::process::{Command, Stdio};
 use crate::{HarnessError, Signal, send_signal};
@@ -344,7 +344,7 @@ impl CodexExecutor {
             child.shutdown(self.kill_grace).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
-        let (client, _incoming, rpc_tasks) = RpcClient::tracked(&self.tracker, stdin, stdout);
+        let (client, _incoming) = RpcClient::spawn(&self.tracker, stdin, stdout);
         let discovery = async {
             client
                 .request("initialize", initialize_params(false))
@@ -394,7 +394,7 @@ impl CodexExecutor {
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         child.shutdown(self.kill_grace).await;
-        rpc_tasks.abort();
+        client.abort();
         let models = match result {
             Ok(inner) => inner?,
             Err(_) => return Err(HarnessError::Protocol("model discovery timed out".into())),
@@ -626,17 +626,16 @@ struct AppServer {
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     stderr_tail: crate::StderrTail,
-    /// The JSON-RPC writer and reader. Like the stderr reader they end when the child's pipes
-    /// close, which a grandchild that escaped teardown can hold open forever: the run aborts
-    /// them with [`Self::release`], so `shutdown` is bounded.
-    rpc_tasks: RpcTasks,
+    /// The JSON-RPC writer and reader belong to `client`. Like the stderr reader they end when
+    /// the child's pipes close, which a grandchild that escaped teardown can hold open forever:
+    /// the run aborts them with [`Self::release`], so `shutdown` is bounded.
     stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AppServer {
     /// Stop the tasks that read and write the child's pipes, once the child is reaped.
     fn release(&mut self) {
-        self.rpc_tasks.abort();
+        self.client.abort();
         if let Some(handle) = self.stderr_task.take() {
             handle.abort();
         }
@@ -692,13 +691,12 @@ async fn launch(
             tail.close();
         })
     });
-    let (client, incoming, rpc_tasks) = RpcClient::tracked(tracker, stdin, stdout);
+    let (client, incoming) = RpcClient::spawn(tracker, stdin, stdout);
     Ok(AppServer {
         child,
         client,
         incoming,
         stderr_tail,
-        rpc_tasks,
         stderr_task,
     })
 }

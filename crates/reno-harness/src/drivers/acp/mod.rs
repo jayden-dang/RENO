@@ -584,6 +584,7 @@ impl Executor for AcpExecutor {
         };
         let (event_tx, event_rx) = mpsc::channel::<ExecEvent>(EVENT_CAPACITY);
         self.tracker.spawn(run_session(Session {
+            tracker: self.tracker.clone(),
             child,
             scratch,
             event_tx,
@@ -661,6 +662,8 @@ fn unix_noop_browser(
 // ---------------------------------------------------------------------------
 
 struct Session {
+    /// The executor's task tracker: the JSON-RPC reader and writer run on it.
+    tracker: TaskTracker,
     child: Child,
     scratch: Option<ScratchDir>,
     event_tx: mpsc::Sender<ExecEvent>,
@@ -909,6 +912,7 @@ fn current_model(session_options: &Value, requested: Option<&str>) -> String {
 /// queue, the answers, the cancel token and consumer liveness.
 async fn run_session(session: Session) {
     let Session {
+        tracker,
         // Locals drop in reverse binding order: reap the child before cleanup.
         scratch: _scratch,
         mut child,
@@ -956,13 +960,14 @@ async fn run_session(session: Session) {
         };
         if harness == HarnessId::Antigravity {
             let prompted = sign_in_prompted.clone();
-            RpcClient::with_stdout_observer(
+            RpcClient::spawn_observing(
+                &tracker,
                 stdin,
                 stdout,
                 Some(Box::new(move |_| prompted.cancel())),
             )
         } else {
-            RpcClient::new(stdin, stdout)
+            RpcClient::spawn(&tracker, stdin, stdout)
         }
     };
 

@@ -11,6 +11,7 @@ use std::time::Duration;
 use reno_proto::AccessMode;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::AcpExecutor;
 use super::launch::find_on_paths;
@@ -326,6 +327,18 @@ fn prepend_path(cmd: &mut Command, dir: &Path) {
     }
 }
 
+/// Aborts the tasks it holds when dropped, so a reader of a sign-in child's pipes ends with the
+/// call that started it, even when a descendant holds the pipe open.
+struct AbortOnDrop(Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Whether an ACP error says the agent isn't signed in: the protocol's
 /// `auth_required` (-32000), or its words.
 fn still_signed_out(error: &HarnessError) -> bool {
@@ -445,13 +458,19 @@ impl AcpExecutor {
         let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(report_lines(stderr, on_progress.clone()));
-        }
+        // The stderr reader is owned by the tracker and ends with this call.
+        let _stderr_reader = child.stderr.take().map(|stderr| {
+            AbortOnDrop(vec![
+                self.tracker
+                    .spawn(report_lines(stderr, on_progress.clone()))
+                    .abort_handle(),
+            ])
+        });
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => {
                 let on_progress = on_progress.clone();
-                RpcClient::with_stdout_observer(
+                RpcClient::spawn_observing(
+                    &self.tracker,
                     stdin,
                     stdout,
                     Some(Box::new(move |line| {
@@ -774,7 +793,7 @@ impl AcpExecutor {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (client, incoming) = match (child.stdin.take(), child.stdout.take()) {
-            (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
+            (Some(stdin), Some(stdout)) => RpcClient::spawn(&self.tracker, stdin, stdout),
             _ => {
                 shutdown_child(&mut child, self.kill_grace).await;
                 return Err(HarnessError::Protocol("agent child has no stdio".into()));
@@ -872,11 +891,14 @@ impl AcpExecutor {
         })?;
         let mut readers = Vec::new();
         if let Some(out) = login.stdout.take() {
-            readers.push(tokio::spawn(report_lines(out, on_progress.clone())));
+            readers.push(self.tracker.spawn(report_lines(out, on_progress.clone())));
         }
         if let Some(err) = login.stderr.take() {
-            readers.push(tokio::spawn(report_lines(err, on_progress.clone())));
+            readers.push(self.tracker.spawn(report_lines(err, on_progress.clone())));
         }
+        // Whatever way this call ends (a timeout, an error, the caller dropping it), the readers
+        // end with it.
+        let _readers = AbortOnDrop(readers.iter().map(JoinHandle::abort_handle).collect());
         let status = match tokio::time::timeout(SIGN_IN_TIMEOUT, login.wait()).await {
             Ok(status) => status?,
             Err(_) => {

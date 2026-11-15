@@ -718,8 +718,12 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let (client, _incoming) =
-            RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let tracker = tokio_util::task::TaskTracker::new();
+        let (client, _incoming) = RpcClient::spawn(
+            &tracker,
+            child.stdin.take().unwrap(),
+            child.stdout.take().unwrap(),
+        );
         answer_unattended(&client, &json!(7), method, &params, access);
         tokio::time::timeout(Duration::from_secs(5), async {
             while !out.exists() {
@@ -781,8 +785,12 @@ mod tests {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-        let (client, mut incoming) =
-            RpcClient::new(child.stdin.take().unwrap(), child.stdout.take().unwrap());
+        let tracker = tokio_util::task::TaskTracker::new();
+        let (client, mut incoming) = RpcClient::spawn(
+            &tracker,
+            child.stdin.take().unwrap(),
+            child.stdout.take().unwrap(),
+        );
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             request_draining(
