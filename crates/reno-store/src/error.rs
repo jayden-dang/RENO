@@ -4,7 +4,6 @@ use reno_proto::{RunId, RunStatus};
 
 /// Everything that can go wrong in `reno-store`.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum StoreError {
     /// The database failed. The cause is kept as an opaque error so that no SQLite type leaks.
     #[error("database error: {0}")]

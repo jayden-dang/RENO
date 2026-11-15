@@ -18,7 +18,6 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         }
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
         KernelError::Store(store) => store_code(store),
-        _ => ErrorCode::Internal,
     }
 }
 
@@ -31,7 +30,11 @@ fn store_code(error: &StoreError) -> ErrorCode {
         StoreError::StaleFence { .. } => ErrorCode::StaleFence,
         StoreError::InvalidArgument(_) => ErrorCode::InvalidParams,
         StoreError::Closed => ErrorCode::Unavailable,
-        _ => ErrorCode::Internal,
+        StoreError::Database(_)
+        | StoreError::Migration(_)
+        | StoreError::Corrupt(_)
+        | StoreError::Io(_)
+        | StoreError::Json(_) => ErrorCode::Internal,
     }
 }
 
