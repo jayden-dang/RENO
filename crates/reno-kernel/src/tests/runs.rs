@@ -276,14 +276,22 @@ async fn approval_flow(decision: ApprovalDecision, expect: Decision) {
     let mut watch = fx.kernel.watch_approvals();
     let run = fx.submit("needs a human").await;
 
-    let approval = until(async || fx.kernel.pending_approvals().into_iter().next()).await;
+    let approval = until(async || {
+        fx.kernel
+            .pending_approvals()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+    })
+    .await;
     assert_eq!(approval.run_id, run);
     assert_eq!(approval.subject.tool, "bash");
     fx.wait_status(&run, RunStatus::WaitingApproval).await;
     assert_eq!(watch.borrow_and_update().len(), 1);
 
     fx.kernel.decide(&approval.id, decision).await.unwrap();
-    assert!(fx.kernel.pending_approvals().is_empty());
+    assert!(fx.kernel.pending_approvals().await.unwrap().is_empty());
     assert!(watch.borrow_and_update().is_empty());
     fx.wait_status(&run, RunStatus::Succeeded).await;
 
@@ -391,7 +399,7 @@ async fn an_unknown_executor_fails_the_run_with_the_diagnostic_in_its_journal() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_exec_error_fails_the_run_with_the_diagnostic() {
+async fn an_executor_that_cannot_honour_the_access_mode_is_not_eligible() {
     let mut descriptor = MockExecutor::default_descriptor(id("mock"));
     descriptor.caps.access_modes = vec![AccessMode::FullAccess];
     let m = MockExecutor::new(id("mock")).with_descriptor(descriptor);
@@ -400,8 +408,50 @@ async fn an_exec_error_fails_the_run_with_the_diagnostic() {
     fx.wait_status(&run, RunStatus::Failed).await;
     let events = fx.events(&run, None).await;
     let done = events.last().unwrap().as_ref().unwrap().event.clone();
-    assert!(diagnostic(&done).contains("not supported"), "{done:?}");
+    let why = diagnostic(&done);
+    assert!(why.starts_with("NoEligibleExecutor:"), "{done:?}");
+    assert!(
+        why.contains("Supervised") && why.contains("[FullAccess]"),
+        "{why}"
+    );
     assert!(m.log().specs.is_empty(), "nothing was started");
+}
+
+/// An executor whose `start` refuses every run, as a harness that is not signed in does.
+struct Refusing;
+
+#[async_trait]
+impl Executor for Refusing {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        MockExecutor::default_descriptor(id("mock"))
+    }
+
+    async fn probe(&self) -> ExecutorHealth {
+        ExecutorHealth::default()
+    }
+
+    async fn start(
+        &self,
+        _: ExecSpec,
+        _: ExecControls,
+    ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
+        Err(ExecError::NotSignedIn("run `claude login`".into()))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exec_error_fails_the_run_with_the_diagnostic() {
+    let registry = ExecutorRegistry::new().with(Arc::new(Refusing));
+    let fx = Fx::new(config(1), registry).await;
+    let run = fx.submit("hi").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    let events = fx.events(&run, None).await;
+    let done = events.last().unwrap().as_ref().unwrap().event.clone();
+    assert!(diagnostic(&done).contains("not signed in"), "{done:?}");
+    assert!(
+        diagnostic(&done).contains("the executor refused the run"),
+        "{done:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -25,13 +25,15 @@ use reno_proto::defs::{
     BotPin, DefKind, DefRecord, DefValidateResult, ValidationContext, validate_body,
 };
 use reno_proto::{
-    Approval, ApprovalDecision, ApprovalId, ExecutorId, RunEventItem, RunId, RunStatus, RunSummary,
-    Seq, TaskId,
+    APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, Approval, ApprovalDecision,
+    ApprovalId, ApprovalRecord, ApprovalStatus, ExecutorId, RunEventItem, RunId, RunStatus,
+    RunSummary, Seq, TaskId,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
 use tokio::time::timeout;
 
+use crate::approvals;
 use crate::clock::Clock;
 use crate::config::KernelConfig;
 use crate::db::Db;
@@ -108,6 +110,7 @@ impl Kernel {
             context,
         ));
         recovery::recover(&shared).await?;
+        shared.approvals.refresh(&shared.db).await?;
         if let Some(setup) = definitions {
             defs::start(&shared, setup).await?;
         }
@@ -137,9 +140,13 @@ impl Kernel {
     /// later. With no `executor` the run goes to the first executor in the bot's list that the
     /// kernel has. An unknown bot is [`KernelError::DefinitionNotFound`].
     ///
-    /// Only the pin takes effect today. Choosing among the bot's executors by health and
-    /// capability is routing (T1.5), and applying its access, sandbox, budget and instructions
-    /// is policy and budgets (T1.6, T1.7).
+    /// The run launches with the `access` and `sandbox` of the pinned bot version. With no
+    /// `executor` given, the first executor in the bot's list that this kernel has **and that
+    /// declares the bot's access mode** is chosen; when none does, the first one it has is
+    /// recorded and the run fails at launch with a `NoEligibleExecutor` diagnostic rather than
+    /// being started with a different access mode (ARCH-15). Choosing among the bot's executors
+    /// by health and routing statistics is T1.5, and applying its instructions and budget is
+    /// T1.5 and T1.7.
     pub async fn submit_for_bot(
         &self,
         bot: &str,
@@ -156,12 +163,22 @@ impl Kernel {
         let stored = current
             .version_of(DefKind::Bot, bot)
             .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
+        let eligible = |id: &&ExecutorId| {
+            self.shared.executors.get(id).is_some_and(|executor| {
+                dispatcher::no_eligible_executor(&executor.descriptor(), def.access).is_none()
+            })
+        };
         let executor = match executor {
             Some(executor) => executor,
             None => def
                 .executors
                 .iter()
-                .find(|id| self.shared.executors.get(id).is_some())
+                .find(eligible)
+                .or_else(|| {
+                    def.executors
+                        .iter()
+                        .find(|id| self.shared.executors.get(id).is_some())
+                })
                 .cloned()
                 .ok_or_else(|| {
                     KernelError::Invalid(format!(
@@ -404,24 +421,54 @@ impl Kernel {
             .map_err(|_| KernelError::RunEnded(run.clone()))?
     }
 
-    /// Approvals waiting for a human, oldest first. In memory in Phase 0.
-    pub fn pending_approvals(&self) -> Vec<Approval> {
-        self.shared.approvals.list()
+    /// Approvals waiting for a human, oldest first, as the store holds them.
+    pub async fn pending_approvals(&self) -> Result<Vec<Approval>> {
+        Ok(self
+            .shared
+            .db
+            .pending_approvals()
+            .await?
+            .iter()
+            .map(approvals::approval)
+            .collect())
     }
 
-    /// The pending approvals, refreshed on every change. Latest value wins.
+    /// The pending approvals, refreshed from the store on every change. Latest value wins.
     pub fn watch_approvals(&self) -> watch::Receiver<Vec<Approval>> {
         self.shared.approvals.subscribe()
     }
 
-    /// Answer a pending approval. The executor gets the decision, then the run goes back to
-    /// `running`.
-    pub async fn decide(&self, approval: &ApprovalId, decision: ApprovalDecision) -> Result<()> {
-        let run = self
+    /// Decided approvals, newest decision first: who decided each, and by which rule. Only
+    /// `run`'s when given. `limit` defaults to 50 and is capped at 500.
+    pub async fn approval_history(
+        &self,
+        run: Option<&RunId>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ApprovalRecord>> {
+        let limit = limit
+            .unwrap_or(APPROVAL_HISTORY_DEFAULT_LIMIT)
+            .clamp(1, APPROVAL_HISTORY_MAX_LIMIT);
+        Ok(self
             .shared
-            .approvals
-            .run_of(approval)
+            .db
+            .approval_history(run, limit)
+            .await?
+            .iter()
+            .map(approvals::record)
+            .collect())
+    }
+
+    /// Answer a pending approval. The decision is stored (decided by a human), the executor gets
+    /// it, then the run goes back to `running`.
+    pub async fn decide(&self, approval: &ApprovalId, decision: ApprovalDecision) -> Result<()> {
+        let row = self
+            .shared
+            .db
+            .get_approval(approval)
+            .await?
+            .filter(|row| row.status == ApprovalStatus::Pending)
             .ok_or_else(|| KernelError::ApprovalNotFound(approval.clone()))?;
+        let run = row.run_id;
         let commands = self
             .shared
             .live_commands(&run)
@@ -456,7 +503,12 @@ impl Kernel {
             shared.abort.cancel();
             shared.tracker.wait().await;
             shared.live_clear();
-            shared.approvals.clear();
+        }
+        // Whatever the supervisors that were dropped left pending is closed here; recovery would
+        // close it at the next start, but a view that shows an approval nobody can answer is
+        // wrong now.
+        if let Err(error) = recovery::expire_orphans(shared).await {
+            tracing::warn!(%error, "could not close the pending approvals at shutdown");
         }
         if let Err(error) = shared.refresh_runs().await {
             tracing::warn!(%error, "final run list refresh failed");

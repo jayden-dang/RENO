@@ -11,20 +11,34 @@
 //! A run it cannot start (unknown executor, `ExecError`, a task with no working directory)
 //! fails: `running`, `evaluating`, `failed`, and then a `Done { Error, diagnostic }` in the
 //! journal, after the state has committed.
+//!
+//! # Launch settings
+//!
+//! A run for a bot starts with the `access` and `sandbox` of the bot **version it is pinned to**
+//! (read from the store, so a later edit of the bot changes nothing for a run already queued);
+//! any other run starts with the kernel's configured defaults. Before the executor is started its
+//! descriptor is checked: an executor that does not declare the requested access mode is not
+//! eligible, and the run fails with a `NoEligibleExecutor` diagnostic. The run is never started
+//! with more access than it asked for (ARCH-15), and never with less access silently either.
+//! The sandbox level is passed through but not checked: no executor declares its sandbox
+//! levels yet, and refusing every run for that would make the field unusable.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reno_harness::exec::ExecControls;
-use reno_proto::{ExecEvent, ExecSpec, RunId, RunStatus, StopReason};
+use reno_proto::defs::{BotDef, DefKind};
+use reno_proto::{
+    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, RunId, RunStatus, SandboxLevel, StopReason,
+};
 use reno_store::{Claim, RunRecord, StoreError};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::lifecycle;
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
-use crate::supervisor::Supervisor;
+use crate::supervisor::{RunInfo, Supervisor};
 
 pub(crate) async fn run(shared: Arc<Shared>) {
     loop {
@@ -85,8 +99,55 @@ async fn next_lease_expiry(shared: &Arc<Shared>) -> Option<Duration> {
     Some(Duration::from_millis(wait))
 }
 
+/// The access and sandbox a run asks for: its pinned bot version's, else the kernel's defaults.
+async fn launch_settings(
+    shared: &Shared,
+    row: &RunRecord,
+) -> Result<(AccessMode, SandboxLevel), String> {
+    let Some(pin) = &row.bot else {
+        return Ok((shared.config.access, shared.config.sandbox));
+    };
+    let stored = shared
+        .db
+        .get_definition(DefKind::Bot, &pin.name, pin.version)
+        .await
+        .map_err(|error| format!("cannot read bot {} v{}: {error}", pin.name, pin.version))?
+        .ok_or_else(|| {
+            format!(
+                "the pinned definition bot {} v{} is gone",
+                pin.name, pin.version
+            )
+        })?;
+    let bot: BotDef = serde_json::from_value(stored.body).map_err(|error| {
+        format!(
+            "the pinned definition bot {} v{} is unreadable: {error}",
+            pin.name, pin.version
+        )
+    })?;
+    Ok((bot.access, bot.sandbox))
+}
+
+/// The diagnostic of a run that no executor can honour, or `None` when `descriptor` can.
+pub(crate) fn no_eligible_executor(
+    descriptor: &ExecutorDescriptor,
+    access: AccessMode,
+) -> Option<String> {
+    if descriptor.caps.access_modes.contains(&access) {
+        return None;
+    }
+    Some(format!(
+        "NoEligibleExecutor: the run asks for access mode {access:?}, and executor {} supports \
+         only {:?}; a run is never started with a different access mode than it asked for",
+        descriptor.id, descriptor.caps.access_modes
+    ))
+}
+
 /// The task's prompt, working directory and model, as `submit` stored them.
-fn exec_spec(shared: &Shared, row: &RunRecord) -> Result<ExecSpec, String> {
+fn exec_spec(
+    row: &RunRecord,
+    access: AccessMode,
+    sandbox: SandboxLevel,
+) -> Result<ExecSpec, String> {
     let cwd = row
         .spec
         .get("cwd")
@@ -104,8 +165,8 @@ fn exec_spec(shared: &Shared, row: &RunRecord) -> Result<ExecSpec, String> {
         cwd: PathBuf::from(cwd),
         model,
         effort: None,
-        access: shared.config.access,
-        sandbox: shared.config.sandbox,
+        access,
+        sandbox,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),
@@ -145,13 +206,23 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     }
     shared.mark_runs_dirty();
 
-    let spec = match exec_spec(shared, &row) {
+    let spec = match launch_settings(shared, &row)
+        .await
+        .and_then(|(access, sandbox)| exec_spec(&row, access, sandbox))
+    {
         Ok(spec) => spec,
         Err(why) => return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await,
     };
     let Some(executor) = shared.executors.get(&row.executor).cloned() else {
         let why = format!("unknown executor {}", row.executor);
         return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await;
+    };
+    if let Some(why) = no_eligible_executor(&executor.descriptor(), spec.access) {
+        return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await;
+    }
+    let info = RunInfo {
+        cwd: spec.cwd.clone(),
+        bot: row.bot.as_ref().map(|pin| pin.name.clone()),
     };
 
     let (controls, handle) = ExecControls::with_cancel(CONTROL_QUEUE, cancel.clone());
@@ -166,6 +237,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 Arc::clone(shared),
                 run_id,
                 fence,
+                info,
                 stream,
                 handle,
                 cancel,

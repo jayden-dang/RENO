@@ -1,98 +1,83 @@
-//! Pending approvals: in memory in Phase 0 (persistence is T1.6).
+//! The kernel's view of approvals: the pending list that `approval.list` and `approvals.watch`
+//! show, backed by the store.
 //!
-//! A pending approval lives exactly as long as the run supervisor that raised it: the
-//! supervisor adds it when the executor asks, removes it when it is decided, and removes every
-//! approval of its run when the run ends. A daemon restart therefore forgets them, which is
-//! sound: recovery interrupts every run that was waiting on one.
+//! The store is the truth (`reno_store::approvals`): a pending approval is a durable row, so a
+//! request survives in the record whatever happens to the process. This module holds only the
+//! `watch` that mirrors the pending rows for subscribers. Whoever changes the rows calls
+//! [`Approvals::refresh`] afterwards, which reads them back and publishes them, so a subscriber
+//! sees what the store holds and nothing else. Refreshes are serialised, so a later read is never
+//! published before an earlier one and the last value published is the newest.
 //!
-//! The mutex guards a small table and is never held across an `.await`.
+//! What the supervisors do with a request (policy, the wait, the deadline) is in `supervisor`;
+//! this module is the read side.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use reno_proto::{Approval, ApprovalRecord};
+use reno_store::StoredApproval;
+use tokio::sync::{Mutex, watch};
 
-use reno_proto::{Approval, ApprovalId, RunId};
-use tokio::sync::watch;
+use crate::db::Db;
+use crate::error::Result;
 
-#[derive(Debug)]
-struct Pending {
-    approval: Approval,
-}
-
-/// The pending approvals and the `watch` that mirrors them.
+/// The pending approvals, as subscribers see them.
 #[derive(Debug)]
 pub(crate) struct Approvals {
-    pending: Mutex<Vec<Pending>>,
     tx: watch::Sender<Vec<Approval>>,
+    /// Held across a read and its publish, so refreshes cannot cross.
+    refreshing: Mutex<()>,
 }
 
 impl Approvals {
     pub(crate) fn new() -> Self {
         Self {
-            pending: Mutex::new(Vec::new()),
             tx: watch::channel(Vec::new()).0,
+            refreshing: Mutex::new(()),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Vec<Pending>> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Publish the table to watchers, still holding its lock so updates arrive in order.
-    fn publish(&self, table: &[Pending]) {
-        self.tx
-            .send_replace(table.iter().map(|p| p.approval.clone()).collect());
-    }
-
-    pub(crate) fn add(&self, approval: Approval) {
-        let mut table = self.lock();
-        table.push(Pending { approval });
-        self.publish(&table);
-    }
-
-    /// The run that raised `id`, if it is still pending.
-    pub(crate) fn run_of(&self, id: &ApprovalId) -> Option<RunId> {
-        self.lock()
-            .iter()
-            .find(|p| p.approval.id == *id)
-            .map(|p| p.approval.run_id.clone())
-    }
-
-    /// Forget `id`. Returns whether it was pending.
-    pub(crate) fn remove(&self, id: &ApprovalId) -> bool {
-        let mut table = self.lock();
-        let before = table.len();
-        table.retain(|p| p.approval.id != *id);
-        let removed = table.len() != before;
-        if removed {
-            self.publish(&table);
-        }
-        removed
-    }
-
-    /// Forget everything `run` is waiting on.
-    pub(crate) fn remove_run(&self, run: &RunId) {
-        let mut table = self.lock();
-        let before = table.len();
-        table.retain(|p| p.approval.run_id != *run);
-        if table.len() != before {
-            self.publish(&table);
-        }
-    }
-
-    /// Forget everything (a hard shutdown dropped the supervisors without their cleanup).
-    pub(crate) fn clear(&self) {
-        let mut table = self.lock();
-        if !table.is_empty() {
-            table.clear();
-            self.publish(&table);
-        }
-    }
-
-    /// The pending approvals, oldest first.
-    pub(crate) fn list(&self) -> Vec<Approval> {
-        self.lock().iter().map(|p| p.approval.clone()).collect()
+    /// Read the pending rows from the store and publish them if they changed.
+    pub(crate) async fn refresh(&self, db: &Db) -> Result<()> {
+        let _turn = self.refreshing.lock().await;
+        let pending: Vec<Approval> = db.pending_approvals().await?.iter().map(approval).collect();
+        self.tx.send_if_modified(|current| {
+            if *current == pending {
+                return false;
+            }
+            *current = pending;
+            true
+        });
+        Ok(())
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<Vec<Approval>> {
         self.tx.subscribe()
     }
+}
+
+/// A pending row as the wire's [`Approval`].
+pub(crate) fn approval(row: &StoredApproval) -> Approval {
+    Approval {
+        id: row.id.clone(),
+        run_id: row.run_id.clone(),
+        subject: row.subject.clone(),
+        requested_at_ms: to_ms(row.created_at),
+    }
+}
+
+/// A row, pending or decided, as the wire's [`ApprovalRecord`].
+pub(crate) fn record(row: &StoredApproval) -> ApprovalRecord {
+    ApprovalRecord {
+        id: row.id.clone(),
+        run_id: row.run_id.clone(),
+        request_id: row.request_id.clone(),
+        subject: row.subject.clone(),
+        status: row.status,
+        decided_by: row.decided_by.clone(),
+        created_at_ms: to_ms(row.created_at),
+        decided_at_ms: row.decided_at.map(to_ms),
+        expires_at_ms: to_ms(row.expires_at),
+    }
+}
+
+fn to_ms(at: i64) -> u64 {
+    u64::try_from(at).unwrap_or(0)
 }

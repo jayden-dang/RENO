@@ -24,28 +24,31 @@
 //!
 //! # Waiting
 //!
-//! `NeedsApproval` moves the run to `waiting_approval` and adds a pending approval; `decide`
-//! answers the executor and returns the run to `running`. `NeedsInput` moves it to
-//! `waiting_input`. Phase 0 has no client path that answers input, so such a run waits until it
-//! is cancelled, the executor gives up, or the kernel shuts down.
+//! `NeedsApproval` is judged by policy (see the `approval` module): a rule or a repeated denial
+//! answers it at once and the run never leaves `running`; otherwise the run moves to
+//! `waiting_approval` with a stored pending approval, which `decide` or the approval's deadline
+//! answers, and the run returns to `running`. `NeedsInput` moves it to `waiting_input`. Phase 0
+//! has no client path that answers input, so such a run waits until it is cancelled, the
+//! executor gives up, or the kernel shuts down.
+
+mod approval;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use reno_harness::exec::{ControlsClosed, Decision, ExecHandle, SteerRejected};
-use reno_proto::{
-    Approval, ApprovalId, ApprovalSubject, ExecEvent, RunId, RunStatus, Seq, StopReason,
-};
+use reno_harness::exec::{ExecHandle, SteerRejected};
+use reno_proto::{ExecEvent, RunId, RunStatus, Seq, StopReason};
 use reno_store::{JournalWriter, StoreError};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::time::{Sleep, sleep};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::{KernelError, Result};
+use crate::error::KernelError;
 use crate::lifecycle;
 use crate::procs::{Records, Spawned};
 use crate::shared::{Shared, Slot, Subscription, SupCmd};
@@ -71,6 +74,15 @@ impl Sub {
     }
 }
 
+/// What the supervisor must know about the run to judge its approvals.
+#[derive(Debug, Clone)]
+pub(crate) struct RunInfo {
+    /// The run's worktree, which policy paths are judged against.
+    pub(crate) cwd: PathBuf,
+    /// The bot the run is pinned to, which policy rules are scoped by.
+    pub(crate) bot: Option<String>,
+}
+
 /// How the run ended, as the executor (or the supervisor, when it had to) said.
 struct End {
     stop: StopReason,
@@ -82,6 +94,7 @@ pub(crate) struct Supervisor {
     shared: Arc<Shared>,
     run: RunId,
     fence: u64,
+    info: RunInfo,
     stream: BoxStream<'static, ExecEvent>,
     handle: ExecHandle,
     cancel: CancellationToken,
@@ -90,7 +103,10 @@ pub(crate) struct Supervisor {
     status: RunStatus,
     journal: Option<JournalWriter>,
     subs: Vec<Sub>,
-    open_approvals: Vec<(ApprovalId, String)>,
+    /// Approvals waiting for a human, each with its deadline.
+    open_approvals: Vec<approval::Open>,
+    /// Fires at the earliest deadline in `open_approvals`; `None` while nothing waits.
+    expiry: Option<Pin<Box<Sleep>>>,
     open_inputs: HashSet<String>,
     /// Something went wrong that makes the run's record untrustworthy; the run ends `error`.
     fatal: Option<String>,
@@ -117,12 +133,21 @@ async fn grace_elapsed(grace: &mut Option<Pin<Box<Sleep>>>) {
     }
 }
 
+/// Pending until the earliest approval deadline is armed and elapses.
+async fn expiry_elapsed(expiry: &mut Option<Pin<Box<Sleep>>>) {
+    match expiry {
+        Some(sleep) => sleep.await,
+        None => std::future::pending().await,
+    }
+}
+
 impl Supervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         shared: Arc<Shared>,
         run: RunId,
         fence: u64,
+        info: RunInfo,
         stream: BoxStream<'static, ExecEvent>,
         handle: ExecHandle,
         cancel: CancellationToken,
@@ -134,6 +159,7 @@ impl Supervisor {
             shared,
             run,
             fence,
+            info,
             stream,
             handle,
             cancel,
@@ -143,6 +169,7 @@ impl Supervisor {
             journal: None,
             subs: Vec::new(),
             open_approvals: Vec::new(),
+            expiry: None,
             open_inputs: HashSet::new(),
             fatal: None,
             lost: false,
@@ -168,6 +195,7 @@ impl Supervisor {
                     self.heartbeat().await;
                     beat.set(sleep(period));
                 }
+                () = expiry_elapsed(&mut self.expiry) => self.expire_due().await,
                 () = grace_elapsed(&mut grace) => {
                     // The executor ignored the cancel. Dropping its stream is what ends a
                     // harness that will not stop by itself.
@@ -246,39 +274,17 @@ impl Supervisor {
     /// Handle one non-final event. Every event is journaled and broadcast; the few that also
     /// change the run's state do that first, so whoever sees the event sees the state.
     async fn event(&mut self, event: ExecEvent) {
-        if let ExecEvent::NeedsApproval {
-            request_id,
-            subject,
-        } = &event
-        {
-            self.raise_approval(request_id, subject).await;
-        } else if let ExecEvent::NeedsInput { request_id, .. } = &event {
+        if matches!(event, ExecEvent::NeedsApproval { .. }) {
+            // Judged, answered or held, and journaled in its own order.
+            self.approval_requested(event).await;
+            return;
+        }
+        if let ExecEvent::NeedsInput { request_id, .. } = &event {
             self.open_inputs.insert(request_id.clone());
             self.enter_wait(RunStatus::WaitingInput).await;
         }
         // Whatever the event is, it is recorded and broadcast.
         self.publish(&event);
-    }
-
-    async fn raise_approval(&mut self, request_id: &str, subject: &ApprovalSubject) {
-        let requested = self.shared.db.now_ms();
-        let suffix = self.shared.mint.suffix(requested);
-        match ApprovalId::from_suffix(&suffix) {
-            Ok(id) => {
-                // State before visibility: commit `waiting_approval`, then publish the approval,
-                // so no client ever sees a pending approval on a run that still reads `running`.
-                self.open_approvals
-                    .push((id.clone(), request_id.to_owned()));
-                self.enter_wait(RunStatus::WaitingApproval).await;
-                self.shared.approvals.add(Approval {
-                    id,
-                    run_id: self.run.clone(),
-                    subject: subject.clone(),
-                    requested_at_ms: u64::try_from(requested).unwrap_or(0),
-                });
-            }
-            Err(error) => self.fail(format!("cannot mint an approval id: {error}")),
-        }
     }
 
     async fn transition(&mut self, to: RunStatus) -> bool {
@@ -356,29 +362,6 @@ impl Supervisor {
         }
     }
 
-    async fn decide(&mut self, approval: ApprovalId, decision: Decision) -> Result<()> {
-        let Some(at) = self
-            .open_approvals
-            .iter()
-            .position(|(id, _)| *id == approval)
-        else {
-            return Err(KernelError::ApprovalNotFound(approval));
-        };
-        let request_id = self.open_approvals[at].1.clone();
-        // A full answer queue must not park the supervisor either: give up if the run is
-        // cancelled meanwhile.
-        let sent = tokio::select! {
-            sent = self.handle.decide(request_id, decision) => sent,
-            () = self.cancel.cancelled() => Err(ControlsClosed),
-        };
-        sent.map_err(|_| KernelError::RunEnded(self.run.clone()))?;
-        self.open_approvals.remove(at);
-        // State before visibility, as when raising: commit `running`, then drop it from the list.
-        self.resolve_wait().await;
-        self.shared.approvals.remove(&approval);
-        Ok(())
-    }
-
     async fn heartbeat(&mut self) {
         let lease_ms = self.shared.config.lease_ms();
         match self
@@ -435,11 +418,15 @@ impl Supervisor {
             match lifecycle::end_run(&self.shared.db, &self.run, self.fence, self.status, stop)
                 .await
             {
-                Ok(_) => self.publish(&ExecEvent::Done {
-                    stop,
-                    result,
-                    diagnostic,
-                }),
+                Ok(_) => {
+                    // What the run still had open is closed before its `Done`, which stays last.
+                    self.close_approvals().await;
+                    self.publish(&ExecEvent::Done {
+                        stop,
+                        result,
+                        diagnostic,
+                    });
+                }
                 Err(error) => tracing::error!(
                     run = %self.run, %error,
                     "could not commit the end of the run; recovery will interrupt it"

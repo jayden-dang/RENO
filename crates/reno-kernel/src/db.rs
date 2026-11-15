@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
-use reno_proto::{ExecutorId, RunId, RunStatus, TaskId};
+use reno_proto::{ApprovalId, ApprovalOutcome, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId};
 use reno_store::{
-    Applied, Claim, DefinitionRecord, Journals, NewDefinition, NewTask, RunRecord, Store,
-    StoreError,
+    Applied, Claim, DefinitionRecord, ExpireScope, Expired, Journals, NewApproval, NewDefinition,
+    NewTask, RunRecord, Store, StoreError, StoredApproval,
 };
 
 use crate::clock::Clock;
@@ -178,5 +178,61 @@ impl Db {
 
     pub(crate) async fn nonterminal_runs(&self) -> Result<Vec<RunRecord>> {
         self.store.nonterminal_runs().await
+    }
+
+    pub(crate) async fn create_approval(&self, new: NewApproval, fence: u64) -> Result<()> {
+        self.wrote();
+        self.store.create_approval(new, fence, self.now_ms()).await
+    }
+
+    pub(crate) async fn record_approval(
+        &self,
+        new: NewApproval,
+        outcome: ApprovalOutcome,
+        by: ResolvedBy,
+        fence: u64,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .record_approval(new, outcome, by, fence, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn resolve_approval(
+        &self,
+        id: &ApprovalId,
+        outcome: ApprovalOutcome,
+        by: ResolvedBy,
+        fence: u64,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .resolve_approval(id, outcome, by, fence, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn expire_pending(&self, scope: ExpireScope) -> Result<Vec<Expired>> {
+        self.wrote();
+        self.store.expire_pending(scope, self.now_ms()).await
+    }
+
+    pub(crate) async fn pending_approvals(&self) -> Result<Vec<StoredApproval>> {
+        self.store.pending_approvals().await
+    }
+
+    pub(crate) async fn get_approval(&self, id: &ApprovalId) -> Result<Option<StoredApproval>> {
+        self.store.get_approval(id).await
+    }
+
+    pub(crate) async fn approval_history(
+        &self,
+        run: Option<&RunId>,
+        limit: u32,
+    ) -> Result<Vec<StoredApproval>> {
+        self.store.approval_history(run, limit).await
+    }
+
+    pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {
+        self.store.was_denied(run, digest).await
     }
 }

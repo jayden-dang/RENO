@@ -30,11 +30,15 @@ pub struct KernelConfig {
     pub watch_limit: u32,
     /// Terminal runs `watch_runs` carries besides the non-terminal ones: the newest this many.
     pub recent_runs: u32,
-    /// The access mode every run asks its executor for. Phase 0 has no per-run policy, so the
-    /// strictest mode is the default (ARCH-15: an executor that cannot honour it is refused).
+    /// The access mode a run with no bot asks its executor for; the strictest by default
+    /// (ARCH-15: an executor that cannot honour it is refused). A run for a bot asks for its
+    /// pinned bot's `access` instead.
     pub access: AccessMode,
-    /// The sandbox every run asks for.
+    /// The sandbox a run with no bot asks for. A run for a bot asks for its bot's `sandbox`.
     pub sandbox: SandboxLevel,
+    /// How long an approval that asks a human waits before it is denied as expired, when the
+    /// policy sets no `approval_ttl` of its own. A deadline, not a poll (ARCH-10).
+    pub approval_ttl: Duration,
 }
 
 impl Default for KernelConfig {
@@ -52,6 +56,7 @@ impl Default for KernelConfig {
             recent_runs: 50,
             access: AccessMode::Supervised,
             sandbox: SandboxLevel::WorkspaceWrite,
+            approval_ttl: Duration::from_secs(30 * 60),
         }
     }
 }

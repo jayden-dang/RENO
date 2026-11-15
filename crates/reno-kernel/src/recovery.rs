@@ -10,12 +10,16 @@
 //!    `waiting_input`, `waiting_approval` and `evaluating` become `interrupted`: whether work
 //!    with side effects may be redone is a decision, not a default. Each is a fenced transition
 //!    at the row's own fence. `queued` and `interrupted` rows stay as they are.
-//! 3. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
+//! 3. **Approvals.** No supervisor exists at start, so every `pending` approval is orphaned:
+//!    each becomes `expired` (a `synchronous=FULL` write), and its run's journal gets the
+//!    `ApprovalResolved { denied, expired }` that its supervisor never wrote. The harness that
+//!    asked is gone with its run, which is `interrupted` above.
+//! 4. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
 //!    its journal if the journal does not already end in one, with the stop reason its status
 //!    implies.
 
-use reno_proto::{ExecEvent, RunId, RunStatus, StopReason};
-use reno_store::RunRecord;
+use reno_proto::{ApprovalOutcome, ExecEvent, ResolvedBy, RunId, RunStatus, StopReason};
+use reno_store::{ExpireScope, RunRecord};
 
 use crate::error::Result;
 use crate::procs;
@@ -27,6 +31,7 @@ pub(crate) struct Recovered {
     pub(crate) requeued: Vec<RunId>,
     pub(crate) interrupted: Vec<RunId>,
     pub(crate) swept: usize,
+    pub(crate) approvals_expired: usize,
     pub(crate) journals_repaired: usize,
 }
 
@@ -68,6 +73,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         }
     }
 
+    report.approvals_expired = expire_orphans(shared).await?;
+
     let ended: Vec<(RunId, ExecEvent)> = shared
         .db
         .list_runs(None)
@@ -99,6 +106,42 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         tracing::info!(?report, "recovery finished");
     }
     Ok(report)
+}
+
+/// Expires every pending approval, for the moment no supervisor is left to answer them (start-up
+/// recovery, and shutdown after the supervisors are gone or were dropped), and writes each one's
+/// resolution into its run's journal. Returns how many there were.
+///
+/// State first, journal second (ARCH-8): the rows are expired in one durable transaction, and
+/// only then are the journals appended to. A journal that cannot be appended to is logged and
+/// left; the record is what counts.
+pub(crate) async fn expire_orphans(shared: &Shared) -> Result<usize> {
+    let expired = shared.db.expire_pending(ExpireScope::All).await?;
+    if expired.is_empty() {
+        return Ok(0);
+    }
+    let count = expired.len();
+    let journals = shared.db.journals();
+    tokio::task::spawn_blocking(move || {
+        for closed in expired {
+            let resolved = ExecEvent::ApprovalResolved {
+                request_id: closed.request_id,
+                decision: ApprovalOutcome::Denied,
+                by: ResolvedBy::Expired,
+                message: None,
+            };
+            let appended = journals
+                .writer(&closed.run_id)
+                .and_then(|mut writer| writer.append(&resolved).and_then(|_| writer.flush()));
+            if let Err(error) = appended {
+                tracing::error!(run = %closed.run_id, %error, "could not journal an expired approval");
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|error| tracing::error!(%error, "journal task failed"));
+    shared.approvals.refresh(&shared.db).await?;
+    Ok(count)
 }
 
 /// The `Done` a journal gets when state says the run ended and the journal never said so.

@@ -72,9 +72,10 @@ pub(crate) struct LiveRun {
     pub(crate) cmd: mpsc::Sender<SupCmd>,
 }
 
-/// A run's place in the `live` table. Dropping it frees the slot, drops the run's pending
-/// approvals and wakes the dispatcher, on every path: normal end, panic, or a task dropped by
-/// the shutdown deadline.
+/// A run's place in the `live` table. Dropping it frees the slot and wakes the dispatcher, on
+/// every path: normal end, panic, or a task dropped by the shutdown deadline. A run's pending
+/// approvals are closed in the store by its supervisor when it ends, and by shutdown and
+/// recovery for the ones a dropped or crashed supervisor left behind.
 #[derive(Debug)]
 pub(crate) struct Slot {
     shared: Arc<Shared>,
@@ -94,7 +95,6 @@ impl Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        self.shared.approvals.remove_run(&self.run);
         self.shared.live_remove(&self.run);
     }
 }
