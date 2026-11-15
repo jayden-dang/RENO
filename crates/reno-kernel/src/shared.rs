@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use reno_harness::exec::Decision;
+use reno_proto::defs::ValidationContext;
 use reno_proto::{
     ApprovalId, ExecEvent, PROMPT_SUMMARY_CHARS, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RunId,
     RunStatus, RunSummary, Seq, StopReason,
@@ -20,6 +21,7 @@ use tokio_util::task::TaskTracker;
 use crate::approvals::Approvals;
 use crate::config::KernelConfig;
 use crate::db::Db;
+use crate::defs::CurrentDefs;
 use crate::error::{KernelError, Result};
 use crate::ids::IdMint;
 use crate::registry::ExecutorRegistry;
@@ -115,6 +117,11 @@ pub(crate) struct Shared {
     pub(crate) live_changed: watch::Sender<u64>,
     pub(crate) approvals: Approvals,
     pub(crate) runs_tx: watch::Sender<Vec<RunSummary>>,
+    /// The definitions in force and the problems with the files. Written by the definitions
+    /// loader only.
+    pub(crate) defs_tx: watch::Sender<Arc<CurrentDefs>>,
+    /// What validation may assume about the world: the executors a bot may name.
+    pub(crate) defs_ctx: ValidationContext,
     pub(crate) mint: IdMint,
 }
 
@@ -128,7 +135,12 @@ impl std::fmt::Debug for Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(db: Db, executors: ExecutorRegistry, mut config: KernelConfig) -> Self {
+    pub(crate) fn new(
+        db: Db,
+        executors: ExecutorRegistry,
+        mut config: KernelConfig,
+        defs_ctx: ValidationContext,
+    ) -> Self {
         config.max_concurrent = config.max_concurrent.max(1);
         config.subscriber_queue = config.subscriber_queue.max(1);
         Self {
@@ -144,6 +156,8 @@ impl Shared {
             live_changed: watch::channel(0).0,
             approvals: Approvals::new(),
             runs_tx: watch::channel(Vec::new()).0,
+            defs_tx: watch::channel(Arc::default()).0,
+            defs_ctx,
             mint: IdMint::default(),
         }
     }
@@ -334,6 +348,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         prompt: Some(row.goal.clone()),
         model: row.model.clone().or_else(|| requested_model(&row.spec)),
         stop_reason,
+        bot: row.bot.clone(),
         created_at_ms: u64::try_from(row.created_at).unwrap_or(0),
         updated_at_ms: u64::try_from(row.updated_at).unwrap_or(0),
     }

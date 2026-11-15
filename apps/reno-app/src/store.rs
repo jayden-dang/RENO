@@ -315,7 +315,8 @@ impl Store {
         };
         let params = TaskRunParams {
             prompt,
-            executor,
+            executor: Some(executor),
+            bot: None,
             cwd: None,
             model: None,
         };

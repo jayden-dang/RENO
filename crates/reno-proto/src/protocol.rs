@@ -17,6 +17,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::defs::{
+    BotDef, BotPin, DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult,
+    DefsSnapshot, DefsWatchParams, PolicyDef, TriggerDef,
+};
 use crate::exec::{ApprovalSubject, ExecEvent};
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
@@ -40,6 +44,10 @@ pub const FEATURE_SUB_GAP: &str = "sub.gap";
 /// Feature: `approval.list`, `approval.decide` and the `approvals.watch` subscription exist.
 pub const FEATURE_APPROVALS: &str = "approvals";
 
+/// Feature: `def.list`, `def.get`, `def.validate` and the `defs.watch` subscription exist, and
+/// `task.run` accepts `bot`.
+pub const FEATURE_DEFS: &str = "defs";
+
 /// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
 pub const FEATURE_RUN_STEER: &str = "run.steer";
 /// Feature: `daemon.shutdown` exists.
@@ -53,6 +61,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_APPROVALS,
     FEATURE_RUN_STEER,
     FEATURE_DAEMON_SHUTDOWN,
+    FEATURE_DEFS,
 ];
 
 /// A request with a single reply.
@@ -114,6 +123,10 @@ pub struct RunSummary {
     /// Why it stopped, once it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    /// The bot the run was submitted for, and the version of its definition the run is pinned
+    /// to. Absent for a run submitted without a bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<BotPin>,
     /// Creation time, in milliseconds since the Unix epoch.
     pub created_at_ms: u64,
     /// Last state change, in milliseconds since the Unix epoch.
@@ -174,8 +187,14 @@ pub struct DaemonShutdownResult {}
 pub struct TaskRunParams {
     /// The task prompt.
     pub prompt: String,
-    /// Executor to run it on.
-    pub executor: ExecutorId,
+    /// Executor to run it on. May be left out when `bot` is given: the daemon then takes the
+    /// first executor in the bot's list that it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<ExecutorId>,
+    /// The bot to run it as. The run is pinned to the version of the bot's definition that is
+    /// current when the task is submitted. Needs feature `defs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<String>,
     /// Working directory; the daemon's default when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
@@ -432,6 +451,19 @@ method!(
     RunSteer, "run.steer", RunSteerParams => RunSteerResult
 );
 method!(
+    /// `def.list`: the current definitions and any load errors. Needs feature `defs`.
+    DefList, "def.list", DefListParams => DefsSnapshot
+);
+method!(
+    /// `def.get`: one version of one definition, with its body. Needs feature `defs`.
+    DefGet, "def.get", DefGetParams => DefRecord
+);
+method!(
+    /// `def.validate`: checks a body against every rule without saving it. Needs feature
+    /// `defs`.
+    DefValidate, "def.validate", DefValidateParams => DefValidateResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -447,6 +479,11 @@ subscription!(
 subscription!(
     /// `runs.watch`: the current run list, replaced on every change.
     RunsWatch, "runs.watch", RunsWatchParams => RunsSnapshot
+);
+subscription!(
+    /// `defs.watch`: the current definitions and load errors, replaced on every change. Needs
+    /// feature `defs`.
+    DefsWatch, "defs.watch", DefsWatchParams => DefsSnapshot
 );
 subscription!(
     /// `approvals.watch`: the pending approvals, replaced on every change. Needs feature
@@ -490,7 +527,8 @@ fn subscription_entry<S: Subscription>() -> Value {
 }
 
 /// The whole wire contract as JSON: protocol version, features, and for every method,
-/// notification and subscription its name and the JSON Schemas of its params and result or item.
+/// notification and subscription its name and the JSON Schemas of its params and result or item,
+/// and the schemas of the definition files (the `body` of `def.get` and `def.validate`).
 /// CI snapshots this value (ARCH-13). Register every new protocol type here.
 pub fn protocol_schema() -> Value {
     json!({
@@ -507,14 +545,23 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunSteer>(),
             method_entry::<ApprovalList>(),
             method_entry::<ApprovalDecide>(),
+            method_entry::<DefList>(),
+            method_entry::<DefGet>(),
+            method_entry::<DefValidate>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),
         ],
+        "definitions": {
+            "bot": schema_of::<BotDef>(),
+            "trigger": schema_of::<TriggerDef>(),
+            "policy": schema_of::<PolicyDef>(),
+        },
         "subscriptions": [
             subscription_entry::<RunEvents>(),
             subscription_entry::<RunsWatch>(),
             subscription_entry::<ApprovalsWatch>(),
+            subscription_entry::<DefsWatch>(),
         ],
     })
 }

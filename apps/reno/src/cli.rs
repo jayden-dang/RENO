@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use reno_proto::{ApprovalId, RunId, Seq};
+use reno_proto::defs::DefKind;
+use reno_proto::{ApprovalId, ExecutorId, RunId, Seq};
 
 /// Talk to the Reno daemon.
 #[derive(Debug, Parser)]
@@ -36,6 +37,9 @@ pub(crate) enum Command {
     /// List pending approvals.
     #[command(subcommand)]
     Approval(ApprovalCommand),
+    /// List, show and check bots, triggers and the policy.
+    #[command(subcommand)]
+    Defs(DefsCommand),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -62,9 +66,12 @@ pub(crate) enum TaskCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct TaskRun {
-    /// The executor to run on.
-    #[arg(long, default_value = "mock")]
-    pub(crate) executor: String,
+    /// The executor to run on [default: mock, or with --bot the bot's first executor].
+    #[arg(long)]
+    pub(crate) executor: Option<String>,
+    /// Run as this bot: the run is pinned to the version of the bot's definition in force now.
+    #[arg(long)]
+    pub(crate) bot: Option<String>,
     /// The working directory [default: the current directory].
     #[arg(long, value_name = "DIR")]
     pub(crate) cwd: Option<PathBuf>,
@@ -120,4 +127,44 @@ pub(crate) enum ApprovalCommand {
 pub(crate) struct Decide {
     /// The approval, as `reno approval list` shows it.
     pub(crate) approval: ApprovalId,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DefsCommand {
+    /// List the definitions in force, with their versions, and any errors in the files.
+    List(DefsList),
+    /// Show one version of a definition.
+    Show(DefsShow),
+    /// Validate the definition files and print every error. Needs no daemon.
+    ///
+    /// Exits 0 when the files are valid, 1 when they are not.
+    Check(DefsCheck),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DefsList {
+    /// Only this kind: bot, trigger or policy.
+    #[arg(long)]
+    pub(crate) kind: Option<DefKind>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DefsShow {
+    /// The kind: bot, trigger or policy.
+    pub(crate) kind: DefKind,
+    /// The name; `policy` for the policy.
+    pub(crate) name: String,
+    /// The version [default: the newest].
+    #[arg(long, value_name = "N")]
+    pub(crate) version: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DefsCheck {
+    /// The definitions directory [default: $RENO_DEFS_DIR, or ~/.reno].
+    #[arg(long, env = "RENO_DEFS_DIR", value_name = "DIR")]
+    pub(crate) dir: Option<PathBuf>,
+    /// An executor id to accept besides the ones Reno builds (mock, claude-code, codex).
+    #[arg(long = "executor", value_name = "ID")]
+    pub(crate) executors: Vec<ExecutorId>,
 }

@@ -258,6 +258,7 @@ mod tests {
             prompt: None,
             model: None,
             stop_reason: None,
+            bot: None,
             created_at_ms: NOW - HOUR,
             updated_at_ms: NOW - 1000,
         }

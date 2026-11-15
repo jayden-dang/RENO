@@ -45,10 +45,18 @@ struct Submitted<'a> {
 }
 
 async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
-    let executor = args
-        .executor
-        .parse()
-        .with_context(|| format!("`{}` is not an executor name", args.executor))?;
+    // Without a bot the executor defaults to the mock. With one, the daemon picks the bot's
+    // first executor that it has.
+    let executor = match (&args.executor, &args.bot) {
+        (Some(name), _) => Some(name.as_str()),
+        (None, None) => Some("mock"),
+        (None, Some(_)) => None,
+    }
+    .map(|name| {
+        name.parse()
+            .with_context(|| format!("`{name}` is not an executor name"))
+    })
+    .transpose()?;
     let cwd = match args.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().context("cannot read the current directory")?,
@@ -62,6 +70,7 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
         .run_task(TaskRunParams {
             prompt: args.prompt,
             executor,
+            bot: args.bot,
             cwd: Some(cwd),
             model: args.model,
         })

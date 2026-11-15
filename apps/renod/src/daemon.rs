@@ -4,8 +4,9 @@
 //!
 //! 1. the data directory is made private (0700);
 //! 2. the data-directory lock is taken, before anything else is opened;
-//! 3. the executors are looked up, the store is opened and the kernel starts (it recovers the
-//!    last run's leftovers first);
+//! 3. the executors are looked up, the store is opened, the definitions directory is created on
+//!    first start, and the kernel starts: it recovers the last run's leftovers, then loads the
+//!    definitions;
 //! 4. the socket is bound and the server starts answering.
 //!
 //! # Shutdown
@@ -16,7 +17,8 @@
 //! 1. stop accepting: the listener is dropped, so the socket file goes and nobody new connects.
 //!    Connections already open stay up;
 //! 2. `Kernel::shutdown`: no more claims, every live run is cancelled and ends `interrupted`
-//!    (subscribers see its `Done`), within the kernel's own deadline;
+//!    (subscribers see its `Done`), within the kernel's own deadline; then the definitions watch
+//!    is stopped;
 //! 3. connections get a short grace to finish what they are owed (a `daemon.shutdown` reply, a
 //!    last event), then they are cancelled, and the server is awaited with a deadline;
 //! 4. the socket file is removed if anything left it behind;
@@ -28,7 +30,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reno_harness::exec::Executor;
-use reno_kernel::{Kernel, KernelConfig, KernelError, SystemClock};
+use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, SystemClock};
+use reno_proto::defs::ValidationContext;
 use reno_proto::{ExecutorId, IdError};
 use reno_rpc::{RpcError, Server, UnixServer};
 use reno_store::{Store, StoreError};
@@ -36,6 +39,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::defs::{self, FsDefinitions, GitInit};
 use crate::executors::{self, ExecutorSet};
 use crate::handlers::{self, Ctx};
 use crate::lock::{DataDirLock, LockError};
@@ -75,6 +79,10 @@ pub struct DaemonConfig {
     pub connection_grace: Duration,
     /// See [`SERVER_DEADLINE`].
     pub server_deadline: Duration,
+    /// How long the definition files must be quiet before an edit is loaded.
+    pub defs_debounce: Duration,
+    /// How `git init` is run on first start; tests replace it.
+    pub git_init: GitInit,
 }
 
 impl DaemonConfig {
@@ -86,6 +94,8 @@ impl DaemonConfig {
             kernel: KernelConfig::default(),
             connection_grace: CONNECTION_GRACE,
             server_deadline: SERVER_DEADLINE,
+            defs_debounce: defs::DEFAULT_DEBOUNCE,
+            git_init: defs::git_init,
         }
     }
 }
@@ -110,6 +120,14 @@ pub enum DaemonError {
     /// The kernel could not start.
     #[error("cannot start the kernel: {0}")]
     Kernel(#[from] KernelError),
+    /// The definitions directory could not be created or opened.
+    #[error("cannot use the definitions directory {}: {source}", path.display())]
+    Definitions {
+        /// The directory.
+        path: PathBuf,
+        /// What failed.
+        source: io::Error,
+    },
     /// The socket could not be bound.
     #[error("cannot serve on the socket: {0}")]
     Socket(#[from] RpcError),
@@ -149,6 +167,8 @@ impl Daemon {
             mut kernel,
             connection_grace,
             server_deadline,
+            defs_debounce,
+            git_init,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace()] {
@@ -175,8 +195,38 @@ impl Daemon {
         let mut ids: Vec<ExecutorId> = registry.ids().cloned().collect();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
+        // Everything Reno can build is a name a definition may use, installed or not.
+        let context = ValidationContext::with_builtin(ids.iter().cloned());
+        let defs_error = |source| DaemonError::Definitions {
+            path: paths.defs_dir.clone(),
+            source,
+        };
+        defs::bootstrap(&paths.defs_dir, git_init)
+            .await
+            .map_err(defs_error)?;
+        let fs_defs =
+            Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
+
         kernel.owner = format!("renod-{}", std::process::id());
-        let kernel = Kernel::start(kernel, store, registry, Arc::new(SystemClock)).await?;
+        let setup = DefsSetup {
+            port: fs_defs.clone(),
+            context,
+        };
+        let kernel = match Kernel::start_with_definitions(
+            kernel,
+            store,
+            registry,
+            Arc::new(SystemClock),
+            setup,
+        )
+        .await
+        {
+            Ok(kernel) => kernel,
+            Err(error) => {
+                fs_defs.shutdown().await;
+                return Err(error.into());
+            }
+        };
 
         let stop = CancellationToken::new();
         let ctx = Arc::new(Ctx {
@@ -193,6 +243,7 @@ impl Daemon {
             Ok(listener) => listener,
             Err(error) => {
                 kernel.shutdown().await;
+                fs_defs.shutdown().await;
                 return Err(error.into());
             }
         };
@@ -221,6 +272,7 @@ impl Daemon {
             serving,
             server,
             kernel,
+            fs_defs,
             harnesses,
             socket: paths.socket,
             lock,
@@ -261,6 +313,7 @@ struct Shutdown {
     serving: JoinHandle<Result<(), RpcError>>,
     server: Arc<Server>,
     kernel: Kernel,
+    fs_defs: Arc<FsDefinitions>,
     harnesses: Vec<Arc<dyn Executor>>,
     socket: PathBuf,
     lock: DataDirLock,
@@ -277,6 +330,7 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
 
     // 2. The kernel ends every live run `interrupted`, within its own deadline.
     let report = s.kernel.shutdown().await;
+    s.fs_defs.shutdown().await;
     for harness in &s.harnesses {
         harness.shutdown().await;
     }

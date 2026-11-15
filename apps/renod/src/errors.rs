@@ -16,7 +16,9 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         KernelError::SteerQueueFull(_) | KernelError::ShuttingDown | KernelError::Gap { .. } => {
             ErrorCode::Unavailable
         }
+        KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
+        KernelError::Definitions(_) => ErrorCode::Internal,
         KernelError::Store(store) => store_code(store),
     }
 }
@@ -54,6 +56,7 @@ pub fn invalid(message: impl Into<String>) -> ErrorObject {
 
 #[cfg(test)]
 mod tests {
+    use reno_proto::defs::DefKind;
     use reno_proto::{ApprovalId, RunId, RunStatus, Seq};
 
     use super::*;
@@ -85,6 +88,15 @@ mod tests {
                 ErrorCode::Unavailable,
             ),
             (KernelError::Invalid("x".into()), ErrorCode::InvalidParams),
+            (
+                KernelError::DefinitionNotFound {
+                    kind: DefKind::Bot,
+                    name: "keeper".into(),
+                    version: Some(2),
+                },
+                ErrorCode::NotFound,
+            ),
+            (KernelError::Definitions("x".into()), ErrorCode::Internal),
         ];
         for (error, code) in cases {
             assert_eq!(code_of(&error), code, "{error}");

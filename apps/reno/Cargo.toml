@@ -21,6 +21,7 @@ rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

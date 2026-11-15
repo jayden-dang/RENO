@@ -45,7 +45,8 @@ daemon_test! {
 
         let run = within(fx.client.run_task(TaskRunParams {
             prompt: "say hello\nand then goodbye".into(),
-            executor: id("mock"),
+            executor: Some(id("mock")),
+            bot: None,
             cwd: None,
             model: Some("mock-1".into()),
         }))
@@ -355,7 +356,8 @@ daemon_test! {
         // task.run: unknown executor, blank prompt, bad cwd.
         let run = |prompt: &str, executor: &str, cwd: Option<&str>| TaskRunParams {
             prompt: prompt.into(),
-            executor: id(executor),
+            executor: Some(id(executor)),
+            bot: None,
             cwd: cwd.map(Into::into),
             model: None,
         };

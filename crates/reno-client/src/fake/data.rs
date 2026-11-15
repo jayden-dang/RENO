@@ -66,6 +66,7 @@ fn summary(
         prompt: None,
         model: Some(MODEL.to_owned()),
         stop_reason: stop,
+        bot: None,
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
     })

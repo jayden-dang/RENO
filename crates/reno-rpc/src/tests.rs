@@ -41,6 +41,7 @@ fn summary(n: u64) -> RunSummary {
         prompt: None,
         model: None,
         stop_reason: None,
+        bot: None,
         created_at_ms: 0,
         updated_at_ms: n,
     }

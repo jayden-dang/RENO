@@ -1,0 +1,56 @@
+# Reno's policy. The first rule that matches an action decides what happens to it.
+# Reno reads this file when it starts and again whenever it changes. A change that does not
+# validate is reported and ignored: the last good policy stays in force.
+#
+# effect: allow (no question), ask (a human decides; with nobody to answer, the answer is no),
+#         deny (refused).
+# match:  every condition present must hold. action is read, edit, command, network, mcp_tool or
+#         other. tool, command and path are globs. scope is "*" or a list of bot names.
+#         A path inside the run's worktree is matched relative to it (`src/**`); a path outside
+#         is matched as an absolute path, so "/**" means "anywhere outside the worktree".
+
+# What happens when no rule matches.
+default = "ask"
+
+# Dangerous actions are refused first, so no later rule can allow them.
+[[rules]]
+note = "recursive force delete"
+effect = "deny"
+match = { action = "command", command = "rm -rf *" }
+
+[[rules]]
+note = "discarding work"
+effect = "deny"
+match = { action = "command", command = "git reset --hard*" }
+
+[[rules]]
+note = "force push"
+effect = "deny"
+match = { action = "command", command = "git push*--force*" }
+
+[[rules]]
+note = "force push"
+effect = "deny"
+match = { action = "command", command = "git push* -f*" }
+
+[[rules]]
+note = "write outside the worktree"
+effect = "deny"
+match = { action = "edit", path = "/**" }
+
+[[rules]]
+note = "push-needs-human"
+effect = "ask"
+match = { action = "command", command = "git push *" }
+
+# The prototype asks only for network use from a run that read untrusted content. Taint arrives
+# with T2.11; until then every network action asks.
+[[rules]]
+note = "network access"
+effect = "ask"
+match = { action = "network" }
+
+[[rules]]
+note = "cargo in the example bot's worktree"
+effect = "allow"
+match = { action = "command", command = "cargo *", scope = ["example"] }

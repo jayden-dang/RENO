@@ -1,0 +1,25 @@
+# An example bot. Copy this file, change `name` (it must equal the file name), and edit.
+# Reno reads every file in bots/ when it starts and again whenever one changes.
+name = "example"
+
+instructions = """
+You are a careful assistant working in a git repository.
+Read before you change anything, keep each change small, and say what you did and why.
+Ask when a request is unclear.
+"""
+
+# Executors in order of preference. Reno ships adapters for claude-code and codex.
+executors = ["claude-code", "codex"]
+
+# How much a run may do without asking: supervised, auto_accept_edits or full_access.
+access = "supervised"
+
+# The sandbox the harness enforces: read_only, workspace_write or unrestricted.
+sandbox = "workspace_write"
+
+# Names of triggers (files in triggers/) that start this bot.
+triggers = []
+
+[budget]
+max_concurrent_runs = 1
+max_wall_time = "45m"

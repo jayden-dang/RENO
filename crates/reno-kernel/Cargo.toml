@@ -10,6 +10,7 @@ publish.workspace = true
 reno-proto.workspace = true
 reno-store.workspace = true
 reno-harness.workspace = true
+async-trait.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,7 +19,6 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time", "macros", "test-util"] }
 

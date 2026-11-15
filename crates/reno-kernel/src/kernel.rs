@@ -7,6 +7,7 @@
 //! |---|---|---|---|
 //! | dispatcher | 1 | the claim loop | `Notify` (no queue) and one deadline |
 //! | runs hub | 1 | the `watch_runs` list | `Notify`, coalescing |
+//! | definitions loader | 0 or 1 | the definitions in force | the port's watch, capacity 1 |
 //! | run supervisor | one per live run | stream, journal, subscribers | `mpsc` of 16 commands |
 //!
 //! Per live run there are also the `ExecControls` queues (steering, answers and process records,
@@ -20,6 +21,9 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use reno_harness::exec::Decision;
+use reno_proto::defs::{
+    BotPin, DefKind, DefRecord, DefValidateResult, ValidationContext, validate_body,
+};
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, RunEventItem, RunId, RunStatus, RunSummary,
     Seq, TaskId,
@@ -31,6 +35,7 @@ use tokio::time::timeout;
 use crate::clock::Clock;
 use crate::config::KernelConfig;
 use crate::db::Db;
+use crate::defs::{self, CurrentDefs, DefsSetup};
 use crate::dispatcher;
 use crate::error::{KernelError, Result};
 use crate::events;
@@ -67,8 +72,45 @@ impl Kernel {
         executors: ExecutorRegistry,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        let shared = Arc::new(Shared::new(Db::new(store, clock), executors, config));
+        Self::start_inner(config, store, executors, clock, None).await
+    }
+
+    /// Like [`start`](Self::start), and loads definitions through `definitions` (the
+    /// `Definitions` port): the files are read once before this returns, and again whenever the
+    /// port says they changed. Files that do not validate never stop the kernel: it runs on the
+    /// last good set and publishes the errors ([`watch_defs`](Self::watch_defs)).
+    pub async fn start_with_definitions(
+        config: KernelConfig,
+        store: reno_store::Store,
+        executors: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        definitions: DefsSetup,
+    ) -> Result<Self> {
+        Self::start_inner(config, store, executors, clock, Some(definitions)).await
+    }
+
+    async fn start_inner(
+        config: KernelConfig,
+        store: reno_store::Store,
+        executors: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        definitions: Option<DefsSetup>,
+    ) -> Result<Self> {
+        // Without a port the kernel still validates bodies, against the executors it has.
+        let context = match &definitions {
+            Some(setup) => setup.context.clone(),
+            None => ValidationContext::with_builtin(executors.ids().cloned()),
+        };
+        let shared = Arc::new(Shared::new(
+            Db::new(store, clock),
+            executors,
+            config,
+            context,
+        ));
         recovery::recover(&shared).await?;
+        if let Some(setup) = definitions {
+            defs::start(&shared, setup).await?;
+        }
         shared.refresh_runs().await?;
         shared.spawn(dispatcher::run(Arc::clone(&shared)));
         shared.spawn(runs_hub(Arc::clone(&shared)));
@@ -86,6 +128,63 @@ impl Kernel {
         cwd: PathBuf,
         model: Option<String>,
     ) -> Result<RunId> {
+        self.submit_pinned(prompt.into(), executor, cwd, model, None)
+            .await
+    }
+
+    /// Create a task for `prompt` and queue a run of it as bot `bot`, pinned to the version of
+    /// the bot's definition that is in force now; the pin never changes, whatever is edited
+    /// later. With no `executor` the run goes to the first executor in the bot's list that the
+    /// kernel has. An unknown bot is [`KernelError::DefinitionNotFound`].
+    ///
+    /// Only the pin takes effect today. Choosing among the bot's executors by health and
+    /// capability is routing (T1.5), and applying its access, sandbox, budget and instructions
+    /// is policy and budgets (T1.6, T1.7).
+    pub async fn submit_for_bot(
+        &self,
+        bot: &str,
+        prompt: impl Into<String>,
+        executor: Option<ExecutorId>,
+        cwd: PathBuf,
+        model: Option<String>,
+    ) -> Result<RunId> {
+        let current = self.shared.current_defs();
+        let def = current
+            .set()
+            .bot(bot)
+            .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
+        let stored = current
+            .version_of(DefKind::Bot, bot)
+            .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
+        let executor = match executor {
+            Some(executor) => executor,
+            None => def
+                .executors
+                .iter()
+                .find(|id| self.shared.executors.get(id).is_some())
+                .cloned()
+                .ok_or_else(|| {
+                    KernelError::Invalid(format!(
+                        "none of the executors of bot {bot:?} is available on this daemon"
+                    ))
+                })?,
+        };
+        let pin = BotPin {
+            name: bot.to_owned(),
+            version: stored.version,
+        };
+        self.submit_pinned(prompt.into(), executor, cwd, model, Some(pin))
+            .await
+    }
+
+    async fn submit_pinned(
+        &self,
+        prompt: String,
+        executor: ExecutorId,
+        cwd: PathBuf,
+        model: Option<String>,
+        pin: Option<BotPin>,
+    ) -> Result<RunId> {
         if self.shared.root.is_cancelled() {
             return Err(KernelError::ShuttingDown);
         }
@@ -93,7 +192,6 @@ impl Kernel {
             .to_str()
             .ok_or_else(|| KernelError::Invalid("the working directory is not UTF-8".into()))?
             .to_owned();
-        let prompt = prompt.into();
         let spec = serde_json::json!({ "cwd": cwd, "model": model });
         let db = &self.shared.db;
 
@@ -119,7 +217,11 @@ impl Kernel {
 
         for _ in 0..MINT_ATTEMPTS {
             let run = mint(&self.shared, RunId::from_suffix)?;
-            match db.enqueue_run(&task, &run, &executor).await {
+            let enqueued = match &pin {
+                Some(pin) => db.enqueue_pinned_run(&task, &run, &executor, pin).await,
+                None => db.enqueue_run(&task, &run, &executor).await,
+            };
+            match enqueued {
                 Ok(()) => {
                     self.shared.wake.notify_one();
                     self.shared.mark_runs_dirty();
@@ -130,6 +232,61 @@ impl Kernel {
             }
         }
         Err(KernelError::Invalid("no free run id".into()))
+    }
+
+    /// The definitions in force, and the problems with the files on disk. Latest value wins: a
+    /// slow reader skips versions, never queues them.
+    pub fn watch_defs(&self) -> watch::Receiver<Arc<CurrentDefs>> {
+        defs::subscribe(&self.shared)
+    }
+
+    /// The definitions in force now.
+    pub fn current_defs(&self) -> Arc<CurrentDefs> {
+        self.shared.current_defs()
+    }
+
+    /// One stored version of a definition with its body: the newest when `version` is `None`.
+    /// Versions that are no longer in force can still be read.
+    pub async fn get_definition(
+        &self,
+        kind: DefKind,
+        name: &str,
+        version: Option<u32>,
+    ) -> Result<DefRecord> {
+        let db = &self.shared.db;
+        let latest = db.latest_definition(kind, name).await?;
+        let record = match (version, latest.as_ref()) {
+            (None, found) => found.cloned(),
+            (Some(want), Some(newest)) if newest.version == want => Some(newest.clone()),
+            (Some(want), _) => db.get_definition(kind, name, want).await?,
+        };
+        let record = record.ok_or_else(|| defs::not_found(kind, name, version))?;
+        Ok(DefRecord {
+            kind: record.kind,
+            name: record.name,
+            version: record.version,
+            hash: record.hash,
+            body: record.body,
+            created_at_ms: u64::try_from(record.created_at).unwrap_or(0),
+            latest: latest.is_some_and(|newest| newest.version == record.version),
+        })
+    }
+
+    /// Checks `body` against every rule as if it were saved as `name`, in the context of the
+    /// definitions in force. Nothing is saved.
+    pub fn validate_definition(
+        &self,
+        kind: DefKind,
+        name: &str,
+        body: &serde_json::Value,
+    ) -> DefValidateResult {
+        let current = self.shared.current_defs();
+        let (errors, hash) = validate_body(current.set(), kind, name, body, &self.shared.defs_ctx);
+        DefValidateResult {
+            valid: errors.is_empty(),
+            errors,
+            hash,
+        }
     }
 
     /// Cancel a run. Returns its status when the cancel was accepted.

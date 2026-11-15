@@ -25,6 +25,13 @@ CREATE TABLE definitions (
     PRIMARY KEY (kind, name, version)
 ) WITHOUT ROWID;
 
+CREATE TRIGGER definitions_are_immutable BEFORE UPDATE OF kind, name, version, hash, body, created_at
+ON definitions
+BEGIN SELECT RAISE(ABORT, 'a stored definition version is immutable'); END;
+
+CREATE TRIGGER definitions_are_kept BEFORE DELETE ON definitions
+BEGIN SELECT RAISE(ABORT, 'a stored definition version is never deleted'); END;
+
 CREATE TABLE events (
     seq          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts           INTEGER NOT NULL,
@@ -56,7 +63,18 @@ CREATE TABLE runs (
     created_at       INTEGER NOT NULL,
     started_at       INTEGER,
     ended_at         INTEGER
-, process_start INTEGER);
+, process_start INTEGER, bot_name TEXT, bot_version INTEGER);
+
+CREATE INDEX runs_bot ON runs (bot_name, bot_version) WHERE bot_name IS NOT NULL;
+
+CREATE TRIGGER runs_bot_pin_is_whole_insert BEFORE INSERT ON runs
+WHEN (NEW.bot_name IS NULL) <> (NEW.bot_version IS NULL)
+BEGIN SELECT RAISE(ABORT, 'a run pins both a bot name and a version, or neither'); END;
+
+CREATE TRIGGER runs_bot_pin_is_whole_update BEFORE UPDATE OF bot_name, bot_version ON runs
+WHEN (NEW.bot_name IS NULL) <> (NEW.bot_version IS NULL)
+  OR NEW.bot_name IS NOT OLD.bot_name OR NEW.bot_version IS NOT OLD.bot_version
+BEGIN SELECT RAISE(ABORT, 'the bot pin of a run never changes'); END;
 
 CREATE INDEX runs_claimable ON runs (created_at) WHERE status IN ('queued', 'leased');
 

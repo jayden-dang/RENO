@@ -14,6 +14,7 @@
 //!   ([`StoreConfig`] holds the tunables).
 //! - `migrations`: the schema, versioned with `user_version`.
 //! - `runs`: tasks and runs, claims, fences and transitions.
+//! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
 //! - `error`: [`StoreError`].
@@ -24,6 +25,7 @@
 //! since the epoch.
 
 pub mod db;
+pub mod definitions;
 pub mod error;
 pub mod events;
 pub mod journal;
@@ -32,11 +34,14 @@ pub mod runs;
 mod writer;
 
 pub use db::Store;
+pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOutcome};
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
 pub use runs::{Claim, NewTask, RunRecord};
 pub use writer::StoreConfig;
 
+#[cfg(test)]
+mod definition_tests;
 #[cfg(test)]
 mod tests;
