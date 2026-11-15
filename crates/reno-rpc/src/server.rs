@@ -259,7 +259,10 @@ impl Conn {
     async fn handle_line(self: &Arc<Self>, line: &str) -> bool {
         let inbound = match parse_inbound(line) {
             Ok(inbound) => inbound,
-            Err((id, err)) => return self.send(error_line(&id, &err)).await,
+            Err(bad) => {
+                let (id, err) = *bad;
+                return self.send(error_line(&id, &err)).await;
+            }
         };
         let permit = tokio::select! {
             biased;

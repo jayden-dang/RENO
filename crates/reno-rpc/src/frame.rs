@@ -47,13 +47,17 @@ pub(crate) enum Inbound {
     },
 }
 
-/// Decodes one line. On failure returns the id to answer with (null if unknown) and the error.
-pub(crate) fn parse_inbound(line: &str) -> Result<Inbound, (Value, ErrorObject)> {
+/// A frame that could not be decoded: the id to answer with (null if unknown) and the error.
+/// Boxed so the `Ok` path stays small.
+pub(crate) type BadFrame = Box<(Value, ErrorObject)>;
+
+/// Decodes one line.
+pub(crate) fn parse_inbound(line: &str) -> Result<Inbound, BadFrame> {
     let value: Value = serde_json::from_str(line).map_err(|e| {
-        (
+        Box::new((
             Value::Null,
             ErrorObject::new(ErrorCode::ParseError, format!("parse error: {e}")),
-        )
+        ))
     })?;
     let mut obj = match value {
         Value::Object(obj) => obj,
@@ -63,19 +67,19 @@ pub(crate) fn parse_inbound(line: &str) -> Result<Inbound, (Value, ErrorObject)>
             } else {
                 "a frame must be a JSON object"
             };
-            return Err((
+            return Err(Box::new((
                 Value::Null,
                 ErrorObject::new(ErrorCode::InvalidRequest, msg),
-            ));
+            )));
         }
     };
     let id = obj.remove("id");
     let reply_id = id.clone().unwrap_or(Value::Null);
-    let invalid = |msg: &str| {
-        (
+    let invalid = |msg: &str| -> BadFrame {
+        Box::new((
             reply_id.clone(),
             ErrorObject::new(ErrorCode::InvalidRequest, msg),
-        )
+        ))
     };
     if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Err(invalid("`jsonrpc` must be \"2.0\""));

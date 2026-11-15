@@ -403,7 +403,8 @@ impl Reader {
 
     fn handle(&self, inner: &Inner, line: &str) {
         match parse_inbound(line) {
-            Err((_, err)) => {
+            Err(bad) => {
+                let (_, err) = *bad;
                 tracing::warn!(code = err.code.code(), message = %err.message, "bad frame from server")
             }
             Ok(Inbound::Response { id, outcome }) => self.response(inner, &id, outcome),
@@ -428,10 +429,10 @@ impl Reader {
         };
         match pending {
             Pending::Call(tx) => {
-                let _ = tx.send(outcome.map_err(RpcError::Remote));
+                let _ = tx.send(outcome.map_err(RpcError::from));
             }
             Pending::Subscribe { slot, ack } => {
-                let sub = outcome.map_err(RpcError::Remote).and_then(|v| {
+                let sub = outcome.map_err(RpcError::from).and_then(|v| {
                     serde_json::from_value::<SubRef>(v)
                         .map(|r| r.subscription)
                         .map_err(RpcError::from)

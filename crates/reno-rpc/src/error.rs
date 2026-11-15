@@ -15,9 +15,10 @@ pub enum RpcError {
     /// peer goes away.
     #[error("connection closed")]
     Disconnected,
-    /// The peer answered with a JSON-RPC error.
+    /// The peer answered with a JSON-RPC error. Boxed: the object carries arbitrary `data` and
+    /// would otherwise make every `Result<_, RpcError>` large.
     #[error("remote error {}: {}", .0.code.code(), .0.message)]
-    Remote(ErrorObject),
+    Remote(Box<ErrorObject>),
     /// The peer sent something that is not valid JSON-RPC, or a payload of the wrong shape.
     #[error("protocol violation: {0}")]
     Protocol(String),
@@ -47,14 +48,17 @@ pub enum RpcError {
 
 impl From<ErrorObject> for RpcError {
     fn from(e: ErrorObject) -> Self {
-        Self::Remote(e)
+        Self::Remote(Box::new(e))
     }
 }
 
 impl From<RpcError> for ErrorObject {
     fn from(e: RpcError) -> Self {
+        if let RpcError::Remote(obj) = e {
+            return *obj;
+        }
         let code = match &e {
-            RpcError::Remote(obj) => return obj.clone(),
+            RpcError::Remote(_) => ErrorCode::Internal,
             RpcError::Disconnected | RpcError::AlreadyRunning(_) => ErrorCode::Unavailable,
             RpcError::Protocol(_) | RpcError::FrameTooLarge { .. } => ErrorCode::InvalidRequest,
             RpcError::Io(_) | RpcError::Insecure { .. } => ErrorCode::Internal,
