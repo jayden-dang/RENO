@@ -17,8 +17,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::exec::ExecEvent;
-use crate::ids::{ExecutorId, RunId, Seq, SubscriptionId, TaskId};
+use crate::exec::{ApprovalSubject, ExecEvent};
+use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
 
 /// The wire protocol version. Bumped only for a breaking change.
@@ -30,12 +30,15 @@ pub const FEATURE_RUN_EVENTS_RESUME: &str = "run.events.resume";
 pub const FEATURE_RUNS_WATCH: &str = "runs.watch";
 /// Feature: the daemon sends `sub.gap` to slow event subscribers instead of buffering.
 pub const FEATURE_SUB_GAP: &str = "sub.gap";
+/// Feature: `approval.list`, `approval.decide` and the `approvals.watch` subscription exist.
+pub const FEATURE_APPROVALS: &str = "approvals";
 
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EVENTS_RESUME,
     FEATURE_RUNS_WATCH,
     FEATURE_SUB_GAP,
+    FEATURE_APPROVALS,
 ];
 
 /// A request with a single reply.
@@ -251,6 +254,65 @@ pub struct RunsSnapshot {
     pub runs: Vec<RunSummary>,
 }
 
+/// An action a harness is held on, waiting for a human decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    /// The approval, as `approval.decide` refers to it.
+    pub id: ApprovalId,
+    /// The run that is held.
+    pub run_id: RunId,
+    /// Exactly what is being approved.
+    pub subject: ApprovalSubject,
+    /// When the action was held, in milliseconds since the Unix epoch.
+    pub requested_at_ms: u64,
+}
+
+/// A human's answer to an [`Approval`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    /// Allow this one action; the next similar action asks again.
+    ApproveOnce,
+    /// Refuse the action.
+    Deny,
+}
+
+/// Result of `approval.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalListResult {
+    /// Pending approvals, oldest first.
+    pub approvals: Vec<Approval>,
+}
+
+/// Params of `approval.decide`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalDecideParams {
+    /// The approval to answer.
+    pub approval_id: ApprovalId,
+    /// The answer.
+    pub decision: ApprovalDecision,
+}
+
+/// Result of `approval.decide`: empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalDecideResult {}
+
+/// Params of the `approvals.watch` subscription.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalsWatchParams {}
+
+/// One item of the `approvals.watch` subscription: the whole pending list (latest value wins).
+/// The first item is the list as it stands when the subscription starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalsSnapshot {
+    /// Pending approvals, oldest first.
+    pub approvals: Vec<Approval>,
+}
+
 /// Params of the `sub.gap` notification (ARCH-12).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -313,6 +375,14 @@ method!(
     /// `run.cancel`: asks a run to stop.
     RunCancel, "run.cancel", RunCancelParams => RunCancelResult
 );
+method!(
+    /// `approval.list`: the pending approvals. Needs feature `approvals`.
+    ApprovalList, "approval.list", NoParams => ApprovalListResult
+);
+method!(
+    /// `approval.decide`: answers one pending approval. Needs feature `approvals`.
+    ApprovalDecide, "approval.decide", ApprovalDecideParams => ApprovalDecideResult
+);
 
 subscription!(
     /// `run.events`: a run's journal from a sequence number, then live.
@@ -321,6 +391,11 @@ subscription!(
 subscription!(
     /// `runs.watch`: the current run list, replaced on every change.
     RunsWatch, "runs.watch", RunsWatchParams => RunsSnapshot
+);
+subscription!(
+    /// `approvals.watch`: the pending approvals, replaced on every change. Needs feature
+    /// `approvals`.
+    ApprovalsWatch, "approvals.watch", ApprovalsWatchParams => ApprovalsSnapshot
 );
 
 /// `sub.gap`: a slow subscriber was cut off; resume from `resumeFrom`.
@@ -372,6 +447,8 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunGet>(),
             method_entry::<RunList>(),
             method_entry::<RunCancel>(),
+            method_entry::<ApprovalList>(),
+            method_entry::<ApprovalDecide>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),
@@ -379,6 +456,7 @@ pub fn protocol_schema() -> Value {
         "subscriptions": [
             subscription_entry::<RunEvents>(),
             subscription_entry::<RunsWatch>(),
+            subscription_entry::<ApprovalsWatch>(),
         ],
     })
 }
