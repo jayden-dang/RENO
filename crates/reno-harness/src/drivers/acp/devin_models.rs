@@ -135,7 +135,7 @@ impl Catalog {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
+        let mut child = crate::process::owned::spawn_grouped(&mut cmd)?;
         let mut stdout = child.stdout.take().expect("piped stdout");
         let mut stderr = child.stderr.take().expect("piped stderr");
         let mut out = Vec::new();

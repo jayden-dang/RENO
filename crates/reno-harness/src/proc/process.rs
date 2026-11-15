@@ -36,6 +36,14 @@ impl Tracked {
     }
 }
 
+/// `pid`'s start time as the process table reports it, or `None` when the process is gone or the
+/// table cannot be read. The value is opaque: compare it only with another reading for the same
+/// pid (microseconds since the epoch on macOS, clock ticks since boot on Linux).
+#[cfg(unix)]
+pub(crate) fn start_time(pid: i32) -> Option<u64> {
+    proc_table::start_time(pid)
+}
+
 /// Every live descendant of `root` — children, grandchildren, … — from one
 /// process-table snapshot. Agent CLIs start each shell in its OWN process
 /// group (Claude's background Bash, Codex's exec sessions), so neither a

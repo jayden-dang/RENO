@@ -84,6 +84,7 @@ use crate::upstream_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
+use crate::process::owned::Child as OwnedChild;
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls};
 use catalog::{REASONING_LEVELS, sandbox_mode, sandbox_policy_value, static_models, to_effort};
@@ -262,7 +263,7 @@ impl CodexHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -799,7 +800,7 @@ impl CodexHarness {
 
 /// One `codex app-server` process and its wire.
 struct AppServer {
-    child: Child,
+    child: OwnedChild,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     stderr_tail: crate::StderrTail,
@@ -819,7 +820,7 @@ fn spawn_app_server(exe: &Path, request: &RunRequest) -> Result<AppServer, Harne
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
         let cwd = (!request.cwd.is_empty()).then(|| Path::new(&request.cwd));
         crate::executable::spawn_error(e, cwd, || crate::executable::binary_hint(exe))
     })?;
@@ -1021,7 +1022,7 @@ struct Session {
     executable: PathBuf,
     title_only: bool,
     idle: bool,
-    child: Child,
+    child: OwnedChild,
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
