@@ -102,47 +102,90 @@ pub async fn sweep_orphans(records: &[ProcessRecord]) -> SweepReport {
 /// to days the check guards.
 pub async fn sweep_orphans_with_grace(records: &[ProcessRecord], grace: Duration) -> SweepReport {
     let mut report = SweepReport::default();
-    let mut targets = Vec::new();
+    let mut remaining = Vec::new();
     for &record in records {
         match classify(record) {
             Verdict::Gone => report.gone.push(record),
             Verdict::Skip(reason) => report.skipped.push((record, reason)),
-            Verdict::Sweep => targets.push(record),
+            Verdict::Sweep => remaining.push(record),
         }
     }
 
-    for record in &targets {
-        if is_same_leader(record) {
+    // Ask politely.
+    remaining.retain(|&record| match recheck(record) {
+        Recheck::Leader => {
             send_signal(&-record.pgid, Signal::Term);
+            true
         }
-    }
-    let deadline = tokio::time::Instant::now() + grace;
-    while targets.iter().any(|record| group_exists(record.pgid))
-        && tokio::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(POLL).await;
-    }
-    for record in &targets {
-        // The leader may have exited during the grace; the group is still ours while it has
-        // members, because the kernel never hands out the id of a live group.
-        if group_exists(record.pgid) {
+        Recheck::Vanished => {
+            report.gone.push(record);
+            false
+        }
+        Recheck::Reused => {
+            report.skipped.push((record, SkipReason::Reused));
+            false
+        }
+    });
+    settle(&mut remaining, &mut report.killed, grace).await;
+
+    // Then insist, on the groups still there. A group seen absent was dropped from `remaining`
+    // and is never signalled again: its id may belong to someone else by now.
+    remaining.retain(|&record| match recheck(record) {
+        // The leader exiting during the grace leaves its members; the group stays ours while it
+        // has any, because the kernel never hands out the id of a live group.
+        Recheck::Leader | Recheck::Vanished => {
             send_signal(&-record.pgid, Signal::Kill);
+            true
         }
-    }
-    let settle = tokio::time::Instant::now() + KILL_SETTLE;
-    while targets.iter().any(|record| group_exists(record.pgid))
-        && tokio::time::Instant::now() < settle
-    {
+        Recheck::Reused => {
+            report.skipped.push((record, SkipReason::Reused));
+            false
+        }
+    });
+    settle(&mut remaining, &mut report.killed, KILL_SETTLE).await;
+    report.survivors = remaining;
+    report
+}
+
+/// Wait up to `limit` for the groups of `remaining` to disappear, moving each to `killed` the
+/// first time it is seen absent.
+async fn settle(
+    remaining: &mut Vec<ProcessRecord>,
+    killed: &mut Vec<ProcessRecord>,
+    limit: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        remaining.retain(|&record| {
+            let present = group_exists(record.pgid);
+            if !present {
+                killed.push(record);
+            }
+            present
+        });
+        if remaining.is_empty() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
         tokio::time::sleep(POLL).await;
     }
-    for record in targets {
-        if group_exists(record.pgid) {
-            report.survivors.push(record);
-        } else {
-            report.killed.push(record);
-        }
+}
+
+/// What the recorded leader is now, checked right before a signal.
+enum Recheck {
+    /// Still the recorded process.
+    Leader,
+    /// No longer exists.
+    Vanished,
+    /// The pid belongs to another process now.
+    Reused,
+}
+
+fn recheck(record: ProcessRecord) -> Recheck {
+    match start_time(record.pid) {
+        Some(start) if start == record.start_time => Recheck::Leader,
+        Some(_) => Recheck::Reused,
+        None => Recheck::Vanished,
     }
-    report
 }
 
 enum Verdict {
@@ -169,12 +212,6 @@ fn classify(record: ProcessRecord) -> Verdict {
         return Verdict::Skip(SkipReason::OwnGroup);
     }
     Verdict::Sweep
-}
-
-/// The leader is still the recorded process. A leader that exited is not re-checked (the group
-/// is then judged by [`group_exists`] alone).
-fn is_same_leader(record: &ProcessRecord) -> bool {
-    start_time(record.pid) == Some(record.start_time)
 }
 
 fn process_group(pid: i32) -> Option<i32> {
@@ -253,6 +290,32 @@ mod tests {
             .unwrap();
         assert!(!status.success());
         assert!(!alive(record.pid));
+    }
+
+    #[tokio::test]
+    async fn one_sweep_handles_live_reused_and_dead_records_together() {
+        let live = sleeper();
+        let live_record = live.record().unwrap();
+        let reaped = reap(live);
+        let mut dead = sleeper();
+        let dead_record = dead.record().unwrap();
+        dead.shutdown(GRACE).await;
+        let mut stranger = sleeper();
+        let real = stranger.record().unwrap();
+        let reused = ProcessRecord {
+            start_time: real.start_time + 1,
+            ..real
+        };
+        let report = sweep_orphans_with_grace(&[dead_record, reused, live_record], GRACE).await;
+        assert_eq!(report.killed, vec![live_record], "{report:?}");
+        assert_eq!(report.gone, vec![dead_record]);
+        assert_eq!(report.skipped, vec![(reused, SkipReason::Reused)]);
+        assert!(stranger.try_wait().unwrap().is_none() && alive(real.pid));
+        stranger.shutdown(GRACE).await;
+        tokio::time::timeout(Duration::from_secs(5), reaped)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

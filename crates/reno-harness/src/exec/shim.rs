@@ -38,6 +38,11 @@
 //!   declined (an empty answer list, which every driver treats as a refusal).
 //! - Steering and answer queues are bounded; every task the shim spawns belongs to the
 //!   executor's `TaskTracker` and ends with the output stream (ARCH-11).
+//! - A `Done` is the end of the run. The imported `Harness::run` is a persistent session that
+//!   outlives a turn, so the shim ends it: at `Done` it drops the harness's stream, which every
+//!   driver reads as the consumer leaving (its `event_tx.closed()` arm) and answers by tearing
+//!   down its child and the child's process group. A steering prompt still queued at that moment
+//!   is lost.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -324,7 +329,7 @@ impl Executor for HarnessExecutor {
             cancel,
             last_error: None,
             finished: false,
-            _stop: stop.drop_guard(),
+            stop: Some(stop.drop_guard()),
         };
         Ok(futures::stream::unfold(state, |mut state| async move {
             state.next_event().await.map(|event| (event, state))
@@ -593,8 +598,8 @@ struct Mapped {
     /// The last `AgentEvent::Error`, reported by the `Done` that follows it.
     last_error: Option<String>,
     finished: bool,
-    /// Stops the shim's tasks when the stream ends or is dropped.
-    _stop: DropGuard,
+    /// Cancels the shim's tasks when dropped: at `Done`, or when the stream is dropped.
+    stop: Option<DropGuard>,
 }
 
 enum Next {
@@ -630,11 +635,11 @@ impl Mapped {
                     return Some(if self.cancel.is_cancelled() {
                         self.finish(StopReason::Interrupted, None, None)
                     } else {
-                        self.finish(
-                            StopReason::Error,
-                            None,
-                            Some("the harness ended without reporting a result".into()),
-                        )
+                        let diagnostic = self.last_error.take().map_or_else(
+                            || "the harness ended without reporting a result".to_owned(),
+                            |message| crate::redact_secrets(&message),
+                        );
+                        self.finish(StopReason::Error, None, Some(diagnostic))
                     });
                 }
             }
@@ -651,7 +656,11 @@ impl Mapped {
     ) -> ExecEvent {
         self.finished = true;
         self.pending.deny_all();
+        // A persistent driver keeps its runtime alive after a turn's `Done`; what ends it is the
+        // consumer going away. Dropping the harness's stream here is that signal, and stopping
+        // the shim's tasks closes the steering mailbox.
         self.inner = futures::stream::empty().boxed();
+        self.stop = None;
         ExecEvent::Done {
             stop,
             result,
@@ -808,7 +817,7 @@ fn summarize(output: Option<&str>, exit_code: Option<i32>) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use reno_proto::{McpServerSpec, RunId};
@@ -1024,7 +1033,7 @@ mod tests {
             cancel: CancellationToken::new(),
             last_error: None,
             finished: false,
-            _stop: CancellationToken::new().drop_guard(),
+            stop: None,
         };
         for (name, event) in samples {
             assert_eq!(state.map(event), None, "{name} must be dropped");
@@ -1329,6 +1338,67 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A persistent driver keeps running after a turn's `Done`; the shim must end it.
+    #[tokio::test]
+    async fn a_harness_that_outlives_its_done_is_torn_down_at_done() {
+        struct SetOnDrop(Arc<AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&dropped);
+        let (stub, _) = Stub::new(move |_| {
+            let session = SetOnDrop(Arc::clone(&flag));
+            Ok(
+                futures::stream::unfold((session, false), |(session, sent)| async move {
+                    if sent {
+                        futures::future::pending::<()>().await;
+                    }
+                    Some((Ok(done(DoneStatus::Completed)), (session, true)))
+                })
+                .boxed(),
+            )
+        });
+        let executor = HarnessExecutor::new(stub, id());
+        let (controls, _handle) = ExecControls::new(1);
+        let mut stream = executor
+            .start(spec(AccessMode::FullAccess), controls)
+            .await
+            .unwrap();
+        assert!(matches!(stream.next().await, Some(ExecEvent::Done { .. })));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the harness's stream is dropped as Done is yielded"
+        );
+        // The shim's tasks stop at Done too, before the consumer polls again.
+        tokio::time::timeout(Duration::from_secs(5), executor.shutdown())
+            .await
+            .expect("shim tasks end at Done");
+        assert_eq!(stream.next().await, None);
+    }
+
+    #[tokio::test]
+    async fn an_error_event_without_a_done_is_the_diagnostic() {
+        let (stub, _) = Stub::playing(vec![Ok(AgentEvent::Error {
+            message: "token sk-abc123 rejected".into(),
+        })]);
+        let executor = HarnessExecutor::new(stub, id());
+        let events = collect(&executor, spec(AccessMode::FullAccess)).await;
+        let [
+            ExecEvent::Done {
+                stop: StopReason::Error,
+                diagnostic: Some(diagnostic),
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        assert!(diagnostic.contains("rejected") && !diagnostic.contains("abc123"));
     }
 
     #[tokio::test]

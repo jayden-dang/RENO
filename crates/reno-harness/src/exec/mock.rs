@@ -180,7 +180,6 @@ impl Executor for MockExecutor {
             controls,
             log: Arc::clone(&self.log),
             stashed_answers: Vec::new(),
-            stashed_steers: VecDeque::new(),
             finished: false,
         };
         Ok(futures::stream::unfold(run, |mut run| async move {
@@ -204,7 +203,6 @@ struct Run {
     controls: ExecControls,
     log: Arc<Mutex<MockLog>>,
     stashed_answers: Vec<ExecAnswer>,
-    stashed_steers: VecDeque<String>,
     finished: bool,
 }
 
@@ -290,9 +288,6 @@ impl Run {
     }
 
     async fn wait_steer(&mut self) -> Waited {
-        if self.stashed_steers.pop_front().is_some() {
-            return Waited::Got;
-        }
         let received = tokio::select! {
             biased;
             () = self.controls.cancel.cancelled() => return Waited::Cancelled,

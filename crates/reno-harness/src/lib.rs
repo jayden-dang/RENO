@@ -424,9 +424,12 @@ pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
 mod model_context;
-mod proc;
+pub mod proc;
 #[cfg(unix)]
-pub use proc::record::{ProcessRecord, SweepReport, sweep_orphans, sweep_orphans_with_grace};
+pub use proc::{
+    DEFAULT_SWEEP_GRACE, ProcessRecord, SkipReason, SweepReport, sweep_orphans,
+    sweep_orphans_with_grace,
+};
 pub(crate) use proc::{adapter_install, code_signature, executable};
 pub use proc::{archive_install, install, process, shell_env};
 /// Secret redaction, shared with the doc fold (command output tails).

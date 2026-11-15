@@ -1,10 +1,24 @@
 //! Process ownership, including descendants that outlive their agent.
 //!
-//! This is the one place that puts a child in its own process group ([`lead_group`],
-//! [`spawn_grouped`], [`configure`]) and the one place that ends it ([`Child::shutdown`]):
-//! SIGTERM to the group, a grace period, SIGKILL to the group, then reap. Drivers spawn through
-//! it; none sends its own group signals except the interrupt escalation, which reuses
-//! `crate::send_signal` on the same group.
+//! # Spawning
+//!
+//! This is the one place that puts a child in its own process group: [`lead_group`],
+//! [`spawn_grouped`] and [`configure`] (which adds the Claude session-marker scrub). Every
+//! driver spawn of an agent runtime or helper goes through it. Not through it, deliberately:
+//! package-manager runs that complete with `.output()` (`npm_repair`, the registry's `uv`), which
+//! have no long-lived owner to hold, and the short probes in `executable.rs` and `shell_env.rs`,
+//! which already start their own group or session.
+//!
+//! # Stopping
+//!
+//! Stopping is group-aware wherever the child came from here, in two layers over one primitive
+//! (`crate::send_signal`):
+//!
+//! - [`Child::shutdown`]: SIGTERM to the group, a grace period, SIGKILL to the group, then
+//!   reap, plus every descendant traced while the child lived.
+//! - `crate::shutdown_child` and `crate::shutdown_agent`, which Codex and ACP call on the
+//!   underlying child: `process::signal_target` names the group for a group leader, so the same
+//!   TERM, grace, KILL, reap sequence reaches the whole tree.
 use std::ops::{Deref, DerefMut};
 
 use crate::process::{Child as ProcessChild, Command};
@@ -350,6 +364,26 @@ mod tests {
             total < grace + std::time::Duration::from_secs(1),
             "{total:?}"
         );
+    }
+
+    /// The path Codex and ACP use, `shutdown_agent` on the owned child, ends the same tree.
+    #[tokio::test]
+    async fn shutdown_agent_ends_a_three_level_process_tree() {
+        for ignore_term in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut child, pids) = spawn_tree(dir.path(), ignore_term).await;
+            let grace = std::time::Duration::from_millis(400);
+            let began = std::time::Instant::now();
+            crate::shutdown_agent(&mut child, Vec::new(), grace).await;
+            let gone = until_gone(&pids, std::time::Duration::from_millis(500)).await;
+            let total = began.elapsed();
+            eprintln!("shutdown_agent (ignore TERM: {ignore_term}): {total:?} for pids {pids:?}");
+            assert!(gone.is_some(), "survivors among {pids:?}");
+            assert!(
+                total < grace + std::time::Duration::from_millis(600),
+                "{total:?}"
+            );
+        }
     }
 
     /// Dropping the owner without `shutdown` still ends the group.
