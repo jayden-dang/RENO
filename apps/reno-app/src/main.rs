@@ -1,4 +1,4 @@
-//! T0.10 GPUI spike: window material, translucent panel, tokio bridge, headless model test.
+//! T0.10 GPUI spike: opaque two-tone window, theme tokens, tokio bridge, headless model test.
 
 mod bridge;
 mod model;
@@ -14,16 +14,11 @@ use gpui::{
 use gpui_platform::application;
 
 use model::Model;
-use ui::spike::{Material, SpikeView};
+use ui::spike::SpikeView;
 use ui::theme::Appearance;
 
 fn main() {
-    // `RENO_MATERIAL=gradient` selects the app-painted fallback.
-    let material = match std::env::var("RENO_MATERIAL").as_deref() {
-        Ok("gradient") => Material::Gradient,
-        _ => Material::Blurred,
-    };
-    // `RENO_APPEARANCE=light|dark` previews the panel palette without touching system settings.
+    // `RENO_APPEARANCE=light|dark` previews the palette without touching system settings.
     let appearance_override = match std::env::var("RENO_APPEARANCE").as_deref() {
         Ok("light") => Some(Appearance::Light),
         Ok("dark") => Some(Appearance::Dark),
@@ -41,10 +36,6 @@ fn main() {
         let model = cx.new(|_| Model::default());
         bridge::start_ticker(&model, cx);
 
-        let background = match material {
-            Material::Blurred => WindowBackgroundAppearance::Blurred,
-            Material::Gradient => WindowBackgroundAppearance::Transparent,
-        };
         let bounds = Bounds::centered(None, size(px(520.0), px(420.0)), cx);
         let opened = cx.open_window(
             WindowOptions {
@@ -54,12 +45,10 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(14.0), px(14.0))),
                 }),
-                window_background: background,
+                window_background: WindowBackgroundAppearance::Opaque,
                 ..Default::default()
             },
-            |window, cx| {
-                cx.new(|cx| SpikeView::new(model, material, appearance_override, window, cx))
-            },
+            |window, cx| cx.new(|cx| SpikeView::new(model, appearance_override, window, cx)),
         );
         if opened.is_err() {
             cx.quit();

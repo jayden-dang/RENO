@@ -9,7 +9,8 @@ use gpui::{
     linear_gradient, point, px,
 };
 
-use super::theme::{Theme, mix};
+use super::motion::mix;
+use super::theme::Theme;
 
 fn shadow(color: Hsla, y: f32, blur: f32, spread: f32, inset: bool) -> BoxShadow {
     BoxShadow {
@@ -109,7 +110,7 @@ pub(crate) fn accent_plate(theme: &Theme, t: f32, glow: f32) -> Plate {
     let dark = theme.appearance.is_dark();
     // The theme's fill token, as every other accent fill uses. Dark plates
     // keep their lighting faint so the token reads as itself, not a pastel.
-    let base = theme.accent_strong;
+    let base = theme.accent;
     let top = lift(base, if dark { 0.06 } else { 0.22 });
     // Light: a defined edge a shade deeper than the fill, with a paler ring
     // just inside it. Dark: a soft lifted rim.

@@ -1,0 +1,20 @@
+[package]
+name = "reno-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Block-level markdown model and append-incremental reparse. UI-free.
+# Imported code (ARCH-3): keeps its own lint table instead of `lints.workspace = true`.
+[dependencies]
+pulldown-cmark.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
