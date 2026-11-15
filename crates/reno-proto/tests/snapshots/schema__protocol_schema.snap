@@ -1,0 +1,1544 @@
+---
+source: crates/reno-proto/tests/schema.rs
+expression: protocol_schema()
+---
+{
+  "features": [
+    "run.events.resume",
+    "runs.watch",
+    "sub.gap"
+  ],
+  "methods": [
+    {
+      "name": "daemon.hello",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `daemon.hello`.",
+        "properties": {
+          "clientName": {
+            "description": "Client name, for logs.",
+            "type": "string"
+          },
+          "features": {
+            "description": "Features the client understands.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "protocolVersion": {
+            "description": "Highest protocol version the client speaks.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "clientName",
+          "protocolVersion",
+          "features"
+        ],
+        "title": "HelloParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `daemon.hello`.",
+        "properties": {
+          "features": {
+            "description": "Features both sides support.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pid": {
+            "description": "Daemon process id.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocolVersion": {
+            "description": "Protocol version the connection will use.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "serverVersion": {
+            "description": "Daemon build version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverVersion",
+          "protocolVersion",
+          "features",
+          "pid"
+        ],
+        "title": "HelloResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "daemon.status",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Empty params: serialises as `{}`.",
+        "title": "NoParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `daemon.status`.",
+        "properties": {
+          "activeRuns": {
+            "description": "Runs in a non-terminal state other than `queued`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "executors": {
+            "description": "Executors the daemon found installed.",
+            "items": {
+              "$ref": "#/$defs/ExecutorId"
+            },
+            "type": "array"
+          },
+          "pid": {
+            "description": "Daemon process id.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "queuedRuns": {
+            "description": "Runs waiting to be claimed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uptimeSecs": {
+            "description": "Seconds since the daemon started.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "Daemon build version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "pid",
+          "uptimeSecs",
+          "activeRuns",
+          "queuedRuns",
+          "executors"
+        ],
+        "title": "DaemonStatusInfo",
+        "type": "object"
+      }
+    },
+    {
+      "name": "task.run",
+      "params": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `task.run`.",
+        "properties": {
+          "cwd": {
+            "description": "Working directory; the daemon's default when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "executor": {
+            "$ref": "#/$defs/ExecutorId",
+            "description": "Executor to run it on."
+          },
+          "model": {
+            "description": "Model override.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "The task prompt.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "executor"
+        ],
+        "title": "TaskRunParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `task.run`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The new run."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "TaskRunResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "run.get",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.get`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run to fetch."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunGetParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          },
+          "StopReason": {
+            "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
+            "oneOf": [
+              {
+                "const": "completed",
+                "description": "The harness finished its turn normally.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The harness was stopped before finishing.",
+                "type": "string"
+              },
+              {
+                "const": "error",
+                "description": "The harness failed. A failing harness ends with this, never with a stream error.",
+                "type": "string"
+              },
+              {
+                "const": "refusal",
+                "description": "The model declined the request.",
+                "type": "string"
+              },
+              {
+                "const": "max_tokens",
+                "description": "The model hit its output limit.",
+                "type": "string"
+              }
+            ]
+          },
+          "TaskId": {
+            "pattern": "^task_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One run, as shown in lists and watches.",
+        "properties": {
+          "attempt": {
+            "description": "Attempt number, from 1.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "createdAtMs": {
+            "description": "Creation time, in milliseconds since the Unix epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "executor": {
+            "$ref": "#/$defs/ExecutorId",
+            "description": "The executor running it."
+          },
+          "model": {
+            "description": "Model in use, once known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run."
+          },
+          "status": {
+            "$ref": "#/$defs/RunStatus",
+            "description": "Current lifecycle state."
+          },
+          "stopReason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StopReason"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why it stopped, once it has."
+          },
+          "taskId": {
+            "$ref": "#/$defs/TaskId",
+            "description": "The task it attempts."
+          },
+          "title": {
+            "description": "First line of the prompt, for display.",
+            "type": "string"
+          },
+          "updatedAtMs": {
+            "description": "Last state change, in milliseconds since the Unix epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runId",
+          "taskId",
+          "executor",
+          "status",
+          "attempt",
+          "title",
+          "createdAtMs",
+          "updatedAtMs"
+        ],
+        "title": "RunSummary",
+        "type": "object"
+      }
+    },
+    {
+      "name": "run.list",
+      "params": {
+        "$defs": {
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.list`.",
+        "properties": {
+          "limit": {
+            "description": "Maximum number of runs, newest first.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Only runs in one of these states; all runs when absent.",
+            "items": {
+              "$ref": "#/$defs/RunStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "RunListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunSummary": {
+            "description": "One run, as shown in lists and watches.",
+            "properties": {
+              "attempt": {
+                "description": "Attempt number, from 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "createdAtMs": {
+                "description": "Creation time, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor running it."
+              },
+              "model": {
+                "description": "Model in use, once known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              },
+              "status": {
+                "$ref": "#/$defs/RunStatus",
+                "description": "Current lifecycle state."
+              },
+              "stopReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Why it stopped, once it has."
+              },
+              "taskId": {
+                "$ref": "#/$defs/TaskId",
+                "description": "The task it attempts."
+              },
+              "title": {
+                "description": "First line of the prompt, for display.",
+                "type": "string"
+              },
+              "updatedAtMs": {
+                "description": "Last state change, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "runId",
+              "taskId",
+              "executor",
+              "status",
+              "attempt",
+              "title",
+              "createdAtMs",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          },
+          "StopReason": {
+            "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
+            "oneOf": [
+              {
+                "const": "completed",
+                "description": "The harness finished its turn normally.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The harness was stopped before finishing.",
+                "type": "string"
+              },
+              {
+                "const": "error",
+                "description": "The harness failed. A failing harness ends with this, never with a stream error.",
+                "type": "string"
+              },
+              {
+                "const": "refusal",
+                "description": "The model declined the request.",
+                "type": "string"
+              },
+              {
+                "const": "max_tokens",
+                "description": "The model hit its output limit.",
+                "type": "string"
+              }
+            ]
+          },
+          "TaskId": {
+            "pattern": "^task_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.list`.",
+        "properties": {
+          "runs": {
+            "description": "Matching runs, newest first.",
+            "items": {
+              "$ref": "#/$defs/RunSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "RunListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "run.cancel",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.cancel`.",
+        "properties": {
+          "reason": {
+            "description": "Why, for the audit trail.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run to cancel."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunCancelParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.cancel`.",
+        "properties": {
+          "status": {
+            "$ref": "#/$defs/RunStatus",
+            "description": "The run's status once the cancel was accepted."
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "RunCancelResult",
+        "type": "object"
+      }
+    }
+  ],
+  "notifications": [
+    {
+      "name": "sub.gap",
+      "params": {
+        "$defs": {
+          "Seq": {
+            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "SubscriptionId": {
+            "pattern": "^sub_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `sub.gap` notification (ARCH-12).",
+        "properties": {
+          "resumeFrom": {
+            "$ref": "#/$defs/Seq",
+            "description": "Re-subscribe with `fromSeq` set to this to continue without loss."
+          },
+          "subscription": {
+            "$ref": "#/$defs/SubscriptionId",
+            "description": "The subscription that fell behind and was cut off."
+          }
+        },
+        "required": [
+          "subscription",
+          "resumeFrom"
+        ],
+        "title": "SubGapParams",
+        "type": "object"
+      }
+    }
+  ],
+  "protocolVersion": 1,
+  "subscriptions": [
+    {
+      "item": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          },
+          "ApprovalSubject": {
+            "description": "The exact thing a human is asked to approve.",
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ActionClass",
+                "description": "Class of the action."
+              },
+              "command": {
+                "description": "The command line, for command actions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paths": {
+                "default": [],
+                "description": "Paths the action touches.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "raw": {
+                "default": null,
+                "description": "The harness's own request, kept for the audit record."
+              },
+              "tool": {
+                "description": "Tool the action goes through.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "tool"
+            ],
+            "type": "object"
+          },
+          "ExecEvent": {
+            "description": "One event from a running executor. A failing harness yields `Done { stop: Error }`; the\nstream itself never errors mid-run.",
+            "oneOf": [
+              {
+                "description": "The harness session began.",
+                "properties": {
+                  "model": {
+                    "description": "Model actually in use.",
+                    "type": "string"
+                  },
+                  "session": {
+                    "$ref": "#/$defs/SessionRef",
+                    "description": "Handle for resuming this session."
+                  },
+                  "type": {
+                    "const": "started",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "session",
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Assistant text.",
+                "properties": {
+                  "text": {
+                    "description": "The text chunk.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "text",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Model reasoning text.",
+                "properties": {
+                  "text": {
+                    "description": "The reasoning chunk.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "reasoning",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A tool call began.",
+                "properties": {
+                  "call": {
+                    "$ref": "#/$defs/ToolCall",
+                    "description": "The call."
+                  },
+                  "id": {
+                    "description": "Call id, matched by `ToolResult`.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "tool",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id",
+                  "call"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A tool call finished.",
+                "properties": {
+                  "id": {
+                    "description": "Id of the call.",
+                    "type": "string"
+                  },
+                  "ok": {
+                    "description": "Whether it succeeded.",
+                    "type": "boolean"
+                  },
+                  "summary": {
+                    "description": "Short human-readable outcome.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "const": "tool_result",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id",
+                  "ok"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Token usage so far.",
+                "properties": {
+                  "inputTokens": {
+                    "description": "Input tokens.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "outputTokens": {
+                    "description": "Output tokens.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "usage",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "inputTokens",
+                  "outputTokens"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness asks a human questions.",
+                "properties": {
+                  "questions": {
+                    "description": "The questions.",
+                    "items": {
+                      "$ref": "#/$defs/Question"
+                    },
+                    "type": "array"
+                  },
+                  "requestId": {
+                    "description": "Id the answer is sent against.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "needs_input",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requestId",
+                  "questions"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness asks a human to approve an action.",
+                "properties": {
+                  "requestId": {
+                    "description": "Id the decision is sent against.",
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/ApprovalSubject",
+                    "description": "What is being approved."
+                  },
+                  "type": {
+                    "const": "needs_approval",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requestId",
+                  "subject"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run ended; always the last event.",
+                "properties": {
+                  "diagnostic": {
+                    "description": "Failure detail, when `stop` is `error`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "result": {
+                    "description": "Final result text.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "stop": {
+                    "$ref": "#/$defs/StopReason",
+                    "description": "Why it stopped."
+                  },
+                  "type": {
+                    "const": "done",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "stop"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Question": {
+            "description": "One question put to a human by a harness.",
+            "properties": {
+              "id": {
+                "description": "Identifier the answer refers to.",
+                "type": "string"
+              },
+              "multiSelect": {
+                "default": false,
+                "description": "Whether more than one option may be chosen.",
+                "type": "boolean"
+              },
+              "options": {
+                "default": [],
+                "description": "Suggested answers; empty for free text.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "prompt": {
+                "description": "The question text.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "prompt"
+            ],
+            "type": "object"
+          },
+          "Seq": {
+            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "SessionRef": {
+            "description": "An opaque handle a harness gives for resuming a conversation.",
+            "type": "string"
+          },
+          "StopReason": {
+            "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
+            "oneOf": [
+              {
+                "const": "completed",
+                "description": "The harness finished its turn normally.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The harness was stopped before finishing.",
+                "type": "string"
+              },
+              {
+                "const": "error",
+                "description": "The harness failed. A failing harness ends with this, never with a stream error.",
+                "type": "string"
+              },
+              {
+                "const": "refusal",
+                "description": "The model declined the request.",
+                "type": "string"
+              },
+              {
+                "const": "max_tokens",
+                "description": "The model hit its output limit.",
+                "type": "string"
+              }
+            ]
+          },
+          "ToolCall": {
+            "description": "A tool invocation as far as Reno needs to know it.",
+            "properties": {
+              "input": {
+                "default": null,
+                "description": "The tool's input, verbatim."
+              },
+              "name": {
+                "description": "Tool name as the harness reports it.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of the `run.events` subscription.",
+        "properties": {
+          "event": {
+            "$ref": "#/$defs/ExecEvent",
+            "description": "The event."
+          },
+          "seq": {
+            "$ref": "#/$defs/Seq",
+            "description": "Position in the run's journal."
+          }
+        },
+        "required": [
+          "seq",
+          "event"
+        ],
+        "title": "RunEventItem",
+        "type": "object"
+      },
+      "name": "run.events",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "Seq": {
+            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `run.events` subscription.",
+        "properties": {
+          "fromSeq": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Seq"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Resume after this sequence number; start from the beginning when absent."
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run to follow."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunEventsParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunSummary": {
+            "description": "One run, as shown in lists and watches.",
+            "properties": {
+              "attempt": {
+                "description": "Attempt number, from 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "createdAtMs": {
+                "description": "Creation time, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor running it."
+              },
+              "model": {
+                "description": "Model in use, once known.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              },
+              "status": {
+                "$ref": "#/$defs/RunStatus",
+                "description": "Current lifecycle state."
+              },
+              "stopReason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StopReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Why it stopped, once it has."
+              },
+              "taskId": {
+                "$ref": "#/$defs/TaskId",
+                "description": "The task it attempts."
+              },
+              "title": {
+                "description": "First line of the prompt, for display.",
+                "type": "string"
+              },
+              "updatedAtMs": {
+                "description": "Last state change, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "runId",
+              "taskId",
+              "executor",
+              "status",
+              "attempt",
+              "title",
+              "createdAtMs",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          },
+          "StopReason": {
+            "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
+            "oneOf": [
+              {
+                "const": "completed",
+                "description": "The harness finished its turn normally.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The harness was stopped before finishing.",
+                "type": "string"
+              },
+              {
+                "const": "error",
+                "description": "The harness failed. A failing harness ends with this, never with a stream error.",
+                "type": "string"
+              },
+              {
+                "const": "refusal",
+                "description": "The model declined the request.",
+                "type": "string"
+              },
+              {
+                "const": "max_tokens",
+                "description": "The model hit its output limit.",
+                "type": "string"
+              }
+            ]
+          },
+          "TaskId": {
+            "pattern": "^task_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of the `runs.watch` subscription: the whole current list (latest value wins).",
+        "properties": {
+          "runs": {
+            "description": "Current runs, newest first.",
+            "items": {
+              "$ref": "#/$defs/RunSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "RunsSnapshot",
+        "type": "object"
+      },
+      "name": "runs.watch",
+      "params": {
+        "$defs": {
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `runs.watch` subscription.",
+        "properties": {
+          "status": {
+            "description": "Only runs in one of these states; all runs when absent.",
+            "items": {
+              "$ref": "#/$defs/RunStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "RunsWatchParams",
+        "type": "object"
+      }
+    }
+  ]
+}
