@@ -558,32 +558,45 @@ fn trigger_every_has_a_floor() {
 #[test]
 fn trigger_cron_must_have_five_fields() {
     let when = |cron: &str| format!("kind = \"cron\"\ncron = \"{cron}\"\ntimezone = \"UTC\"");
-    assert_one(
-        &trigger_errors(&trigger_with(&when("0 2 * *"))),
-        "triggers/nightly.toml: when.cron: \"0 2 * *\" has 4 fields",
-    );
+    for cron in ["0 2 * *", "0 0 2 * * *", "0 0 2 * * * 2030"] {
+        let errors = trigger_errors(&trigger_with(&when(cron)));
+        assert_one(
+            &errors,
+            &format!("triggers/nightly.toml: when.cron: \"{cron}\" is not a cron expression"),
+        );
+        assert!(errors[0].contains("a cron has five fields"), "{errors:?}");
+    }
 }
 
 #[test]
 fn trigger_cron_fields_are_range_checked() {
     let when = |cron: &str| format!("kind = \"cron\"\ncron = \"{cron}\"\ntimezone = \"UTC\"");
-    for (cron, needle) in [
-        ("60 2 * * *", "minute field"),
-        ("0 24 * * *", "hour field"),
-        ("0 2 0 * *", "day-of-month field"),
-        ("0 2 * 13 *", "month field"),
-        ("0 2 * * 8", "day-of-week field"),
-        ("0 2 * * funday", "day-of-week field"),
-        ("5-1 2 * * *", "runs backwards"),
-        ("*/0 2 * * *", "step"),
-        ("5/10 2 * * *", "a step needs"),
-        ("0 2 L * *", "day-of-month field"),
-        ("0,,5 2 * * *", "minute field"),
+    for cron in [
+        "60 2 * * *",
+        "0 24 * * *",
+        "0 2 0 * *",
+        "0 2 * 13 *",
+        "0 2 * * 8",
+        "0 2 * * funday",
+        "5-1 2 * * *",
+        "*/0 2 * * *",
     ] {
         let errors = trigger_errors(&trigger_with(&when(cron)));
         assert_one(&errors, "triggers/nightly.toml: when.cron: ");
-        assert!(errors[0].contains(needle), "{cron}: {errors:?}");
+        assert!(
+            errors[0].contains("is not a cron expression"),
+            "{cron}: {errors:?}"
+        );
     }
+}
+
+#[test]
+fn trigger_cron_must_match_some_date() {
+    let when = "kind = \"cron\"\ncron = \"0 0 31 2 *\"\ntimezone = \"UTC\"";
+    assert_one(
+        &trigger_errors(&trigger_with(when)),
+        "triggers/nightly.toml: when.cron: \"0 0 31 2 *\" never matches any date",
+    );
 }
 
 #[test]
@@ -596,6 +609,10 @@ fn trigger_cron_accepts_the_usual_forms() {
         "0 0 * * 7",
         "0 */6 * * *",
         "10-50/10 * * * *",
+        // croner's extensions: the last day of the month, the second Friday, a nickname.
+        "0 2 L * *",
+        "0 9 * * 5#2",
+        "@daily",
     ] {
         let when = format!("kind = \"cron\"\ncron = \"{cron}\"\ntimezone = \"UTC\"");
         assert!(trigger_errors(&trigger_with(&when)).is_empty(), "{cron}");
@@ -1293,4 +1310,24 @@ fn builtin_executors_are_valid_ids() {
     for name in BUILTIN_EXECUTORS {
         assert!(name.parse::<ExecutorId>().is_ok(), "{name}");
     }
+}
+
+#[test]
+fn trigger_prompt_placeholders_are_checked() {
+    let with = |prompt: &str| {
+        format!(
+            "name = \"nightly\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"keeper\"\nprompt = \"{prompt}\"\n"
+        )
+    };
+    assert!(trigger_errors(&with("{{trigger}} {{ scheduled_at }} {{lateness}}")).is_empty());
+    let errors = trigger_errors(&with("hello {{name}}"));
+    assert_one(
+        &errors,
+        "triggers/nightly.toml: target.prompt: has the placeholder {{name}}",
+    );
+    let errors = trigger_errors(&with("hello {{trigger"));
+    assert_one(
+        &errors,
+        "triggers/nightly.toml: target.prompt: has `{{` with no closing",
+    );
 }

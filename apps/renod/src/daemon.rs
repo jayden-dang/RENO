@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::defs::{self, FsDefinitions, GitInit};
 use crate::executors::{self, ExecutorSet};
+use crate::fswatch::FsWatch;
 use crate::handlers::{self, Ctx};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
@@ -208,10 +209,9 @@ impl Daemon {
             Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
 
         kernel.owner = format!("renod-{}", std::process::id());
-        let setup = DefsSetup {
-            port: fs_defs.clone(),
-            context,
-        };
+        kernel.trigger_cwd = paths.workspace();
+        let fs_watch = Arc::new(FsWatch::new());
+        let setup = DefsSetup::new(fs_defs.clone(), context).with_watch(fs_watch.clone());
         let kernel = match Kernel::start_with_definitions(
             kernel,
             store,
@@ -273,6 +273,7 @@ impl Daemon {
             server,
             kernel,
             fs_defs,
+            fs_watch,
             harnesses,
             socket: paths.socket,
             lock,
@@ -314,6 +315,7 @@ struct Shutdown {
     server: Arc<Server>,
     kernel: Kernel,
     fs_defs: Arc<FsDefinitions>,
+    fs_watch: Arc<FsWatch>,
     harnesses: Vec<Arc<dyn Executor>>,
     socket: PathBuf,
     lock: DataDirLock,
@@ -331,6 +333,7 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     // 2. The kernel ends every live run `interrupted`, within its own deadline.
     let report = s.kernel.shutdown().await;
     s.fs_defs.shutdown().await;
+    s.fs_watch.shutdown().await;
     for harness in &s.harnesses {
         harness.shutdown().await;
     }

@@ -391,7 +391,7 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
         format!(
             "bots/keeper.toml: executors[2]: unknown executor \"x\"\n\
              bots/keeper.toml: triggers[1]: unknown trigger \"ghost\"\n\
-             triggers/nightly.toml: when.cron: minute field \"61\": 61 is outside 0..=59\n\
+             triggers/nightly.toml: when.cron: \"61 2 * * *\" is not a cron expression: Component error: Number out of bounds. (a cron has five fields: minute hour day-of-month month day-of-week)\n\
              policy.toml: line 1, column 1: unknown field `mode`, expected one of `default`, `approval_ttl`, `rules`\n\
              4 error(s) in {}\n",
             dir.display()
@@ -685,5 +685,59 @@ fn a_task_run_as_a_bot_is_pinned_to_the_bots_version() {
         text(&unknown.stderr).contains("not found"),
         "{}",
         text(&unknown.stderr)
+    );
+}
+
+#[test]
+fn trigger_list_and_fire_through_the_cli() {
+    let world = World::new();
+    write_def(&world.defs_dir(), "bots/tester.toml", TESTER);
+    write_def(
+        &world.defs_dir(),
+        "triggers/poke.toml",
+        "name = \"poke\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"tester\"\nprompt = \"poked\"\n",
+    );
+    write_def(
+        &world.defs_dir(),
+        "triggers/nightly.toml",
+        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"UTC\"\n[target]\nbot = \"tester\"\nprompt = \"nightly\"\n",
+    );
+    world.start_daemon();
+
+    let list = world.reno(&["trigger", "list"]);
+    assert!(list.status.success(), "{}", text(&list.stderr));
+    let shown = text(&list.stdout);
+    assert!(
+        shown.contains("nightly") && shown.contains("scheduled") && shown.contains("next "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("poke") && shown.contains("manual"),
+        "{shown}"
+    );
+
+    let fired = world.reno(&["trigger", "fire", "poke"]);
+    assert!(fired.status.success(), "{}", text(&fired.stderr));
+    assert!(
+        text(&fired.stdout).starts_with("poke fired: run run_"),
+        "{}",
+        text(&fired.stdout)
+    );
+    let json = world.json(&["trigger", "list"]);
+    let poke = json["triggers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "poke")
+        .unwrap();
+    assert!(poke["lastRunId"].as_str().unwrap().starts_with("run_"));
+    assert_eq!(world.runs().len(), 1);
+
+    let ghost = world.reno(&["trigger", "fire", "ghost"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    assert!(
+        text(&ghost.stderr).contains("not found"),
+        "{}",
+        text(&ghost.stderr)
     );
 }

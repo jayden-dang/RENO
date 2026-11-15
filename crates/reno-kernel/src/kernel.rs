@@ -27,7 +27,7 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, Approval, ApprovalDecision,
     ApprovalId, ApprovalRecord, ApprovalStatus, ExecutorId, RunEventItem, RunId, RunStatus,
-    RunSummary, Seq, TaskId,
+    RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -43,6 +43,7 @@ use crate::error::{KernelError, Result};
 use crate::events;
 use crate::recovery;
 use crate::registry::ExecutorRegistry;
+use crate::scheduler::{self, SchedCmd};
 use crate::shared::{Shared, SupCmd};
 
 /// How often `submit` mints a new id after the store says the last one exists.
@@ -99,6 +100,8 @@ impl Kernel {
         definitions: Option<DefsSetup>,
     ) -> Result<Self> {
         // Without a port the kernel still validates bodies, against the executors it has.
+        let watch_port = definitions.as_ref().and_then(|setup| setup.watch.clone());
+        let has_definitions = definitions.is_some();
         let context = match &definitions {
             Some(setup) => setup.context.clone(),
             None => ValidationContext::with_builtin(executors.ids().cloned()),
@@ -113,6 +116,9 @@ impl Kernel {
         shared.approvals.refresh(&shared.db).await?;
         if let Some(setup) = definitions {
             defs::start(&shared, setup).await?;
+        }
+        if has_definitions {
+            scheduler::start(&shared, watch_port).await?;
         }
         shared.refresh_runs().await?;
         shared.spawn(dispatcher::run(Arc::clone(&shared)));
@@ -155,41 +161,10 @@ impl Kernel {
         cwd: PathBuf,
         model: Option<String>,
     ) -> Result<RunId> {
-        let current = self.shared.current_defs();
-        let def = current
-            .set()
-            .bot(bot)
-            .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-        let stored = current
-            .version_of(DefKind::Bot, bot)
-            .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-        let eligible = |id: &&ExecutorId| {
-            self.shared.executors.get(id).is_some_and(|executor| {
-                dispatcher::no_eligible_executor(&executor.descriptor(), def.access).is_none()
-            })
-        };
-        let executor = match executor {
-            Some(executor) => executor,
-            None => def
-                .executors
-                .iter()
-                .find(eligible)
-                .or_else(|| {
-                    def.executors
-                        .iter()
-                        .find(|id| self.shared.executors.get(id).is_some())
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    KernelError::Invalid(format!(
-                        "none of the executors of bot {bot:?} is available on this daemon"
-                    ))
-                })?,
-        };
-        let pin = BotPin {
-            name: bot.to_owned(),
-            version: stored.version,
-        };
+        let (executor, pin) = bot_launch(&self.shared, bot, executor).map_err(|e| match e {
+            KernelError::NoExecutor(_) => KernelError::Invalid(e.to_string()),
+            other => other,
+        })?;
         self.submit_pinned(prompt.into(), executor, cwd, model, Some(pin))
             .await
     }
@@ -255,6 +230,36 @@ impl Kernel {
     /// slow reader skips versions, never queues them.
     pub fn watch_defs(&self) -> watch::Receiver<Arc<CurrentDefs>> {
         defs::subscribe(&self.shared)
+    }
+
+    /// Every trigger and its state. Latest value wins: a slow reader skips versions, never
+    /// queues them.
+    pub fn watch_triggers(&self) -> watch::Receiver<Arc<Vec<TriggerInfo>>> {
+        self.shared.triggers_tx.subscribe()
+    }
+
+    /// Every trigger and its state now.
+    pub fn list_triggers(&self) -> Vec<TriggerInfo> {
+        self.shared.triggers_tx.borrow().as_ref().clone()
+    }
+
+    /// Fires a trigger now, whatever its schedule: a `manual` trigger or any enabled one. It
+    /// does not move the schedule and is not held back by a backoff. The result says whether a
+    /// run was started, merged into the trigger's running one, or was a duplicate.
+    pub async fn fire_trigger(&self, name: &str) -> Result<TriggerFireResult> {
+        if self.shared.root.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
+        let (reply, answer) = oneshot::channel();
+        self.shared
+            .sched_tx
+            .send(SchedCmd::Fire {
+                name: name.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(|_| KernelError::ShuttingDown)?;
+        answer.await.map_err(|_| KernelError::ShuttingDown)?
     }
 
     /// The definitions in force now.
@@ -527,8 +532,51 @@ impl Kernel {
     }
 }
 
+/// The executor and bot pin a run for `bot` starts with: the executor given, or the first in the
+/// bot's list that this kernel has and that declares the bot's access mode, else the first it
+/// has (the run then fails at launch with `NoEligibleExecutor`, ARCH-15). The pin is the bot's
+/// version in force now.
+pub(crate) fn bot_launch(
+    shared: &Shared,
+    bot: &str,
+    executor: Option<ExecutorId>,
+) -> Result<(ExecutorId, BotPin)> {
+    let current = shared.current_defs();
+    let def = current
+        .set()
+        .bot(bot)
+        .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
+    let stored = current
+        .version_of(DefKind::Bot, bot)
+        .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
+    let eligible = |id: &&ExecutorId| {
+        shared.executors.get(id).is_some_and(|executor| {
+            dispatcher::no_eligible_executor(&executor.descriptor(), def.access).is_none()
+        })
+    };
+    let executor = match executor {
+        Some(executor) => executor,
+        None => def
+            .executors
+            .iter()
+            .find(eligible)
+            .or_else(|| {
+                def.executors
+                    .iter()
+                    .find(|id| shared.executors.get(id).is_some())
+            })
+            .cloned()
+            .ok_or_else(|| KernelError::NoExecutor(bot.to_owned()))?,
+    };
+    let pin = BotPin {
+        name: bot.to_owned(),
+        version: stored.version,
+    };
+    Ok((executor, pin))
+}
+
 /// Mint an id until it parses (it always does: the suffix is hex).
-fn mint<T>(
+pub(crate) fn mint<T>(
     shared: &Shared,
     from_suffix: fn(&str) -> std::result::Result<T, reno_proto::IdError>,
 ) -> Result<T> {

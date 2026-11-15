@@ -14,6 +14,7 @@
 //!   [`protocol_schema`].
 //! - [`defs`]: bots, triggers and policy as TOML-backed definitions: parsing, validation and
 //!   content hashing, all pure. Its wire types are in the protocol.
+//! - [`triggers`]: the state of triggers on the wire (`trigger.list`, `trigger.fire`).
 //! - [`error`]: stable wire error codes.
 //!
 //! # Serde conventions
@@ -48,9 +49,11 @@ pub mod exec;
 pub mod ids;
 pub mod protocol;
 pub mod run;
+pub mod triggers;
 
 pub use error::*;
 pub use exec::*;
 pub use ids::*;
 pub use protocol::*;
 pub use run::*;
+pub use triggers::*;

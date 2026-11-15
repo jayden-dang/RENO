@@ -16,6 +16,7 @@
 //! - `approvals`: durable approval records, decided with `synchronous=FULL`.
 //! - `runs`: tasks and runs, claims, fences and transitions.
 //! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
+//! - `triggers`: the scheduler's state and firings, fired atomically with the run they start.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
 //! - `error`: [`StoreError`].
@@ -33,6 +34,7 @@ pub mod events;
 pub mod journal;
 mod migrations;
 pub mod runs;
+pub mod triggers;
 mod writer;
 
 pub use approvals::{ExpireScope, Expired, NewApproval, StoredApproval};
@@ -42,6 +44,7 @@ pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
 pub use runs::{Claim, NewTask, RunRecord};
+pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};
 pub use writer::StoreConfig;
 
 #[cfg(test)]
@@ -50,3 +53,5 @@ mod approval_tests;
 mod definition_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trigger_tests;

@@ -18,6 +18,7 @@ mod defs;
 mod queue;
 mod recovery;
 mod runs;
+mod triggers;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,9 @@ pub(super) async fn until<T>(mut probe: impl AsyncFnMut() -> Option<T>) -> T {
     }
     panic!("condition never became true");
 }
+
+/// The clock of a new kernel: 2023-11-14T22:13:20Z.
+pub(super) const START_MS: i64 = 1_700_000_000_000;
 
 pub(super) struct Fx {
     dir: Option<TempDir>,
@@ -104,7 +108,7 @@ impl Fx {
         config: KernelConfig,
         executors: ExecutorRegistry,
     ) -> Self {
-        Self::start_over(dir, store, config, executors, None).await
+        Self::start_over(Some(dir), store, config, executors, None, START_MS).await
     }
 
     /// A kernel over a fresh store that loads definitions through `definitions`.
@@ -126,7 +130,76 @@ impl Fx {
         executors: ExecutorRegistry,
         definitions: DefsSetup,
     ) -> Self {
-        Self::start_over(dir, store, config, executors, Some(definitions)).await
+        Self::start_over(
+            Some(dir),
+            store,
+            config,
+            executors,
+            Some(definitions),
+            START_MS,
+        )
+        .await
+    }
+
+    /// A kernel over a fresh store, its clock at `now_ms`, loading definitions through
+    /// `definitions`.
+    pub(super) async fn with_definitions_at(
+        now_ms: i64,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: DefsSetup,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("reno.db")).unwrap();
+        Self::start_over(
+            Some(dir),
+            store,
+            config,
+            executors,
+            Some(definitions),
+            now_ms,
+        )
+        .await
+    }
+
+    /// A second kernel over the same store as `first`, with its own clock at `now_ms`: two
+    /// schedulers on one database.
+    pub(super) async fn sharing(
+        first: &Fx,
+        now_ms: i64,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: DefsSetup,
+    ) -> Self {
+        Self::start_over(
+            None,
+            first.store.clone(),
+            config,
+            executors,
+            Some(definitions),
+            now_ms,
+        )
+        .await
+    }
+
+    /// Like `over_definitions`, with the clock at `now_ms`: a restart some time later.
+    pub(super) async fn restarted_at(
+        now_ms: i64,
+        dir: TempDir,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: DefsSetup,
+    ) -> Self {
+        Self::start_over(
+            Some(dir),
+            store,
+            config,
+            executors,
+            Some(definitions),
+            now_ms,
+        )
+        .await
     }
 
     /// Gives back the store and its directory, to start another kernel over them.
@@ -136,14 +209,15 @@ impl Fx {
     }
 
     async fn start_over(
-        dir: TempDir,
+        dir: Option<TempDir>,
         store: Store,
         config: KernelConfig,
         executors: ExecutorRegistry,
         definitions: Option<DefsSetup>,
+        now_ms: i64,
     ) -> Self {
         let spinner = spin();
-        let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+        let clock = Arc::new(ManualClock::new(now_ms));
         let start = match definitions {
             None => tokio::spawn(Kernel::start(
                 config,
@@ -163,7 +237,7 @@ impl Fx {
         until(async || start.is_finished().then_some(())).await;
         let kernel = start.await.unwrap().unwrap();
         Self {
-            dir: Some(dir),
+            dir,
             store,
             clock,
             kernel,

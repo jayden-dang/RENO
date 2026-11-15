@@ -43,6 +43,15 @@ pub enum KernelError {
         /// The version, when one was asked for.
         version: Option<u32>,
     },
+    /// None of the executors of a bot is available on this daemon.
+    #[error("none of the executors of bot {0:?} is available on this daemon")]
+    NoExecutor(String),
+    /// No trigger by this name is in force.
+    #[error("trigger {0:?} not found")]
+    TriggerNotFound(String),
+    /// The trigger is disabled in its definition, so it cannot be fired.
+    #[error("trigger {0:?} is disabled")]
+    TriggerDisabled(String),
     /// The `Definitions` port failed.
     #[error("definitions: {0}")]
     Definitions(String),

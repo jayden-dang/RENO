@@ -45,8 +45,8 @@
 //!
 //! # What validation does not check
 //!
-//! - A cron expression is checked for shape and ranges (five fields, the syntax in [`time`]),
-//!   not run. `L`, `W` and `#` are not accepted yet.
+//! - A cron expression is parsed by `croner`, the same parser the scheduler fires from
+//!   ([`CronSchedule`]), and must match some date. Nothing is run.
 //! - Time zones are looked up in a bundled copy of the IANA database, so the answer does not
 //!   depend on the machine.
 //! - `team` names are checked for shape only: teams arrive with T2.4.
@@ -76,8 +76,13 @@ pub use bot::{BotDef, Budget};
 pub use eval::{DEFAULT_RULE, EvalContext, PolicyDecision, RuleRef, evaluate};
 pub use hash::{canonical_json, content_hash};
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
-pub use time::{MIN_EVERY, parse_duration};
-pub use trigger::{TriggerDef, TriggerKind, TriggerTarget};
+pub use time::{
+    CronSchedule, MIN_EVERY, format_instant, format_span, parse_duration, parse_instant_ms,
+};
+pub use trigger::{
+    LATE_GRACE, MAX_MISSED_COUNT, PROMPT_PLACEHOLDERS, PromptVars, TriggerDef, TriggerKind,
+    TriggerTarget, lateness_note, render_prompt,
+};
 pub use wire::{
     BotPin, DefGetParams, DefListParams, DefRecord, DefSummary, DefValidateParams,
     DefValidateResult, DefsSnapshot, DefsWatchParams,

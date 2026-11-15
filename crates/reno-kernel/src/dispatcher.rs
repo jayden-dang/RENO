@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reno_harness::exec::ExecControls;
+use reno_harness::exec::{ExecControls, ExecError};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, RunId, RunStatus, SandboxLevel, StopReason,
@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::lifecycle;
+use crate::scheduler::{SchedCmd, StartFailure};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
 use crate::supervisor::{RunInfo, Supervisor};
 
@@ -211,14 +212,15 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         .and_then(|(access, sandbox)| exec_spec(&row, access, sandbox))
     {
         Ok(spec) => spec,
-        Err(why) => return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await,
+        Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
     };
     let Some(executor) = shared.executors.get(&row.executor).cloned() else {
         let why = format!("unknown executor {}", row.executor);
-        return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await;
+        return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
     };
     if let Some(why) = no_eligible_executor(&executor.descriptor(), spec.access) {
-        return fail_start(shared, &run_id, fence, why, cmd_rx, slot).await;
+        let account = Some(StartFailure::NoEligibleExecutor);
+        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
     }
     let info = RunInfo {
         cwd: spec.cwd.clone(),
@@ -233,6 +235,11 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     };
     match started {
         Some(Ok(stream)) => {
+            shared
+                .signal_scheduler(SchedCmd::RunStarted {
+                    run: run_id.clone(),
+                })
+                .await;
             let supervisor = Supervisor::new(
                 Arc::clone(shared),
                 run_id,
@@ -248,7 +255,13 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         }
         Some(Err(error)) => {
             let why = format!("the executor refused the run: {error}");
-            fail_start(shared, &run_id, fence, why, cmd_rx, slot).await;
+            let account = match error {
+                ExecError::NotInstalled(_) => Some(StartFailure::NotInstalled),
+                ExecError::NotSignedIn(_) => Some(StartFailure::NotSignedIn),
+                ExecError::UnsupportedAccess { .. } => Some(StartFailure::NoEligibleExecutor),
+                ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => None,
+            };
+            fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
         }
         None => {
             // Cancelled before the executor answered: nothing ran, so it is `interrupted`.
@@ -272,11 +285,21 @@ async fn fail_start(
     run: &RunId,
     fence: u64,
     why: String,
+    account: Option<StartFailure>,
     cmd_rx: mpsc::Receiver<crate::shared::SupCmd>,
     slot: Slot,
 ) {
     tracing::warn!(%run, %why, "run failed to start");
     conclude(shared, run, fence, StopReason::Error, why, cmd_rx, slot).await;
+    // After the run's end has committed, so the trigger's next occurrence finds it finished.
+    if let Some(why) = account {
+        shared
+            .signal_scheduler(SchedCmd::StartFailed {
+                run: run.clone(),
+                why,
+            })
+            .await;
+    }
 }
 
 /// End a run that has no supervisor: commit its state, then journal its `Done`, then free the

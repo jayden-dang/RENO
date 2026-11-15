@@ -338,7 +338,7 @@ expression: protocol_schema()
             },
             {
               "additionalProperties": false,
-              "description": "Once, a delay after the definition is loaded: a duration such as `30m`.",
+              "description": "Once, a delay after this version of the definition became active: a duration such as\n`30m`. Editing the definition starts the delay again, unless the trigger has fired.",
               "properties": {
                 "after": {
                   "description": "The delay.",
@@ -553,7 +553,7 @@ expression: protocol_schema()
               "type": "string"
             },
             "prompt": {
-              "description": "The prompt template for the task. Placeholders are defined with firing, in T1.8; for now\nthe text is only checked to be present and bounded.",
+              "description": "The prompt template for the task. `{{trigger}}` is the trigger's name,\n`{{scheduled_at}}` the occurrence it fires for (RFC 3339, in the trigger's time zone) and\n`{{lateness}}` how late the run started (`0s` when on time). Any other `{{...}}` is an\nerror. A run that starts late or merges missed occurrences also gets a sentence saying\nso after the prompt.",
               "type": "string"
             }
           },
@@ -603,7 +603,8 @@ expression: protocol_schema()
     "approval.history",
     "run.steer",
     "daemon.shutdown",
-    "defs"
+    "defs",
+    "triggers"
   ],
   "methods": [
     {
@@ -2404,6 +2405,248 @@ expression: protocol_schema()
         "title": "DefValidateResult",
         "type": "object"
       }
+    },
+    {
+      "name": "trigger.list",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Empty params: serialises as `{}`.",
+        "title": "NoParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "TriggerInfo": {
+            "description": "One trigger and its state.",
+            "properties": {
+              "backoffUntilMs": {
+                "description": "Until when it is backed off.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "bot": {
+                "description": "The bot it starts.",
+                "type": "string"
+              },
+              "error": {
+                "description": "Why it cannot run, when `status` is `failed`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "failures": {
+                "description": "Consecutive account-level failures to start; `0` when healthy.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "description": "The `kind` of its `when`: `at`, `after`, `every`, `cron`, `fs` or `manual`.",
+                "type": "string"
+              },
+              "lastFiredAtMs": {
+                "description": "When it last started a run (or merged into one).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "lastRunId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run it last started."
+              },
+              "name": {
+                "description": "The trigger's name.",
+                "type": "string"
+              },
+              "nextDueAtMs": {
+                "description": "When it fires next. Absent for `fs`, `manual`, a finished one-shot and a disabled trigger.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "status": {
+                "$ref": "#/$defs/TriggerStatus",
+                "description": "Where it stands."
+              },
+              "version": {
+                "description": "The version of the definition in force.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "bot",
+              "version",
+              "status",
+              "failures"
+            ],
+            "type": "object"
+          },
+          "TriggerStatus": {
+            "description": "Where a trigger stands.",
+            "oneOf": [
+              {
+                "const": "scheduled",
+                "description": "Waiting for its next due time (`nextDueAtMs`).",
+                "type": "string"
+              },
+              {
+                "const": "watching",
+                "description": "Watching files (`fs`).",
+                "type": "string"
+              },
+              {
+                "const": "manual",
+                "description": "Fires only when asked (`manual`).",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "A one-shot (`at`, `after`) that has fired.",
+                "type": "string"
+              },
+              {
+                "const": "backed_off",
+                "description": "Backed off after repeated failures to start; fires again at `backoffUntilMs`.",
+                "type": "string"
+              },
+              {
+                "const": "disabled",
+                "description": "Disabled in its definition.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Cannot run: see `error`.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `trigger.list`.",
+        "properties": {
+          "triggers": {
+            "description": "Every trigger in the definitions in force, by name.",
+            "items": {
+              "$ref": "#/$defs/TriggerInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "triggers"
+        ],
+        "title": "TriggerListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "trigger.fire",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `trigger.fire`.",
+        "properties": {
+          "name": {
+            "description": "The trigger to fire now. A `manual` trigger or any enabled one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "TriggerFireParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FiringOutcome": {
+            "description": "What became of one occurrence of a trigger.",
+            "oneOf": [
+              {
+                "const": "fired",
+                "description": "A run was started for it.",
+                "type": "string"
+              },
+              {
+                "const": "coalesced",
+                "description": "The trigger's previous run is still going, so no run was started: the occurrence is\nmerged into that run.",
+                "type": "string"
+              },
+              {
+                "const": "duplicate",
+                "description": "This occurrence had already been fired (its nonce exists), so nothing was done. Returned\nby `trigger.fire`; never stored, because the nonce is unique.",
+                "type": "string"
+              },
+              {
+                "const": "backed_off",
+                "description": "The run it started could not start for an account-level reason (not installed, not\nsigned in, no eligible executor), and the trigger was backed off.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `trigger.fire`.",
+        "properties": {
+          "outcome": {
+            "$ref": "#/$defs/FiringOutcome",
+            "description": "What became of it."
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run started, or, for `coalesced`, the run it was merged into."
+          },
+          "scheduledAtMs": {
+            "description": "The occurrence it fired for.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "outcome",
+          "scheduledAtMs"
+        ],
+        "title": "TriggerFireResult",
+        "type": "object"
+      }
     }
   ],
   "notifications": [
@@ -3585,6 +3828,166 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of the `defs.watch` subscription: none.",
         "title": "DefsWatchParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "TriggerInfo": {
+            "description": "One trigger and its state.",
+            "properties": {
+              "backoffUntilMs": {
+                "description": "Until when it is backed off.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "bot": {
+                "description": "The bot it starts.",
+                "type": "string"
+              },
+              "error": {
+                "description": "Why it cannot run, when `status` is `failed`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "failures": {
+                "description": "Consecutive account-level failures to start; `0` when healthy.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "description": "The `kind` of its `when`: `at`, `after`, `every`, `cron`, `fs` or `manual`.",
+                "type": "string"
+              },
+              "lastFiredAtMs": {
+                "description": "When it last started a run (or merged into one).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "lastRunId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run it last started."
+              },
+              "name": {
+                "description": "The trigger's name.",
+                "type": "string"
+              },
+              "nextDueAtMs": {
+                "description": "When it fires next. Absent for `fs`, `manual`, a finished one-shot and a disabled trigger.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "status": {
+                "$ref": "#/$defs/TriggerStatus",
+                "description": "Where it stands."
+              },
+              "version": {
+                "description": "The version of the definition in force.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "bot",
+              "version",
+              "status",
+              "failures"
+            ],
+            "type": "object"
+          },
+          "TriggerStatus": {
+            "description": "Where a trigger stands.",
+            "oneOf": [
+              {
+                "const": "scheduled",
+                "description": "Waiting for its next due time (`nextDueAtMs`).",
+                "type": "string"
+              },
+              {
+                "const": "watching",
+                "description": "Watching files (`fs`).",
+                "type": "string"
+              },
+              {
+                "const": "manual",
+                "description": "Fires only when asked (`manual`).",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "A one-shot (`at`, `after`) that has fired.",
+                "type": "string"
+              },
+              {
+                "const": "backed_off",
+                "description": "Backed off after repeated failures to start; fires again at `backoffUntilMs`.",
+                "type": "string"
+              },
+              {
+                "const": "disabled",
+                "description": "Disabled in its definition.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Cannot run: see `error`.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of the `triggers.watch` subscription: every trigger and its state (latest value\nwins). The first item is the list as it stands when the subscription starts.",
+        "properties": {
+          "triggers": {
+            "description": "Every trigger in the definitions in force, by name.",
+            "items": {
+              "$ref": "#/$defs/TriggerInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "triggers"
+        ],
+        "title": "TriggersSnapshot",
+        "type": "object"
+      },
+      "name": "triggers.watch",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `triggers.watch` subscription.",
+        "title": "TriggersWatchParams",
         "type": "object"
       }
     }

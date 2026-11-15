@@ -49,7 +49,7 @@ impl FakePort {
     }
 
     /// Fires the change signal, as a debounced watcher would.
-    fn touch(&self) {
+    pub(super) fn touch(&self) {
         let tx = self
             .tx
             .lock()
@@ -118,10 +118,7 @@ fn bot(name: &str, instructions: &str) -> DefFile {
 }
 
 pub(super) fn setup(port: &Arc<FakePort>) -> DefsSetup {
-    DefsSetup {
-        port: port.clone(),
-        context: ValidationContext::with_builtin([]),
-    }
+    DefsSetup::new(port.clone(), ValidationContext::with_builtin([]))
 }
 
 async fn fx_with(port: &Arc<FakePort>) -> Fx {

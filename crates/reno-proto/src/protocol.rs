@@ -24,6 +24,9 @@ use crate::defs::{
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
+use crate::triggers::{
+    TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
+};
 
 /// The wire protocol version. Bumped only for a breaking change.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -53,6 +56,9 @@ pub const FEATURE_APPROVALS: &str = "approvals";
 /// `task.run` accepts `bot`.
 pub const FEATURE_DEFS: &str = "defs";
 
+/// Feature: `trigger.list`, `trigger.fire` and the `triggers.watch` subscription exist.
+pub const FEATURE_TRIGGERS: &str = "triggers";
+
 /// Feature: `approval.history` exists, and journals may carry `ExecEvent::ApprovalResolved`.
 pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
 
@@ -71,6 +77,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_STEER,
     FEATURE_DAEMON_SHUTDOWN,
     FEATURE_DEFS,
+    FEATURE_TRIGGERS,
 ];
 
 /// A request with a single reply.
@@ -535,6 +542,15 @@ method!(
     DefValidate, "def.validate", DefValidateParams => DefValidateResult
 );
 method!(
+    /// `trigger.list`: every trigger and its state. Needs feature `triggers`.
+    TriggerList, "trigger.list", NoParams => TriggerListResult
+);
+method!(
+    /// `trigger.fire`: fires a manual trigger, or any enabled one, now. Needs feature
+    /// `triggers`.
+    TriggerFire, "trigger.fire", TriggerFireParams => TriggerFireResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -560,6 +576,11 @@ subscription!(
     /// `defs.watch`: the current definitions and load errors, replaced on every change. Needs
     /// feature `defs`.
     DefsWatch, "defs.watch", DefsWatchParams => DefsSnapshot
+);
+subscription!(
+    /// `triggers.watch`: every trigger and its state, replaced on every change. Needs feature
+    /// `triggers`.
+    TriggersWatch, "triggers.watch", TriggersWatchParams => TriggersSnapshot
 );
 subscription!(
     /// `approvals.watch`: the pending approvals, replaced on every change. Needs feature
@@ -625,6 +646,8 @@ pub fn protocol_schema() -> Value {
             method_entry::<DefList>(),
             method_entry::<DefGet>(),
             method_entry::<DefValidate>(),
+            method_entry::<TriggerList>(),
+            method_entry::<TriggerFire>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),
@@ -639,6 +662,7 @@ pub fn protocol_schema() -> Value {
             subscription_entry::<RunsWatch>(),
             subscription_entry::<ApprovalsWatch>(),
             subscription_entry::<DefsWatch>(),
+            subscription_entry::<TriggersWatch>(),
         ],
     })
 }

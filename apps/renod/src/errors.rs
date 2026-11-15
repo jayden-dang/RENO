@@ -11,7 +11,11 @@ use reno_store::StoreError;
 /// The code a kernel error crosses the socket with.
 pub fn code_of(error: &KernelError) -> ErrorCode {
     match error {
-        KernelError::RunNotFound(_) | KernelError::ApprovalNotFound(_) => ErrorCode::NotFound,
+        KernelError::RunNotFound(_)
+        | KernelError::ApprovalNotFound(_)
+        | KernelError::TriggerNotFound(_) => ErrorCode::NotFound,
+        KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
+        KernelError::NoExecutor(_) => ErrorCode::InvalidParams,
         KernelError::NotCancellable { .. } | KernelError::RunEnded(_) => ErrorCode::Conflict,
         KernelError::SteerQueueFull(_) | KernelError::ShuttingDown | KernelError::Gap { .. } => {
             ErrorCode::Unavailable
@@ -88,6 +92,18 @@ mod tests {
                 ErrorCode::Unavailable,
             ),
             (KernelError::Invalid("x".into()), ErrorCode::InvalidParams),
+            (
+                KernelError::NoExecutor("b".into()),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::TriggerNotFound("t".into()),
+                ErrorCode::NotFound,
+            ),
+            (
+                KernelError::TriggerDisabled("t".into()),
+                ErrorCode::Conflict,
+            ),
             (
                 KernelError::DefinitionNotFound {
                     kind: DefKind::Bot,
