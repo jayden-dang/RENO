@@ -28,7 +28,18 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ("reno-rpc", &["reno-proto"]),
     ("reno-kernel", &["reno-proto", "reno-store", "reno-harness"]),
     ("reno-client", &["reno-proto", "reno-rpc"]),
-    ("renod", &["reno-proto", "reno-kernel", "reno-rpc"]),
+    // `renod` is the composition root: it opens the store and builds the executors it hands the
+    // kernel, so it names `reno-store` and `reno-harness` too.
+    (
+        "renod",
+        &[
+            "reno-proto",
+            "reno-store",
+            "reno-harness",
+            "reno-kernel",
+            "reno-rpc",
+        ],
+    ),
     ("reno", &["reno-proto", "reno-client"]),
     (
         "reno-app",
@@ -476,6 +487,32 @@ mod tests {
             rendered(&edge_violations(&m)),
             ["edges: reno-kernel -> forbidden dev-dependency on reno-client"]
         );
+    }
+
+    #[test]
+    fn renod_composes_the_store_and_the_harness_but_the_cli_and_app_never_do() {
+        let composed = [
+            "reno-proto",
+            "reno-store",
+            "reno-harness",
+            "reno-kernel",
+            "reno-rpc",
+        ];
+        let mut packages: Vec<Package> = composed.iter().map(|name| package(name, &[])).collect();
+        packages.push(package("renod", &composed.map(|name| (name, None))));
+        packages.push(package("reno-client", &[]));
+        assert!(edge_violations(&metadata(packages)).is_empty());
+
+        // ARCH-2: the CLI and the app reach the daemon only through `reno-client`.
+        for front in ["reno", "reno-app"] {
+            for banned in ["reno-kernel", "reno-store", "reno-harness"] {
+                let m = metadata(vec![
+                    package(banned, &[]),
+                    package(front, &[(banned, None)]),
+                ]);
+                assert_eq!(edge_violations(&m).len(), 1, "{front} -> {banned}");
+            }
+        }
     }
 
     #[test]

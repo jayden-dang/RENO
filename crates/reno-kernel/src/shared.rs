@@ -249,9 +249,15 @@ fn title(goal: &str) -> String {
         .collect()
 }
 
+/// The model a task asked for, from its spec (`{"cwd": .., "model": ..}`, written by `submit`).
+fn requested_model(spec: &serde_json::Value) -> Option<String> {
+    spec.get("model")?.as_str().map(str::to_owned)
+}
+
 /// A run row as a client sees it.
 ///
-/// `stop_reason` is derived from the status, because the store keeps no stop reason in Phase 0:
+/// `model` is the row's model when the store has one, otherwise the model the task asked for;
+/// `prompt` is the task's goal. `stop_reason` is derived from the status, because the store keeps no stop reason in Phase 0:
 /// `failed` reads as `error` even when the executor said `refusal` or `max_tokens`, and
 /// `cancelled` as `interrupted`. The journal's `Done` carries the exact reason.
 pub(crate) fn summarize(row: &RunRecord) -> RunSummary {
@@ -268,7 +274,8 @@ pub(crate) fn summarize(row: &RunRecord) -> RunSummary {
         status: row.status,
         attempt: u32::try_from(row.lease_fence.max(1)).unwrap_or(u32::MAX),
         title: title(&row.goal),
-        model: row.model.clone(),
+        prompt: Some(row.goal.clone()),
+        model: row.model.clone().or_else(|| requested_model(&row.spec)),
         stop_reason,
         created_at_ms: u64::try_from(row.created_at).unwrap_or(0),
         updated_at_ms: u64::try_from(row.updated_at).unwrap_or(0),

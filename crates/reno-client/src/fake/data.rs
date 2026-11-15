@@ -61,6 +61,9 @@ fn summary(
         status,
         attempt: 1,
         title: title.to_owned(),
+        // Seeded runs have no stored prompt, as if from an older daemon: the app falls back to
+        // the title.
+        prompt: None,
         model: Some(MODEL.to_owned()),
         stop_reason: stop,
         created_at_ms: NOW_MS - age,

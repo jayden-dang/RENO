@@ -7,6 +7,8 @@
 //! connection task, its writer and the accept loop live in the server's tracker.
 //! [`Server::serve`] returns once the token is cancelled and every connection has stopped
 //! reading, dropped its in-flight handlers, flushed queued frames and closed.
+//! [`Server::serve_until`] splits that token in two: one stops the accept loop, the other stops
+//! the connections.
 //!
 //! A connection also ends on EOF, an I/O error or an oversized line. In-flight handlers are
 //! dropped without a reply at that point: nobody is left to read it.
@@ -119,11 +121,25 @@ impl Server {
         listener: UnixServer,
         cancel: CancellationToken,
     ) -> Result<(), RpcError> {
+        self.serve_until(listener, cancel.clone(), cancel).await
+    }
+
+    /// Like [`serve`](Self::serve), with the two stops apart: when `stop_accepting` fires the
+    /// listener is dropped (so the socket file goes and no new peer can connect) while the
+    /// connections already open carry on; they stop, and this call returns, when `cancel` fires
+    /// or each peer closes. A daemon uses this to finish its own shutdown work while clients can
+    /// still read the replies they are owed.
+    pub async fn serve_until(
+        &self,
+        listener: UnixServer,
+        stop_accepting: CancellationToken,
+        cancel: CancellationToken,
+    ) -> Result<(), RpcError> {
         let slots = Arc::new(Semaphore::new(self.config.max_connections.max(1)));
         loop {
             let permit = tokio::select! {
                 biased;
-                () = cancel.cancelled() => break,
+                () = stop_accepting.cancelled() => break,
                 permit = Arc::clone(&slots).acquire_owned() => match permit {
                     Ok(permit) => permit,
                     Err(_) => break,
@@ -131,7 +147,7 @@ impl Server {
             };
             let accepted = tokio::select! {
                 biased;
-                () = cancel.cancelled() => break,
+                () = stop_accepting.cancelled() => break,
                 accepted = listener.accept() => accepted,
             };
             match accepted {
@@ -142,12 +158,14 @@ impl Server {
                 Err(e) => {
                     tracing::warn!(error = %e, "accept failed");
                     tokio::select! {
-                        () = cancel.cancelled() => break,
+                        () = stop_accepting.cancelled() => break,
                         () = tokio::time::sleep(Duration::from_millis(100)) => {}
                     }
                 }
             }
         }
+        // Closing the listener removes the socket file: from here on nobody can connect.
+        drop(listener);
         self.tracker.close();
         self.tracker.wait().await;
         self.tracker.reopen();

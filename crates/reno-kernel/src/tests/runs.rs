@@ -116,6 +116,8 @@ async fn a_run_succeeds_and_the_journal_and_the_live_subscriber_agree() {
 
     let summary = fx.kernel.get_run(&run).await.unwrap();
     assert_eq!(summary.title, "write a poem");
+    assert_eq!(summary.prompt.as_deref(), Some("write a poem\nsecond line"));
+    assert_eq!(summary.model, None, "no model was asked for");
     assert_eq!(summary.stop_reason, Some(StopReason::Completed));
     assert_eq!(summary.attempt, 1);
     let listed = fx
@@ -133,6 +135,28 @@ async fn a_run_succeeds_and_the_journal_and_the_live_subscriber_agree() {
             .then_some(())
     })
     .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_summary_carries_the_prompt_and_the_requested_model() {
+    let fx = Fx::new(config(1), registry(&[mock([MockStep::text("hi")])])).await;
+    let prompt = "first line\nsecond line";
+    let run = fx
+        .kernel
+        .submit(
+            prompt,
+            id("mock"),
+            PathBuf::from("/work"),
+            Some("mock-1".into()),
+        )
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let summary = fx.kernel.get_run(&run).await.unwrap();
+    assert_eq!(summary.title, "first line");
+    assert_eq!(summary.prompt.as_deref(), Some(prompt));
+    assert_eq!(summary.model.as_deref(), Some("mock-1"));
+    fx.kernel.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]

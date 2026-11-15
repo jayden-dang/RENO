@@ -5,7 +5,6 @@ use reno_store::StoreError;
 
 /// Everything a kernel call can fail with.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum KernelError {
     /// The store failed.
     #[error(transparent)]

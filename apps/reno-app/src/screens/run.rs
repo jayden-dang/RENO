@@ -124,11 +124,13 @@ impl RunScreen {
                 .transcript(&self.run)
                 .map_or(&[][..], |t| t.events.as_slice());
             let pending: Vec<Approval> = state.approvals_for(&self.run).cloned().collect();
-            // The protocol carries only the first line of the prompt, as the title; a title in the
-            // "bot . repo: what" shape shows its "what".
-            let prompt = state
-                .run(&self.run)
-                .map(|r| summary::parse_title(&r.title).what);
+            // The whole prompt when the daemon sends it; otherwise (an older daemon) the title,
+            // which is its first line, and which in the "bot . repo: what" shape shows its "what".
+            let prompt = state.run(&self.run).map(|r| {
+                r.prompt
+                    .as_deref()
+                    .unwrap_or_else(|| summary::parse_title(&r.title).what)
+            });
             transcript::build_rows(prompt, events, &pending)
         };
         self.apply(built);

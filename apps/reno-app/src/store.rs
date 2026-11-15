@@ -24,8 +24,7 @@
 //! client.
 
 use std::collections::BTreeSet;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
@@ -148,17 +147,36 @@ impl Store {
         }));
     }
 
-    /// Connects to the daemon socket. `renod` does not exist yet, and the app has no edge to
-    /// `reno-rpc` (ARCH-4), so today this only probes and reports why there is no daemon.
+    /// Connects to the daemon's socket (`reno_client::default_socket_path`). When nothing
+    /// answers, Home says the daemon is not running and how to start it.
     pub(crate) fn start_socket(&mut self, cx: &mut Context<Self>) {
         self.system_clock = true;
-        let path = socket_path();
-        let probe = path.as_deref().map(std::os::unix::net::UnixStream::connect);
-        let reason = offline_reason(
-            path.as_deref(),
-            probe.as_ref().and_then(|r| r.as_ref().err()),
-        );
-        self.go_offline(reason, cx);
+        let Some(path) = reno_client::default_socket_path() else {
+            self.go_offline("Cannot locate the daemon socket: HOME is not set.", cx);
+            return;
+        };
+        self.connect_socket(path, cx);
+    }
+
+    /// Connects to the daemon socket at `path`.
+    pub(crate) fn connect_socket(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let boot = Tokio::spawn(cx, async move {
+            let client = Client::connect_unix(&path).await?;
+            let (mirror, updates) = Mirror::start(client.clone(), MirrorConfig::default());
+            Ok::<_, ClientError>((client, mirror, updates))
+        });
+        self.bridge = Some(cx.spawn(async move |this, cx| {
+            let booted = match boot.await {
+                Ok(Ok(parts)) => Ok(parts),
+                Ok(Err(e)) => Err(offline_reason(&e)),
+                Err(e) => Err(format!("The connection task failed: {e}")),
+            };
+            this.update(cx, |store, cx| match booted {
+                Ok((client, mirror, updates)) => store.attach(client, mirror, updates, cx),
+                Err(reason) => store.go_offline(reason, cx),
+            })
+            .ok();
+        }));
     }
 
     /// Takes a connected client and the mirror's update channel, and consumes the channel on
@@ -332,35 +350,14 @@ fn system_now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// `~/Library/Application Support/Reno/reno.sock` (ARCHITECTURE 14).
-pub(crate) fn socket_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library/Application Support/Reno")
-            .join("reno.sock"),
-    )
-}
-
 /// The sentence Home shows when there is no daemon.
-pub(crate) fn offline_reason(path: Option<&Path>, probe_error: Option<&io::Error>) -> String {
-    let Some(path) = path else {
-        return "Cannot locate the daemon socket: HOME is not set.".to_owned();
-    };
-    match probe_error {
-        Some(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            format!("Nothing is listening on {}.", path.display())
-        }
-        Some(e) => format!("Could not reach {}: {e}.", path.display()),
-        None => format!(
-            "A daemon is listening on {}, but this build cannot attach to it yet.",
-            path.display()
+pub(crate) fn offline_reason(error: &ClientError) -> String {
+    match error {
+        ClientError::NotRunning(_) => "Daemon not running — run `reno daemon start`".to_owned(),
+        ClientError::Incompatible { .. } => format!(
+            "The daemon cannot talk to this app ({error}). Update one of them, then restart the daemon"
         ),
+        other => format!("Could not reach the daemon: {other}"),
     }
 }
 
@@ -369,25 +366,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offline_reasons() {
-        let path = Path::new("/tmp/reno.sock");
-        let missing = io::Error::from(io::ErrorKind::NotFound);
+    fn a_missing_daemon_says_how_to_start_it() {
+        let missing = ClientError::NotRunning(std::path::PathBuf::from("/tmp/reno.sock"));
         assert_eq!(
-            offline_reason(Some(path), Some(&missing)),
-            "Nothing is listening on /tmp/reno.sock."
+            offline_reason(&missing),
+            "Daemon not running — run `reno daemon start`"
         );
-        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
-        assert!(offline_reason(Some(path), Some(&refused)).starts_with("Nothing is listening"));
-        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
-        assert!(offline_reason(Some(path), Some(&denied)).starts_with("Could not reach"));
-        assert!(offline_reason(Some(path), None).contains("cannot attach"));
-        assert!(offline_reason(None, None).contains("HOME"));
     }
 
     #[test]
-    fn socket_path_is_under_application_support() {
-        if let Some(path) = socket_path() {
-            assert!(path.ends_with("Library/Application Support/Reno/reno.sock"));
-        }
+    fn other_failures_say_what_went_wrong() {
+        let reason = offline_reason(&ClientError::Transport("broken pipe".into()));
+        assert_eq!(
+            reason,
+            "Could not reach the daemon: transport error: broken pipe"
+        );
+        let reason = offline_reason(&ClientError::Incompatible {
+            client: 1,
+            server: Some(2),
+        });
+        assert!(
+            reason.starts_with("The daemon cannot talk to this app"),
+            "{reason}"
+        );
     }
 }

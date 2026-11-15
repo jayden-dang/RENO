@@ -53,9 +53,10 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// The seq a resumed `run.events` subscription should start from.
+    /// The seq a resumed `run.events` subscription should start from: the one after the highest
+    /// seen, or 1 (the first event of a journal) while the transcript is empty.
     pub fn resume_from(&self) -> Seq {
-        self.highest.and_then(Seq::next).unwrap_or(Seq(0))
+        self.highest.and_then(Seq::next).unwrap_or(Seq(1))
     }
 }
 
@@ -273,6 +274,7 @@ mod tests {
             status,
             attempt: 1,
             title: format!("run {name}"),
+            prompt: None,
             model: None,
             stop_reason: None,
             created_at_ms: created,
@@ -426,8 +428,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_transcript_resumes_from_zero() {
-        assert_eq!(Transcript::default().resume_from(), Seq(0));
+    fn empty_transcript_resumes_from_the_first_seq() {
+        // Journals count from 1.
+        assert_eq!(Transcript::default().resume_from(), Seq(1));
     }
 
     #[test]

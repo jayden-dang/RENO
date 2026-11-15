@@ -191,7 +191,8 @@ string_id!(
     "1 to 64 characters from A-Z a-z 0-9 . _ -"
 );
 
-/// A per-run event sequence number. Journals number events from 0 without gaps.
+/// A per-run event sequence number. A run's journal numbers its events from 1 without gaps; a
+/// `from` of `Seq(0)` therefore means "from the start".
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]

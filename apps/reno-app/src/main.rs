@@ -1,7 +1,7 @@
 //! Reno's desktop app: the shell and the Home screen on GPUI.
 //!
-//! `reno-app --fake` runs an in-process fake daemon. With no flag the app looks for the daemon
-//! socket and, until `renod` exists, shows a "daemon not running" Home.
+//! `reno-app --fake` runs an in-process fake daemon. With no flag the app connects to the real
+//! daemon's socket, and shows "Daemon not running — run `reno daemon start`" when nothing answers.
 
 mod actions;
 mod app;

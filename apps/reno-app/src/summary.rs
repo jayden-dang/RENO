@@ -255,6 +255,7 @@ mod tests {
             status,
             attempt: 1,
             title: title.to_owned(),
+            prompt: None,
             model: None,
             stop_reason: None,
             created_at_ms: NOW - HOUR,

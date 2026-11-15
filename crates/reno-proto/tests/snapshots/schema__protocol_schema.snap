@@ -8,7 +8,8 @@ expression: protocol_schema()
     "runs.watch",
     "sub.gap",
     "approvals",
-    "run.steer"
+    "run.steer",
+    "daemon.shutdown"
   ],
   "methods": [
     {
@@ -144,6 +145,21 @@ expression: protocol_schema()
           "executors"
         ],
         "title": "DaemonStatusInfo",
+        "type": "object"
+      }
+    },
+    {
+      "name": "daemon.shutdown",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Empty params: serialises as `{}`.",
+        "title": "NoParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `daemon.shutdown`: empty.",
+        "title": "DaemonShutdownResult",
         "type": "object"
       }
     },
@@ -354,7 +370,14 @@ expression: protocol_schema()
             "description": "The executor running it."
           },
           "model": {
-            "description": "Model in use, once known.",
+            "description": "The model the run was asked for, or the one the executor reported once it started.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt": {
+            "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
             "type": [
               "string",
               "null"
@@ -579,7 +602,14 @@ expression: protocol_schema()
                 "description": "The executor running it."
               },
               "model": {
-                "description": "Model in use, once known.",
+                "description": "The model the run was asked for, or the one the executor reported once it started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt": {
+                "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
                 "type": [
                   "string",
                   "null"
@@ -1018,7 +1048,7 @@ expression: protocol_schema()
       "params": {
         "$defs": {
           "Seq": {
-            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "description": "A per-run event sequence number. A run's journal numbers its events from 1 without gaps; a\n`from` of `Seq(0)` therefore means \"from the start\".",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -1401,7 +1431,7 @@ expression: protocol_schema()
             "type": "object"
           },
           "Seq": {
-            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "description": "A per-run event sequence number. A run's journal numbers its events from 1 without gaps; a\n`from` of `Seq(0)` therefore means \"from the start\".",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -1467,7 +1497,7 @@ expression: protocol_schema()
           },
           "seq": {
             "$ref": "#/$defs/Seq",
-            "description": "Position in the run's journal."
+            "description": "Position in the run's journal, counted from 1."
           }
         },
         "required": [
@@ -1485,7 +1515,7 @@ expression: protocol_schema()
             "type": "string"
           },
           "Seq": {
-            "description": "A per-run event sequence number. Journals number events from 0 without gaps.",
+            "description": "A per-run event sequence number. A run's journal numbers its events from 1 without gaps; a\n`from` of `Seq(0)` therefore means \"from the start\".",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -1503,7 +1533,7 @@ expression: protocol_schema()
                 "type": "null"
               }
             ],
-            "description": "First sequence number to deliver, **inclusive** — the value a `sub.gap` names as\n`resumeFrom`. Start from the beginning when absent."
+            "description": "First sequence number to deliver, **inclusive** — the value a `sub.gap` names as\n`resumeFrom`. A run's journal numbers its events from 1, so `0` and an absent value both\nstart from the beginning."
           },
           "runId": {
             "$ref": "#/$defs/RunId",
@@ -1603,7 +1633,14 @@ expression: protocol_schema()
                 "description": "The executor running it."
               },
               "model": {
-                "description": "Model in use, once known.",
+                "description": "The model the run was asked for, or the one the executor reported once it started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt": {
+                "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
                 "type": [
                   "string",
                   "null"

@@ -264,7 +264,8 @@ impl Render for HomeScreen {
                         .text_size(px(13.5))
                         .text_color(theme.muted)
                         .child(format!(
-                            "{reason} Start renod, or run reno-app --fake for a demo daemon."
+                            "{}. Or run reno-app --fake for a demo daemon.",
+                            reason.trim_end_matches('.')
                         )),
                 )
             })

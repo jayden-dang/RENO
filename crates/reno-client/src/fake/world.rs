@@ -132,6 +132,7 @@ impl World {
                 status: RunStatus::Queued,
                 attempt: 1,
                 title,
+                prompt: Some(params.prompt.clone()),
                 model: params.model.clone(),
                 stop_reason: None,
                 created_at_ms: now,
@@ -260,10 +261,10 @@ impl World {
         )
     }
 
-    /// The event at `seq` of a run, with whether the journal has ended after it.
+    /// The event at `seq` of a run, counted from 1 like a real journal.
     pub(super) fn event_at(&self, id: &RunId, seq: u64) -> Option<(Seq, ExecEvent)> {
         let run = self.run(id)?;
-        let at = usize::try_from(seq).ok()?;
+        let at = usize::try_from(seq.checked_sub(1)?).ok()?;
         run.journal.get(at).map(|e| (Seq(seq), e.clone()))
     }
 }

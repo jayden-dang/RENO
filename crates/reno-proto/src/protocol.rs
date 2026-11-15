@@ -35,6 +35,8 @@ pub const FEATURE_APPROVALS: &str = "approvals";
 
 /// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
 pub const FEATURE_RUN_STEER: &str = "run.steer";
+/// Feature: `daemon.shutdown` exists.
+pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
@@ -43,6 +45,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_SUB_GAP,
     FEATURE_APPROVALS,
     FEATURE_RUN_STEER,
+    FEATURE_DAEMON_SHUTDOWN,
 ];
 
 /// A request with a single reply.
@@ -93,7 +96,10 @@ pub struct RunSummary {
     pub attempt: u32,
     /// First line of the prompt, for display.
     pub title: String,
-    /// Model in use, once known.
+    /// The whole prompt the task was submitted with. Absent from daemons that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// The model the run was asked for, or the one the executor reported once it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Why it stopped, once it has.
@@ -148,6 +154,10 @@ pub struct DaemonStatusInfo {
     /// Executors the daemon found installed.
     pub executors: Vec<ExecutorId>,
 }
+
+/// Result of `daemon.shutdown`: empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonShutdownResult {}
 
 /// Params of `task.run`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -241,7 +251,8 @@ pub struct RunEventsParams {
     /// The run to follow.
     pub run_id: RunId,
     /// First sequence number to deliver, **inclusive** — the value a `sub.gap` names as
-    /// `resumeFrom`. Start from the beginning when absent.
+    /// `resumeFrom`. A run's journal numbers its events from 1, so `0` and an absent value both
+    /// start from the beginning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_seq: Option<Seq>,
 }
@@ -250,7 +261,7 @@ pub struct RunEventsParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunEventItem {
-    /// Position in the run's journal.
+    /// Position in the run's journal, counted from 1.
     pub seq: Seq,
     /// The event.
     pub event: ExecEvent,
@@ -380,6 +391,11 @@ method!(
     DaemonStatus, "daemon.status", NoParams => DaemonStatusInfo
 );
 method!(
+    /// `daemon.shutdown`: asks the daemon to stop. It answers once shutdown has begun, and the
+    /// connection may close right after. Needs feature `daemon.shutdown`.
+    DaemonShutdown, "daemon.shutdown", NoParams => DaemonShutdownResult
+);
+method!(
     /// `task.run`: creates a task and its first run.
     TaskRun, "task.run", TaskRunParams => TaskRunResult
 );
@@ -467,6 +483,7 @@ pub fn protocol_schema() -> Value {
         "methods": [
             method_entry::<DaemonHello>(),
             method_entry::<DaemonStatus>(),
+            method_entry::<DaemonShutdown>(),
             method_entry::<TaskRun>(),
             method_entry::<RunGet>(),
             method_entry::<RunList>(),

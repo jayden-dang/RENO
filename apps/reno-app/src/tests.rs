@@ -174,6 +174,26 @@ fn a_disconnected_daemon_shows_the_not_running_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn no_daemon_at_the_socket_says_how_to_start_one(cx: &mut TestAppContext) {
+    cx.update(gpui_tokio::init);
+    let store = cx.new(|cx| {
+        let mut store = Store::connecting();
+        store.connect_socket("/nonexistent-reno-dir/reno.sock".into(), cx);
+        store
+    });
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.offline_reason().is_some())
+    });
+    store.read_with(cx, |s, _| {
+        assert_eq!(s.connection(), ConnectionStatus::Disconnected);
+        assert_eq!(
+            s.offline_reason(),
+            Some("Daemon not running — run `reno daemon start`")
+        );
+    });
+}
+
+#[gpui::test]
 fn a_still_connecting_store_says_so(cx: &mut TestAppContext) {
     let store = cx.new(|_| Store::connecting());
     let (root, vcx) = window(cx, &store, Appearance::Light);
@@ -414,6 +434,26 @@ fn clicking_send_sends_only_with_a_draft(cx: &mut TestAppContext) {
         store.read_with(cx, |s, _| s.state().runs().len()) == before + 1
     });
     assert!(store.read_with(vcx, |s, _| s.state().run(&run).is_some()));
+}
+
+#[gpui::test]
+fn the_prompt_bubble_shows_the_whole_prompt_the_daemon_sent(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = send_from_home(vcx, &root, "first line\nsecond line");
+    // The title is only the first line; `RunSummary.prompt` carries the rest.
+    let summary = store
+        .read_with(vcx, |s, _| s.state().run(&run).cloned())
+        .unwrap();
+    assert_eq!(summary.title, "first line");
+    assert_eq!(summary.prompt.as_deref(), Some("first line\nsecond line"));
+    wait_drawn(vcx, |vcx| {
+        rows_of(vcx, &root)
+            .iter()
+            .any(|r| matches!(r, Row::User { steer: false, text, .. } if text == "first line\nsecond line"))
+    });
 }
 
 #[gpui::test]

@@ -9,6 +9,7 @@
 //! - `client`: [`Client`], typed calls and subscriptions, with the checked `daemon.hello`
 //!   handshake and gap-free [`Client::run_events`].
 //! - `state`: [`State`], [`Update`] and [`Changed`]. Plain data with one pure `apply`; no tokio.
+//! - `paths`: the default data directory and socket path (`renod` resolves the same ones).
 //! - `mirror`: [`Mirror`], the tokio driver that turns subscriptions into [`Update`]s on a
 //!   bounded channel.
 //! - `error`: [`ClientError`].
@@ -17,6 +18,7 @@
 pub mod client;
 pub mod error;
 pub mod mirror;
+pub mod paths;
 pub mod state;
 
 #[cfg(feature = "fake")]
@@ -25,4 +27,5 @@ pub mod fake;
 pub use client::Client;
 pub use error::ClientError;
 pub use mirror::{Mirror, MirrorConfig, UPDATE_CAPACITY, Updates};
+pub use paths::{default_data_dir, default_socket_path};
 pub use state::{Changed, ConnectionStatus, DaemonInfo, State, Transcript, Update};

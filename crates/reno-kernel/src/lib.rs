@@ -24,8 +24,9 @@
 //! - Approvals are in memory; recovery interrupts runs that were waiting on one.
 //! - A run in `waiting_input` has no client path to an answer.
 //! - A run holds one process record; a second report replaces the first.
-//! - `RunSummary::stop_reason` is derived from the status (the store keeps no stop reason), and
-//!   `model` stays empty: no event updates the row's model.
+//! - `RunSummary::stop_reason` is derived from the status (the store keeps no stop reason).
+//!   `RunSummary::model` is the model the task asked for (no event updates the row's model, so
+//!   the one an executor reports in `Started` is not shown), and `prompt` is the task's goal.
 
 mod approvals;
 mod clock;

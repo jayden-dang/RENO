@@ -1,0 +1,98 @@
+# renod
+
+The Reno daemon. It opens the store, builds the executors, starts the kernel and serves the
+client protocol on a Unix socket. The CLI (`reno`) and the app talk to it through `reno-client`.
+
+```
+renod [--data-dir DIR] [--socket PATH]
+```
+
+Normally you do not run it by hand: `reno daemon start` starts it detached and waits until it
+answers, `reno daemon stop` stops it.
+
+## Files
+
+| Path | What |
+|---|---|
+| `<data-dir>/` | mode 0700. macOS: `~/Library/Application Support/Reno`. Elsewhere: `$XDG_DATA_HOME/reno`, or `~/.local/share/reno` |
+| `engine.lock` | an exclusive `flock`, held for the life of the process, taken before anything else is opened. A second `renod` on the same data directory exits non-zero and says who holds it |
+| `reno.sock` | the socket, mode 0600 (`--socket` moves it) |
+| `reno.db`, `journals/` | the store |
+| `logs/renod.<date>.log` | JSON lines, written through a non-blocking appender |
+| `workspace/` | where a task that names no working directory runs |
+
+`RENO_DATA_DIR` and `RENO_SOCKET` are read by `renod`, `reno` and the app alike, for tests and
+for running two daemons side by side.
+
+## Logs
+
+Filtered by `RENO_LOG` (an `EnvFilter` expression such as `renod=debug,reno_kernel=trace`;
+`info` by default). When stderr is a terminal the same events are also printed there in a
+human-readable form.
+
+## Executors
+
+- `mock` is always registered. It plays a short canned run and finishes. With `RENO_MOCK_HOLD=1`
+  it stops after its first text and waits until the run is steered or cancelled; the tests use
+  that to keep a run live without a timer.
+- `claude-code` and `codex` are registered when their CLIs are found. `RENO_NO_HARNESSES=1`
+  skips that lookup, so tests never touch a real harness.
+
+## Shutdown
+
+`SIGTERM`, `SIGINT` or the `daemon.shutdown` method start the same sequence:
+
+1. stop accepting: the listener is dropped, so the socket file goes and no one new can connect;
+2. `Kernel::shutdown`: live runs are cancelled and end `interrupted`; subscribers see their `Done`;
+3. open connections get a short grace to read what they are owed, then are cancelled, and the
+   server is awaited with a deadline;
+4. the socket file is removed if anything kept it;
+5. the lock is released, last.
+
+A daemon that is killed (`kill -9`) skips all of this. The next start finds the stale socket and
+removes it, and the kernel's recovery interrupts the runs that were live, so each journal ends in
+a `Done`.
+
+## Tests
+
+- `tests/protocol.rs` serves the daemon in-process on a temp socket, on a multi-thread runtime,
+  and drives it through `reno-client`.
+- `tests/process.rs` runs the real binary: the lock, the socket's mode, `SIGTERM`, and a crash.
+- `apps/reno/tests/e2e.rs` runs `reno` and `renod` together.
+
+None of them needs a network or a real harness.
+
+## Manual check: a connection from another user is refused
+
+CI cannot do this: it needs a second uid. The socket is already unreachable to other users
+(the data directory is 0700), so the check below uses `root`, which can reach the path, to show
+that the peer-uid check refuses anyway.
+
+1. Start a daemon as yourself, in a scratch directory:
+
+   ```sh
+   export SOCK=/tmp/reno-uid-check/data/reno.sock
+   renod --data-dir /tmp/reno-uid-check/data &
+   ```
+
+2. As yourself, the request is answered:
+
+   ```sh
+   printf '{"jsonrpc":"2.0","id":1,"method":"daemon.status","params":{}}\n' | nc -U "$SOCK"
+   ```
+
+   Expected: one JSON line with `"result"` and the daemon's pid.
+
+3. As another user, the same request gets no answer:
+
+   ```sh
+   printf '{"jsonrpc":"2.0","id":1,"method":"daemon.status","params":{}}\n' | sudo nc -U "$SOCK"
+   ```
+
+   Expected: no output, and the connection closes. The daemon's log (`logs/renod.<date>.log`)
+   has a WARN line, `rejecting connection from another user`, with `uid=0`.
+
+4. As an ordinary second user (`sudo -u someoneelse nc -U "$SOCK"`) the connect itself fails with
+   `Permission denied`, because the data directory is 0700. That is the first of the two layers.
+
+5. Stop the daemon: `reno --data-dir /tmp/reno-uid-check/data daemon stop`.
