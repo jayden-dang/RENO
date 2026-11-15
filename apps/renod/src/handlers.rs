@@ -21,6 +21,8 @@
 //! | `trigger.list` | `list_triggers` |
 //! | `trigger.fire` | `fire_trigger` |
 //! | `triggers.watch` | `watch_triggers` |
+//! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
+//! | `workspace.clean` | `clean_workspaces` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
 //! handler for it. Every kernel failure goes through [`crate::errors`].
@@ -53,6 +55,10 @@ use reno_proto::{
     DefGet, DefList, DefValidate, DefsWatch, TriggerFire, TriggerFireParams, TriggerFireResult,
     TriggerInfo, TriggerList, TriggerListResult, TriggersSnapshot, TriggersWatch,
     TriggersWatchParams,
+};
+use reno_proto::{
+    WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
+    WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
 };
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
@@ -114,6 +120,9 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
         .method::<TriggerList, _, _>(bind(ctx, trigger_list))
         .method::<TriggerFire, _, _>(bind(ctx, trigger_fire))
+        .method::<WorkspaceList, _, _>(bind(ctx, workspace_list))
+        .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
+        .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
@@ -316,6 +325,34 @@ async fn trigger_fire(ctx: Arc<Ctx>, p: TriggerFireParams) -> Reply<TriggerFireR
         .fire_trigger(&p.name)
         .await
         .map_err(|e| kernel_error(&e))
+}
+
+async fn workspace_list(ctx: Arc<Ctx>, p: WorkspaceListParams) -> Reply<WorkspaceListResult> {
+    Ok(WorkspaceListResult {
+        workspaces: ctx
+            .kernel
+            .workspaces(p.status.as_deref())
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
+}
+
+async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceInfo> {
+    ctx.kernel
+        .workspace(&p.run_id)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+async fn workspace_clean(ctx: Arc<Ctx>, p: WorkspaceCleanParams) -> Reply<WorkspaceCleanResult> {
+    tracing::info!(target = ?p.target, force = p.force, "workspace clean requested");
+    Ok(WorkspaceCleanResult {
+        items: ctx
+            .kernel
+            .clean_workspaces(p.target, p.force)
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
 }
 
 // ---- subscriptions -------------------------------------------------------------------------

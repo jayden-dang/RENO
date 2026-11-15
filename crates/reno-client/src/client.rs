@@ -233,6 +233,47 @@ impl Client {
         Ok(self.rpc.call::<reno_proto::TriggerFire>(params).await?)
     }
 
+    /// `workspace.list`: the worktrees of write runs, newest first, optionally only those in
+    /// one of `status`. Needs feature `workspaces`.
+    pub async fn list_workspaces(
+        &self,
+        status: Option<Vec<reno_proto::WorkspaceStatus>>,
+    ) -> Result<Vec<reno_proto::WorkspaceInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_WORKSPACES)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::WorkspaceList>(reno_proto::WorkspaceListParams { status })
+            .await?
+            .workspaces)
+    }
+
+    /// `workspace.get`: one run's workspace. Needs feature `workspaces`.
+    pub async fn get_workspace(
+        &self,
+        run_id: reno_proto::RunId,
+    ) -> Result<reno_proto::WorkspaceInfo, ClientError> {
+        self.require(reno_proto::FEATURE_WORKSPACES)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::WorkspaceGet>(reno_proto::WorkspaceGetParams { run_id })
+            .await?)
+    }
+
+    /// `workspace.clean`: removes workspaces that hold nothing to lose (or merged ones, for
+    /// `Merged` and a single run); with `force`, any. Needs feature `workspaces`.
+    pub async fn clean_workspaces(
+        &self,
+        target: reno_proto::CleanTarget,
+        force: bool,
+    ) -> Result<Vec<reno_proto::CleanItem>, ClientError> {
+        self.require(reno_proto::FEATURE_WORKSPACES)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::WorkspaceClean>(reno_proto::WorkspaceCleanParams { target, force })
+            .await?
+            .items)
+    }
+
     /// `triggers.watch`: every trigger and its state, then a new full list on every change.
     /// Latest-value, like [`Client::watch_runs`]. Needs feature `triggers`.
     pub async fn watch_triggers(

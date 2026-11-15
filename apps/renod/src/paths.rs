@@ -7,6 +7,7 @@
 //!   journals/              per-run journals (made by the store)
 //!   logs/                  JSON logs
 //!   workspace/             the working directory of a task that names none
+//!   worktrees/             git worktrees of write runs: <repo key>/<run id>/, branch reno/<run id>
 //!   reno.sock              the socket (0600), unless `--socket` puts it elsewhere
 //! ```
 //!
@@ -37,6 +38,8 @@ pub const DB_FILE: &str = "reno.db";
 pub const LOGS_DIR: &str = "logs";
 /// The default working directory's name.
 pub const WORKSPACE_DIR: &str = "workspace";
+/// The directory of the worktrees of write runs.
+pub const WORKTREES_DIR: &str = "worktrees";
 /// Where [`Paths::new`] puts the definitions, inside the data directory.
 pub const DEFS_DIR: &str = "definitions";
 
@@ -108,6 +111,12 @@ impl Paths {
     /// The log directory.
     pub fn logs(&self) -> PathBuf {
         self.data_dir.join(LOGS_DIR)
+    }
+
+    /// The worktrees of write runs: `<repo key>/<run id>/` below it. The repo key is
+    /// `<name>-<12 hex of the SHA-256 of the repository's canonical git dir>`.
+    pub fn worktrees(&self) -> PathBuf {
+        self.data_dir.join(WORKTREES_DIR)
     }
 
     /// The default working directory of a task.
@@ -205,6 +214,7 @@ mod tests {
         assert_eq!(paths.db(), PathBuf::from("/d/reno.db"));
         assert_eq!(paths.logs(), PathBuf::from("/d/logs"));
         assert_eq!(paths.workspace(), PathBuf::from("/d/workspace"));
+        assert_eq!(paths.worktrees(), PathBuf::from("/d/worktrees"));
         let elsewhere = Paths::new(PathBuf::from("/d"), Some(PathBuf::from("/s/x.sock")));
         assert_eq!(elsewhere.socket, PathBuf::from("/s/x.sock"));
         // A made-up `Paths` never points at the real `~/.reno`.

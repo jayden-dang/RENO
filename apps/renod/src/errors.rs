@@ -4,7 +4,7 @@
 //! are not a contract. Both error enums are `non_exhaustive`, so an unknown variant becomes
 //! `Internal`, never a panic and never an unmapped code.
 
-use reno_kernel::KernelError;
+use reno_kernel::{KernelError, WorkspaceError};
 use reno_proto::{ErrorCode, ErrorObject};
 use reno_store::StoreError;
 
@@ -23,7 +23,20 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
         KernelError::Definitions(_) => ErrorCode::Internal,
+        KernelError::WorkspaceNotFound(_) => ErrorCode::NotFound,
+        KernelError::Workspace(workspace) => workspace_code(workspace),
         KernelError::Store(store) => store_code(store),
+    }
+}
+
+fn workspace_code(error: &WorkspaceError) -> ErrorCode {
+    match error {
+        WorkspaceError::NotAGitRepo { .. }
+        | WorkspaceError::NoCommits { .. }
+        | WorkspaceError::BareRepository { .. }
+        | WorkspaceError::Unsafe(_) => ErrorCode::InvalidParams,
+        WorkspaceError::PathTaken { .. } | WorkspaceError::InUse(_) => ErrorCode::Conflict,
+        WorkspaceError::Failed(_) => ErrorCode::Internal,
     }
 }
 
@@ -113,6 +126,35 @@ mod tests {
                 ErrorCode::NotFound,
             ),
             (KernelError::Definitions("x".into()), ErrorCode::Internal),
+            (KernelError::WorkspaceNotFound(run()), ErrorCode::NotFound),
+            (
+                KernelError::Workspace(WorkspaceError::NotAGitRepo { dir: "/x".into() }),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::NoCommits { repo: "/x".into() }),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::BareRepository { repo: "/x".into() }),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::Unsafe("x".into())),
+                ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::PathTaken { path: "/x".into() }),
+                ErrorCode::Conflict,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::InUse(run())),
+                ErrorCode::Conflict,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::Failed("x".into())),
+                ErrorCode::Internal,
+            ),
         ];
         for (error, code) in cases {
             assert_eq!(code_of(&error), code, "{error}");

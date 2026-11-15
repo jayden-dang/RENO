@@ -14,6 +14,7 @@
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
+//! - [`worktrees`]: the `Workspace` port over git worktrees in `<data-dir>/worktrees/`.
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
 //! - [`daemon`]: [`Daemon`], start-up and the shutdown sequence.
@@ -30,6 +31,7 @@ mod handlers;
 pub mod lock;
 pub mod logging;
 pub mod paths;
+pub mod worktrees;
 
 pub use daemon::{
     CONNECTION_GRACE, Daemon, DaemonConfig, DaemonError, ExecutorSource, SERVER_DEADLINE, Stopped,
@@ -38,3 +40,4 @@ pub use defs::{Bootstrapped, FsDefinitions, GitInit, GitOutcome};
 pub use executors::ExecutorSet;
 pub use fswatch::FsWatch;
 pub use paths::Paths;
+pub use worktrees::GitWorkspace;
