@@ -22,6 +22,9 @@ use crate::defs::{
     DefsSnapshot, DefsWatchParams, PolicyDef, TriggerDef,
 };
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
+use crate::health::{
+    ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatchParams,
+};
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
 use crate::triggers::{
@@ -71,6 +74,8 @@ pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
 
 /// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
 pub const FEATURE_RUN_STEER: &str = "run.steer";
+/// Feature: `executor.list`, `executor.refresh` and the `executors.watch` subscription exist.
+pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `daemon.shutdown` exists.
 pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 
@@ -86,6 +91,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_DEFS,
     FEATURE_TRIGGERS,
     FEATURE_WORKSPACES,
+    FEATURE_EXECUTORS,
 ];
 
 /// A request with a single reply.
@@ -572,6 +578,17 @@ method!(
     WorkspaceClean, "workspace.clean", WorkspaceCleanParams => WorkspaceCleanResult
 );
 method!(
+    /// `executor.list`: every executor with its descriptor and last health. Needs feature
+    /// `executors`.
+    ExecutorList, "executor.list", NoParams => ExecutorListResult
+);
+method!(
+    /// `executor.refresh`: probes one executor (or all) again and answers with the result. The
+    /// only calls that probe are this, the daemon's start, and a run that failed to start
+    /// because its harness was not installed or not signed in. Needs feature `executors`.
+    ExecutorRefresh, "executor.refresh", ExecutorRefreshParams => ExecutorListResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -602,6 +619,11 @@ subscription!(
     /// `triggers.watch`: every trigger and its state, replaced on every change. Needs feature
     /// `triggers`.
     TriggersWatch, "triggers.watch", TriggersWatchParams => TriggersSnapshot
+);
+subscription!(
+    /// `executors.watch`: every executor and its last health, replaced on every change. Needs
+    /// feature `executors`.
+    ExecutorsWatch, "executors.watch", ExecutorsWatchParams => ExecutorsSnapshot
 );
 subscription!(
     /// `approvals.watch`: the pending approvals, replaced on every change. Needs feature
@@ -672,6 +694,8 @@ pub fn protocol_schema() -> Value {
             method_entry::<WorkspaceList>(),
             method_entry::<WorkspaceGet>(),
             method_entry::<WorkspaceClean>(),
+            method_entry::<ExecutorList>(),
+            method_entry::<ExecutorRefresh>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),
@@ -687,6 +711,7 @@ pub fn protocol_schema() -> Value {
             subscription_entry::<ApprovalsWatch>(),
             subscription_entry::<DefsWatch>(),
             subscription_entry::<TriggersWatch>(),
+            subscription_entry::<ExecutorsWatch>(),
         ],
     })
 }

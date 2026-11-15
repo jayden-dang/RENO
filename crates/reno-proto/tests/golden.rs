@@ -280,7 +280,7 @@ fn daemon_hello() {
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
-                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces"],
+                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors"],
                "pid": 4242}),
     );
 }
@@ -929,4 +929,117 @@ fn workspace_types_on_the_wire() {
         },
         json!({"runId": run_id(), "outcome": "kept", "reason": "unmerged commits"}),
     );
+}
+
+#[test]
+fn executor_health_on_the_wire() {
+    assert_eq!(<ExecutorList as Method>::NAME, "executor.list");
+    assert_eq!(<ExecutorRefresh as Method>::NAME, "executor.refresh");
+    assert_eq!(<ExecutorsWatch as Subscription>::NAME, "executors.watch");
+
+    golden(
+        &ExecutorHealth {
+            installed: InstallStatus::Installed {
+                path: "/usr/local/bin/codex".into(),
+                version: Some("0.169.0".into()),
+            },
+            version_gate: VersionGate::Untested {
+                verified: "0.169.0".into(),
+            },
+            signed_in: SignedIn::Yes {
+                account: Some("me@example.com".into()),
+            },
+            models: ModelCatalog::live(vec![ModelInfo {
+                id: "gpt-6".into(),
+                display_name: Some("GPT-6".into()),
+            }]),
+            checked_at_ms: 1_800_000_000_000,
+        },
+        json!({
+            "installed": {"type": "installed", "path": "/usr/local/bin/codex", "version": "0.169.0"},
+            "versionGate": {"type": "untested", "verified": "0.169.0"},
+            "signedIn": {"type": "yes", "account": "me@example.com"},
+            "models": {"source": "live", "models": [{"id": "gpt-6", "displayName": "GPT-6"}]},
+            "checkedAtMs": 1_800_000_000_000_u64
+        }),
+    );
+    golden(
+        &ExecutorHealth {
+            installed: InstallStatus::NotInstalled {
+                why: NotInstalledReason::NeedsInstall {
+                    what: "the Hermes ACP adapter (npm)".into(),
+                },
+            },
+            version_gate: VersionGate::Unchecked,
+            signed_in: SignedIn::Unknown,
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: 5,
+        },
+        json!({
+            "installed": {"type": "not_installed", "why": {"type": "needs_install", "what": "the Hermes ACP adapter (npm)"}},
+            "versionGate": {"type": "unchecked"},
+            "signedIn": {"type": "unknown"},
+            "models": {"source": "curated", "models": []},
+            "checkedAtMs": 5
+        }),
+    );
+    for (value, wire) in [
+        (
+            NotInstalledReason::NotFound { hint: "x".into() },
+            json!({"type": "not_found", "hint": "x"}),
+        ),
+        (
+            NotInstalledReason::Unusable { detail: "d".into() },
+            json!({"type": "unusable", "detail": "d"}),
+        ),
+        (
+            NotInstalledReason::ProbeFailed { detail: "d".into() },
+            json!({"type": "probe_failed", "detail": "d"}),
+        ),
+    ] {
+        golden(&value, wire);
+    }
+    golden(&VersionGate::Ok, json!({"type": "ok"}));
+    golden(
+        &VersionGate::TooOld { min: "2.0.0".into() },
+        json!({"type": "too_old", "min": "2.0.0"}),
+    );
+    golden(&SignedIn::Yes { account: None }, json!({"type": "yes"}));
+    golden(
+        &SignedIn::No {
+            hint: "run `claude auth login`".into(),
+        },
+        json!({"type": "no", "hint": "run `claude auth login`"}),
+    );
+    golden(&ModelSource::Curated, json!("curated"));
+    golden(&ModelSource::Live, json!("live"));
+    golden(&ExecutorRefreshParams { id: None }, json!({}));
+    golden(
+        &ExecutorRefreshParams {
+            id: Some("codex".parse().unwrap()),
+        },
+        json!({"id": "codex"}),
+    );
+    golden(
+        &ExecutorsSnapshot { executors: vec![] },
+        json!({"executors": []}),
+    );
+    golden(
+        &ExecutorListResult { executors: vec![] },
+        json!({"executors": []}),
+    );
+    // Health a daemon has not produced yet is simply absent.
+    let info: ExecutorInfo = serde_json::from_value(json!({
+        "descriptor": {
+            "id": "mock", "contractVersion": 1, "adapterVersion": "x",
+            "cliVerified": {"min": "0", "verified": "1"},
+            "caps": {"steering": "none", "resume": false, "accessModes": ["supervised"],
+                     "sandboxLevels": ["unrestricted"], "mcpInjection": false,
+                     "structuredOutput": false, "deterministicTurnEnd": false,
+                     "planMode": false, "models": []}
+        }
+    }))
+    .unwrap();
+    assert!(info.health.is_none());
+    assert!(serde_json::to_value(&info).unwrap().get("health").is_none());
 }
