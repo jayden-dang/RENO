@@ -6,9 +6,11 @@
 
 use std::io::{self, Write};
 
+use reno_proto::defs::format_instant;
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalRecord, DaemonStatusInfo, ExecEvent, ResolvedBy,
-    RunEventItem, RunStatus, RunSummary, StopReason,
+    Approval, ApprovalOutcome, ApprovalRecord, DaemonStatusInfo, ExecEvent, FiringOutcome,
+    ResolvedBy, RunEventItem, RunStatus, RunSummary, StopReason, TriggerFireResult, TriggerInfo,
+    TriggerStatus,
 };
 use serde::Serialize;
 
@@ -232,6 +234,62 @@ pub(crate) fn approval_line(approval: &Approval) -> String {
         "{}  run {}  {:<8}  by nobody yet  {} {what}",
         approval.id, approval.run_id, "pending", subject.tool
     )
+}
+
+/// One trigger on one line: name, kind, status, then what is known of its timing.
+pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
+    let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
+    let mut line = format!(
+        "{:<16} {:<7} {:<10} bot {}",
+        trigger.name,
+        trigger.kind,
+        status_text_of(trigger.status),
+        trigger.bot
+    );
+    if let Some(next) = trigger.next_due_at_ms {
+        line.push_str(&format!("  next {}", at(next)));
+    }
+    if let Some(last) = trigger.last_fired_at_ms {
+        line.push_str(&format!("  last {}", at(last)));
+    }
+    if trigger.failures > 0 {
+        line.push_str(&format!("  failures {}", trigger.failures));
+    }
+    if let Some(until) = trigger.backoff_until_ms {
+        line.push_str(&format!("  backed off until {}", at(until)));
+    }
+    if let Some(error) = &trigger.error {
+        line.push_str(&format!("  error: {error}"));
+    }
+    line
+}
+
+fn status_text_of(status: TriggerStatus) -> &'static str {
+    match status {
+        TriggerStatus::Scheduled => "scheduled",
+        TriggerStatus::Watching => "watching",
+        TriggerStatus::Manual => "manual",
+        TriggerStatus::Done => "done",
+        TriggerStatus::BackedOff => "backed off",
+        TriggerStatus::Disabled => "disabled",
+        TriggerStatus::Failed => "failed",
+    }
+}
+
+/// What `reno trigger fire` says.
+pub(crate) fn fired_line(name: &str, fired: &TriggerFireResult) -> String {
+    let run = fired.run_id.as_ref().map(ToString::to_string);
+    match (fired.outcome, run) {
+        (FiringOutcome::Fired, Some(run)) => format!("{name} fired: run {run}"),
+        (FiringOutcome::Coalesced, Some(run)) => {
+            format!("{name} is still running {run}; this occurrence was merged into it")
+        }
+        (FiringOutcome::Duplicate, _) => {
+            format!("{name} had already fired for this occurrence; nothing was done")
+        }
+        (FiringOutcome::BackedOff, _) => format!("{name} is backed off"),
+        (outcome, None) => format!("{name}: {outcome:?}"),
+    }
 }
 
 /// `73` as `1m 13s`.

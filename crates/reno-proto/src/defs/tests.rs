@@ -1311,3 +1311,23 @@ fn builtin_executors_are_valid_ids() {
         assert!(name.parse::<ExecutorId>().is_ok(), "{name}");
     }
 }
+
+#[test]
+fn trigger_prompt_placeholders_are_checked() {
+    let with = |prompt: &str| {
+        format!(
+            "name = \"nightly\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"keeper\"\nprompt = \"{prompt}\"\n"
+        )
+    };
+    assert!(trigger_errors(&with("{{trigger}} {{ scheduled_at }} {{lateness}}")).is_empty());
+    let errors = trigger_errors(&with("hello {{name}}"));
+    assert_one(
+        &errors,
+        "triggers/nightly.toml: target.prompt: has the placeholder {{name}}",
+    );
+    let errors = trigger_errors(&with("hello {{trigger"));
+    assert_one(
+        &errors,
+        "triggers/nightly.toml: target.prompt: has `{{` with no closing",
+    );
+}
