@@ -1,16 +1,17 @@
 //! The kernel's port to harnesses (ARCH-7, ARCHITECTURE section 4.2).
 //!
-//! [`Executor`] is the one trait the kernel sees. Three things implement it today:
+//! [`Executor`] is the one trait the kernel sees. Four things implement it today:
 //!
 //! - [`crate::ClaudeExecutor`] is native (stage B, ARCHITECTURE sections 2.1 and 5.1): it
 //!   speaks Claude Code's wire directly and emits `ExecEvent`s, with structured approvals.
-//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A) and still serves Codex
-//!   and ACP until their drivers go native too. Then the shim goes away.
+//! - [`crate::CodexExecutor`] is native too: it speaks the `codex app-server` JSON-RPC.
+//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A) and still serves ACP
+//!   until its driver goes native too. Then the shim goes away.
 //! - [`MockExecutor`] plays a scripted run for kernel tests and the CLI's `--executor mock`.
 //!
 //! # What a native driver plugs into
 //!
-//! Everything a driver shares is here, so Codex and ACP follow without changing the contract:
+//! Everything a driver shares is here, so ACP follows without changing the contract:
 //! [`Executor`], [`ExecControls`] (steering, cancel, answers, process records),
 //! [`require_access`] (fail closed before spawning, ARCH-15), and [`OpenRequests`], the table
 //! that keeps approvals and input requests apart, never lets a wrong-kind answer approve, and

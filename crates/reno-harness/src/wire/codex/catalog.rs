@@ -1,38 +1,23 @@
-//! Model catalog + effort mapping for Codex, ported from reno's
-//! `packages/harness/src/codex.ts`.
+//! Model catalog and the wire spellings of effort and sandbox for Codex.
 //!
-//! The live catalog comes from the app server's paginated `model/list`
-//! (experimentalApi). This snapshot is the failure/offline fallback, kept in
-//! newest-first order so a picker remains useful when discovery cannot run.
+//! The live catalog comes from the app server's paginated `model/list` (experimentalApi); see
+//! [`parse_model_page`]. The snapshot below is the offline fallback, kept in newest-first order
+//! so the descriptor stays useful when discovery has not run or cannot.
+//!
+//! Sans-IO (ARCH-6).
 
-use crate::upstream_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel, SandboxLevel};
+use reno_proto::{Effort, ModelInfo, SandboxLevel};
+use serde_json::Value;
 
-/// The unified reasoning ladder Codex accepts (`minimal` is offered but clamped
-/// on the wire — see [`to_effort`]).
-pub(crate) const REASONING_LEVELS: &[ReasoningLevel] = &[
-    ReasoningLevel::Minimal,
-    ReasoningLevel::Low,
-    ReasoningLevel::Medium,
-    ReasoningLevel::High,
-    ReasoningLevel::XHigh,
-    ReasoningLevel::Max,
-    ReasoningLevel::Ultra,
-];
+use crate::upstream_proto::{Model, ModelOption, ModelOptionChoice, ReasoningLevel};
 
-/// Codex's API rejects `minimal` when default tools (web_search, image_gen)
-/// are enabled, and doesn't know Claude's ultracode/ultrathink modes. It DOES
-/// accept `max` and `ultra` natively (gpt-5.6+), so those pass straight
-/// through — only the levels Codex can't take are clamped to the nearest
-/// effort (port of codex.ts `toEffort`).
-pub(crate) fn to_effort(reasoning: Option<ReasoningLevel>) -> Option<&'static str> {
-    Some(match reasoning? {
-        ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
-        ReasoningLevel::Medium => "medium",
-        ReasoningLevel::High => "high",
-        ReasoningLevel::XHigh | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => "xhigh",
-        ReasoningLevel::Max => "max",
-        ReasoningLevel::Ultra => "ultra",
-    })
+/// `turn/start`'s `effort`.
+pub(crate) fn effort(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+    }
 }
 
 /// `thread/start`'s `sandbox` param (kebab-case wire words).
@@ -40,7 +25,7 @@ pub(crate) fn sandbox_mode(sandbox: SandboxLevel) -> &'static str {
     match sandbox {
         SandboxLevel::ReadOnly => "read-only",
         SandboxLevel::WorkspaceWrite => "workspace-write",
-        SandboxLevel::DangerFullAccess => "danger-full-access",
+        SandboxLevel::Unrestricted => "danger-full-access",
     }
 }
 
@@ -49,20 +34,76 @@ pub(crate) fn sandbox_policy_type(sandbox: SandboxLevel) -> &'static str {
     match sandbox {
         SandboxLevel::ReadOnly => "readOnly",
         SandboxLevel::WorkspaceWrite => "workspaceWrite",
-        SandboxLevel::DangerFullAccess => "dangerFullAccess",
+        SandboxLevel::Unrestricted => "dangerFullAccess",
     }
 }
 
-/// `turn/start`'s full `sandboxPolicy` object. Workspace-write (auto-accept
-/// edits) keeps network access: reno agents fetch deps and hit APIs, and a
-/// network-less sandbox would ask before every one of those commands.
-pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> serde_json::Value {
+/// `turn/start`'s full `sandboxPolicy` object. Workspace-write (auto-accept edits) keeps network
+/// access: agents fetch dependencies and hit APIs, and a network-less sandbox would ask before
+/// every one of those commands.
+pub(crate) fn sandbox_policy_value(sandbox: SandboxLevel) -> Value {
     let mut policy = serde_json::Map::new();
     policy.insert("type".into(), sandbox_policy_type(sandbox).into());
     if matches!(sandbox, SandboxLevel::WorkspaceWrite) {
         policy.insert("networkAccess".into(), true.into());
     }
-    serde_json::Value::Object(policy)
+    Value::Object(policy)
+}
+
+/// One `model/list` page: the visible models (each with whether the account's default) and the
+/// cursor of the next page. A hidden model, or one with no id, is skipped on its own: the rest
+/// of the page is kept.
+pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Option<String>) {
+    let mut models = Vec::new();
+    for item in result
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if item.get("hidden").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(id) = item
+            .get("model")
+            .and_then(Value::as_str)
+            .or_else(|| item.get("id").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let display_name = item
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id)
+            .to_owned();
+        models.push((
+            ModelInfo {
+                id: id.to_owned(),
+                display_name: Some(display_name),
+            },
+            item.get("isDefault").and_then(Value::as_bool) == Some(true),
+        ));
+    }
+    let next_cursor = result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (models, next_cursor)
+}
+
+/// The curated fallback as the descriptor carries it.
+pub(crate) fn static_model_infos() -> Vec<ModelInfo> {
+    static_models()
+        .into_iter()
+        .map(|model| ModelInfo {
+            id: model.id,
+            display_name: Some(model.label),
+        })
+        .collect()
 }
 
 const ULTRA_LADDER: &[ReasoningLevel] = &[
@@ -204,14 +245,85 @@ pub(crate) fn static_models() -> Vec<Model> {
 mod tests {
     use super::*;
 
+    use serde_json::json;
+
     #[test]
-    fn effort_clamps_like_codex_ts() {
-        assert_eq!(to_effort(None), None);
-        assert_eq!(to_effort(Some(ReasoningLevel::Minimal)), Some("low"));
-        assert_eq!(to_effort(Some(ReasoningLevel::Ultracode)), Some("xhigh"));
-        assert_eq!(to_effort(Some(ReasoningLevel::Ultrathink)), Some("xhigh"));
-        assert_eq!(to_effort(Some(ReasoningLevel::Max)), Some("max"));
-        assert_eq!(to_effort(Some(ReasoningLevel::Ultra)), Some("ultra"));
+    fn effort_and_sandbox_have_their_wire_spellings() {
+        assert_eq!(effort(Effort::Low), "low");
+        assert_eq!(effort(Effort::Medium), "medium");
+        assert_eq!(effort(Effort::High), "high");
+        assert_eq!(sandbox_mode(SandboxLevel::ReadOnly), "read-only");
+        assert_eq!(
+            sandbox_mode(SandboxLevel::WorkspaceWrite),
+            "workspace-write"
+        );
+        assert_eq!(
+            sandbox_mode(SandboxLevel::Unrestricted),
+            "danger-full-access"
+        );
+        assert_eq!(
+            sandbox_policy_value(SandboxLevel::Unrestricted),
+            json!({"type": "dangerFullAccess"})
+        );
+        assert_eq!(
+            sandbox_policy_value(SandboxLevel::WorkspaceWrite),
+            json!({"type": "workspaceWrite", "networkAccess": true})
+        );
+        assert_eq!(
+            sandbox_policy_value(SandboxLevel::ReadOnly),
+            json!({"type": "readOnly"})
+        );
+    }
+
+    #[test]
+    fn a_model_page_skips_hidden_models_and_keeps_the_rest() {
+        let page = json!({
+            "data": [
+                { "id": "hidden", "model": "hidden", "displayName": "Hidden", "hidden": true },
+                { "id": "", "model": "  " },
+                {
+                    "id": "gpt-6-astra",
+                    "model": "gpt-6-astra",
+                    "displayName": " GPT-6-Astra ",
+                    "hidden": false,
+                    "supportedReasoningEfforts": [{ "reasoningEffort": "future" }],
+                    "isDefault": true
+                },
+                // An older build: no `model`, no name, no hidden flag.
+                { "id": "gpt-old" }
+            ],
+            "nextCursor": "next"
+        });
+        let (models, cursor) = parse_model_page(&page);
+        assert_eq!(cursor.as_deref(), Some("next"));
+        assert_eq!(
+            models,
+            vec![
+                (
+                    ModelInfo {
+                        id: "gpt-6-astra".into(),
+                        display_name: Some("GPT-6-Astra".into())
+                    },
+                    true
+                ),
+                (
+                    ModelInfo {
+                        id: "gpt-old".into(),
+                        display_name: Some("gpt-old".into())
+                    },
+                    false
+                ),
+            ]
+        );
+        assert_eq!(parse_model_page(&json!({})).1, None);
+    }
+
+    #[test]
+    fn the_descriptor_fallback_is_the_curated_list() {
+        let infos = static_model_infos();
+        assert_eq!(infos.len(), static_models().len());
+        assert_eq!(infos[0].id, "gpt-6-astra");
+        assert_eq!(infos[0].display_name.as_deref(), Some("GPT-6-Astra"));
     }
 
     #[test]

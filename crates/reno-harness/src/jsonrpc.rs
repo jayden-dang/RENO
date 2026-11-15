@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::task::TaskTracker;
 
 use crate::HarnessError;
 use crate::process::{ChildStdin, ChildStdout};
@@ -83,23 +84,47 @@ impl RpcClient {
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::start(None, stdin, stdout, observer)
+    }
+
+    /// [`Self::new`], with the writer and reader tasks on `tracker`, so the owner can wait for
+    /// them at shutdown (ARCH-11). They end when the child's pipes close.
+    pub(crate) fn tracked(
+        tracker: &TaskTracker,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
+        Self::start(Some(tracker), stdin, stdout, None)
+    }
+
+    fn start(
+        tracker: Option<&TaskTracker>,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        observer: Option<StdoutObserver>,
+    ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         let closed = Arc::new(AtomicBool::new(false));
-        tokio::spawn(write_loop(
-            stdin,
-            writer_rx,
-            Arc::clone(&pending),
-            closed.clone(),
-        ));
-        tokio::spawn(read_loop(
+        let writer = write_loop(stdin, writer_rx, Arc::clone(&pending), closed.clone());
+        let reader = read_loop(
             stdout,
             Arc::clone(&pending),
             incoming_tx,
             closed.clone(),
             observer,
-        ));
+        );
+        match tracker {
+            Some(tracker) => {
+                tracker.spawn(writer);
+                tracker.spawn(reader);
+            }
+            None => {
+                tokio::spawn(writer);
+                tokio::spawn(reader);
+            }
+        }
         (
             Self {
                 next_id: Arc::new(AtomicI64::new(0)),

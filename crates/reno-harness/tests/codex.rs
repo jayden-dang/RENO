@@ -281,7 +281,11 @@ async fn happy_path_maps_notifications_to_exec_events() {
             },
             ExecEvent::Tool {
                 id: "w1".into(),
-                call: ToolCall::new("web_search", json!({ "query": "rust" }), ActionClass::Network),
+                call: ToolCall::new(
+                    "web_search",
+                    json!({ "query": "rust" }),
+                    ActionClass::Network
+                ),
             },
             ExecEvent::ToolResult {
                 id: "w1".into(),
@@ -467,7 +471,10 @@ async fn a_crash_during_thread_setup_reports_its_stderr() {
     assert_eq!(stop, StopReason::Error);
     let diagnostic = diagnostic.unwrap();
     assert!(diagnostic.contains("exit code 3"), "{diagnostic}");
-    assert!(diagnostic.contains("bad toml in mcp_servers"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("bad toml in mcp_servers"),
+        "{diagnostic}"
+    );
 }
 
 #[tokio::test]
@@ -551,7 +558,7 @@ async fn recorded_v1_subagents_stay_out_of_the_parents_feed() {
     assert_children_stay_out(
         &events,
         "parent answer",
-        &["alpha answer", "beta answer", "echo beta", "Also check gamma"],
+        &["alpha answer", "beta answer", "echo beta", "beta-input"],
     );
     // The parent's own collaboration calls are on its feed.
     for (id, name) in [
@@ -576,7 +583,12 @@ async fn recorded_v2_lifecycle_stays_out_of_the_parents_feed() {
     assert_children_stay_out(
         &events,
         "parent progress\n\nparent answer\n\n",
-        &["first alpha", "second alpha", "beta answer", "First assignment"],
+        &[
+            "first alpha",
+            "second alpha",
+            "beta answer",
+            "First assignment",
+        ],
     );
 }
 
@@ -587,7 +599,12 @@ async fn a_child_that_acts_before_its_spawn_is_announced_stays_out() {
     assert_children_stay_out(
         &events,
         "parent output",
-        &["early alpha", "later alpha", "beta output", "beta continues"],
+        &[
+            "early alpha",
+            "later alpha",
+            "beta output",
+            "beta continues",
+        ],
     );
 }
 
@@ -702,7 +719,10 @@ async fn full_access_asks_nothing() {
 #[tokio::test]
 async fn a_permission_widening_is_asked_unless_nothing_is_confined() {
     // Unrestricted sandbox under full access: nothing to widen, answered here.
-    let outcome = run_with(&executor(), spec("scenario:permissions"), |_| Decision::Deny).await;
+    let outcome = run_with(&executor(), spec("scenario:permissions"), |_| {
+        Decision::Deny
+    })
+    .await;
     assert!(outcome.approvals.is_empty());
     assert_eq!(result_of(&outcome.events), "permissions=turn");
 
@@ -768,8 +788,8 @@ async fn a_form_elicitation_is_a_question() {
     assert_eq!(questions.len(), 1);
     assert!(questions[0].prompt.contains("Ship it?"), "{questions:?}");
     assert_eq!(questions[0].options, ["Yes", "No"]);
-    // The driver answers with the last option ("No"): a form answered `No` is `false`.
-    assert_eq!(result_of(&outcome.events), "form=declined");
+    // The driver answers with the last option ("No"): an accepted form whose boolean is false.
+    assert_eq!(result_of(&outcome.events), "form=accepted-false");
 }
 
 #[tokio::test]
@@ -892,14 +912,14 @@ async fn auto_accept_edits_accepts_only_changes_inside_the_working_directory() {
         asked,
         vec![
             (ActionClass::Edit, vec![PathBuf::from("/outside/a.rs")]),
-            (
-                ActionClass::Edit,
-                vec![dir.path().join("../escape.rs")]
-            ),
+            (ActionClass::Edit, vec![dir.path().join("../escape.rs")]),
             // Never seen: no paths known, so asked.
             (ActionClass::Edit, Vec::new()),
             // A session-wide grant is asked even for the working directory itself.
-            (ActionClass::Edit, vec![dir.path().to_path_buf()]),
+            (
+                ActionClass::Edit,
+                vec![dir.path().join("c.rs"), dir.path().to_path_buf()]
+            ),
             (ActionClass::Command, vec![PathBuf::from("/work")]),
             (ActionClass::Other, Vec::new()),
         ],
@@ -943,7 +963,8 @@ async fn a_request_that_arrives_after_cancel_is_declined_at_once() {
     let mut events = Vec::new();
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(event) = live.stream.next().await {
-            if matches!(event, ExecEvent::Started { .. }) {
+            // Once the turn is running: only then is there a turn to interrupt.
+            if matches!(&event, ExecEvent::Text { text } if text == "working") {
                 live.handle.cancel();
             }
             events.push(event);
@@ -953,9 +974,10 @@ async fn a_request_that_arrives_after_cancel_is_declined_at_once() {
     .expect("cancelled run ends");
     assert_eq!(done(&events).0, StopReason::Interrupted, "{events:?}");
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, ExecEvent::NeedsApproval { .. } | ExecEvent::NeedsInput { .. })),
+        !events.iter().any(|e| matches!(
+            e,
+            ExecEvent::NeedsApproval { .. } | ExecEvent::NeedsInput { .. }
+        )),
         "nothing is asked of a run that was cancelled: {events:?}"
     );
     let seen = std::fs::read_to_string(dir.path().join("late-request.txt")).unwrap();
@@ -1005,7 +1027,11 @@ async fn each_access_mode_launches_with_its_policy_and_never_a_looser_sandbox_th
         let mut spec = spec_with("scenario:policy", access);
         spec.sandbox = sandbox;
         let events = run_to_end(&executor(), spec).await;
-        assert_eq!(result_of(&events), expected, "{access:?} + {sandbox:?}");
+        assert_eq!(
+            done(&events).1.as_deref(),
+            Some(expected),
+            "{access:?} + {sandbox:?}: {events:?}"
+        );
     }
 }
 
@@ -1227,6 +1253,26 @@ async fn an_unresponsive_child_is_reaped_with_an_interrupted_done() {
     );
 }
 
+/// A turn the app-server never acknowledges is not a run that cannot be cancelled.
+#[tokio::test]
+async fn cancel_ends_a_run_whose_turn_start_is_never_answered() {
+    let executor = executor().with_graces(Duration::from_millis(100), Duration::from_millis(500));
+    let mut live = start(&executor, spec("scenario:silent-start")).await;
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = live.stream.next().await {
+            if matches!(event, ExecEvent::Started { .. }) {
+                live.handle.cancel();
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .expect("the cancelled run ended");
+    assert_eq!(done(&events).0, StopReason::Interrupted, "{events:?}");
+    assert_eq!(dones(&events), 1);
+}
+
 /// ARCH-11: every task a run spawned is the executor's, and ends with the run's stream.
 #[tokio::test]
 async fn shutdown_waits_for_the_tasks_of_runs_whose_streams_were_dropped() {
@@ -1311,7 +1357,9 @@ fn flaky_app_server(dir: &Path, fail: u32, reason: &str) -> (PathBuf, PathBuf) {
 async fn an_app_server_that_dies_before_answering_is_relaunched_and_every_launch_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let (script, count) = flaky_app_server(dir.path(), 1, "cold start: not ready");
-    let executor = CodexExecutor::new().with_executable(script);
+    let executor = CodexExecutor::new()
+        .with_executable(script)
+        .with_startup_retry_delays(vec![Duration::from_millis(10)]);
     let mut spec = spec("scenario:happy");
     spec.model = Some("gpt-5.6-sol".into());
     spec.effort = Some(Effort::High);
@@ -1329,7 +1377,11 @@ async fn an_app_server_that_dies_before_answering_is_relaunched_and_every_launch
     while let Ok(record) = live.records.try_recv() {
         pids.push(record.pid);
     }
-    assert_eq!(pids.len(), 2, "the dead launch and its replacement: {pids:?}");
+    assert_eq!(
+        pids.len(),
+        2,
+        "the dead launch and its replacement: {pids:?}"
+    );
     assert_ne!(pids[0], pids[1]);
 }
 
@@ -1337,9 +1389,11 @@ async fn an_app_server_that_dies_before_answering_is_relaunched_and_every_launch
 async fn an_app_server_that_keeps_dying_reports_what_it_printed() {
     let dir = tempfile::tempdir().unwrap();
     let (script, count) = flaky_app_server(dir.path(), 99, "missing libssl.so.3");
-    let executor = CodexExecutor::new().with_executable(script);
+    let executor = CodexExecutor::new()
+        .with_executable(script)
+        .with_startup_retry_delays(vec![Duration::from_millis(10); 3]);
     let mut live = start(&executor, spec("scenario:happy")).await;
-    // Three relaunches, 1 + 3 + 8 s apart.
+    // Three relaunches.
     let events = tokio::time::timeout(Duration::from_secs(30), async {
         drive(&mut live, |_| Decision::Allow).await.events
     })
@@ -1401,7 +1455,10 @@ async fn a_resume_refusal_fails_the_run_instead_of_starting_fresh() {
     let mut spec = spec("scenario:resumed");
     spec.resume = Some(SessionRef("resume-broken".into()));
     let events = run_to_end(&executor(), spec).await;
-    assert_ne!(started_session(&events).as_deref(), Some("th-wrongly-fresh"));
+    assert_ne!(
+        started_session(&events).as_deref(),
+        Some("th-wrongly-fresh")
+    );
     let (stop, _, diagnostic) = done(&events);
     assert_eq!(stop, StopReason::Error);
     assert!(

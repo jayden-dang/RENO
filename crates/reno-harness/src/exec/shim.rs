@@ -38,9 +38,9 @@
 //! codex and acp drivers, and some of those sites are logins and model probes, not runs), and
 //! none of them receives anything the shim could hand a sink to. Forwarding would mean
 //! threading a sink through `RunControls` into every driver, which is not a small edit. Until
-//! Codex and ACP get native `Executor`s that own their spawn (T1.0b, T1.0c), a run through this
-//! shim leaves no process row, so the orphan sweep after a crash has nothing to find for it.
-//! `ClaudeExecutor` is native and reports its child, including a relaunched one, and
+//! ACP gets a native `Executor` that owns its spawn (T1.0c), a run through this shim leaves no
+//! process row, so the orphan sweep after a crash has nothing to find for it. `ClaudeExecutor`
+//! and `CodexExecutor` are native and report their children, including a relaunched one, and
 //! `MockExecutor` reports records through `MockStep::Spawned`.
 //!
 //! # Guarantees
@@ -121,8 +121,8 @@ pub const DROPPED_AGENT_EVENTS: &[&str] = &[
 /// request to `ExecEvent::NeedsInput` carrying that question. It does **not** parse the prose
 /// into `NeedsApproval`: Reno never reads prose to make a security decision. Structured approvals
 /// (`NeedsApproval` with an `ApprovalSubject`, answered by `ExecHandle::decide`) come with a
-/// native driver: `ClaudeExecutor` has them (T1.0a); Codex and ACP get them in T1.0b and
-/// T1.0c. A `Decision` sent for a shim request is ignored with a warning; the request stays
+/// native driver: `ClaudeExecutor` (T1.0a) and `CodexExecutor` (T1.0b) have them; ACP gets
+/// them in T1.0c. A `Decision` sent for a shim request is ignored with a warning; the request stays
 /// open for an `Answer::Input`.
 ///
 /// # Declared capabilities

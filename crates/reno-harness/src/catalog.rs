@@ -38,6 +38,9 @@ impl Catalog {
             .map(|r| r.models)
     }
 
+    /// [`Self::get_with_timeout`] with the default timeout. Only the tests use it now: Codex
+    /// kept no catalog cache when its driver went native, and ACP sets its own timeout.
+    #[cfg(test)]
     pub(crate) async fn get_with<F, Fut, K>(
         &self,
         force: bool,

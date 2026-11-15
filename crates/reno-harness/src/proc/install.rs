@@ -141,7 +141,7 @@ pub fn installed(id: HarnessId) -> bool {
     use HarnessId::*;
     match id {
         ClaudeCode => crate::ClaudeExecutor::new().installed(),
-        Codex => crate::CodexHarness::new().installed(),
+        Codex => crate::CodexExecutor::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),
         Hermes => crate::AcpHarness::hermes().installed(),
         Devin => crate::AcpHarness::devin().installed(),

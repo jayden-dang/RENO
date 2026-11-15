@@ -18,9 +18,11 @@ fail_turn() { # $1 = request id, $2 = message
   emit "{\"method\":\"turn/failed\",\"params\":{\"turn\":{\"id\":\"t-bad\",\"error\":{\"message\":\"$2\"}}}}"
 }
 
-# A completed agent message: the run's result text.
+# A completed agent message: the run's result text (quotes and backslashes dropped, so the
+# JSON stays valid whatever a diagnostic line carried).
 say() {
-  emit "{\"method\":\"item/completed\",\"params\":{\"item\":{\"id\":\"final\",\"type\":\"agentMessage\",\"text\":\"$1\"}}}"
+  text=$(printf '%s' "$1" | tr -d '"\\')
+  emit "{\"method\":\"item/completed\",\"params\":{\"item\":{\"id\":\"final\",\"type\":\"agentMessage\",\"text\":\"$text\"}}}"
 }
 
 # ---- handshake -------------------------------------------------------------
@@ -501,6 +503,7 @@ case "$turnline" in
   read -r r3 || exit 1
   has "$r3" '"id":303' || { say "lost 303"; exit 0; }
   if has "$r3" '"action":"accept"' && has "$r3" '"confirm":true'; then say "form=accepted"
+  elif has "$r3" '"action":"accept"' && has "$r3" '"confirm":false'; then say "form=accepted-false"
   elif has "$r3" '"action":"decline"'; then say "form=declined"
   else say "unexpected: $r3"; fi
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
@@ -559,6 +562,7 @@ case "$turnline" in
   cwd=$(printf '%s' "$thread_line" | sed 's/.*"cwd":"\([^"]*\)".*/\1/')
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"working"}}'
   read -r intline || exit 1
   has "$intline" '"method":"turn/interrupt"' || exit 9
   emit "{\"id\":$(rid "$intline"),\"result\":{}}"
@@ -586,6 +590,11 @@ case "$turnline" in
     emit "{\"id\":$iid,\"result\":{}}"
     emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"expected turn/interrupt"}}}}'
   fi
+  ;;
+
+*scenario:silent-start*)
+  # The app-server never answers turn/start: a cancel must still end the run.
+  exec sleep 30
   ;;
 
 *scenario:wedge*)
@@ -655,7 +664,8 @@ case "$turnline" in
   ap=$(printf '%s' "$thread_line" | sed 's/.*"approvalPolicy":"\([^"]*\)".*/\1/')
   sb=$(printf '%s' "$thread_line" | sed 's/.*"sandbox":"\([^"]*\)".*/\1/')
   tp=$(printf '%s' "$turnline" | sed 's/.*"approvalPolicy":"\([^"]*\)".*/\1/')
-  ts=$(printf '%s' "$turnline" | sed 's/.*"sandboxPolicy":{"type":"\([^"]*\)".*/\1/')
+  # Keys are in alphabetical order on the wire: `networkAccess` comes before `type`.
+  ts=$(printf '%s' "$turnline" | sed 's/.*"sandboxPolicy":{[^}]*"type":"\([^"]*\)".*/\1/')
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   say "thread=$ap/$sb turn=$tp/$ts"

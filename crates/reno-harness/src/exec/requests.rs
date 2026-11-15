@@ -99,6 +99,11 @@ impl<A, I> OpenRequests<A, I> {
         self.open.is_empty()
     }
 
+    /// How many requests are waiting, for a driver that caps them (ARCH-11).
+    pub fn len(&self) -> usize {
+        self.open.len()
+    }
+
     /// Take every open request, in no particular order, leaving the table empty.
     pub fn drain(&mut self) -> Vec<(String, Open<A, I>)> {
         self.open.drain().collect()
