@@ -87,12 +87,16 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
     steps
 }
 
-/// Builds the registry: `mock`, plus each harness whose CLI is installed.
-pub async fn discover(hold_mock: bool) -> Result<ExecutorSet, IdError> {
+/// Builds the registry: `mock`, plus each harness whose CLI is installed. With `harnesses` false
+/// only `mock` is registered and no CLI is looked for, let alone started.
+pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError> {
     let mut set = ExecutorSet {
         registry: ExecutorRegistry::new().with(Arc::new(mock_executor(hold_mock)?)),
         harnesses: Vec::new(),
     };
+    if !harnesses {
+        return Ok(set);
+    }
     let candidates = [
         HarnessExecutor::new(ClaudeHarness::new(), CLAUDE_ID.parse()?),
         HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?),
@@ -102,11 +106,19 @@ pub async fn discover(hold_mock: bool) -> Result<ExecutorSet, IdError> {
         let id = executor.descriptor().id;
         let health = executor.probe().await;
         if health.installed {
-            tracing::info!(executor = %id, version = ?health.version, "executor found");
+            tracing::info!(
+                executor = %id,
+                version = health.version.as_deref().unwrap_or("unknown"),
+                "executor found"
+            );
             set.registry.insert(id, executor.clone());
             set.harnesses.push(executor);
         } else {
-            tracing::info!(executor = %id, detail = ?health.detail, "executor not installed");
+            tracing::info!(
+                executor = %id,
+                detail = health.detail.as_deref().unwrap_or(""),
+                "executor not installed"
+            );
         }
     }
     Ok(set)
@@ -123,6 +135,14 @@ mod tests {
         for name in [MOCK_ID, CLAUDE_ID, CODEX_ID] {
             assert_eq!(name.parse::<ExecutorId>().expect("valid").as_str(), name);
         }
+    }
+
+    #[tokio::test]
+    async fn without_harnesses_only_the_mock_is_registered_and_nothing_is_probed() {
+        let set = discover(false, false).await.expect("discover");
+        let ids: Vec<_> = set.registry.ids().map(ExecutorId::as_str).collect();
+        assert_eq!(ids, [MOCK_ID]);
+        assert!(set.harnesses.is_empty());
     }
 
     #[test]

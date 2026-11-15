@@ -154,6 +154,16 @@ mod tests {
     }
 
     #[test]
+    fn the_defaults_are_the_ones_the_client_computes() {
+        // `reno-client` also honours `RENO_DATA_DIR`; compare only when it is not set.
+        if std::env::var_os(DATA_DIR_ENV).is_none() && std::env::var_os(SOCKET_ENV).is_none() {
+            assert_eq!(default_data_dir(), reno_client::default_data_dir());
+            let socket = default_data_dir().map(|dir| Paths::new(dir, None).socket);
+            assert_eq!(socket, reno_client::default_socket_path());
+        }
+    }
+
+    #[test]
     fn no_home_means_no_default() {
         assert_eq!(data_dir_from(env(&[])), None);
         assert_eq!(data_dir_from(env(&[("HOME", "")])), None);

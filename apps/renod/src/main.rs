@@ -31,6 +31,9 @@ struct Args {
     /// Make the mock executor wait to be steered or cancelled, for tests and demos.
     #[arg(long, env = "RENO_MOCK_HOLD", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
     mock_hold: bool,
+    /// Register only the mock executor: look for no harness CLI, for tests.
+    #[arg(long, env = "RENO_NO_HARNESSES", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
+    no_harnesses: bool,
 }
 
 #[allow(clippy::print_stderr)]
@@ -72,18 +75,19 @@ fn run(args: Args) -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("cannot start the async runtime")?;
-    let outcome = runtime.block_on(serve(paths, args.mock_hold));
+    let outcome = runtime.block_on(serve(paths, args.mock_hold, !args.no_harnesses));
     if let Err(error) = &outcome {
         tracing::error!(%error, "renod failed");
     }
     outcome
 }
 
-async fn serve(paths: Paths, mock_hold: bool) -> anyhow::Result<()> {
+async fn serve(paths: Paths, mock_hold: bool, harnesses: bool) -> anyhow::Result<()> {
     let config = DaemonConfig::new(
         paths,
         ExecutorSource::Discover {
             hold_mock: mock_hold,
+            harnesses,
         },
     );
     let daemon = Daemon::start(config).await?;

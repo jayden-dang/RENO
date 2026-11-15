@@ -51,10 +51,12 @@ pub const SERVER_DEADLINE: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub enum ExecutorSource {
     /// `mock`, plus each harness whose CLI is installed. Looked up after the lock is taken, so a
-    /// second daemon fails fast. With `hold_mock` the mock waits to be steered or cancelled.
+    /// second daemon fails fast.
     Discover {
-        /// Use the mock's hold script.
+        /// Use the mock's hold script: it waits to be steered or cancelled.
         hold_mock: bool,
+        /// Look for the harness CLIs at all. Tests turn this off so that none is ever touched.
+        harnesses: bool,
     },
     /// Exactly these, for tests.
     Given(ExecutorSet),
@@ -155,7 +157,10 @@ impl Daemon {
         let lock = DataDirLock::acquire(&paths.lock())?;
 
         let executors = match executors {
-            ExecutorSource::Discover { hold_mock } => executors::discover(hold_mock).await?,
+            ExecutorSource::Discover {
+                hold_mock,
+                harnesses,
+            } => executors::discover(hold_mock, harnesses).await?,
             ExecutorSource::Given(set) => set,
         };
         let db = paths.db();

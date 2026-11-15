@@ -29,6 +29,8 @@ impl Renod {
             .arg("--data-dir")
             .arg(data_dir)
             .env("RENO_MOCK_HOLD", "1")
+            // Never so much as probe a real harness CLI.
+            .env("RENO_NO_HARNESSES", "1")
             .env_remove("RENO_DATA_DIR")
             .env_remove("RENO_SOCKET")
             .stdin(Stdio::null())
@@ -149,6 +151,7 @@ process_test! {
         let second = Command::new(env!("CARGO_BIN_EXE_renod"))
             .arg("--data-dir")
             .arg(&dir)
+            .env("RENO_NO_HARNESSES", "1")
             .env_remove("RENO_DATA_DIR")
             .env_remove("RENO_SOCKET")
             .stdin(Stdio::null())

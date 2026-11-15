@@ -35,7 +35,8 @@ human-readable form.
 - `mock` is always registered. It plays a short canned run and finishes. With `RENO_MOCK_HOLD=1`
   it stops after its first text and waits until the run is steered or cancelled; the tests use
   that to keep a run live without a timer.
-- `claude-code` and `codex` are registered when their CLIs are found.
+- `claude-code` and `codex` are registered when their CLIs are found. `RENO_NO_HARNESSES=1`
+  skips that lookup, so tests never touch a real harness.
 
 ## Shutdown
 

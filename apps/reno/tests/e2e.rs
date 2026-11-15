@@ -67,6 +67,9 @@ impl World {
             .env_remove("RENO_SOCKET")
             .env_remove("RENO_LOG")
             .env_remove("RENO_MOCK_HOLD")
+            // `reno daemon start` passes its environment on to `renod`: never probe a real
+            // harness CLI from a test.
+            .env("RENO_NO_HARNESSES", "1")
             .stdin(Stdio::null());
         if self.hold_mock {
             // `reno daemon start` passes its environment on to `renod`.
