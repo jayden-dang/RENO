@@ -124,7 +124,7 @@ pub(crate) struct Shared {
     /// What validation may assume about the world: the executors a bot may name.
     pub(crate) defs_ctx: ValidationContext,
     pub(crate) mint: IdMint,
-    /// The scheduler's inbox. The dispatcher uses `try_send`: it never waits for the scheduler.
+    /// The scheduler's inbox. Senders wait when it is full; the scheduler never waits on them.
     pub(crate) sched_tx: mpsc::Sender<SchedCmd>,
     sched_rx: Mutex<Option<mpsc::Receiver<SchedCmd>>>,
     /// Every trigger and its state, as the scheduler last published it.
@@ -180,11 +180,13 @@ impl Shared {
             .take()
     }
 
-    /// Tells the scheduler about a run, without waiting. A full inbox drops the message: the
-    /// scheduler is behind and the next backoff or start will say the same.
-    pub(crate) fn signal_scheduler(&self, command: SchedCmd) {
-        if self.sched_tx.try_send(command).is_err() {
-            tracing::debug!("the scheduler inbox is full or closed; dropping a run signal");
+    /// Tells the scheduler about a run. A full inbox makes the caller wait (backpressure), so a
+    /// start or a failure is never lost; the scheduler never waits on the dispatcher (it only
+    /// wakes it through `Notify`), so the wait cannot form a cycle (ARCH-11). A closed inbox
+    /// means the scheduler has stopped (shutdown) and the signal no longer matters.
+    pub(crate) async fn signal_scheduler(&self, command: SchedCmd) {
+        if self.sched_tx.send(command).await.is_err() {
+            tracing::debug!("the scheduler has stopped; dropping a run signal");
         }
     }
 

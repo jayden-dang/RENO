@@ -70,9 +70,9 @@ use crate::watch::{Watch, WatchSpec};
 /// The longest the scheduler sleeps before it reads the clock again (see the module docs).
 pub(crate) const CLOCK_GUARD: Duration = Duration::from_secs(3600);
 
-/// Commands the scheduler accepts. The queue is bounded; the senders that cannot wait use
-/// `try_send` (the dispatcher) and the scheduler never sends to them, so it cannot form a cycle
-/// (ARCH-11).
+/// Commands the scheduler accepts. The queue is bounded and every sender waits when it is full;
+/// the scheduler never waits on a sender (it wakes the dispatcher through `Notify`), so the
+/// waits cannot form a cycle (ARCH-11).
 pub(crate) const COMMAND_QUEUE: usize = 256;
 
 /// How often `fire` mints ids again after the store says the last ones are taken.

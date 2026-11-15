@@ -235,9 +235,11 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     };
     match started {
         Some(Ok(stream)) => {
-            shared.signal_scheduler(SchedCmd::RunStarted {
-                run: run_id.clone(),
-            });
+            shared
+                .signal_scheduler(SchedCmd::RunStarted {
+                    run: run_id.clone(),
+                })
+                .await;
             let supervisor = Supervisor::new(
                 Arc::clone(shared),
                 run_id,
@@ -291,10 +293,12 @@ async fn fail_start(
     conclude(shared, run, fence, StopReason::Error, why, cmd_rx, slot).await;
     // After the run's end has committed, so the trigger's next occurrence finds it finished.
     if let Some(why) = account {
-        shared.signal_scheduler(SchedCmd::StartFailed {
-            run: run.clone(),
-            why,
-        });
+        shared
+            .signal_scheduler(SchedCmd::StartFailed {
+                run: run.clone(),
+                why,
+            })
+            .await;
     }
 }
 
