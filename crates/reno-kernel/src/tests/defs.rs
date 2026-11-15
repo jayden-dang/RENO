@@ -49,7 +49,7 @@ impl FakePort {
     }
 
     /// Fires the change signal, as a debounced watcher would.
-    fn touch(&self) {
+    pub(super) fn touch(&self) {
         let tx = self
             .tx
             .lock()

@@ -44,7 +44,10 @@ pub(crate) enum Schedule {
     /// Repeatedly, from the instant the definition version was stored.
     Every { interval_ms: i64 },
     /// On a cron expression in a zone.
-    Cron { cron: CronSchedule, zone: String },
+    Cron {
+        cron: Box<CronSchedule>,
+        zone: String,
+    },
     /// On file changes: no time.
     Fs,
     /// Only on request: no time.
@@ -81,7 +84,7 @@ impl Schedule {
                 interval_ms: duration(every)?,
             },
             TriggerKind::Cron { cron, timezone } => Self::Cron {
-                cron: CronSchedule::new(cron, timezone)?,
+                cron: Box::new(CronSchedule::new(cron, timezone)?),
                 zone: timezone.clone(),
             },
             TriggerKind::Fs { .. } => Self::Fs,
