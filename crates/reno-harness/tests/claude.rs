@@ -401,6 +401,60 @@ async fn captured_live_forwarded_foreground_subagent_text_stays_out_of_the_paren
     assert_eq!(dones(&events), 1, "{events:?}");
 }
 
+/// One run, one `Started`, one `Done`, and the parent feed's own tool calls only.
+fn assert_one_run_of(events: &[ExecEvent]) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, ExecEvent::Started { .. }))
+            .count(),
+        1,
+        "{events:?}"
+    );
+    assert_eq!(dones(events), 1, "{events:?}");
+    assert!(matches!(
+        events.last(),
+        Some(ExecEvent::Done {
+            stop: StopReason::Completed,
+            ..
+        })
+    ));
+}
+
+fn tool_names(events: &[ExecEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::Tool { call, .. } => Some(call.name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn captured_live_forked_skill_frames_show_the_skill_call_and_nothing_of_its_agents() {
+    // Frames from claude 2.1.310: a `context: fork` skill that spawns two background agents,
+    // which run Bash. The parent feed has the Skill call only.
+    let events = replay_fixture("live-2.1.310-forked-skill.jsonl").await;
+    assert_one_run_of(&events);
+    assert_eq!(tool_names(&events), ["Skill"], "{events:?}");
+}
+
+#[tokio::test]
+async fn captured_live_typed_fork_frames_leave_the_forks_interior_out() {
+    // Frames from claude 2.1.310: `/fanout` typed as the prompt runs in a fork that spawns two
+    // agents; `/f-slow-steps` runs Bash three times. Everything the forks do is tagged with a
+    // `forked-command-*` id, so the parent feed carries no tool call at all.
+    for fixture in [
+        "live-2.1.310-typed-forked-command.jsonl",
+        "live-2.1.310-typed-fork-slow-steps.jsonl",
+    ] {
+        let events = replay_fixture(fixture).await;
+        assert_one_run_of(&events);
+        assert!(tool_names(&events).is_empty(), "{fixture}: {events:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Structured approvals
 // ---------------------------------------------------------------------------
@@ -609,8 +663,9 @@ async fn access_modes_decide_what_reaches_reno() {
     );
     assert!(outcome.approvals.is_empty());
 
-    // Auto-accept edits: the CLI's own acceptEdits mode; the edit goes through unasked, the
-    // command and the plan are asked, and a deny refuses them.
+    // Auto-accept edits: the CLI's own acceptEdits mode. Nothing is answered here: an edit
+    // request that reaches the driver is one acceptEdits did not cover, so it is asked like
+    // the command and the plan, and a deny refuses each.
     let mut live = start(
         &executor(),
         spec_with("scenario:approvals", AccessMode::AutoAcceptEdits),
@@ -619,7 +674,7 @@ async fn access_modes_decide_what_reaches_reno() {
     let outcome = drive(&mut live, |_| Decision::Deny).await;
     assert_eq!(
         result_of(&outcome.events),
-        "acceptEdits none bash=deny edit=allow plan=deny"
+        "acceptEdits none bash=deny edit=deny plan=deny"
     );
     let asked: Vec<_> = outcome
         .approvals
@@ -630,6 +685,7 @@ async fn access_modes_decide_what_reaches_reno() {
         asked,
         [
             (ActionClass::Command, "Bash"),
+            (ActionClass::Edit, "Edit"),
             (ActionClass::Other, "ExitPlanMode")
         ]
     );
@@ -693,6 +749,46 @@ async fn open_requests_are_denied_on_cancel_and_a_wrong_kind_answer_never_approv
     let answer = std::fs::read_to_string(&record).expect("the CLI saw an answer");
     assert!(answer.contains("\"behavior\":\"deny\""), "{answer}");
     assert!(!answer.contains("\"behavior\":\"allow\""), "{answer}");
+}
+
+/// A request that reaches the driver after the run was cancelled is denied at once: nothing new
+/// is allowed (not even under full access) and nobody is left to ask.
+#[tokio::test]
+async fn a_request_after_cancel_is_denied_and_never_asked() {
+    for access in [AccessMode::Supervised, AccessMode::FullAccess] {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("answer.json");
+        let mut spec = spec_with("scenario:request-after-cancel", access);
+        spec.env.insert(
+            "RENO_TEST_RECORD".into(),
+            record.to_string_lossy().into_owned(),
+        );
+        let executor = executor().with_graces(Duration::from_millis(500), Duration::from_secs(2));
+        let mut live = start(&executor, spec).await;
+        let mut events = Vec::new();
+        let finished = tokio::time::timeout(Duration::from_secs(20), async {
+            while let Some(event) = live.stream.next().await {
+                if matches!(event, ExecEvent::Started { .. }) {
+                    live.handle.cancel();
+                }
+                events.push(event);
+            }
+        })
+        .await;
+        assert!(finished.is_ok(), "{access:?}: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ExecEvent::NeedsApproval { .. })),
+            "{access:?}: {events:?}"
+        );
+        assert_eq!(done(&events).0, StopReason::Interrupted, "{access:?}");
+        let answer = std::fs::read_to_string(&record).expect("the CLI saw an answer");
+        assert!(
+            answer.contains("\"behavior\":\"deny\""),
+            "{access:?}: {answer}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

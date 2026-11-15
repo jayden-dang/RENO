@@ -4,7 +4,8 @@
 //! The kernel, end to end, over the native `ClaudeExecutor` and a fake `claude` binary (the
 //! harness crate's `tests/fixtures/fake-claude.sh`, which speaks stream-json and the control
 //! protocol). No network and no real harness (ARCH-16). Real time, because a real child process
-//! runs; nothing here sleeps to wait, and the timeout is only a failsafe against a hang.
+//! runs; nothing here sleeps to wait, and the timeout is only a failsafe against a hang. The
+//! kernel's clock is a manual one: stored times are fixed.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reno_harness::ClaudeExecutor;
-use reno_kernel::{ExecutorRegistry, Kernel, KernelConfig, SystemClock};
+use reno_kernel::{ExecutorRegistry, Kernel, KernelConfig, ManualClock};
 use reno_proto::{
     ActionClass, ApprovalDecision, ExecEvent, ExecutorId, RunId, RunStatus, Seq, StopReason,
 };
@@ -56,7 +57,8 @@ impl Fx {
             KernelConfig::default(),
             store.clone(),
             registry,
-            Arc::new(SystemClock),
+            // A fixed clock: the test reads no wall time (ARCH-16).
+            Arc::new(ManualClock::new(1_700_000_000_000)),
         )
         .await
         .unwrap();

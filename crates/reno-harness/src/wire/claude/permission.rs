@@ -19,7 +19,7 @@
 //!
 //! # What an access mode lets through
 //!
-//! See [`allowed_without_asking`] and [`permission_mode`]; the table lives on
+//! See [`answered_here`] and [`permission_mode`]; the table lives on
 //! `ClaudeExecutor`, which applies them.
 
 use std::path::PathBuf;
@@ -84,21 +84,16 @@ pub(crate) fn subject(tool: &str, input: &Value, raw: &Value) -> ApprovalSubject
     }
 }
 
-/// Whether `access` lets `tool` through without asking Reno.
-///
-/// Full access asks nothing; auto-accept-edits lets the edit tools through; supervised lets
-/// nothing through of what reaches here. (What the CLI itself allows in its permission mode,
-/// reading inside the working directory for one, never reaches Reno at all.)
-pub(crate) fn allowed_without_asking(access: AccessMode, tool: &str) -> bool {
-    match access {
-        AccessMode::FullAccess => true,
-        AccessMode::AutoAcceptEdits => EDIT_TOOLS.contains(&tool),
-        AccessMode::Supervised => false,
-    }
+/// Whether the driver itself answers every permission request that reaches it: full access
+/// asks nothing. Under the other two modes whatever the CLI's permission mode does not cover
+/// reaches Reno, edits included: under `acceptEdits` an `Edit` request is one the CLI did not
+/// accept itself.
+pub(crate) fn answered_here(access: AccessMode) -> bool {
+    access == AccessMode::FullAccess
 }
 
 /// The CLI `--permission-mode` a run launches in. Full access is `default` too: the run is
-/// answered here instead (see [`allowed_without_asking`]), so no run is launched with a
+/// answered here instead (see [`answered_here`]), so no run is launched with a
 /// skip-permissions flag, which the CLI refuses as root outside a sandbox.
 pub(crate) fn permission_mode(access: AccessMode) -> &'static str {
     match access {
@@ -296,33 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn each_access_mode_covers_what_it_says() {
-        use AccessMode::*;
-        for tool in [
-            "Bash",
-            "Edit",
-            "mcp__x__y",
-            "WebFetch",
-            "Read",
-            "Whatever",
-            "ExitPlanMode",
-        ] {
-            assert!(allowed_without_asking(FullAccess, tool), "{tool}");
-            assert!(!allowed_without_asking(Supervised, tool), "{tool}");
-        }
-        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
-            assert!(allowed_without_asking(AutoAcceptEdits, tool), "{tool}");
-        }
-        for tool in [
-            "Bash",
-            "mcp__x__y",
-            "WebFetch",
-            "Read",
-            "Whatever",
-            "ExitPlanMode",
-        ] {
-            assert!(!allowed_without_asking(AutoAcceptEdits, tool), "{tool}");
-        }
+    fn only_full_access_is_answered_without_asking_reno() {
+        assert!(answered_here(AccessMode::FullAccess));
+        // Under acceptEdits the CLI accepts the edits it covers itself, so an edit request that
+        // arrives is one it did not cover: it is asked like the rest.
+        assert!(!answered_here(AccessMode::AutoAcceptEdits));
+        assert!(!answered_here(AccessMode::Supervised));
     }
 
     #[test]

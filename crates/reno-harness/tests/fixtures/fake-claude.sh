@@ -401,6 +401,24 @@ case "$first" in
   done
   ;;
 
+*scenario:request-after-cancel*)
+  # A permission request that reaches the driver only after the run was cancelled: whatever
+  # answers it is recorded in $RENO_TEST_RECORD, then the CLI exits.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-late"}'
+  while read -r line; do
+    case "$line" in *'"subtype":"interrupt"'*) break ;; esac
+  done
+  emit '{"type":"control_request","request_id":"cr-late","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+  while read -r line; do
+    case "$line" in
+    *'"request_id":"cr-late"'*)
+      printf '%s\n' "$line" > "$RENO_TEST_RECORD"
+      exit 0
+      ;;
+    esac
+  done
+  ;;
+
 *scenario:crash-mid-turn*)
   # The CLI dies during its turn, before any result.
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-crash"}'

@@ -66,14 +66,16 @@ use crate::{Signal, send_signal};
 use resume::Transcript;
 use wire::{ControlRequestFrame, Frame, control_error_line, control_response_line};
 
-/// The oldest Claude Code CLI this driver is known to work with. The imported code pins no
-/// minimum of its own; this is the oldest version it was live-validated against (the stdio
-/// permission channel and the stream-json frames, 2.1.228, as the fixtures
-/// `live-2.1.228-*.jsonl` were captured).
+/// The oldest Claude Code CLI this driver claims to work with. The imported code pins no
+/// minimum of its own (its only version table is the curated models', whose oldest row is
+/// 2.1.111); this is the oldest version its protocol code was live-validated against: the stdio
+/// permission channel and the stream-json frames, 2.1.228, where the `live-2.1.228-*.jsonl`
+/// fixtures were captured.
 pub const MIN_CLI_VERSION: &str = "2.1.228";
 
-/// The newest CLI the driver's fixtures and fake CLI were checked against: the one installed
-/// where this was written.
+/// The newest CLI version this driver targets: the one installed where the native contract was
+/// written. The driver's fixtures and the fake CLI follow the 2.1.x wire; no live run against
+/// this version has been made, so it is a claim to confirm with the live tests (`--ignored`).
 pub const VERIFIED_CLI_VERSION: &str = "2.1.325";
 
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
@@ -170,18 +172,24 @@ fn too_old_message(version: Option<&str>) -> Option<String> {
 /// mode does not cover is sent to Reno as a `can_use_tool` request. Reno's access mode picks the
 /// CLI's mode and what this driver answers itself:
 ///
-/// | `AccessMode` | `--permission-mode` | Answered here, without asking | Reaches Reno as `NeedsApproval` |
-/// |---|---|---|---|
-/// | `FullAccess` | `default` | every `can_use_tool` request: allowed | nothing |
-/// | `AutoAcceptEdits` | `acceptEdits` | the edit tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`): allowed | everything else the CLI asks about |
-/// | `Supervised` | `default` | nothing | everything the CLI asks about |
+/// | `AccessMode` | `--permission-mode` | The CLI asks about | This driver answers itself | Reaches Reno as `NeedsApproval` |
+/// |---|---|---|---|---|
+/// | `FullAccess` | `default` | what `default` does not allow (commands, network, edits, MCP tools) | every such request: allow | nothing |
+/// | `AutoAcceptEdits` | `acceptEdits` | what `acceptEdits` does not allow: commands, network, MCP tools, and edits it does not cover | nothing | all of it |
+/// | `Supervised` | `default` | what `default` does not allow (commands, network, edits, MCP tools) | nothing | all of it |
 ///
-/// What the CLI itself allows in its mode (reading inside the working directory, for one) never
-/// reaches Reno in any mode. `FullAccess` deliberately does not launch with
-/// `bypassPermissions` or a skip-permissions flag: the CLI refuses those as root outside a
-/// sandbox, so the run stays in `default` and this driver allows each request instead.
-/// `ExitPlanMode` counts as everything else: it is asked in `AutoAcceptEdits` and `Supervised`,
-/// and approving it continues in the mode above. No mode is ever widened mid-run.
+/// What the CLI allows by itself in its mode (reading inside the working directory in every
+/// mode, edits inside it in `acceptEdits`) never reaches Reno, and a request that does reach
+/// Reno is never allowed unseen except under `FullAccess`. In particular an edit request under
+/// `AutoAcceptEdits` is an edit `acceptEdits` did not cover, so it is asked.
+///
+/// `FullAccess` deliberately does not launch with `bypassPermissions` or a skip-permissions
+/// flag: the CLI refuses those as root outside a sandbox, so the run stays in `default` and this
+/// driver allows each request instead (the imported driver did the same for every run the
+/// imported host did not mark `auto_approve`). `ExitPlanMode` is a request like any other:
+/// asked in `AutoAcceptEdits` and `Supervised`, and approving it continues in the permission
+/// mode of the table. A request that arrives after the run was cancelled is denied at once.
+/// No mode is ever widened mid-run.
 ///
 /// [`Self::with_access_modes`] narrows what an instance will honour; `start` refuses any other
 /// mode with [`ExecError::UnsupportedAccess`] before spawning (ARCH-15).
@@ -394,14 +402,13 @@ async fn launch(
     let stdin = stdin.ok_or_else(|| missing("stdin"))?;
     let stdout = stdout.ok_or_else(|| missing("stdout"))?;
     let stderr_tail = crate::StderrTail::default();
-    if let Some(stderr) = stderr {
-        tracker.spawn(read_stderr(stderr, stderr_tail.clone()));
-    }
+    let stderr_task = stderr.map(|stderr| tracker.spawn(read_stderr(stderr, stderr_tail.clone())));
     Ok(Runtime {
         child,
         stdout_lines: crate::lossy_lines::lossy_lines(stdout),
         stdin: Stdin::new(tracker, stdin, spec.resume.is_some()),
         stderr_tail,
+        stderr_task,
     })
 }
 
@@ -532,6 +539,7 @@ impl Executor for ClaudeExecutor {
             stdout_lines,
             mut stdin,
             stderr_tail,
+            stderr_task,
         } = match launch(&self.tracker, &exe, &spec, &processes).await {
             Ok(runtime) => runtime,
             // Any failure to launch is a failed run, not an ineligible executor.
@@ -573,6 +581,7 @@ impl Executor for ClaudeExecutor {
             kill_grace: self.kill_grace,
             lock_dir,
             stderr_tail,
+            stderr_task,
             tracker: self.tracker.clone(),
         }));
 
@@ -605,19 +614,26 @@ struct Runtime {
     stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     stdin: Stdin,
     stderr_tail: crate::StderrTail,
+    /// Ends when the pipe closes, which a grandchild that escaped teardown can hold open
+    /// forever: the run aborts it, so `shutdown` is bounded.
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The run's stdin, through its writer task. Until the CLI reports its session, a resuming run
 /// keeps a copy of everything it wrote: when the session cannot be restored, the fresh process
 /// is told the same things.
 struct Stdin {
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::Sender<String>,
     replay: Option<Vec<String>>,
 }
 
+/// Lines queued for the CLI's stdin (ARCH-11). The CLI reads each at once; a queue this deep
+/// means it is wedged, and the run ends rather than growing without bound.
+const STDIN_CAPACITY: usize = 1024;
+
 impl Stdin {
     fn new(tracker: &TaskTracker, stdin: ChildStdin, keep_for_replay: bool) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(STDIN_CAPACITY);
         tracker.spawn(stdin_writer(stdin, rx));
         Self {
             tx,
@@ -625,18 +641,26 @@ impl Stdin {
         }
     }
 
-    /// Write one line. False once the writer is gone (the child died).
+    /// Queue one line. False once the writer is gone (the child died) or the CLI has stopped
+    /// reading.
     fn line(&mut self, line: String) -> bool {
         if let Some(replay) = &mut self.replay {
             replay.push(line.clone());
         }
-        self.tx.send(line).is_ok()
+        match self.tx.try_send(line) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(target: "reno_harness::claude", "the CLI's stdin queue is full; the CLI is not reading");
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
 }
 
 /// Owns the child's stdin; a write failure (EPIPE after the child died) is tolerated and
 /// logged. The pipe closes when the run drops its [`Stdin`], after the child was torn down.
-async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
+async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>) {
     while let Some(line) = rx.recv().await {
         let write = async {
             stdin.write_all(line.as_bytes()).await?;
@@ -673,6 +697,7 @@ struct Session {
     lock_dir: PathBuf,
     /// Rolling stderr tail for the crash message on an unexpected exit.
     stderr_tail: crate::StderrTail,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
     tracker: TaskTracker,
 }
 
@@ -718,6 +743,7 @@ fn deny_all(requests: &mut Requests, stdin: &mut Stdin) {
 async fn serve_control_request(
     frame: ControlRequestFrame,
     access: AccessMode,
+    cancelled: bool,
     requests: &mut Requests,
     stdin: &mut Stdin,
     event_tx: &mpsc::Sender<ExecEvent>,
@@ -738,6 +764,16 @@ async fn serve_control_request(
         ));
         return true;
     }
+    // The run is being cancelled: nothing new is allowed, and nobody is left to ask.
+    if cancelled {
+        let message = if request.tool_name == permission::ASK_USER_QUESTION {
+            permission::QUESTIONS_DISMISSED
+        } else {
+            permission::DENIED
+        };
+        respond(stdin, &request_id, permission::deny(message));
+        return true;
+    }
     let tool = request.tool_name;
     let input = request.input;
     if tool == permission::ASK_USER_QUESTION {
@@ -753,7 +789,7 @@ async fn serve_control_request(
         }
         let questions = asked.iter().map(|a| a.question.clone()).collect();
         let replaced = requests.open_input(request_id.clone(), InputPayload { input, asked });
-        refuse_replaced(replaced, &request_id, stdin);
+        note_superseded(replaced, &request_id);
         return event_tx
             .send(ExecEvent::NeedsInput {
                 request_id,
@@ -765,13 +801,13 @@ async fn serve_control_request(
     let exit_plan = tool == permission::EXIT_PLAN_MODE;
     // Approving the plan leaves plan mode for the run's access mode, not the CLI's `default`.
     let after_plan = exit_plan.then(|| permission::permission_mode(access));
-    if permission::allowed_without_asking(access, &tool) {
+    if permission::answered_here(access) {
         respond(stdin, &request_id, permission::allow(input, after_plan));
         return true;
     }
     let subject = permission::subject(&tool, &input, &raw);
     let replaced = requests.open_approval(request_id.clone(), ApprovalPayload { input, exit_plan });
-    refuse_replaced(replaced, &request_id, stdin);
+    note_superseded(replaced, &request_id);
     event_tx
         .send(ExecEvent::NeedsApproval {
             request_id,
@@ -781,19 +817,19 @@ async fn serve_control_request(
         .is_ok()
 }
 
-/// A request id the CLI reused while its first request was still open: the older one is refused.
-fn refuse_replaced(
+/// A request id the CLI reused while its first request was still open: the new request
+/// supersedes the old one, which the CLI can no longer be waiting on under that id. Denying it
+/// would be read as the answer to the new request.
+fn note_superseded(
     replaced: Option<crate::exec::Open<ApprovalPayload, InputPayload>>,
     request_id: &str,
-    stdin: &mut Stdin,
 ) {
     if replaced.is_some() {
         tracing::warn!(
             target: "reno_harness::claude",
             request_id,
-            "the CLI reused the id of a request still open; the earlier one is refused"
+            "the CLI reused the id of a request still open; the earlier one is dropped"
         );
-        respond(stdin, request_id, permission::deny(permission::DENIED));
     }
 }
 
@@ -865,6 +901,7 @@ async fn run_session(session: Session) {
         kill_grace,
         lock_dir,
         mut stderr_tail,
+        mut stderr_task,
         tracker,
     } = session;
 
@@ -915,6 +952,9 @@ async fn run_session(session: Session) {
                     stdout_lines = runtime.stdout_lines;
                     stdin = runtime.stdin;
                     stderr_tail = runtime.stderr_tail;
+                    if let Some(old) = std::mem::replace(&mut stderr_task, runtime.stderr_task) {
+                        old.abort();
+                    }
                 }
                 Err(error) => {
                     let diagnostic = crate::redact_secrets(&error.to_string());
@@ -984,7 +1024,7 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     if let Frame::ControlRequest(request) = frame {
-                        if !serve_control_request(request, access, &mut requests, &mut stdin, &event_tx).await {
+                        if !serve_control_request(request, access, interrupted, &mut requests, &mut stdin, &event_tx).await {
                             break 'main; // consumer gone: reap below
                         }
                         continue;
@@ -1222,6 +1262,9 @@ async fn run_session(session: Session) {
     }
     child.shutdown_with(torn_down, kill_grace).await;
     if let Some(handle) = escalation {
+        handle.abort();
+    }
+    if let Some(handle) = stderr_task {
         handle.abort();
     }
 }
