@@ -12,6 +12,10 @@
 # What happens when no rule matches.
 default = "ask"
 
+# How long an action that asks waits for a human before it is denied as expired. Without this
+# line the daemon's own limit applies (30 minutes).
+# approval_ttl = "30m"
+
 # Dangerous actions are refused first, so no later rule can allow them.
 [[rules]]
 note = "recursive force delete"

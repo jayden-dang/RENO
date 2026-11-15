@@ -94,6 +94,11 @@ async fn approvals_need_the_negotiated_feature() {
         client.list_approvals().await,
         Err(ClientError::Protocol(_))
     ));
+    assert!(!client.supports(reno_proto::FEATURE_APPROVAL_HISTORY));
+    assert!(matches!(
+        client.approval_history(None, None).await,
+        Err(ClientError::Protocol(_))
+    ));
     cancel.cancel();
 }
 
