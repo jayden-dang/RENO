@@ -262,6 +262,6 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
     }
 }

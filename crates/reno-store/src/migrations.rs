@@ -1,7 +1,8 @@
 //! Schema migrations (`user_version` based, via `rusqlite_migration`).
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
-//! process start time to `runs`; migration 5 adds the durable approval records. Status columns carry
+//! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
+//! the scheduler's trigger state and firings. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -157,9 +158,69 @@ CREATE TRIGGER approvals_are_kept BEFORE DELETE ON approvals
 BEGIN SELECT RAISE(ABORT, 'an approval record is never deleted'); END;
 ";
 
+/// Migration 6 (T1.8, triggers): the scheduler's state and the record of what each occurrence
+/// became.
+///
+/// `triggers` holds one row per trigger in force: the definition version it was planned against,
+/// the `when` it was planned for (a changed `when` is a new plan; an unchanged one keeps its
+/// due time across a restart), when it is next due, when it last fired, the run it last started
+/// and its backoff. A row is replaced on a new plan and deleted when the trigger leaves the
+/// definitions.
+///
+/// `firings` has one row per occurrence that was acted on, under a unique `nonce`
+/// (`<kind>:<trigger>:<scheduled_at>`), so firing the same occurrence twice is refused by the
+/// database, not by a check that could race. A refused duplicate leaves no row. `run_id` is the
+/// run the occurrence started, or for `coalesced` the run it was merged into. A row is never
+/// deleted, and its only change is `fired` to `backed_off`, when the run it started could not
+/// start for an account-level reason.
+const V6: &str = "
+CREATE TABLE triggers (
+    name          TEXT PRIMARY KEY,
+    def_version   INTEGER NOT NULL CHECK (def_version >= 1),
+    schedule      TEXT NOT NULL CHECK (json_valid(schedule)),
+    enabled       INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    next_due_at   INTEGER,
+    last_fired_at INTEGER,
+    last_run_id   TEXT REFERENCES runs (id),
+    failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+    backoff_until INTEGER,
+    CHECK ((failures = 0) = (backoff_until IS NULL))
+) WITHOUT ROWID;
+
+CREATE TABLE firings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    nonce        TEXT NOT NULL UNIQUE,
+    trigger_name TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,
+    fired_at     INTEGER NOT NULL,
+    run_id       TEXT NOT NULL REFERENCES runs (id),
+    outcome      TEXT NOT NULL CHECK (outcome IN ('fired', 'coalesced', 'backed_off')),
+    missed       INTEGER NOT NULL DEFAULT 1 CHECK (missed >= 1)
+);
+CREATE INDEX firings_trigger ON firings (trigger_name, id);
+CREATE INDEX firings_run ON firings (run_id);
+
+CREATE TRIGGER firings_only_back_off BEFORE UPDATE ON firings
+WHEN NOT (OLD.outcome = 'fired' AND NEW.outcome = 'backed_off'
+    AND NEW.id = OLD.id AND NEW.nonce = OLD.nonce AND NEW.trigger_name = OLD.trigger_name
+    AND NEW.scheduled_at = OLD.scheduled_at AND NEW.fired_at = OLD.fired_at
+    AND NEW.run_id = OLD.run_id AND NEW.missed = OLD.missed)
+BEGIN SELECT RAISE(ABORT, 'a firing changes only from fired to backed_off'); END;
+
+CREATE TRIGGER firings_are_kept BEFORE DELETE ON firings
+BEGIN SELECT RAISE(ABORT, 'a firing record is never deleted'); END;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3), M::up(V4), M::up(V5)])
+    Migrations::new(vec![
+        M::up(V1),
+        M::up(V2),
+        M::up(V3),
+        M::up(V4),
+        M::up(V5),
+        M::up(V6),
+    ])
 }
 
 /// Brings `conn` to the latest schema. A second call is a no-op.
@@ -207,7 +268,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -294,5 +355,33 @@ mod tests {
             .unwrap();
         assert_eq!(kept, 1);
         assert!(conn.execute("DELETE FROM definitions", []).is_err());
+    }
+
+    /// Upgrading a database written before triggers were scheduled (schema 5): its runs keep their
+    /// rows, and the new tables start empty and work.
+    #[test]
+    fn upgrade_from_a_version_five_database_adds_empty_trigger_tables() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 5).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);",
+        )
+        .unwrap();
+        assert!(
+            conn.prepare("SELECT 1 FROM firings").is_err(),
+            "schema 5 has no firings table"
+        );
+        run(&mut conn).unwrap();
+        let (runs, triggers, firings): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM triggers),
+                        (SELECT count(*) FROM firings)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((runs, triggers, firings), (1, 0, 0));
     }
 }
