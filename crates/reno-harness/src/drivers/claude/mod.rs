@@ -456,9 +456,9 @@ impl Executor for ClaudeExecutor {
                 structured_output: false,
                 // Done is the CLI's own terminal `result` frame.
                 deterministic_turn_end: true,
-                // The CLI has a plan mode and the driver answers its ExitPlanMode; `ExecSpec`
-                // cannot ask for it yet.
-                plan_mode: true,
+                // The CLI has a plan mode and the driver answers its ExitPlanMode, but `ExecSpec`
+                // cannot request it yet; never declare a capability a caller cannot use (ARCH-15).
+                plan_mode: false,
                 models,
             },
         }

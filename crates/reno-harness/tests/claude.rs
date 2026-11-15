@@ -1274,7 +1274,8 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
     assert!(caps.mcp_injection);
     assert!(!caps.structured_output);
     assert!(caps.deterministic_turn_end);
-    assert!(caps.plan_mode);
+    // Not requestable through `ExecSpec` yet, so not declared (ARCH-15).
+    assert!(!caps.plan_mode);
     assert!(!caps.models.is_empty());
     assert!(caps.models.iter().all(|m| !m.id.is_empty()));
 }
