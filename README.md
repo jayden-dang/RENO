@@ -84,8 +84,7 @@ There is nothing to install yet.
 
 ## Requirements
 
-- macOS on Apple silicon. Linux and Windows are planned later, with a frosted-glass look in
-  place of macOS vibrancy.
+- macOS on Apple silicon. Linux and Windows are planned later, with the same look.
 - At least one harness CLI installed and signed in.
 
 ## Privacy
