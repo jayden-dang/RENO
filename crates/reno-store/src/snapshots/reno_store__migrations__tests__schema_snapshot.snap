@@ -173,4 +173,25 @@ CREATE TABLE triggers (
     failures      INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
     backoff_until INTEGER,
     CHECK ((failures = 0) = (backoff_until IS NULL))
-) WITHOUT ROWID
+) WITHOUT ROWID;
+
+CREATE TABLE workspaces (
+    run_id     TEXT PRIMARY KEY REFERENCES runs (id),
+    repo       TEXT NOT NULL,
+    repo_key   TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    subdir     TEXT NOT NULL DEFAULT '',
+    branch     TEXT NOT NULL,
+    base_sha   TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('preparing', 'active', 'kept', 'removed', 'lost')),
+    commits    INTEGER CHECK (commits IS NULL OR commits >= 0),
+    dirty      INTEGER CHECK (dirty IS NULL OR dirty IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK ((commits IS NULL) = (dirty IS NULL))
+);
+
+CREATE UNIQUE INDEX workspaces_live_path ON workspaces (path)
+    WHERE status IN ('preparing', 'active', 'kept');
+
+CREATE INDEX workspaces_open ON workspaces (status) WHERE status IN ('preparing', 'active', 'kept')

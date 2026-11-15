@@ -423,6 +423,7 @@ impl Supervisor {
                 .await
             {
                 Ok(_) => {
+                    crate::workspaces::release_after_run(&self.shared, &self.run).await;
                     // What the run still had open is closed before its `Done`, which stays last.
                     self.close_approvals().await;
                     self.publish(&ExecEvent::Done {

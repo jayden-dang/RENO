@@ -8,9 +8,9 @@ use std::io::{self, Write};
 
 use reno_proto::defs::format_instant;
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalRecord, DaemonStatusInfo, ExecEvent, FiringOutcome,
-    ResolvedBy, RunEventItem, RunStatus, RunSummary, StopReason, TriggerFireResult, TriggerInfo,
-    TriggerStatus,
+    Approval, ApprovalOutcome, ApprovalRecord, CleanItem, CleanOutcome, DaemonStatusInfo,
+    ExecEvent, FiringOutcome, ResolvedBy, RunEventItem, RunStatus, RunSummary, StopReason,
+    TriggerFireResult, TriggerInfo, TriggerStatus, WorkspaceInfo,
 };
 use serde::Serialize;
 
@@ -234,6 +234,63 @@ pub(crate) fn approval_line(approval: &Approval) -> String {
         "{}  run {}  {:<8}  by nobody yet  {} {what}",
         approval.id, approval.run_id, "pending", subject.tool
     )
+}
+
+/// One workspace on one line: run, status, branch, what it holds and where it is.
+pub(crate) fn workspace_line(workspace: &WorkspaceInfo) -> String {
+    let mut line = format!(
+        "{} {:<9} {}",
+        workspace.run_id,
+        wire_name(&workspace.status),
+        workspace.branch
+    );
+    if let Some(changes) = workspace.changes {
+        line.push_str(&format!("  {} commit(s)", changes.commits));
+        if changes.dirty {
+            line.push_str(", uncommitted changes");
+        }
+    }
+    line.push_str(&format!("  {}", workspace.path.display()));
+    line
+}
+
+/// Every field of a workspace, one per line.
+pub(crate) fn workspace_detail(workspace: &WorkspaceInfo) -> Vec<String> {
+    let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
+    let mut lines = vec![
+        format!("run        {}", workspace.run_id),
+        format!("status     {}", wire_name(&workspace.status)),
+        format!("repository {}", workspace.repo.display()),
+        format!("worktree   {}", workspace.path.display()),
+        format!("branch     {}", workspace.branch),
+        format!("base       {}", workspace.base_sha),
+    ];
+    if !workspace.subdir.is_empty() {
+        lines.push(format!("subdir     {}", workspace.subdir));
+    }
+    if let Some(changes) = workspace.changes {
+        lines.push(format!(
+            "holds      {} commit(s){}",
+            changes.commits,
+            if changes.dirty {
+                ", uncommitted changes"
+            } else {
+                ""
+            }
+        ));
+    }
+    lines.push(format!("created    {}", at(workspace.created_at_ms)));
+    lines.push(format!("updated    {}", at(workspace.updated_at_ms)));
+    lines
+}
+
+/// What `reno workspace clean` says about one workspace.
+pub(crate) fn clean_line(item: &CleanItem) -> String {
+    match (item.outcome, &item.reason) {
+        (CleanOutcome::Removed, _) => format!("{} removed", item.run_id),
+        (CleanOutcome::Kept, Some(why)) => format!("{} kept: {why}", item.run_id),
+        (CleanOutcome::Kept, None) => format!("{} kept", item.run_id),
+    }
 }
 
 /// One trigger on one line: name, kind, status, then what is known of its timing.

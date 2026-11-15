@@ -81,7 +81,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
+      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
       "properties": {
         "access": {
           "$ref": "#/$defs/AccessMode",
@@ -102,6 +102,10 @@ expression: protocol_schema()
             "$ref": "#/$defs/ExecutorId"
           },
           "type": "array"
+        },
+        "in_place_writes": {
+          "description": "Let this bot's write runs work directly in the directory they target when it is not a git\nrepository. Off by default: a write run on a non-git directory is refused, because there\nis no worktree to isolate it in. A git repository is never written in place.",
+          "type": "boolean"
         },
         "instructions": {
           "description": "What the bot is for and how it works. Sent with every run.",
@@ -604,7 +608,8 @@ expression: protocol_schema()
     "run.steer",
     "daemon.shutdown",
     "defs",
-    "triggers"
+    "triggers",
+    "workspaces"
   ],
   "methods": [
     {
@@ -2645,6 +2650,501 @@ expression: protocol_schema()
           "scheduledAtMs"
         ],
         "title": "TriggerFireResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "workspace.list",
+      "params": {
+        "$defs": {
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its run has not ended (or may be resumed).",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `workspace.list`.",
+        "properties": {
+          "status": {
+            "description": "Only workspaces in one of these statuses; every workspace when absent.",
+            "items": {
+              "$ref": "#/$defs/WorkspaceStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "WorkspaceListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "WorkspaceChanges": {
+            "description": "What a workspace holds beyond its base commit.",
+            "properties": {
+              "commits": {
+                "description": "Commits on the branch that its base commit does not have.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "dirty": {
+                "description": "Whether the worktree has uncommitted changes or untracked files.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "commits",
+              "dirty"
+            ],
+            "type": "object"
+          },
+          "WorkspaceInfo": {
+            "description": "One run's workspace.",
+            "properties": {
+              "baseSha": {
+                "description": "The commit the branch was cut from.",
+                "type": "string"
+              },
+              "branch": {
+                "description": "The branch, `reno/<run id>`.",
+                "type": "string"
+              },
+              "changes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceChanges"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "What it held when its run last ended."
+              },
+              "createdAtMs": {
+                "description": "When it was recorded.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "description": "The worktree's root.",
+                "type": "string"
+              },
+              "repo": {
+                "description": "The repository's working tree root the task targeted.",
+                "type": "string"
+              },
+              "repoKey": {
+                "description": "The stable, collision-free key of the repository in the worktrees directory.",
+                "type": "string"
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run it belongs to."
+              },
+              "status": {
+                "$ref": "#/$defs/WorkspaceStatus",
+                "description": "Where it stands."
+              },
+              "subdir": {
+                "description": "The directory inside the repository the task targeted, relative to its root; empty for the\nroot. The run's working directory is `path` joined with it.",
+                "type": "string"
+              },
+              "updatedAtMs": {
+                "description": "When it last changed.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "runId",
+              "repo",
+              "repoKey",
+              "path",
+              "branch",
+              "baseSha",
+              "status",
+              "createdAtMs",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          },
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its run has not ended (or may be resumed).",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `workspace.list`.",
+        "properties": {
+          "workspaces": {
+            "description": "The workspaces, newest first.",
+            "items": {
+              "$ref": "#/$defs/WorkspaceInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "workspaces"
+        ],
+        "title": "WorkspaceListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "workspace.get",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `workspace.get`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose workspace to return."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "WorkspaceGetParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "WorkspaceChanges": {
+            "description": "What a workspace holds beyond its base commit.",
+            "properties": {
+              "commits": {
+                "description": "Commits on the branch that its base commit does not have.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "dirty": {
+                "description": "Whether the worktree has uncommitted changes or untracked files.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "commits",
+              "dirty"
+            ],
+            "type": "object"
+          },
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its run has not ended (or may be resumed).",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One run's workspace.",
+        "properties": {
+          "baseSha": {
+            "description": "The commit the branch was cut from.",
+            "type": "string"
+          },
+          "branch": {
+            "description": "The branch, `reno/<run id>`.",
+            "type": "string"
+          },
+          "changes": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkspaceChanges"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What it held when its run last ended."
+          },
+          "createdAtMs": {
+            "description": "When it was recorded.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "The worktree's root.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The repository's working tree root the task targeted.",
+            "type": "string"
+          },
+          "repoKey": {
+            "description": "The stable, collision-free key of the repository in the worktrees directory.",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run it belongs to."
+          },
+          "status": {
+            "$ref": "#/$defs/WorkspaceStatus",
+            "description": "Where it stands."
+          },
+          "subdir": {
+            "description": "The directory inside the repository the task targeted, relative to its root; empty for the\nroot. The run's working directory is `path` joined with it.",
+            "type": "string"
+          },
+          "updatedAtMs": {
+            "description": "When it last changed.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runId",
+          "repo",
+          "repoKey",
+          "path",
+          "branch",
+          "baseSha",
+          "status",
+          "createdAtMs",
+          "updatedAtMs"
+        ],
+        "title": "WorkspaceInfo",
+        "type": "object"
+      }
+    },
+    {
+      "name": "workspace.clean",
+      "params": {
+        "$defs": {
+          "CleanTarget": {
+            "description": "Which workspaces `workspace.clean` looks at.",
+            "oneOf": [
+              {
+                "description": "One run's workspace.",
+                "properties": {
+                  "runId": {
+                    "$ref": "#/$defs/RunId",
+                    "description": "The run."
+                  },
+                  "type": {
+                    "const": "run",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "runId"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Workspaces whose branch is merged into their repository's current `HEAD`.",
+                "properties": {
+                  "type": {
+                    "const": "merged",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Workspaces with no commits and no uncommitted changes.",
+                "properties": {
+                  "type": {
+                    "const": "all_clean",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `workspace.clean`.",
+        "properties": {
+          "force": {
+            "default": false,
+            "description": "Remove a workspace even when it holds unmerged commits or uncommitted changes, deleting\nits branch. The only way to lose work.",
+            "type": "boolean"
+          },
+          "target": {
+            "$ref": "#/$defs/CleanTarget",
+            "description": "What to clean."
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "WorkspaceCleanParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "CleanItem": {
+            "description": "One workspace `workspace.clean` looked at.",
+            "properties": {
+              "outcome": {
+                "$ref": "#/$defs/CleanOutcome",
+                "description": "What was done."
+              },
+              "reason": {
+                "description": "Why it was kept, in words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              }
+            },
+            "required": [
+              "runId",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          "CleanOutcome": {
+            "description": "What `workspace.clean` did with one workspace.",
+            "oneOf": [
+              {
+                "const": "removed",
+                "description": "The worktree and the branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Left as it was: see `reason`.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `workspace.clean`.",
+        "properties": {
+          "items": {
+            "description": "Each workspace looked at.",
+            "items": {
+              "$ref": "#/$defs/CleanItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "WorkspaceCleanResult",
         "type": "object"
       }
     }

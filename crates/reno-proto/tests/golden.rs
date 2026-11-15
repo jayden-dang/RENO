@@ -280,7 +280,7 @@ fn daemon_hello() {
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
-                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers"],
+                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces"],
                "pid": 4242}),
     );
 }
@@ -863,4 +863,70 @@ fn trigger_state_on_the_wire() {
     ] {
         golden(&status, json!(wire));
     }
+}
+
+#[test]
+fn workspace_types_on_the_wire() {
+    use reno_proto::{
+        CleanItem, CleanOutcome, CleanTarget, WorkspaceChanges, WorkspaceCleanParams,
+        WorkspaceInfo, WorkspaceStatus,
+    };
+    let info = WorkspaceInfo {
+        run_id: run_id(),
+        repo: "/r".into(),
+        repo_key: "r-0123456789ab".into(),
+        path: "/d/worktrees/r-0123456789ab/run_a".into(),
+        subdir: "crates/x".into(),
+        branch: "reno/run_a".into(),
+        base_sha: "abc".into(),
+        status: WorkspaceStatus::Kept,
+        changes: Some(WorkspaceChanges {
+            commits: 2,
+            dirty: true,
+        }),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+    };
+    golden(
+        &info,
+        json!({
+            "runId": run_id(),
+            "repo": "/r",
+            "repoKey": "r-0123456789ab",
+            "path": "/d/worktrees/r-0123456789ab/run_a",
+            "subdir": "crates/x",
+            "branch": "reno/run_a",
+            "baseSha": "abc",
+            "status": "kept",
+            "changes": {"commits": 2, "dirty": true},
+            "createdAtMs": 1,
+            "updatedAtMs": 2,
+        }),
+    );
+    assert_eq!(
+        info.cwd(),
+        std::path::PathBuf::from("/d/worktrees/r-0123456789ab/run_a/crates/x")
+    );
+    golden(
+        &WorkspaceCleanParams {
+            target: CleanTarget::Merged,
+            force: false,
+        },
+        json!({"target": {"type": "merged"}, "force": false}),
+    );
+    golden(
+        &WorkspaceCleanParams {
+            target: CleanTarget::Run { run_id: run_id() },
+            force: true,
+        },
+        json!({"target": {"type": "run", "runId": run_id()}, "force": true}),
+    );
+    golden(
+        &CleanItem {
+            run_id: run_id(),
+            outcome: CleanOutcome::Kept,
+            reason: Some("unmerged commits".into()),
+        },
+        json!({"runId": run_id(), "outcome": "kept", "reason": "unmerged commits"}),
+    );
 }

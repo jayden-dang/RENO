@@ -20,6 +20,7 @@ answers, `reno daemon stop` stops it.
 | `reno.db`, `journals/` | the store |
 | `logs/renod.<date>.log` | JSON lines, written through a non-blocking appender |
 | `workspace/` | where a task that names no working directory runs |
+| `worktrees/` | git worktrees of write runs: `<repo key>/<run id>/` on the branch `reno/<run id>`; the repo key is `<name>-<12 hex of the SHA-256 of the repository's canonical git dir>` |
 | `~/.reno/` | the definitions, not part of the data directory (see below) |
 
 `RENO_DATA_DIR` and `RENO_SOCKET` are read by `renod`, `reno` and the app alike, for tests and

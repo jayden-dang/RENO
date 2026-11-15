@@ -26,6 +26,7 @@ use crate::error::{KernelError, Result};
 use crate::ids::IdMint;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
+use crate::workspace::Workspace;
 
 /// Commands a run supervisor accepts. Bounded (`COMMAND_QUEUE`); the sender waits for room, and
 /// the supervisor never sends to its callers, so the queue cannot form a cycle (ARCH-11).
@@ -124,6 +125,8 @@ pub(crate) struct Shared {
     /// What validation may assume about the world: the executors a bot may name.
     pub(crate) defs_ctx: ValidationContext,
     pub(crate) mint: IdMint,
+    /// Where write runs work; `None` runs everything in place.
+    pub(crate) workspace: Option<Arc<dyn Workspace>>,
     /// The scheduler's inbox. Senders wait when it is full; the scheduler never waits on them.
     pub(crate) sched_tx: mpsc::Sender<SchedCmd>,
     sched_rx: Mutex<Option<mpsc::Receiver<SchedCmd>>>,
@@ -146,6 +149,7 @@ impl Shared {
         executors: ExecutorRegistry,
         mut config: KernelConfig,
         defs_ctx: ValidationContext,
+        workspace: Option<Arc<dyn Workspace>>,
     ) -> Self {
         config.max_concurrent = config.max_concurrent.max(1);
         config.subscriber_queue = config.subscriber_queue.max(1);
@@ -166,6 +170,7 @@ impl Shared {
             defs_tx: watch::channel(Arc::default()).0,
             defs_ctx,
             mint: IdMint::default(),
+            workspace,
             sched_tx,
             sched_rx: Mutex::new(Some(sched_rx)),
             triggers_tx: watch::channel(Arc::default()).0,

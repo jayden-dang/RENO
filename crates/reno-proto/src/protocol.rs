@@ -27,6 +27,10 @@ use crate::run::{RunStatus, StopReason};
 use crate::triggers::{
     TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
 };
+use crate::workspace::{
+    WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGetParams, WorkspaceInfo,
+    WorkspaceListParams, WorkspaceListResult,
+};
 
 /// The wire protocol version. Bumped only for a breaking change.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -59,6 +63,9 @@ pub const FEATURE_DEFS: &str = "defs";
 /// Feature: `trigger.list`, `trigger.fire` and the `triggers.watch` subscription exist.
 pub const FEATURE_TRIGGERS: &str = "triggers";
 
+/// Feature: `workspace.list`, `workspace.get` and `workspace.clean` exist.
+pub const FEATURE_WORKSPACES: &str = "workspaces";
+
 /// Feature: `approval.history` exists, and journals may carry `ExecEvent::ApprovalResolved`.
 pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
 
@@ -78,6 +85,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_DAEMON_SHUTDOWN,
     FEATURE_DEFS,
     FEATURE_TRIGGERS,
+    FEATURE_WORKSPACES,
 ];
 
 /// A request with a single reply.
@@ -551,6 +559,19 @@ method!(
     TriggerFire, "trigger.fire", TriggerFireParams => TriggerFireResult
 );
 method!(
+    /// `workspace.list`: the worktrees write runs work in. Needs feature `workspaces`.
+    WorkspaceList, "workspace.list", WorkspaceListParams => WorkspaceListResult
+);
+method!(
+    /// `workspace.get`: one run's workspace. Needs feature `workspaces`.
+    WorkspaceGet, "workspace.get", WorkspaceGetParams => WorkspaceInfo
+);
+method!(
+    /// `workspace.clean`: removes workspaces that hold nothing to lose (or, with `force`, any).
+    /// Needs feature `workspaces`.
+    WorkspaceClean, "workspace.clean", WorkspaceCleanParams => WorkspaceCleanResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -648,6 +669,9 @@ pub fn protocol_schema() -> Value {
             method_entry::<DefValidate>(),
             method_entry::<TriggerList>(),
             method_entry::<TriggerFire>(),
+            method_entry::<WorkspaceList>(),
+            method_entry::<WorkspaceGet>(),
+            method_entry::<WorkspaceClean>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),

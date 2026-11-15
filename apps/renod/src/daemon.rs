@@ -4,7 +4,8 @@
 //!
 //! 1. the data directory is made private (0700);
 //! 2. the data-directory lock is taken, before anything else is opened;
-//! 3. the executors are looked up, the store is opened, the definitions directory is created on
+//! 3. the worktrees directory is made (with the data directory's privacy);
+//!    the executors are looked up, the store is opened, the definitions directory is created on
 //!    first start, and the kernel starts: it recovers the last run's leftovers, then loads the
 //!    definitions;
 //! 4. the socket is bound and the server starts answering.
@@ -45,6 +46,7 @@ use crate::fswatch::FsWatch;
 use crate::handlers::{self, Ctx};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
+use crate::worktrees::GitWorkspace;
 
 /// How long connections get, after the kernel has stopped, to finish what they are owed before
 /// they are cancelled.
@@ -172,7 +174,7 @@ impl Daemon {
             git_init,
         } = config;
 
-        for dir in [paths.data_dir.clone(), paths.workspace()] {
+        for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
             ensure_private_dir(&dir).map_err(|source| DaemonError::Dir { path: dir, source })?;
         }
         let lock = DataDirLock::acquire(&paths.lock())?;
@@ -209,15 +211,25 @@ impl Daemon {
             Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
 
         kernel.owner = format!("renod-{}", std::process::id());
-        kernel.trigger_cwd = paths.workspace();
+        // Resolved once, so that it is comparable with the resolved working directories that
+        // `task.run` hands the kernel (a symlinked data directory must still count as scratch).
+        let scratch = tokio::fs::canonicalize(paths.workspace())
+            .await
+            .map_err(|source| DaemonError::Dir {
+                path: paths.workspace(),
+                source,
+            })?;
+        kernel.trigger_cwd.clone_from(&scratch);
+        kernel.scratch_root = Some(scratch.clone());
         let fs_watch = Arc::new(FsWatch::new());
         let setup = DefsSetup::new(fs_defs.clone(), context).with_watch(fs_watch.clone());
-        let kernel = match Kernel::start_with_definitions(
+        let kernel = match Kernel::start_with(
             kernel,
             store,
             registry,
             Arc::new(SystemClock),
-            setup,
+            Some(setup),
+            Some(Arc::new(GitWorkspace::new(paths.worktrees()))),
         )
         .await
         {
@@ -233,7 +245,7 @@ impl Daemon {
             kernel: kernel.clone(),
             started: Instant::now(),
             executors: ids,
-            default_cwd: paths.workspace(),
+            default_cwd: scratch,
             stop: stop.clone(),
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));

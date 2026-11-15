@@ -18,6 +18,8 @@
 //! - `scheduler`, `schedule`: the trigger scheduler actor (timers are deadlines, definitions
 //!   changes re-plan, firings are deduplicated by nonce) and its pure arithmetic.
 //! - `watch`: the `Watch` port `fs` triggers use.
+//! - `workspace`, `workspaces`: the `Workspace` port (git worktrees for write runs), its fake, and
+//!   what the kernel does with it: placement, release at a run's end, clean, start-up sweep.
 //! - `supervisor`: one task per live run; owns its stream, journal, subscribers and heartbeat.
 //! - `events`: `run_events`, journal replay joined to the live tail.
 //! - `recovery`: what start-up repairs.
@@ -68,6 +70,8 @@ mod scheduler;
 mod shared;
 mod supervisor;
 mod watch;
+mod workspace;
+mod workspaces;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::KernelConfig;
@@ -76,6 +80,10 @@ pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport};
 pub use registry::ExecutorRegistry;
 pub use watch::{Watch, WatchSpec, WatchStream};
+pub use workspace::{
+    FAKE_WORKTREES, FakeWorkspace, InPlace, Inspection, Placement, ReleasePolicy, Released,
+    Workspace, WorkspaceError,
+};
 
 #[cfg(test)]
 mod tests;
