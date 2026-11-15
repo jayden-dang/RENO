@@ -1,0 +1,66 @@
+//! Kernel tunables. Every default is a number from ARCHITECTURE 4.1 and 17.2.
+
+use std::time::Duration;
+
+use reno_proto::{AccessMode, SandboxLevel};
+
+/// How the kernel runs. `Default` is what the daemon uses.
+#[derive(Debug, Clone)]
+pub struct KernelConfig {
+    /// Runs the dispatcher keeps live at once. At least 1.
+    pub max_concurrent: usize,
+    /// The name this kernel claims runs under (`runs.lease_owner`).
+    pub owner: String,
+    /// How long a claim holds a run. A live run is heartbeated every third of it (20 s of 60 s).
+    pub lease: Duration,
+    /// How long a cancelled run's executor has to end its stream before the supervisor drops the
+    /// stream and ends the run itself, `interrupted`.
+    pub cancel_grace: Duration,
+    /// How long `shutdown` waits for runs to end before it drops them where they stand.
+    pub shutdown_deadline: Duration,
+    /// How long the start-up orphan sweep waits after SIGTERM before SIGKILL.
+    pub sweep_grace: Duration,
+    /// How long the dispatcher waits before it retries after the store failed it. A deadline that
+    /// exists only while the store is failing.
+    pub store_retry: Duration,
+    /// Events one `run_events` subscriber may have queued; past that it gets a gap error
+    /// (ARCH-12). At least 1.
+    pub subscriber_queue: usize,
+    /// Runs `watch_runs` carries, newest first.
+    pub watch_limit: u32,
+    /// The access mode every run asks its executor for. Phase 0 has no per-run policy, so the
+    /// strictest mode is the default (ARCH-15: an executor that cannot honour it is refused).
+    pub access: AccessMode,
+    /// The sandbox every run asks for.
+    pub sandbox: SandboxLevel,
+}
+
+impl Default for KernelConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 4,
+            owner: "reno-kernel".to_owned(),
+            lease: Duration::from_secs(60),
+            cancel_grace: Duration::from_secs(10),
+            shutdown_deadline: Duration::from_secs(15),
+            sweep_grace: Duration::from_secs(3),
+            store_retry: Duration::from_secs(1),
+            subscriber_queue: 256,
+            watch_limit: 500,
+            access: AccessMode::Supervised,
+            sandbox: SandboxLevel::WorkspaceWrite,
+        }
+    }
+}
+
+impl KernelConfig {
+    /// The lease in milliseconds, as the store takes it.
+    pub(crate) fn lease_ms(&self) -> u64 {
+        u64::try_from(self.lease.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The heartbeat period: a third of the lease, never zero.
+    pub(crate) fn heartbeat_period(&self) -> Duration {
+        (self.lease / 3).max(Duration::from_millis(1))
+    }
+}

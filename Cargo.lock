@@ -4563,6 +4563,19 @@ dependencies = [
 [[package]]
 name = "reno-kernel"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reno-harness",
+ "reno-proto",
+ "reno-store",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "reno-markdown"

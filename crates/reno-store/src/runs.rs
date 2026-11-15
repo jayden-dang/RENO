@@ -76,6 +76,16 @@ pub struct RunRecord {
     pub pid: Option<u32>,
     /// Process group id of the executor's child, if one was recorded.
     pub pgid: Option<u32>,
+    /// Opaque start time of that child (see `reno_harness::proc::ProcessRecord::start_time`), so
+    /// a sweep can tell it from a stranger that inherited the pid. Set together with `pid`.
+    pub process_start: Option<u64>,
+    /// The goal of the run's task: the prompt it was submitted with.
+    pub goal: String,
+    /// The task's free-form specification (`{}` when it has none).
+    pub spec: serde_json::Value,
+    /// When the run last changed, in milliseconds since the epoch: the time of its newest event,
+    /// or its creation time if it has none.
+    pub updated_at: i64,
     /// When it was enqueued.
     pub created_at: i64,
     /// When it first ran.
@@ -140,7 +150,12 @@ fn expiry(now: i64, lease_ms: u64) -> Result<i64> {
 }
 
 const RUN_COLS: &str = "id, task_id, executor, model, status, lease_owner, lease_fence, \
-     lease_expires_at, session_ref, wake_at, pid, pgid, created_at, started_at, ended_at";
+     lease_expires_at, session_ref, wake_at, pid, pgid, created_at, started_at, ended_at, \
+     process_start, \
+     (SELECT goal FROM tasks WHERE tasks.id = runs.task_id), \
+     (SELECT spec FROM tasks WHERE tasks.id = runs.task_id), \
+     COALESCE((SELECT MAX(ts) FROM events \
+               WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at)";
 
 fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let id: String = row.get(0)?;
@@ -158,6 +173,10 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let created_at = row.get(12)?;
     let started_at = row.get(13)?;
     let ended_at = row.get(14)?;
+    let process_start: Option<i64> = row.get(15)?;
+    let goal: String = row.get(16)?;
+    let spec: String = row.get(17)?;
+    let updated_at = row.get(18)?;
     Ok((|| {
         let id_u32 = |v: Option<i64>| {
             v.map(|v| u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("bad pid {v}"))))
@@ -176,6 +195,13 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
             wake_at,
             pid: id_u32(pid)?,
             pgid: id_u32(pgid)?,
+            process_start: process_start
+                .map(|v| from_i64(v, "process start time"))
+                .transpose()?,
+            goal,
+            spec: serde_json::from_str(&spec)
+                .map_err(|e| StoreError::Corrupt(format!("task spec: {e}")))?,
+            updated_at,
             created_at,
             started_at,
             ended_at,
@@ -449,13 +475,23 @@ pub(crate) fn tx_record_process(
     fence: u64,
     pid: u32,
     pgid: u32,
+    start_time: u64,
     now: i64,
 ) -> Result<()> {
     load_fenced(conn, run, fence)?;
     let changed = conn
-        .prepare_cached("UPDATE runs SET pid = ?3, pgid = ?4 WHERE id = ?1 AND lease_fence = ?2")
+        .prepare_cached(
+            "UPDATE runs SET pid = ?3, pgid = ?4, process_start = ?5
+             WHERE id = ?1 AND lease_fence = ?2",
+        )
         .db()?
-        .execute(params![run.as_str(), to_i64(fence, "fence")?, pid, pgid])
+        .execute(params![
+            run.as_str(),
+            to_i64(fence, "fence")?,
+            pid,
+            pgid,
+            to_i64(start_time, "process start time")?
+        ])
         .db()?;
     if changed != 1 {
         return Err(StoreError::Corrupt("record_process lost its row".into()));
@@ -466,7 +502,7 @@ pub(crate) fn tx_record_process(
         "run.process_recorded",
         ("run", run.as_str()),
         None,
-        &json!({ "pid": pid, "pgid": pgid, "fence": fence }),
+        &json!({ "pid": pid, "pgid": pgid, "startTime": start_time, "fence": fence }),
     )
 }
 
@@ -538,20 +574,22 @@ impl Store {
         .await
     }
 
-    /// Records the executor child's pid and process group for the orphan sweep (ARCHITECTURE
-    /// 17.3). A durable write: it runs alone with `synchronous=FULL`, because a lost record
-    /// leaves an orphan nobody can find.
+    /// Records the executor child's pid, process group and start time for the orphan sweep
+    /// (ARCHITECTURE 17.3). The start time is what lets the sweep refuse a reused pid. A durable
+    /// write: it runs alone with `synchronous=FULL`, because a lost record leaves an orphan
+    /// nobody can find. A run holds one record; a later call replaces it.
     pub async fn record_process(
         &self,
         run: &RunId,
         fence: u64,
         pid: u32,
         pgid: u32,
+        start_time: u64,
         now: i64,
     ) -> Result<()> {
         let run = run.clone();
         self.write(Durability::Full, move |c| {
-            tx_record_process(c, &run, fence, pid, pgid, now)
+            tx_record_process(c, &run, fence, pid, pgid, start_time, now)
         })
         .await
     }

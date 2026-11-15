@@ -201,6 +201,13 @@ impl JournalWriter {
         Ok(seq)
     }
 
+    /// The seq the next [`append`](Self::append) will give: one past the last event, 1 for an
+    /// empty journal. A reader that registers while it holds the writer knows exactly which
+    /// events the journal file already contains.
+    pub fn next_seq(&self) -> Seq {
+        self.next
+    }
+
     /// Flushes buffered appends to the file.
     pub fn flush(&mut self) -> Result<()> {
         self.out.flush()?;

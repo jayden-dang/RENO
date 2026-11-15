@@ -211,7 +211,7 @@ async fn expired_lease_is_reclaimable_with_a_higher_fence_and_the_old_fence_is_s
     ));
     assert!(stale(
         store
-            .record_process(&run_id(0), 1, 10, 10, 160)
+            .record_process(&run_id(0), 1, 10, 10, 77, 160)
             .await
             .unwrap_err()
     ));
@@ -587,11 +587,12 @@ async fn record_process_is_durable_and_fenced() {
     let (_d, store) = seeded(1).await;
     let c = store.claim_next("a", 0, 100).await.unwrap().unwrap();
     store
-        .record_process(&c.run_id, c.fence, 4242, 4240, 3)
+        .record_process(&c.run_id, c.fence, 4242, 4240, 99, 3)
         .await
         .unwrap();
     let run = store.get_run(&c.run_id).await.unwrap().unwrap();
     assert_eq!((run.pid, run.pgid), (Some(4242), Some(4240)));
+    assert_eq!(run.process_start, Some(99));
     assert!(
         event_kinds(&store)
             .await
@@ -599,11 +600,34 @@ async fn record_process_is_durable_and_fenced() {
     );
     assert!(matches!(
         store
-            .record_process(&c.run_id, 99, 1, 1, 4)
+            .record_process(&c.run_id, 99, 1, 1, 1, 4)
             .await
             .unwrap_err(),
         StoreError::StaleFence { .. }
     ));
+}
+
+#[tokio::test]
+async fn a_run_row_carries_its_task_and_its_last_change() {
+    let (_d, store) = open();
+    let mut task = new_task(0);
+    task.spec = serde_json::json!({ "cwd": "/w" });
+    store.create_task(task, 5).await.unwrap();
+    store
+        .enqueue_run(&task_id(0), &run_id(0), &exec(), 7)
+        .await
+        .unwrap();
+    let run = store.get_run(&run_id(0)).await.unwrap().unwrap();
+    assert_eq!(run.goal, "goal 0");
+    assert_eq!(run.spec, serde_json::json!({ "cwd": "/w" }));
+    assert_eq!((run.created_at, run.updated_at), (7, 7));
+    let c = store.claim_next("a", 40, 100).await.unwrap().unwrap();
+    store
+        .transition(&c.run_id, c.fence, RunStatus::Running, 50)
+        .await
+        .unwrap();
+    let run = store.get_run(&run_id(0)).await.unwrap().unwrap();
+    assert_eq!(run.updated_at, 50);
 }
 
 #[tokio::test]
@@ -632,6 +656,20 @@ async fn checkpoint_runs_once_after_idle_and_never_on_a_timer() {
     assert_eq!(store.stats().checkpoints.load(Ordering::Relaxed), 1);
     let wal = dir.path().join("reno.db-wal");
     assert_eq!(std::fs::metadata(wal).map(|m| m.len()).unwrap_or(0), 0);
+}
+
+#[test]
+fn journal_writer_reports_its_next_seq() {
+    let dir = tempfile::tempdir().unwrap();
+    let journals = crate::Journals::new(dir.path());
+    let mut w = journals.writer(&run_id(0)).unwrap();
+    assert_eq!(w.next_seq(), Seq(1));
+    let done = reno_proto::ExecEvent::Text { text: "a".into() };
+    w.append(&done).unwrap();
+    assert_eq!(w.next_seq(), Seq(2));
+    w.flush().unwrap();
+    drop(w);
+    assert_eq!(journals.writer(&run_id(0)).unwrap().next_seq(), Seq(2));
 }
 
 #[tokio::test]
@@ -912,7 +950,7 @@ mod model {
                     };
                     (
                         want,
-                        out(store.record_process(&run_id(i), f, 100, 100, now).await),
+                        out(store.record_process(&run_id(i), f, 100, 100, 5, now).await),
                     )
                 }
                 Op::Advance(d) => {
