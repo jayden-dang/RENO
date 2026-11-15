@@ -87,9 +87,12 @@ pub(crate) enum RunCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct RunList {
-    /// Show at most this many runs.
+    /// Show at most this many runs, newest first.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) limit: u32,
+    /// Show every run, fetched a page at a time. Overrides `--limit`.
     #[arg(long)]
-    pub(crate) limit: Option<u32>,
+    pub(crate) all: bool,
 }
 
 #[derive(Debug, Args)]

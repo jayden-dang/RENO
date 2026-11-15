@@ -386,6 +386,36 @@ fn run_summary_carries_prompt_and_model() {
 }
 
 #[test]
+fn run_list_paging() {
+    golden(&RunListParams::default(), json!({}));
+    golden(
+        &RunListParams {
+            status: Some(vec![RunStatus::Succeeded]),
+            limit: Some(20),
+            before: Some(run_id()),
+        },
+        json!({"status": ["succeeded"], "limit": 20, "before": "run_01HZX9"}),
+    );
+    golden(
+        &RunListResult {
+            runs: vec![],
+            next: Some(run_id()),
+        },
+        json!({"runs": [], "next": "run_01HZX9"}),
+    );
+    // The last page, and a daemon that predates paging, send no `next`.
+    golden(
+        &RunListResult {
+            runs: vec![],
+            next: None,
+        },
+        json!({"runs": []}),
+    );
+    assert_eq!((RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT), (100, 500));
+    assert_eq!(PROMPT_SUMMARY_CHARS, 280);
+}
+
+#[test]
 fn run_summary_without_prompt_still_parses() {
     // A daemon that predates `prompt` sends no such key; both ends must cope.
     golden(

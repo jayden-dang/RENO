@@ -114,6 +114,19 @@ impl Db {
         self.store.list_runs(status).await
     }
 
+    pub(crate) async fn list_runs_page(
+        &self,
+        status: &[RunStatus],
+        before: Option<&RunId>,
+        limit: u32,
+    ) -> Result<Vec<RunRecord>> {
+        self.store.list_runs_page(status, before, limit).await
+    }
+
+    pub(crate) async fn count_runs(&self, status: &[RunStatus]) -> Result<u64> {
+        self.store.count_runs(status).await
+    }
+
     pub(crate) async fn nonterminal_runs(&self) -> Result<Vec<RunRecord>> {
         self.store.nonterminal_runs().await
     }

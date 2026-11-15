@@ -24,6 +24,13 @@ use crate::run::{RunStatus, StopReason};
 /// The wire protocol version. Bumped only for a breaking change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Characters of a prompt a list or watch summary carries (`run.get` has the whole prompt).
+pub const PROMPT_SUMMARY_CHARS: usize = 280;
+/// Runs `run.list` returns when `limit` is absent.
+pub const RUN_LIST_DEFAULT_LIMIT: u32 = 100;
+/// The most runs one `run.list` page returns; a larger `limit` is cut to this.
+pub const RUN_LIST_MAX_LIMIT: u32 = 500;
+
 /// Feature: `run.events` honours `fromSeq`.
 pub const FEATURE_RUN_EVENTS_RESUME: &str = "run.events.resume";
 /// Feature: the `runs.watch` subscription exists.
@@ -96,7 +103,9 @@ pub struct RunSummary {
     pub attempt: u32,
     /// First line of the prompt, for display.
     pub title: String,
-    /// The whole prompt the task was submitted with. Absent from daemons that predate it.
+    /// The prompt the task was submitted with. Absent from daemons that predate it. In
+    /// `run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in
+    /// `…` when cut; `run.get` returns it whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// The model the run was asked for, or the one the executor reported once it started.
@@ -198,9 +207,13 @@ pub struct RunListParams {
     /// Only runs in one of these states; all runs when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<RunStatus>>,
-    /// Maximum number of runs, newest first.
+    /// Maximum number of runs, newest first. Defaults to [`RUN_LIST_DEFAULT_LIMIT`] and is cut
+    /// to [`RUN_LIST_MAX_LIMIT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Cursor: only runs older than this one. Pass the previous page's `next`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<RunId>,
 }
 
 /// Result of `run.list`.
@@ -209,6 +222,9 @@ pub struct RunListParams {
 pub struct RunListResult {
     /// Matching runs, newest first.
     pub runs: Vec<RunSummary>,
+    /// Pass as `before` to get the next page; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<RunId>,
 }
 
 /// Params of `run.cancel`.

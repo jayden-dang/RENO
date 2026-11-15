@@ -377,7 +377,7 @@ expression: protocol_schema()
             ]
           },
           "prompt": {
-            "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
+            "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
             "type": [
               "string",
               "null"
@@ -435,6 +435,10 @@ expression: protocol_schema()
       "name": "run.list",
       "params": {
         "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
           "RunStatus": {
             "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
             "oneOf": [
@@ -494,8 +498,19 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of `run.list`.",
         "properties": {
+          "before": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor: only runs older than this one. Pass the previous page's `next`."
+          },
           "limit": {
-            "description": "Maximum number of runs, newest first.",
+            "description": "Maximum number of runs, newest first. Defaults to [`RUN_LIST_DEFAULT_LIMIT`] and is cut\nto [`RUN_LIST_MAX_LIMIT`].",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -609,7 +624,7 @@ expression: protocol_schema()
                 ]
               },
               "prompt": {
-                "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
+                "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
                 "type": [
                   "string",
                   "null"
@@ -699,6 +714,17 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Result of `run.list`.",
         "properties": {
+          "next": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as `before` to get the next page; absent on the last page."
+          },
           "runs": {
             "description": "Matching runs, newest first.",
             "items": {
@@ -1640,7 +1666,7 @@ expression: protocol_schema()
                 ]
               },
               "prompt": {
-                "description": "The whole prompt the task was submitted with. Absent from daemons that predate it.",
+                "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
                 "type": [
                   "string",
                   "null"

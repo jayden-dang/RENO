@@ -20,8 +20,8 @@ use reno_proto::{
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
     DaemonStatus, DaemonStatusInfo, FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION,
     RunCancel, RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams,
-    RunId, RunList, RunListParams, RunStatus, RunSteer, RunSteerParams, RunSummary, RunsSnapshot,
-    RunsWatch, RunsWatchParams, Seq, TaskRun, TaskRunParams,
+    RunId, RunList, RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSummary,
+    RunsSnapshot, RunsWatch, RunsWatchParams, Seq, TaskRun, TaskRunParams,
 };
 use reno_rpc::{RpcError, SubEvent, SubStream};
 use serde::de::DeserializeOwned;
@@ -162,9 +162,19 @@ impl Client {
         Ok(self.rpc.call::<RunGet>(params).await?)
     }
 
-    /// `run.list`: runs, newest first.
+    /// `run.list`: one page of runs, newest first (the daemon's default page size when `limit`
+    /// is absent). Use [`Client::list_runs_page`] to page on.
     pub async fn list_runs(&self, params: RunListParams) -> Result<Vec<RunSummary>, ClientError> {
-        Ok(self.rpc.call::<RunList>(params).await?.runs)
+        Ok(self.list_runs_page(params).await?.runs)
+    }
+
+    /// `run.list` with its cursor: pass `next` as the following call's `before` until it is
+    /// `None`.
+    pub async fn list_runs_page(
+        &self,
+        params: RunListParams,
+    ) -> Result<RunListResult, ClientError> {
+        Ok(self.rpc.call::<RunList>(params).await?)
     }
 
     /// `run.cancel`: asks a run to stop. Returns the status once the cancel was accepted.

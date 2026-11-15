@@ -8,8 +8,11 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use reno_harness::exec::Decision;
-use reno_proto::{ApprovalId, ExecEvent, RunId, RunStatus, RunSummary, Seq, StopReason};
-use reno_store::RunRecord;
+use reno_proto::{
+    ApprovalId, ExecEvent, PROMPT_SUMMARY_CHARS, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RunId,
+    RunStatus, RunSummary, Seq, StopReason,
+};
+use reno_store::{RunRecord, StoreError};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -207,27 +210,64 @@ impl Shared {
         self.runs_dirty.notify_one();
     }
 
-    /// The newest `limit` runs of the given statuses, newest first.
+    /// One page of runs, newest first: at most `limit` (default and cap from the protocol),
+    /// older than `before`. The second value is the cursor for the next page, when there is one.
     pub(crate) async fn summaries(
         &self,
         status: Option<&[RunStatus]>,
         limit: Option<u32>,
-    ) -> Result<Vec<RunSummary>> {
-        let mut rows = self.db.list_runs(None).await?;
-        rows.reverse();
-        let limit = limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX));
-        Ok(rows
-            .iter()
-            .filter(|row| status.is_none_or(|wanted| wanted.contains(&row.status)))
-            .take(limit)
-            .map(summarize)
-            .collect())
+        before: Option<&RunId>,
+    ) -> Result<(Vec<RunSummary>, Option<RunId>)> {
+        let limit = limit
+            .unwrap_or(RUN_LIST_DEFAULT_LIMIT)
+            .clamp(1, RUN_LIST_MAX_LIMIT);
+        // One extra row says whether another page follows.
+        let mut rows = self
+            .db
+            .list_runs_page(status.unwrap_or_default(), before, limit.saturating_add(1))
+            .await
+            .map_err(|error| match (error, before) {
+                (StoreError::NotFound { .. }, Some(cursor)) => {
+                    KernelError::RunNotFound(cursor.clone())
+                }
+                (error, _) => KernelError::from(error),
+            })?;
+        let more = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+        rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        let next = if more {
+            rows.last().map(|row| row.id.clone())
+        } else {
+            None
+        };
+        Ok((rows.iter().map(summarize).collect(), next))
     }
 
-    /// Reload the run list into the `watch`.
+    /// Reload the live view into the `watch`: every non-terminal run (at most `watch_limit`) and
+    /// the newest `recent_runs` terminal ones, newest first. Two indexed, bounded queries; the
+    /// history is never read whole.
     pub(crate) async fn refresh_runs(&self) -> Result<()> {
-        let list = self.summaries(None, Some(self.config.watch_limit)).await?;
-        self.runs_tx.send_replace(list);
+        const TERMINAL: [RunStatus; 3] = [
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ];
+        let open: Vec<RunStatus> = RunStatus::ALL
+            .into_iter()
+            .filter(|s| !s.is_terminal())
+            .collect();
+        let mut rows = self
+            .db
+            .list_runs_page(&open, None, self.config.watch_limit)
+            .await?;
+        rows.extend(
+            self.db
+                .list_runs_page(&TERMINAL, None, self.config.recent_runs)
+                .await?,
+        );
+        // Stable: runs created in the same millisecond keep each query's own newest-first order.
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at));
+        self.runs_tx
+            .send_replace(rows.iter().map(summarize).collect());
         Ok(())
     }
 
@@ -254,13 +294,30 @@ fn requested_model(spec: &serde_json::Value) -> Option<String> {
     spec.get("model")?.as_str().map(str::to_owned)
 }
 
+/// `prompt` cut to `PROMPT_SUMMARY_CHARS` characters (on a char boundary), with `…` when cut.
+fn truncate_prompt(prompt: &str) -> String {
+    match prompt.char_indices().nth(PROMPT_SUMMARY_CHARS) {
+        None => prompt.to_owned(),
+        Some((end, _)) => format!("{}…", &prompt[..end]),
+    }
+}
+
+/// A run row as a list or the watch shows it: `prompt` cut to `PROMPT_SUMMARY_CHARS`
+/// characters. [`summarize_full`] is the whole row, for `run.get`.
+pub(crate) fn summarize(row: &RunRecord) -> RunSummary {
+    RunSummary {
+        prompt: Some(truncate_prompt(&row.goal)),
+        ..summarize_full(row)
+    }
+}
+
 /// A run row as a client sees it.
 ///
 /// `model` is the row's model when the store has one, otherwise the model the task asked for;
-/// `prompt` is the task's goal. `stop_reason` is derived from the status, because the store keeps no stop reason in Phase 0:
+/// `prompt` is the task's whole goal. `stop_reason` is derived from the status, because the store keeps no stop reason in Phase 0:
 /// `failed` reads as `error` even when the executor said `refusal` or `max_tokens`, and
 /// `cancelled` as `interrupted`. The journal's `Done` carries the exact reason.
-pub(crate) fn summarize(row: &RunRecord) -> RunSummary {
+pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
     let stop_reason = match row.status {
         RunStatus::Succeeded => Some(StopReason::Completed),
         RunStatus::Failed => Some(StopReason::Error),

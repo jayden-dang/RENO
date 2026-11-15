@@ -351,10 +351,22 @@ fn router(shared: &Arc<Shared>) -> Router {
             if let Some(only) = &p.status {
                 runs.retain(|r| only.contains(&r.status));
             }
-            if let Some(limit) = p.limit {
-                runs.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+            if let Some(cursor) = &p.before {
+                match runs.iter().position(|r| &r.run_id == cursor) {
+                    Some(at) => runs.drain(..=at).for_each(drop),
+                    None => return Err(not_found("run")),
+                }
             }
-            Ok(RunListResult { runs })
+            let limit = p
+                .limit
+                .unwrap_or(reno_proto::RUN_LIST_DEFAULT_LIMIT)
+                .clamp(1, reno_proto::RUN_LIST_MAX_LIMIT);
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            let next = (runs.len() > limit)
+                .then(|| runs.get(limit - 1).map(|r| r.run_id.clone()))
+                .flatten();
+            runs.truncate(limit);
+            Ok(RunListResult { runs, next })
         }
     };
 

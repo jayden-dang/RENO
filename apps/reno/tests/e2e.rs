@@ -137,6 +137,41 @@ fn alive(pid: u32) -> bool {
 }
 
 #[test]
+fn run_list_limit_and_all() {
+    let world = World::new();
+    world.start_daemon();
+    for prompt in ["one", "two", "three"] {
+        let run = world.reno(&["task", "run", "--executor", "mock", prompt]);
+        assert!(run.status.success(), "{}", text(&run.stderr));
+    }
+
+    let limited = world.json(&["run", "list", "--limit", "2"]);
+    let titles: Vec<_> = limited["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(titles, ["three", "two"], "newest first");
+    assert!(limited["next"].is_string(), "{limited}");
+    let text_out = text(&world.reno(&["run", "list", "--limit", "2"]).stdout);
+    assert!(text_out.contains("more runs exist"), "{text_out}");
+
+    let all = world.json(&["run", "list", "--all"]);
+    assert_eq!(all["runs"].as_array().unwrap().len(), 3);
+    assert!(all.get("next").is_none(), "{all}");
+    // The default page (20) holds all three too.
+    assert_eq!(world.runs().len(), 3);
+    // A zero limit is refused by the argument parser.
+    assert!(
+        !world
+            .reno(&["run", "list", "--limit", "0"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn start_run_list_and_stop() {
     let world = World::new();
 

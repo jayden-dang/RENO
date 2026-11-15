@@ -87,9 +87,13 @@ CREATE TABLE attempts (
 /// was reused (ARCHITECTURE 17.3).
 const V2: &str = "ALTER TABLE runs ADD COLUMN process_start INTEGER;";
 
+/// Migration 3: run listings page by `(created_at, rowid)`, newest first, so the order has an
+/// index and a page reads only its own rows.
+const V3: &str = "CREATE INDEX runs_created ON runs (created_at);";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1), M::up(V2)])
+    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3)])
 }
 
 /// Brings `conn` to the latest schema. A second call is a no-op.
@@ -137,7 +141,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema

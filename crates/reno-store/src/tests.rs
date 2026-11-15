@@ -335,6 +335,48 @@ async fn listing_and_recovery_queries() {
 }
 
 #[tokio::test]
+async fn list_runs_page_is_newest_first_and_stable_across_inserts() {
+    // All seven runs share created_at = 0, so the order rests on rowid.
+    let (_d, store) = seeded(7).await;
+    let ids = |rows: &[crate::RunRecord]| rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+
+    let first = store.list_runs_page(&[], None, 3).await.unwrap();
+    assert_eq!(ids(&first), [run_id(6), run_id(5), run_id(4)]);
+
+    // Newer runs arrive between pages: the cursor neither repeats nor skips.
+    for n in 7..10 {
+        store
+            .enqueue_run(&task_id(0), &run_id(n), &exec(), 5)
+            .await
+            .unwrap();
+    }
+    let cursor = first.last().map(|r| r.id.clone());
+    let second = store.list_runs_page(&[], cursor.as_ref(), 3).await.unwrap();
+    assert_eq!(ids(&second), [run_id(3), run_id(2), run_id(1)]);
+    let cursor = second.last().map(|r| r.id.clone());
+    let last = store.list_runs_page(&[], cursor.as_ref(), 3).await.unwrap();
+    assert_eq!(ids(&last), [run_id(0)]);
+
+    // A fresh listing sees the newer runs first.
+    let head = store.list_runs_page(&[], None, 2).await.unwrap();
+    assert_eq!(ids(&head), [run_id(9), run_id(8)]);
+
+    // Status filter, and a cursor that names no run.
+    let c = store.claim_next("a", 1, 100).await.unwrap().unwrap();
+    let leased = store
+        .list_runs_page(&[RunStatus::Leased, RunStatus::Running], None, 10)
+        .await
+        .unwrap();
+    assert_eq!(ids(&leased), [c.run_id]);
+    let missing = run_id(99);
+    let err = store
+        .list_runs_page(&[], Some(&missing), 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound { .. }), "{err:?}");
+}
+
+#[tokio::test]
 async fn events_since_pages_in_order() {
     let (_d, store) = seeded(4).await;
     let all = store.events_since(Seq(0), 100).await.unwrap();

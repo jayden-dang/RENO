@@ -121,12 +121,12 @@ async fn hello(_ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
 }
 
 async fn count(ctx: &Ctx, statuses: &[RunStatus]) -> Reply<u32> {
-    let runs = ctx
+    let n = ctx
         .kernel
-        .list_runs(Some(statuses), None)
+        .count_runs(statuses)
         .await
         .map_err(|e| kernel_error(&e))?;
-    Ok(u32::try_from(runs.len()).unwrap_or(u32::MAX))
+    Ok(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 async fn status(ctx: Arc<Ctx>, _: NoParams) -> Reply<DaemonStatusInfo> {
@@ -195,12 +195,12 @@ async fn run_get(ctx: Arc<Ctx>, p: RunGetParams) -> Reply<RunSummary> {
 }
 
 async fn run_list(ctx: Arc<Ctx>, p: RunListParams) -> Reply<RunListResult> {
-    let runs = ctx
+    let (runs, next) = ctx
         .kernel
-        .list_runs(p.status.as_deref(), p.limit)
+        .list_runs(p.status.as_deref(), p.limit, p.before.as_ref())
         .await
         .map_err(|e| kernel_error(&e))?;
-    Ok(RunListResult { runs })
+    Ok(RunListResult { runs, next })
 }
 
 async fn run_cancel(ctx: Arc<Ctx>, p: RunCancelParams) -> Reply<RunCancelResult> {

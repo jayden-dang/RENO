@@ -181,22 +181,35 @@ impl Kernel {
 
     /// One run.
     pub async fn get_run(&self, run: &RunId) -> Result<RunSummary> {
-        Ok(crate::shared::summarize(
+        Ok(crate::shared::summarize_full(
             &self.shared.run_record(run).await?,
         ))
     }
 
-    /// Runs, newest first, optionally only those in `status`, at most `limit`.
+    /// One page of runs, newest first, optionally only those in `status`. `limit` defaults to
+    /// 100 and is capped at 500; `before` is the cursor (the previous page's `next`), and an
+    /// unknown one is [`KernelError::RunNotFound`]. Prompts are cut as in the watch; [`get_run`]
+    /// has the whole prompt. The second value is the cursor for the next page, if any.
+    ///
+    /// [`get_run`]: Self::get_run
     pub async fn list_runs(
         &self,
         status: Option<&[RunStatus]>,
         limit: Option<u32>,
-    ) -> Result<Vec<RunSummary>> {
-        self.shared.summaries(status, limit).await
+        before: Option<&RunId>,
+    ) -> Result<(Vec<RunSummary>, Option<RunId>)> {
+        self.shared.summaries(status, limit, before).await
     }
 
-    /// The newest runs (`KernelConfig::watch_limit`), refreshed after every change. Latest value
-    /// wins: a slow reader skips versions, never queues them.
+    /// How many runs are in one of `status`.
+    pub async fn count_runs(&self, status: &[RunStatus]) -> Result<u64> {
+        Ok(self.shared.db.count_runs(status).await?)
+    }
+
+    /// The live view, refreshed after every change: every non-terminal run (at most
+    /// `KernelConfig::watch_limit`) and the newest `KernelConfig::recent_runs` terminal ones,
+    /// newest first, with prompts cut. Latest value wins: a slow reader skips versions, never
+    /// queues them.
     pub fn watch_runs(&self) -> watch::Receiver<Vec<RunSummary>> {
         self.shared.runs_tx.subscribe()
     }

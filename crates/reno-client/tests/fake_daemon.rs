@@ -123,7 +123,7 @@ async fn demo_state_matches_the_prototype() {
     let only_running = client
         .list_runs(RunListParams {
             status: Some(vec![RunStatus::Running]),
-            limit: None,
+            ..RunListParams::default()
         })
         .await
         .unwrap();

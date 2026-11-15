@@ -79,7 +79,7 @@ daemon_test! {
         assert_eq!(listed, vec![summary]);
         let only_failed = within(fx.client.list_runs(RunListParams {
             status: Some(vec![RunStatus::Failed]),
-            limit: None,
+            ..RunListParams::default()
         }))
         .await
         .unwrap();

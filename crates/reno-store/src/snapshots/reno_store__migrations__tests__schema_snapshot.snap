@@ -60,6 +60,8 @@ CREATE TABLE runs (
 
 CREATE INDEX runs_claimable ON runs (created_at) WHERE status IN ('queued', 'leased');
 
+CREATE INDEX runs_created ON runs (created_at);
+
 CREATE INDEX runs_status ON runs (status);
 
 CREATE INDEX runs_task ON runs (task_id);

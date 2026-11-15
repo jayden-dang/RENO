@@ -7,8 +7,8 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
-    ApprovalDecision, ApprovalListResult, ExecEvent, RunCancelResult, RunId, RunListParams,
-    RunListResult, Seq, StopReason, TaskRunParams,
+    ApprovalDecision, ApprovalListResult, ExecEvent, RUN_LIST_MAX_LIMIT, RunCancelResult, RunId,
+    RunListParams, RunListResult, Seq, StopReason, TaskRunParams,
 };
 use serde::Serialize;
 
@@ -126,20 +126,45 @@ async fn follow(
 
 async fn run_list(env: &Env, args: RunList) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
-    let runs = client
-        .list_runs(RunListParams {
-            status: None,
-            limit: args.limit,
-        })
-        .await
-        .map_err(|e| env.explain(e))?;
+    let mut runs = Vec::new();
+    let mut before = None;
+    // `--all` pages with the largest page the daemon allows; otherwise one page of `--limit`.
+    let page = if args.all {
+        RUN_LIST_MAX_LIMIT
+    } else {
+        args.limit.min(RUN_LIST_MAX_LIMIT)
+    };
+    let mut want = if args.all {
+        usize::MAX
+    } else {
+        usize::try_from(args.limit).unwrap_or(usize::MAX)
+    };
+    let next = loop {
+        let result = client
+            .list_runs_page(RunListParams {
+                status: None,
+                limit: Some(page.min(u32::try_from(want).unwrap_or(u32::MAX))),
+                before: before.take(),
+            })
+            .await
+            .map_err(|e| env.explain(e))?;
+        want = want.saturating_sub(result.runs.len());
+        runs.extend(result.runs);
+        match result.next {
+            Some(cursor) if want > 0 => before = Some(cursor),
+            other => break other,
+        }
+    };
     if env.json {
-        print_json(&RunListResult { runs })?;
+        print_json(&RunListResult { runs, next })?;
     } else if runs.is_empty() {
         print_line("no runs")?;
     } else {
         for run in &runs {
             print_line(render::run_line(run))?;
+        }
+        if next.is_some() {
+            print_line("more runs exist: raise --limit, or use --all")?;
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -120,12 +120,13 @@ async fn a_run_succeeds_and_the_journal_and_the_live_subscriber_agree() {
     assert_eq!(summary.model, None, "no model was asked for");
     assert_eq!(summary.stop_reason, Some(StopReason::Completed));
     assert_eq!(summary.attempt, 1);
-    let listed = fx
+    let (listed, next) = fx
         .kernel
-        .list_runs(Some(&[RunStatus::Succeeded]), None)
+        .list_runs(Some(&[RunStatus::Succeeded]), None, None)
         .await
         .unwrap();
     assert_eq!(listed, vec![summary.clone()]);
+    assert_eq!(next, None);
 
     // The watch carries the refreshed list.
     until(async || {
@@ -711,4 +712,127 @@ async fn an_idle_kernel_makes_no_store_write_however_long_it_sits() {
     // And it still works afterwards.
     let again = fx.submit("two").await;
     fx.wait_status(&again, RunStatus::Succeeded).await;
+}
+
+/// 200 ended runs and two live ones, with a window of 50.
+#[tokio::test(start_paused = true)]
+async fn the_watch_holds_the_live_runs_and_only_the_recent_ended_ones() {
+    let quick = mock([MockStep::started("s1", "mock-1"), MockStep::text("a")]);
+    let hold =
+        MockExecutor::new(id("hold")).with_steps([MockStep::Sleep(Duration::from_secs(3600))]);
+    let cfg = KernelConfig {
+        recent_runs: 50,
+        ..config(4)
+    };
+    let fx = Fx::new(cfg, registry(&[quick, hold])).await;
+
+    let mut ended = Vec::new();
+    for n in 0..200 {
+        ended.push(fx.submit(&format!("run {n}")).await);
+    }
+    until(async || {
+        let done = fx.kernel.count_runs(&[RunStatus::Succeeded]).await.unwrap();
+        (done == 200).then_some(())
+    })
+    .await;
+
+    let mut live = Vec::new();
+    for _ in 0..2 {
+        let run = fx
+            .kernel
+            .submit("hold", id("hold"), PathBuf::from("/work"), None)
+            .await
+            .unwrap();
+        fx.wait_status(&run, RunStatus::Running).await;
+        live.push(run);
+    }
+
+    let mut watch = fx.kernel.watch_runs();
+    let window = until(async || {
+        let list = watch.borrow_and_update().clone();
+        let seen_live = live.iter().all(|run| {
+            list.iter()
+                .any(|r| r.run_id == *run && r.status == RunStatus::Running)
+        });
+        seen_live.then_some(list)
+    })
+    .await;
+    assert_eq!(window.len(), 2 + 50);
+    assert_eq!(window.iter().filter(|r| !r.status.is_terminal()).count(), 2);
+    let mut kept: Vec<_> = window
+        .iter()
+        .filter(|r| r.status.is_terminal())
+        .map(|r| r.run_id.clone())
+        .collect();
+    kept.sort();
+    let mut newest: Vec<_> = ended[150..].to_vec();
+    newest.sort();
+    assert_eq!(kept, newest, "the 50 newest ended runs");
+
+    // The listing pages through all 202 without a repeat, 70 at a time.
+    let mut seen = Vec::new();
+    let mut before = None;
+    loop {
+        let (page, next) = fx
+            .kernel
+            .list_runs(None, Some(70), before.as_ref())
+            .await
+            .unwrap();
+        assert!(page.len() <= 70);
+        seen.extend(page.into_iter().map(|r| r.run_id));
+        match next {
+            Some(cursor) => before = Some(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 202);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 202);
+    // The default page is 100, and the cap is 500.
+    let (page, next) = fx.kernel.list_runs(None, None, None).await.unwrap();
+    assert_eq!((page.len(), next.is_some()), (100, true));
+    let (page, next) = fx.kernel.list_runs(None, Some(9999), None).await.unwrap();
+    assert_eq!((page.len(), next), (202, None));
+    // An unknown cursor is an error, not an empty page.
+    let unknown = RunId::from_suffix("nosuchrun").unwrap();
+    assert!(matches!(
+        fx.kernel.list_runs(None, None, Some(&unknown)).await,
+        Err(KernelError::RunNotFound(_))
+    ));
+    for run in &live {
+        fx.kernel.cancel(run).await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn list_and_watch_cut_the_prompt_and_run_get_keeps_it_whole() {
+    let quick = mock([MockStep::started("s1", "mock-1"), MockStep::text("a")]);
+    let fx = Fx::new(config(2), registry(&[quick])).await;
+    // Multi-byte characters: the cut must fall on a char boundary.
+    let long = "é".repeat(1000);
+    let run = fx.submit(&long).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let cut = format!("{}…", "é".repeat(280));
+    let (listed, _) = fx.kernel.list_runs(None, None, None).await.unwrap();
+    assert_eq!(listed[0].prompt.as_deref(), Some(cut.as_str()));
+    let mut watch = fx.kernel.watch_runs();
+    let watched = until(async || {
+        let list = watch.borrow_and_update().clone();
+        list.iter().any(|r| r.run_id == run).then_some(list)
+    })
+    .await;
+    assert_eq!(watched[0].prompt.as_deref(), Some(cut.as_str()));
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().prompt.as_deref(),
+        Some(long.as_str())
+    );
+
+    // A prompt of exactly 280 characters is not touched.
+    let exact = "x".repeat(280);
+    let run = fx.submit(&exact).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let (listed, _) = fx.kernel.list_runs(None, Some(1), None).await.unwrap();
+    assert_eq!(listed[0].prompt.as_deref(), Some(exact.as_str()));
 }

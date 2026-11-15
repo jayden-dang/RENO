@@ -26,8 +26,10 @@ pub struct KernelConfig {
     /// Events one `run_events` subscriber may have queued; past that it gets a gap error
     /// (ARCH-12). At least 1.
     pub subscriber_queue: usize,
-    /// Runs `watch_runs` carries, newest first.
+    /// Most non-terminal runs `watch_runs` carries, a bound on a long queue.
     pub watch_limit: u32,
+    /// Terminal runs `watch_runs` carries besides the non-terminal ones: the newest this many.
+    pub recent_runs: u32,
     /// The access mode every run asks its executor for. Phase 0 has no per-run policy, so the
     /// strictest mode is the default (ARCH-15: an executor that cannot honour it is refused).
     pub access: AccessMode,
@@ -47,6 +49,7 @@ impl Default for KernelConfig {
             store_retry: Duration::from_secs(1),
             subscriber_queue: 256,
             watch_limit: 500,
+            recent_runs: 50,
             access: AccessMode::Supervised,
             sandbox: SandboxLevel::WorkspaceWrite,
         }

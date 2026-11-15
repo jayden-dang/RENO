@@ -619,6 +619,70 @@ impl Store {
         .await
     }
 
+    /// One page of runs, **newest first** (`created_at`, then rowid, both descending), at most
+    /// `limit` rows. `status` keeps only runs in one of those states (all runs when empty).
+    /// `before` is a cursor: only runs older than that run, so a page never repeats or skips a
+    /// run when newer ones are inserted meanwhile. An unknown cursor is [`StoreError::NotFound`].
+    pub async fn list_runs_page(
+        &self,
+        status: &[RunStatus],
+        before: Option<&RunId>,
+        limit: u32,
+    ) -> Result<Vec<RunRecord>> {
+        let status: Vec<&'static str> = status.iter().map(|s| status_str(*s)).collect();
+        let before = before.cloned();
+        self.read(move |c| {
+            let mut sql = format!("SELECT {RUN_COLS} FROM runs WHERE 1 = 1");
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if !status.is_empty() {
+                let marks = vec!["?"; status.len()].join(", ");
+                sql.push_str(&format!(" AND status IN ({marks})"));
+                for s in &status {
+                    args.push(Box::new(*s));
+                }
+            }
+            if let Some(cursor) = &before {
+                let at: Option<(i64, i64)> = c
+                    .query_row(
+                        "SELECT created_at, rowid FROM runs WHERE id = ?1",
+                        [cursor.as_str()],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .db()?;
+                let (created, rowid) = at.ok_or_else(|| StoreError::NotFound {
+                    kind: "run",
+                    id: cursor.to_string(),
+                })?;
+                sql.push_str(" AND (created_at, rowid) < (?, ?)");
+                args.push(Box::new(created));
+                args.push(Box::new(rowid));
+            }
+            sql.push_str(" ORDER BY created_at DESC, rowid DESC LIMIT ?");
+            args.push(Box::new(i64::from(limit)));
+            let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| &**a).collect();
+            query_runs(c, &sql, &refs)
+        })
+        .await
+    }
+
+    /// How many runs are in one of `status` (an index scan, no rows loaded).
+    pub async fn count_runs(&self, status: &[RunStatus]) -> Result<u64> {
+        let status: Vec<&'static str> = status.iter().map(|s| status_str(*s)).collect();
+        self.read(move |c| {
+            let marks = vec!["?"; status.len()].join(", ");
+            let n: i64 = c
+                .query_row(
+                    &format!("SELECT count(*) FROM runs WHERE status IN ({marks})"),
+                    rusqlite::params_from_iter(status.iter()),
+                    |r| r.get(0),
+                )
+                .db()?;
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+        .await
+    }
+
     /// Every run that is not terminal (including `interrupted`), oldest first. Recovery reads
     /// this at boot.
     pub async fn nonterminal_runs(&self) -> Result<Vec<RunRecord>> {
