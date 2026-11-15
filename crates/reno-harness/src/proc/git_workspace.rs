@@ -1,0 +1,751 @@
+//! Git worktrees for write runs (T1.3): the `git` CLI as a subprocess, never libgit2.
+//!
+//! # Layout
+//!
+//! ```text
+//! <root>/                       the data directory's `worktrees/`
+//!   <repo key>/<run id>/        one worktree per run, on the branch `reno/<run id>`
+//! ```
+//!
+//! The **repo key** is `<name>-<12 hex>`: `<name>` is the main working tree's directory name (the
+//! parent of `.git`; for a bare repository its own name) with every
+//! character outside `[A-Za-z0-9._-]` replaced by `_` (at most 32 characters), and the hex is the
+//! first 12 digits of the SHA-256 of the canonical path of the repository's *common git
+//! directory*. The hash makes two repositories that share a directory name collision-free; using
+//! the common directory makes every linked worktree of one repository share one key, and keeps
+//! the key stable whatever subdirectory a task targets.
+//!
+//! # The user's checkout is never touched
+//!
+//! In the user's checkout this module runs only `rev-parse`, `worktree add/remove/prune/list`,
+//! `merge-base --is-ancestor`, `rev-list` and `update-ref` on `refs/heads/reno/*`. It never
+//! checks out, switches, stashes, resets, cleans or configures anything there, and it never runs
+//! `status` there (`status` can refresh the index). `status` runs only inside a Reno worktree.
+//! The branch is cut from a commit sha resolved first, so the user's branch never moves. Git hooks
+//! are disabled for the commands Reno runs, so a user's `post-checkout` hook does not fire in a
+//! worktree an agent will work in.
+//!
+//! Uncommitted changes in the user's checkout are not in the worktree: it starts from the `HEAD`
+//! commit.
+//!
+//! # Subprocess hygiene (ARCHITECTURE 17.3)
+//!
+//! Each `git` is spawned through `process::owned::spawn_grouped`, so it leads its own process
+//! group and a timeout ends the whole group. Standard input is closed, prompts are off
+//! (`GIT_TERMINAL_PROMPT=0`), the environment that could redirect git (`GIT_DIR`,
+//! `GIT_WORK_TREE`, `GIT_INDEX_FILE`...) is removed, and output is captured up to a bound; the
+//! rest is read and dropped so the child never blocks on a full pipe.
+//!
+//! # Locking
+//!
+//! `worktree add`, `remove`, `prune` and ref deletion take locks inside the repository's `.git`.
+//! One async mutex per repository (keyed by its canonical common directory) serialises them, so
+//! two runs on one repository work side by side and a second repository is never held up.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+use crate::process::Command;
+use crate::process::owned::spawn_grouped;
+
+/// Bytes of each of a git command's stdout and stderr that are kept.
+const OUTPUT_CAP: usize = 1 << 20;
+/// How long a killed git gets to end before its group is killed.
+const KILL_GRACE: Duration = Duration::from_secs(2);
+/// The default bound on one git command.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Why a git operation failed. Typed, so a caller can tell a refusal from a fault.
+#[derive(Debug, thiserror::Error)]
+pub enum GitError {
+    /// `git` could not be started.
+    #[error("cannot run git: {0}")]
+    GitMissing(String),
+    /// The directory is not inside a git repository.
+    #[error("{} is not inside a git repository", dir.display())]
+    NotARepo {
+        /// The directory.
+        dir: PathBuf,
+    },
+    /// The repository is bare: it has no working tree to branch from.
+    #[error("{} is a bare repository", repo.display())]
+    Bare {
+        /// The repository.
+        repo: PathBuf,
+    },
+    /// The repository has no commits yet, so there is nothing to cut a branch from.
+    #[error("the repository at {} has no commits", repo.display())]
+    NoCommits {
+        /// The repository.
+        repo: PathBuf,
+    },
+    /// A value that must not reach git (a run id that is not a safe ref name).
+    #[error("refused: {0}")]
+    Unsafe(String),
+    /// The worktree's path is taken by something that is not this run's worktree.
+    #[error("{} exists and is not this run's worktree", path.display())]
+    PathTaken {
+        /// The path.
+        path: PathBuf,
+    },
+    /// A git command failed.
+    #[error("git {op} failed ({code}): {stderr}")]
+    Failed {
+        /// The command, such as `worktree add`.
+        op: String,
+        /// Its exit code, or `signal` when it was killed by one.
+        code: String,
+        /// The tail of what it printed to stderr.
+        stderr: String,
+    },
+    /// A git command ran past its timeout and was ended.
+    #[error("git {op} timed out after {secs}s")]
+    Timeout {
+        /// The command.
+        op: String,
+        /// The bound, in seconds.
+        secs: u64,
+    },
+    /// A file system call failed.
+    #[error("{what}: {message}")]
+    Io {
+        /// What was being done.
+        what: String,
+        /// The error.
+        message: String,
+    },
+}
+
+/// Where a run's worktree is: everything needed to find, inspect and remove it later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    /// The repository's working tree root.
+    pub repo: PathBuf,
+    /// The repository's key in the worktrees directory.
+    pub repo_key: String,
+    /// The worktree's root.
+    pub path: PathBuf,
+    /// The directory the task targeted, relative to the repository root; empty for the root.
+    pub subdir: String,
+    /// The branch, `reno/<run id>`.
+    pub branch: String,
+    /// The commit the branch is cut from.
+    pub base_sha: String,
+}
+
+impl Location {
+    /// The run's working directory: the worktree plus the targeted subdirectory.
+    pub fn cwd(&self) -> PathBuf {
+        if self.subdir.is_empty() {
+            self.path.clone()
+        } else {
+            self.path.join(&self.subdir)
+        }
+    }
+}
+
+/// What a worktree holds beyond its base commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Changes {
+    /// Commits the base does not have.
+    pub commits: u32,
+    /// Uncommitted changes or untracked files.
+    pub dirty: bool,
+}
+
+impl Changes {
+    /// Nothing to lose.
+    pub fn is_clean(&self) -> bool {
+        self.commits == 0 && !self.dirty
+    }
+}
+
+/// What [`GitWorktrees::inspect`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inspection {
+    /// The worktree directory exists.
+    pub exists: bool,
+    /// The branch exists.
+    pub branch_exists: bool,
+    /// What it holds. Dirtiness is unknown (`false`) when the directory is gone.
+    pub changes: Changes,
+}
+
+/// How [`GitWorktrees::release`] decides what may go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Release {
+    /// Remove only what holds nothing to lose: no commits beyond the base, nothing uncommitted.
+    IfClean,
+    /// Also remove what is merged: the branch tip is reachable from the repository's `HEAD`, and
+    /// the worktree has no uncommitted changes.
+    IfMerged,
+    /// Remove regardless, deleting the branch and losing whatever it held.
+    Force,
+}
+
+/// What [`GitWorktrees::release`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Released {
+    /// The worktree and the branch are gone.
+    Removed,
+    /// Left as it was, because of what it holds.
+    Kept(Changes),
+    /// The directory was already gone and was pruned; the branch was kept because it holds
+    /// commits.
+    GoneBranchKept(Changes),
+}
+
+/// The git worktree manager. Cheap to share: wrap it in an `Arc`.
+#[derive(Debug)]
+pub struct GitWorktrees {
+    root: PathBuf,
+    timeout: Duration,
+    locks: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+struct Output {
+    stdout: String,
+    stderr: String,
+    code: Option<i32>,
+}
+
+impl Output {
+    fn ok(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+impl GitWorktrees {
+    /// A manager that keeps worktrees under `root` (the data directory's `worktrees/`).
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            timeout: DEFAULT_TIMEOUT,
+            locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The same manager with `timeout` as the bound on each git command.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// The worktrees directory.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The repository key of the repository whose common git directory is `common_dir`: see the
+    /// module docs.
+    pub fn repo_key(common_dir: &Path) -> String {
+        // The main working tree's name: the parent of `.git`, whichever linked worktree asks.
+        let named = if common_dir.file_name().is_some_and(|n| n == ".git") {
+            common_dir.parent().unwrap_or(common_dir)
+        } else {
+            common_dir
+        };
+        let name: String = named
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(32)
+            .collect();
+        let name = name.trim_matches('.');
+        let name = if name.is_empty() { "repo" } else { name };
+        let digest = Sha256::digest(common_dir.as_os_str().as_encoded_bytes());
+        let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+        format!("{name}-{hex}")
+    }
+
+    /// Whether `dir` is inside a git repository with a working tree. `Ok(None)` means it is
+    /// not; a bare repository is an error.
+    pub async fn probe(&self, dir: &Path) -> Result<Option<Probe>, GitError> {
+        let common = self
+            .git(
+                dir,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await?;
+        if !common.ok() {
+            if common.stderr.contains("not a git repository") {
+                return Ok(None);
+            }
+            return Err(failed("rev-parse", &common));
+        }
+        let bare = self
+            .git(dir, &["rev-parse", "--is-bare-repository"])
+            .await?;
+        if bare.ok() && bare.stdout.trim() == "true" {
+            return Err(GitError::Bare {
+                repo: PathBuf::from(common.stdout.trim()),
+            });
+        }
+        let top = self.git(dir, &["rev-parse", "--show-toplevel"]).await?;
+        if !top.ok() {
+            // Inside the `.git` directory itself: there is no working tree here.
+            return Ok(None);
+        }
+        let prefix = self.git(dir, &["rev-parse", "--show-prefix"]).await?;
+        if !prefix.ok() {
+            return Err(failed("rev-parse", &prefix));
+        }
+        let toplevel = canonical(Path::new(top.stdout.trim())).await?;
+        let common_dir = canonical(Path::new(common.stdout.trim())).await?;
+        Ok(Some(Probe {
+            toplevel,
+            common_dir,
+            subdir: prefix.stdout.trim().trim_end_matches('/').to_owned(),
+        }))
+    }
+
+    /// Plans the worktree for `run`: where it will be and which commit it starts from. Reads
+    /// the repository (`rev-parse` only) and writes nothing.
+    ///
+    /// `Ok(None)` means `dir` is not in a git repository.
+    pub async fn plan(&self, run: &str, dir: &Path) -> Result<Option<Location>, GitError> {
+        check_run_id(run)?;
+        let Some(probe) = self.probe(dir).await? else {
+            return Ok(None);
+        };
+        let head = self
+            .git(
+                &probe.toplevel,
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            )
+            .await?;
+        if !head.ok() {
+            return Err(GitError::NoCommits {
+                repo: probe.toplevel,
+            });
+        }
+        let repo_key = Self::repo_key(&probe.common_dir);
+        Ok(Some(Location {
+            path: self.root.join(&repo_key).join(run),
+            repo: probe.toplevel,
+            repo_key,
+            subdir: probe.subdir,
+            branch: branch_of(run),
+            base_sha: head.stdout.trim().to_owned(),
+        }))
+    }
+
+    /// Creates the worktree and branch of `loc`. Idempotent: a worktree that already exists at
+    /// the path on that branch is accepted, and a branch left by an earlier attempt is reused.
+    pub async fn create(&self, loc: &Location) -> Result<(), GitError> {
+        let _guard = self.lock(&loc.repo).await?;
+        if tokio::fs::try_exists(&loc.path).await.unwrap_or(false) {
+            return if self.registered(loc).await? {
+                self.ensure_subdir(loc).await
+            } else {
+                Err(GitError::PathTaken {
+                    path: loc.path.clone(),
+                })
+            };
+        }
+        if let Some(parent) = loc.path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io("create the worktrees directory", &e))?;
+        }
+        // A worktree whose directory vanished still blocks `add`: forget it first.
+        self.expect_ok(&loc.repo, &["worktree", "prune"], "worktree prune")
+            .await?;
+        let path = loc.path.to_string_lossy().into_owned();
+        let branch_ref = format!("refs/heads/{}", loc.branch);
+        let have_branch = self
+            .git(
+                &loc.repo,
+                &["rev-parse", "--verify", "--quiet", &branch_ref],
+            )
+            .await?
+            .ok();
+        if have_branch {
+            self.expect_ok(
+                &loc.repo,
+                &["worktree", "add", "--quiet", &path, &loc.branch],
+                "worktree add",
+            )
+            .await?;
+        } else {
+            self.expect_ok(
+                &loc.repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "--no-track",
+                    "-b",
+                    &loc.branch,
+                    &path,
+                    &loc.base_sha,
+                ],
+                "worktree add",
+            )
+            .await?;
+        }
+        self.ensure_subdir(loc).await
+    }
+
+    /// What the worktree and branch of `loc` hold now.
+    pub async fn inspect(&self, loc: &Location) -> Result<Inspection, GitError> {
+        let exists = tokio::fs::try_exists(&loc.path).await.unwrap_or(false);
+        let branch_ref = format!("refs/heads/{}", loc.branch);
+        let branch_exists = self
+            .git(
+                &loc.repo,
+                &["rev-parse", "--verify", "--quiet", &branch_ref],
+            )
+            .await?
+            .ok();
+        let range = format!("{}..{}", loc.base_sha, branch_ref);
+        let mut commits = 0;
+        let mut dirty = false;
+        if exists {
+            let head_range = format!("{}..HEAD", loc.base_sha);
+            commits = self.count(&loc.path, &head_range).await?;
+            let status = self
+                .git(
+                    &loc.path,
+                    &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                )
+                .await?;
+            if !status.ok() {
+                return Err(failed("status", &status));
+            }
+            dirty = !status.stdout.is_empty();
+        } else if branch_exists {
+            commits = self.count(&loc.repo, &range).await?;
+        }
+        Ok(Inspection {
+            exists,
+            branch_exists,
+            changes: Changes { commits, dirty },
+        })
+    }
+
+    /// Removes the worktree and branch of `loc` as `how` allows. See [`Release`] and
+    /// [`Released`]. A branch is deleted only by compare-and-delete against the commit it was
+    /// seen at, so a commit that lands in between is never lost; `Force` is the one exception.
+    pub async fn release(&self, loc: &Location, how: Release) -> Result<Released, GitError> {
+        let seen = self.inspect(loc).await?;
+        let branch_ref = format!("refs/heads/{}", loc.branch);
+        let tip = if seen.branch_exists {
+            let out = self
+                .git(&loc.repo, &["rev-parse", "--verify", &branch_ref])
+                .await?;
+            out.ok().then(|| out.stdout.trim().to_owned())
+        } else {
+            None
+        };
+        if how != Release::Force {
+            let mut removable = seen.changes.is_clean();
+            if !removable && how == Release::IfMerged && !seen.changes.dirty {
+                removable = match &tip {
+                    Some(tip) => self.is_ancestor(&loc.repo, tip).await?,
+                    None => false,
+                };
+            }
+            if !removable {
+                return Ok(if seen.exists {
+                    Released::Kept(seen.changes)
+                } else {
+                    // The directory is gone: forget the registration, keep the branch.
+                    let _guard = self.lock(&loc.repo).await?;
+                    self.expect_ok(&loc.repo, &["worktree", "prune"], "worktree prune")
+                        .await?;
+                    Released::GoneBranchKept(seen.changes)
+                });
+            }
+        }
+        let _guard = self.lock(&loc.repo).await?;
+        if seen.exists {
+            let path = loc.path.to_string_lossy().into_owned();
+            let mut args = vec!["worktree", "remove"];
+            if how == Release::Force {
+                args.push("--force");
+            }
+            args.push(&path);
+            let removed = self.git(&loc.repo, &args).await?;
+            if !removed.ok() {
+                // Something changed under us (a new file, a lock): look again, keep it.
+                let now = self.inspect(loc).await?;
+                if now.exists && how != Release::Force {
+                    return Ok(Released::Kept(now.changes));
+                }
+                return Err(failed("worktree remove", &removed));
+            }
+        }
+        self.expect_ok(&loc.repo, &["worktree", "prune"], "worktree prune")
+            .await?;
+        if let Some(tip) = tip {
+            let deleted = if how == Release::Force {
+                self.git(&loc.repo, &["update-ref", "-d", &branch_ref])
+                    .await?
+            } else {
+                self.git(&loc.repo, &["update-ref", "-d", &branch_ref, &tip])
+                    .await?
+            };
+            if !deleted.ok() {
+                return Err(failed("update-ref", &deleted));
+            }
+        }
+        // Leave no empty `<repo key>/` directory behind; harmless if it is not empty.
+        if let Some(parent) = loc.path.parent() {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+        Ok(Released::Removed)
+    }
+
+    /// Forgets worktrees of `repo` whose directory has vanished (`git worktree prune`).
+    pub async fn prune(&self, repo: &Path) -> Result<(), GitError> {
+        if !tokio::fs::try_exists(repo).await.unwrap_or(false) {
+            return Ok(());
+        }
+        let _guard = self.lock(repo).await?;
+        self.expect_ok(repo, &["worktree", "prune"], "worktree prune")
+            .await
+    }
+
+    /// Directories under the worktrees root that `known` does not list: leftovers whose record
+    /// is gone. Reported, never removed: they may hold work.
+    pub async fn unknown_dirs(&self, known: &HashSet<PathBuf>) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(mut keys) = tokio::fs::read_dir(&self.root).await else {
+            return found;
+        };
+        while let Ok(Some(key)) = keys.next_entry().await {
+            let Ok(mut runs) = tokio::fs::read_dir(key.path()).await else {
+                continue;
+            };
+            while let Ok(Some(run)) = runs.next_entry().await {
+                if !known.contains(&run.path()) {
+                    found.push(run.path());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    // ---- internals ------------------------------------------------------------------------
+
+    async fn ensure_subdir(&self, loc: &Location) -> Result<(), GitError> {
+        if loc.subdir.is_empty() {
+            return Ok(());
+        }
+        // A directory that is not tracked at `HEAD` is not in the worktree: make it empty.
+        tokio::fs::create_dir_all(loc.cwd())
+            .await
+            .map_err(|e| io("create the working subdirectory", &e))
+    }
+
+    async fn registered(&self, loc: &Location) -> Result<bool, GitError> {
+        let list = self
+            .git(&loc.repo, &["worktree", "list", "--porcelain"])
+            .await?;
+        if !list.ok() {
+            return Err(failed("worktree list", &list));
+        }
+        let want = canonical(&loc.path).await?;
+        Ok(list
+            .stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .any(|path| Path::new(path) == want || Path::new(path) == loc.path))
+    }
+
+    async fn count(&self, dir: &Path, range: &str) -> Result<u32, GitError> {
+        let out = self.git(dir, &["rev-list", "--count", range]).await?;
+        if !out.ok() {
+            return Err(failed("rev-list", &out));
+        }
+        Ok(out.stdout.trim().parse().unwrap_or(0))
+    }
+
+    async fn is_ancestor(&self, repo: &Path, tip: &str) -> Result<bool, GitError> {
+        let out = self
+            .git(repo, &["merge-base", "--is-ancestor", tip, "HEAD"])
+            .await?;
+        match out.code {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(failed("merge-base", &out)),
+        }
+    }
+
+    async fn lock(&self, repo: &Path) -> Result<tokio::sync::OwnedMutexGuard<()>, GitError> {
+        let key = match self
+            .git(
+                repo,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await
+        {
+            Ok(out) if out.ok() => canonical(Path::new(out.stdout.trim())).await?,
+            _ => repo.to_path_buf(),
+        };
+        let mutex = {
+            let mut locks = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(locks.entry(key).or_default())
+        };
+        Ok(mutex.lock_owned().await)
+    }
+
+    async fn expect_ok(&self, dir: &Path, args: &[&str], op: &str) -> Result<(), GitError> {
+        let out = self.git(dir, args).await?;
+        if out.ok() {
+            Ok(())
+        } else {
+            Err(failed(op, &out))
+        }
+    }
+
+    /// Runs `git args` in `dir`: own process group, closed stdin, bounded output, a timeout.
+    async fn git(&self, dir: &Path, args: &[&str]) -> Result<Output, GitError> {
+        let op = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+        let mut command = Command::new("git");
+        command
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("LC_ALL", "C");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_PREFIX",
+        ] {
+            command.env_remove(key);
+        }
+        let mut child =
+            spawn_grouped(&mut command).map_err(|e| GitError::GitMissing(e.to_string()))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let finished = tokio::time::timeout(self.timeout, async {
+            let (status, out, err) = tokio::join!(child.wait(), capture(stdout), capture(stderr));
+            (status, out, err)
+        })
+        .await;
+        match finished {
+            Ok((status, out, err)) => {
+                let status = status.map_err(|e| io("wait for git", &e))?;
+                Ok(Output {
+                    stdout: out,
+                    stderr: err,
+                    code: status.code(),
+                })
+            }
+            Err(_) => {
+                child.shutdown(KILL_GRACE).await;
+                Err(GitError::Timeout {
+                    op,
+                    secs: self.timeout.as_secs(),
+                })
+            }
+        }
+    }
+}
+
+/// What [`GitWorktrees::probe`] learned about a directory inside a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    /// The working tree root.
+    pub toplevel: PathBuf,
+    /// The canonical common git directory.
+    pub common_dir: PathBuf,
+    /// The directory's path inside the working tree, empty at the root.
+    pub subdir: String,
+}
+
+/// The branch of a run.
+pub fn branch_of(run: &str) -> String {
+    format!("reno/{run}")
+}
+
+fn check_run_id(run: &str) -> Result<(), GitError> {
+    let safe = !run.is_empty()
+        && run.len() <= 128
+        && run
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if safe {
+        Ok(())
+    } else {
+        Err(GitError::Unsafe(format!(
+            "run id {run:?} is not a safe branch name"
+        )))
+    }
+}
+
+fn failed(op: &str, out: &Output) -> GitError {
+    let tail: String = out.stderr.trim().chars().take(600).collect();
+    GitError::Failed {
+        op: op.to_owned(),
+        code: out
+            .code
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string()),
+        stderr: tail,
+    }
+}
+
+fn io(what: &str, error: &std::io::Error) -> GitError {
+    GitError::Io {
+        what: what.to_owned(),
+        message: error.to_string(),
+    }
+}
+
+async fn canonical(path: &Path) -> Result<PathBuf, GitError> {
+    tokio::fs::canonicalize(path)
+        .await
+        .map_err(|e| io(&format!("resolve {}", path.display()), &e))
+}
+
+/// Reads `reader` to its end, keeping the first [`OUTPUT_CAP`] bytes.
+async fn capture<R: AsyncRead + Unpin>(reader: Option<R>) -> String {
+    let Some(mut reader) = reader else {
+        return String::new();
+    };
+    let mut kept = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = OUTPUT_CAP.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+            }
+        }
+    }
+    String::from_utf8_lossy(&kept).into_owned()
+}
