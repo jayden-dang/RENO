@@ -131,6 +131,7 @@ pub async fn settle(config_dir: &Path, max: Duration) -> bool {
 /// Both of Claude Code's refresh locks, held. While held no CLI refreshes
 /// (each retries until it can take the lock, then re-reads the store), so
 /// the stored login can be read and replaced as one step. Released on drop.
+#[derive(Debug)]
 pub struct RefreshLock {
     held: Vec<PathBuf>,
     touch: Option<tokio::task::JoinHandle<()>>,

@@ -136,9 +136,9 @@ impl Child {
 
     /// The pid, group and start time to persist for this child, while it is unreaped.
     ///
-    /// No driver persists records yet; the run supervisor does once the kernel lands (T0.8).
+    /// The native Claude executor reports it through `ExecControls::processes` as soon as it
+    /// spawns; the run supervisor persists it.
     #[cfg(unix)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn record(&self) -> Option<crate::proc::record::ProcessRecord> {
         crate::proc::record::ProcessRecord::of_pid(self.inner.id()?)
     }

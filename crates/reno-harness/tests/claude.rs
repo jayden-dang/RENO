@@ -8,15 +8,15 @@
 //! listings, live reconfiguration, subagent chips) lost its tests with its code.
 
 #![cfg(unix)]
+// Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use reno_harness::exec::{
-    Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer,
-};
+use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
 use reno_harness::{ClaudeExecutor, ProcessRecord};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorId, Question, RunId,
@@ -79,7 +79,9 @@ async fn start_with(
     controls: ExecControls,
     handle: ExecHandle,
 ) -> Live {
-    let records = handle.take_process_records().expect("records are taken once");
+    let records = handle
+        .take_process_records()
+        .expect("records are taken once");
     let stream = executor.start(spec, controls).await.expect("run starts");
     Live {
         stream,
@@ -98,10 +100,7 @@ struct Outcome {
 
 /// Drive `live` to its end. Approvals go to `decide`; the first option of every question (or
 /// `"A"` for free text) answers `NeedsInput`.
-async fn drive(
-    live: &mut Live,
-    mut decide: impl FnMut(&ApprovalSubject) -> Decision,
-) -> Outcome {
+async fn drive(live: &mut Live, mut decide: impl FnMut(&ApprovalSubject) -> Decision) -> Outcome {
     let mut outcome = Outcome::default();
     let run = async {
         while let Some(event) = live.stream.next().await {
@@ -353,7 +352,11 @@ async fn captured_live_background_subagent_frames_replay_without_the_subagent() 
         1,
         "{events:?}"
     );
-    assert_eq!(dones(&events), 1, "the eager result is the run's end: {events:?}");
+    assert_eq!(
+        dones(&events),
+        1,
+        "the eager result is the run's end: {events:?}"
+    );
     // The spawn is a plain tool call on the parent feed, under the harness's own tool name.
     assert!(
         events.iter().any(
@@ -594,7 +597,11 @@ async fn questions_closed_unanswered_deny_the_tool() {
 #[tokio::test]
 async fn access_modes_decide_what_reaches_reno() {
     // Full access: nothing is asked; the CLI launches in `default` with no skip flag.
-    let mut live = start(&executor(), spec_with("scenario:approvals", AccessMode::FullAccess)).await;
+    let mut live = start(
+        &executor(),
+        spec_with("scenario:approvals", AccessMode::FullAccess),
+    )
+    .await;
     let outcome = drive(&mut live, |_| Decision::Deny).await;
     assert_eq!(
         result_of(&outcome.events),
@@ -629,7 +636,11 @@ async fn access_modes_decide_what_reaches_reno() {
 
     // Supervised asks about each; an allow lets it through, and an approved plan continues in
     // the access mode's own permission mode.
-    let mut live = start(&executor(), spec_with("scenario:approvals", AccessMode::Supervised)).await;
+    let mut live = start(
+        &executor(),
+        spec_with("scenario:approvals", AccessMode::Supervised),
+    )
+    .await;
     let outcome = drive(&mut live, |_| Decision::Allow).await;
     assert_eq!(
         result_of(&outcome.events),
@@ -734,6 +745,22 @@ async fn cancel_escalates_to_sigterm_and_ends_with_an_interrupted_done() {
     assert_eq!(dones(&events), 1);
 }
 
+/// ARCH-11: every task a run spawned is the executor's, and ends with the run's stream.
+#[tokio::test]
+async fn shutdown_waits_for_the_tasks_of_runs_whose_streams_were_dropped() {
+    let executor = executor().with_graces(Duration::from_millis(100), Duration::from_millis(500));
+    let mut live = start(&executor, spec("scenario:interrupt")).await;
+    while let Some(event) = live.stream.next().await {
+        if matches!(event, ExecEvent::Started { .. }) {
+            break;
+        }
+    }
+    drop(live.stream);
+    tokio::time::timeout(Duration::from_secs(20), executor.shutdown())
+        .await
+        .expect("the run's tasks end once its stream is dropped");
+}
+
 #[tokio::test]
 async fn the_spawned_childs_process_record_is_forwarded() {
     let mut live = start(&executor(), spec("scenario:happy")).await;
@@ -762,7 +789,11 @@ async fn a_relaunched_child_is_reported_too() {
     while let Ok(record) = live.records.try_recv() {
         pids.push(record.pid);
     }
-    assert_eq!(pids.len(), 2, "the first child and its fresh replacement: {pids:?}");
+    assert_eq!(
+        pids.len(),
+        2,
+        "the first child and its fresh replacement: {pids:?}"
+    );
     assert_ne!(pids[0], pids[1]);
 }
 
@@ -832,14 +863,24 @@ async fn a_steered_turn_running_a_long_tool_is_not_marked_done() {
     )
     .await;
     let events = drive(&mut live, |_| Decision::Allow).await.events;
-    assert_eq!(dones(&events), 1, "exactly the steered turn's own end: {events:?}");
+    assert_eq!(
+        dones(&events),
+        1,
+        "exactly the steered turn's own end: {events:?}"
+    );
     let done_at = events.len() - 1;
     let tool_result_at = events
         .iter()
         .position(|e| matches!(e, ExecEvent::ToolResult { id, .. } if id == "tool-sleep"))
         .expect("tool result");
-    assert!(done_at > tool_result_at, "Done before the tool finished: {events:?}");
-    assert_eq!(done(&events), (StopReason::Completed, Some("DONE".into()), None));
+    assert!(
+        done_at > tool_result_at,
+        "Done before the tool finished: {events:?}"
+    );
+    assert_eq!(
+        done(&events),
+        (StopReason::Completed, Some("DONE".into()), None)
+    );
 }
 
 /// A message queued behind a turn that just finished: that turn's result is a boundary; the
@@ -905,14 +946,16 @@ async fn an_unreplayed_steer_releases_the_run_end() {
 /// Those are not the prompt's end.
 #[tokio::test]
 async fn results_settling_killed_tasks_on_resume_do_not_end_the_run() {
-    let events = run_to_end(
-        &executor(),
-        spec("Reply PONG scenario:resume-killed-tasks"),
-    )
-    .await;
+    let events = run_to_end(&executor(), spec("Reply PONG scenario:resume-killed-tasks")).await;
     assert_eq!(dones(&events), 1, "{events:?}");
-    assert_eq!(done(&events), (StopReason::Completed, Some("PONG".into()), None));
-    let pong = events.iter().position(|e| *e == text("PONG")).expect("reply");
+    assert_eq!(
+        done(&events),
+        (StopReason::Completed, Some("PONG".into()), None)
+    );
+    let pong = events
+        .iter()
+        .position(|e| *e == text("PONG"))
+        .expect("reply");
     assert!(pong < events.len() - 1);
 }
 
@@ -950,7 +993,11 @@ async fn an_unrestorable_session_is_relaunched_fresh() {
             resume_spec(session, &unknown.path().join("missing")),
         )
         .await;
-        assert_eq!(started_session(&events).as_deref(), Some("sess-fresh"), "{session}");
+        assert_eq!(
+            started_session(&events).as_deref(),
+            Some("sess-fresh"),
+            "{session}"
+        );
         assert_eq!(
             done(&events),
             (StopReason::Completed, Some("resumed=none".into()), None),
@@ -1036,7 +1083,10 @@ async fn a_missing_working_directory_is_a_failed_run_not_a_missing_binary() {
     let (stop, _, diagnostic) = done(&events);
     assert_eq!(stop, StopReason::Error);
     assert!(
-        diagnostic.as_deref().unwrap_or_default().contains("does not exist"),
+        diagnostic
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not exist"),
         "{diagnostic:?}"
     );
 }
@@ -1091,7 +1141,10 @@ async fn structured_output_is_refused_before_anything_is_spawned() {
         .await
         .err()
         .expect("refused");
-    assert!(matches!(error, ExecError::UnsupportedOutputSchema), "{error:?}");
+    assert!(
+        matches!(error, ExecError::UnsupportedOutputSchema),
+        "{error:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,7 +1158,10 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
     assert_eq!(descriptor.id, "claude-code".parse::<ExecutorId>().unwrap());
     assert_eq!(descriptor.cli_verified.min, MIN_CLI_VERSION);
     assert_eq!(descriptor.cli_verified.verified, VERIFIED_CLI_VERSION);
-    assert!(descriptor.adapter_version.contains("claude"), "{descriptor:?}");
+    assert!(
+        descriptor.adapter_version.contains("claude"),
+        "{descriptor:?}"
+    );
     let caps = descriptor.caps;
     assert_eq!(caps.steering, Steering::StepBoundary);
     assert!(caps.resume);

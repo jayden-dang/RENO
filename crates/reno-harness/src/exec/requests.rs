@@ -63,7 +63,11 @@ impl<A, I> OpenRequests<A, I> {
 
     /// Record an approval the run is waiting on. A repeated id replaces the earlier request,
     /// which is handed back so the driver can refuse it.
-    pub fn open_approval(&mut self, request_id: impl Into<String>, payload: A) -> Option<Open<A, I>> {
+    pub fn open_approval(
+        &mut self,
+        request_id: impl Into<String>,
+        payload: A,
+    ) -> Option<Open<A, I>> {
         self.open.insert(request_id.into(), Open::Approval(payload))
     }
 
@@ -79,7 +83,9 @@ impl<A, I> OpenRequests<A, I> {
             (Some(Open::Approval(payload)), Answer::Decision(decision)) => {
                 Resolved::Decision(payload, decision)
             }
-            (Some(Open::Input(payload)), Answer::Input(answers)) => Resolved::Input(payload, answers),
+            (Some(Open::Input(payload)), Answer::Input(answers)) => {
+                Resolved::Input(payload, answers)
+            }
             (Some(kept), _) => {
                 self.open.insert(request_id, kept);
                 Resolved::WrongKind
@@ -140,7 +146,10 @@ mod tests {
         table.open_approval("a", ());
         table.open_input("q", ());
         // "Yes" typed as an input answer is not a decision.
-        assert_eq!(table.resolve(answer("a", input("Yes"))), Resolved::WrongKind);
+        assert_eq!(
+            table.resolve(answer("a", input("Yes"))),
+            Resolved::WrongKind
+        );
         assert_eq!(
             table.resolve(answer("q", Answer::Decision(Decision::Allow))),
             Resolved::WrongKind

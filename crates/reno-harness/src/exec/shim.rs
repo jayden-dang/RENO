@@ -35,13 +35,13 @@
 //!
 //! The shim reports no `ProcessRecord` through `ExecControls::processes`. The imported drivers
 //! spawn their child deep inside their own tasks (`spawn_grouped` has seven call sites in the
-//! codex and acp drivers, the Claude driver spawns through another path, and some of those
-//! sites are logins and model probes, not runs), and none of them receives anything the shim
-//! could hand a sink to. Forwarding would mean threading a sink through `RunControls` into
-//! every driver, which is not a small edit. Until stage B replaces the drivers with native
-//! `Executor`s that own their spawn, a run through this shim leaves no process row, so the
-//! orphan sweep after a crash has nothing to find for it. `MockExecutor` reports records
-//! through `MockStep::Spawned`.
+//! codex and acp drivers, and some of those sites are logins and model probes, not runs), and
+//! none of them receives anything the shim could hand a sink to. Forwarding would mean
+//! threading a sink through `RunControls` into every driver, which is not a small edit. Until
+//! Codex and ACP get native `Executor`s that own their spawn (T1.0b, T1.0c), a run through this
+//! shim leaves no process row, so the orphan sweep after a crash has nothing to find for it.
+//! `ClaudeExecutor` is native and reports its child, including a relaunched one, and
+//! `MockExecutor` reports records through `MockStep::Spawned`.
 //!
 //! # Guarantees
 //!
@@ -119,9 +119,10 @@ pub const DROPPED_AGENT_EVENTS: &[&str] = &[
 /// `request_input`, indistinguishable from an agent's own question. The shim maps every such
 /// request to `ExecEvent::NeedsInput` carrying that question. It does **not** parse the prose
 /// into `NeedsApproval`: Reno never reads prose to make a security decision. Structured approvals
-/// (`NeedsApproval` with an `ApprovalSubject`, answered by `ExecHandle::decide`) arrive with the
-/// native contract in stage B (T1.0). A `Decision` sent for a shim request is ignored with a
-/// warning; the request stays open for an `Answer::Input`.
+/// (`NeedsApproval` with an `ApprovalSubject`, answered by `ExecHandle::decide`) come with a
+/// native driver: `ClaudeExecutor` has them (T1.0a); Codex and ACP get them in T1.0b and
+/// T1.0c. A `Decision` sent for a shim request is ignored with a warning; the request stays
+/// open for an `Answer::Input`.
 ///
 /// # Declared capabilities
 ///

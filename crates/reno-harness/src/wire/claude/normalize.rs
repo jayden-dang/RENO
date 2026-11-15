@@ -258,7 +258,7 @@ pub(crate) struct Normalizer {
 }
 
 impl Normalizer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             saw_init: false,
             command_calls: std::collections::HashMap::new(),
@@ -269,7 +269,7 @@ impl Normalizer {
     }
 
     /// The CLI reported its session (`system:init`).
-    pub fn started(&self) -> bool {
+    pub(crate) fn started(&self) -> bool {
         self.saw_init
     }
 
@@ -289,7 +289,7 @@ impl Normalizer {
 
     /// Normalize one stdout frame into 0+ events. `interrupted` folds a post-interrupt `result`
     /// into `Done { stop: Interrupted }`.
-    pub fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<ExecEvent> {
+    pub(crate) fn normalize(&mut self, frame: Frame, interrupted: bool) -> Vec<ExecEvent> {
         match frame {
             Frame::System(f) => {
                 // The CLI retrying a failed API call waits between attempts with nothing on
@@ -307,7 +307,9 @@ impl Normalizer {
                     if attempt >= 3 && !self.retry_noticed {
                         self.retry_noticed = true;
                         let why = match (f.error_status, f.error.as_ref().and_then(Value::as_str)) {
-                            (Some(429), _) | (_, Some("rate_limit")) => "is rate limited".to_owned(),
+                            (Some(429), _) | (_, Some("rate_limit")) => {
+                                "is rate limited".to_owned()
+                            }
                             (Some(529), _) | (_, Some("overloaded")) => "is overloaded".to_owned(),
                             (Some(status), _) => format!("returned an error ({status})"),
                             (None, _) => "could not be reached".to_owned(),
@@ -638,7 +640,10 @@ mod tests {
             assert!(norm.normalize(parse(raw), false).is_empty(), "{raw}");
         }
         // Not even a child's error code becomes the run's failure.
-        let done = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+        let done = norm.normalize(
+            parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#),
+            false,
+        );
         assert_eq!(
             done_of(&done).2.as_deref(),
             Some("The run ended with an error.")
@@ -710,7 +715,11 @@ mod tests {
             false,
         );
         match &events[..] {
-            [ExecEvent::ToolResult { summary: Some(s), .. }] => {
+            [
+                ExecEvent::ToolResult {
+                    summary: Some(s), ..
+                },
+            ] => {
                 assert!(s.chars().count() < 260, "{} chars", s.chars().count());
                 assert!(s.ends_with('…'));
             }
@@ -725,7 +734,10 @@ mod tests {
             parse(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#),
             false,
         );
-        let blocked = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+        let blocked = norm.normalize(
+            parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#),
+            false,
+        );
         assert_eq!(
             done_of(&blocked).2.as_deref(),
             Some("Claude 5-hour limit reached — the turn was blocked. Try again after it resets.")
@@ -740,7 +752,10 @@ mod tests {
                 r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"five_hour",{overage}}}}}"#
             );
             assert!(norm.normalize(parse(&raw), false).is_empty(), "{overage}");
-            let done = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+            let done = norm.normalize(
+                parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#),
+                false,
+            );
             assert_eq!(
                 done_of(&done).2.as_deref(),
                 Some("The run ended with an error."),
@@ -891,7 +906,8 @@ mod tests {
 
     #[test]
     fn an_unreadable_result_ends_the_run() {
-        let ok = normalize_one(r#"{"type":"result","subtype":"success","usage":{"input_tokens":"x"}}"#);
+        let ok =
+            normalize_one(r#"{"type":"result","subtype":"success","usage":{"input_tokens":"x"}}"#);
         assert_eq!(done_of(&ok), (StopReason::Completed, None, None));
         let failed = normalize_one(
             r#"{"type":"result","subtype":"success","is_error":true,"usage":{"input_tokens":"x"}}"#,
@@ -934,12 +950,18 @@ mod tests {
             false,
         );
         let diagnostic = done_of(&done).2.unwrap();
-        assert!(diagnostic.contains("overloaded") && diagnostic.contains("3 of 10"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("overloaded") && diagnostic.contains("3 of 10"),
+            "{diagnostic}"
+        );
     }
 
     #[test]
     fn the_summary_helper_leads_with_the_exit_code() {
-        assert_eq!(summarize(Some("a\nb\n"), Some(0)).as_deref(), Some("exit code 0: b"));
+        assert_eq!(
+            summarize(Some("a\nb\n"), Some(0)).as_deref(),
+            Some("exit code 0: b")
+        );
         assert_eq!(summarize(None, Some(3)).as_deref(), Some("exit code 3"));
         assert_eq!(summarize(Some("  \n"), None), None);
     }

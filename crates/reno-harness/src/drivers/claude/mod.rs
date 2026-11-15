@@ -64,9 +64,7 @@ use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
 use crate::{Signal, send_signal};
 use resume::Transcript;
-use wire::{
-    ControlRequestFrame, Frame, control_error_line, control_response_line,
-};
+use wire::{ControlRequestFrame, Frame, control_error_line, control_response_line};
 
 /// The oldest Claude Code CLI this driver is known to work with. The imported code pins no
 /// minimum of its own; this is the oldest version it was live-validated against (the stdio
@@ -430,7 +428,10 @@ impl Executor for ClaudeExecutor {
                     "reno-harness {} claude-code driver (CLI {cli})",
                     env!("CARGO_PKG_VERSION")
                 ),
-                None => format!("reno-harness {} claude-code driver", env!("CARGO_PKG_VERSION")),
+                None => format!(
+                    "reno-harness {} claude-code driver",
+                    env!("CARGO_PKG_VERSION")
+                ),
             },
             cli_verified: VersionRange {
                 min: MIN_CLI_VERSION.into(),
@@ -797,13 +798,22 @@ fn refuse_replaced(
 }
 
 /// Apply one answer from the consumer.
-fn apply_answer(answer: ExecAnswer, access: AccessMode, requests: &mut Requests, stdin: &mut Stdin) {
+fn apply_answer(
+    answer: ExecAnswer,
+    access: AccessMode,
+    requests: &mut Requests,
+    stdin: &mut Stdin,
+) {
     let request_id = answer.request_id.clone();
     let after_plan = permission::permission_mode(access);
     match requests.resolve(answer) {
         Resolved::Decision(open, crate::exec::Decision::Allow) => {
             let leave_plan = open.exit_plan.then_some(after_plan);
-            respond(stdin, &request_id, permission::allow(open.input, leave_plan));
+            respond(
+                stdin,
+                &request_id,
+                permission::allow(open.input, leave_plan),
+            );
         }
         Resolved::Decision(_, crate::exec::Decision::Deny) => {
             respond(stdin, &request_id, permission::deny(permission::DENIED));
@@ -1446,8 +1456,7 @@ mod tests {
 
     #[test]
     fn the_descriptor_lists_only_what_the_instance_will_honour() {
-        let restricted =
-            ClaudeExecutor::new().with_access_modes(vec![AccessMode::Supervised]);
+        let restricted = ClaudeExecutor::new().with_access_modes(vec![AccessMode::Supervised]);
         assert_eq!(
             restricted.descriptor().caps.access_modes,
             vec![AccessMode::Supervised]
@@ -1456,8 +1465,10 @@ mod tests {
         let cli = ClaudeExecutor::new().descriptor().cli_verified;
         assert_eq!(cli.min, MIN_CLI_VERSION);
         assert_eq!(cli.verified, VERIFIED_CLI_VERSION);
-        assert!(semver::Version::parse(MIN_CLI_VERSION).unwrap()
-            <= semver::Version::parse(VERIFIED_CLI_VERSION).unwrap());
+        assert!(
+            semver::Version::parse(MIN_CLI_VERSION).unwrap()
+                <= semver::Version::parse(VERIFIED_CLI_VERSION).unwrap()
+        );
     }
 
     #[test]
@@ -1467,6 +1478,9 @@ mod tests {
         assert_eq!(too_old_message(None), None);
         assert_eq!(too_old_message(Some("not a version")), None);
         let message = too_old_message(Some("2.1.100")).expect("too old");
-        assert!(message.contains("2.1.100") && message.contains(MIN_CLI_VERSION), "{message}");
+        assert!(
+            message.contains("2.1.100") && message.contains(MIN_CLI_VERSION),
+            "{message}"
+        );
     }
 }

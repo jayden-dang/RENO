@@ -2,9 +2,9 @@
 //! A Claude child is never torn down while Claude Code is saving a refreshed
 //! login: neither signalled nor sent EOF until the refresh lock is released.
 //! Its own test binary — it points the process at a temp config dir.
+use reno_harness::ClaudeExecutor;
 use reno_harness::claude::refresh_lock;
 use reno_harness::exec::{ExecControls, Executor};
-use reno_harness::ClaudeExecutor;
 use reno_proto::{AccessMode, ExecSpec, RunId, SandboxLevel};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;

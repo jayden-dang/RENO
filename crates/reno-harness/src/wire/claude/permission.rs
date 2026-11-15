@@ -126,7 +126,8 @@ pub(crate) fn parse_questions(request_id: &str, input: &Value) -> Vec<Asked> {
     raw.iter()
         .enumerate()
         .map(|(at, q)| {
-            let field = |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
+            let field =
+                |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
             let header = field(["header", "title"]).unwrap_or_default();
             let text = field(["question", "prompt"]).unwrap_or_default();
             Asked {
@@ -252,20 +253,36 @@ mod tests {
         assert!(bash.paths.is_empty());
         assert_eq!(bash.raw, raw);
 
-        let edit = subject("Edit", &json!({"file_path": "/w/a.rs", "old_string": "a"}), &json!({}));
+        let edit = subject(
+            "Edit",
+            &json!({"file_path": "/w/a.rs", "old_string": "a"}),
+            &json!({}),
+        );
         assert_eq!(edit.action, ActionClass::Edit);
         assert_eq!(edit.command, None);
         assert_eq!(edit.paths, vec![std::path::PathBuf::from("/w/a.rs")]);
 
-        let notebook = subject("NotebookEdit", &json!({"notebook_path": "/w/n.ipynb"}), &json!({}));
+        let notebook = subject(
+            "NotebookEdit",
+            &json!({"notebook_path": "/w/n.ipynb"}),
+            &json!({}),
+        );
         assert_eq!(notebook.paths, vec![std::path::PathBuf::from("/w/n.ipynb")]);
 
-        let grep = subject("Grep", &json!({"pattern": "x", "path": "/w/src"}), &json!({}));
+        let grep = subject(
+            "Grep",
+            &json!({"pattern": "x", "path": "/w/src"}),
+            &json!({}),
+        );
         assert_eq!(grep.action, ActionClass::Read);
         assert_eq!(grep.paths, vec![std::path::PathBuf::from("/w/src")]);
 
         // Only a command action has a command, whatever the input says.
-        let mcp = subject("mcp__x__y", &json!({"command": "ls", "file_path": "/etc"}), &json!({}));
+        let mcp = subject(
+            "mcp__x__y",
+            &json!({"command": "ls", "file_path": "/etc"}),
+            &json!({}),
+        );
         assert_eq!(mcp.action, ActionClass::McpTool);
         assert_eq!(mcp.command, None);
         assert!(mcp.paths.is_empty());
@@ -281,14 +298,29 @@ mod tests {
     #[test]
     fn each_access_mode_covers_what_it_says() {
         use AccessMode::*;
-        for tool in ["Bash", "Edit", "mcp__x__y", "WebFetch", "Read", "Whatever", "ExitPlanMode"] {
+        for tool in [
+            "Bash",
+            "Edit",
+            "mcp__x__y",
+            "WebFetch",
+            "Read",
+            "Whatever",
+            "ExitPlanMode",
+        ] {
             assert!(allowed_without_asking(FullAccess, tool), "{tool}");
             assert!(!allowed_without_asking(Supervised, tool), "{tool}");
         }
         for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
             assert!(allowed_without_asking(AutoAcceptEdits, tool), "{tool}");
         }
-        for tool in ["Bash", "mcp__x__y", "WebFetch", "Read", "Whatever", "ExitPlanMode"] {
+        for tool in [
+            "Bash",
+            "mcp__x__y",
+            "WebFetch",
+            "Read",
+            "Whatever",
+            "ExitPlanMode",
+        ] {
             assert!(!allowed_without_asking(AutoAcceptEdits, tool), "{tool}");
         }
     }
@@ -373,10 +405,7 @@ mod tests {
         // Approving a plan leaves plan mode for the run's own mode.
         let plan = allow(json!({"plan": "p"}), Some("acceptEdits"));
         assert_eq!(plan["updatedPermissions"][0]["mode"], "acceptEdits");
-        assert_eq!(
-            deny("nope"),
-            json!({"behavior": "deny", "message": "nope"})
-        );
+        assert_eq!(deny("nope"), json!({"behavior": "deny", "message": "nope"}));
         assert_eq!(DENIED, "The user did not allow this.");
         assert!(QUESTIONS_DISMISSED.contains("dismissed"));
     }

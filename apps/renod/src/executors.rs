@@ -4,13 +4,14 @@
 //!   default it plays a short canned run and finishes. With `hold` it stops after its first text
 //!   and waits to be steered or cancelled, which gives tests and demos a run that stays live
 //!   without any timer.
-//! - `claude-code` and `codex` are registered through [`HarnessExecutor`] when their CLIs are
-//!   found. Nothing here starts them.
+//! - `claude-code` is the native [`ClaudeExecutor`] and `codex` still runs through the stage A
+//!   [`HarnessExecutor`] shim (until its driver goes native, T1.0b); both are registered when
+//!   their CLIs are found. Nothing here starts them.
 
 use std::sync::Arc;
 
 use reno_harness::exec::{Executor, HarnessExecutor, MockExecutor, MockStep};
-use reno_harness::{ClaudeHarness, CodexHarness};
+use reno_harness::{ClaudeExecutor, CodexHarness};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ExecEvent, IdError, StopReason, ToolCall};
 use serde_json::json;
@@ -18,20 +19,29 @@ use serde_json::json;
 /// The id of the always-present mock executor.
 pub const MOCK_ID: &str = "mock";
 /// The id of the Claude Code executor.
-pub const CLAUDE_ID: &str = "claude-code";
+pub const CLAUDE_ID: &str = reno_harness::claude::EXECUTOR_ID;
 /// The id of the Codex executor.
 pub const CODEX_ID: &str = "codex";
 
 /// The model the mock reports.
 pub const MOCK_MODEL: &str = "mock-1";
 
-/// The registry the kernel gets, and the shims the daemon must wait for at shutdown.
-#[derive(Debug, Default)]
+/// The registry the kernel gets, and the harness executors the daemon must wait for at shutdown.
+#[derive(Default)]
 pub struct ExecutorSet {
     /// Executors by id.
     pub registry: ExecutorRegistry,
-    /// The harness shims in the registry, so shutdown can wait for their tasks.
-    pub harnesses: Vec<Arc<HarnessExecutor>>,
+    /// The harness executors in the registry, so shutdown can wait for their tasks.
+    pub harnesses: Vec<Arc<dyn Executor>>,
+}
+
+impl std::fmt::Debug for ExecutorSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutorSet")
+            .field("registry", &self.registry)
+            .field("harnesses", &self.harnesses.len())
+            .finish()
+    }
 }
 
 impl ExecutorSet {
@@ -97,12 +107,11 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
     if !harnesses {
         return Ok(set);
     }
-    let candidates = [
-        HarnessExecutor::new(ClaudeHarness::new(), CLAUDE_ID.parse()?),
-        HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?),
+    let candidates: [Arc<dyn Executor>; 2] = [
+        Arc::new(ClaudeExecutor::new()),
+        Arc::new(HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?)),
     ];
     for executor in candidates {
-        let executor = Arc::new(executor);
         let id = executor.descriptor().id;
         let health = executor.probe().await;
         if health.installed {

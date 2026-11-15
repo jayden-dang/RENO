@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reno_harness::exec::HarnessExecutor;
+use reno_harness::exec::Executor;
 use reno_kernel::{Kernel, KernelConfig, KernelError, SystemClock};
 use reno_proto::{ExecutorId, IdError};
 use reno_rpc::{RpcError, Server, UnixServer};
@@ -261,7 +261,7 @@ struct Shutdown {
     serving: JoinHandle<Result<(), RpcError>>,
     server: Arc<Server>,
     kernel: Kernel,
-    harnesses: Vec<Arc<HarnessExecutor>>,
+    harnesses: Vec<Arc<dyn Executor>>,
     socket: PathBuf,
     lock: DataDirLock,
     connection_grace: Duration,

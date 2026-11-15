@@ -258,7 +258,11 @@ mod tests {
     #[test]
     fn an_unknown_cli_version_keeps_every_curated_row() {
         for cli in [None, Some(""), Some("not a version")] {
-            assert_eq!(ids(&supported_models(cli)), ids(&static_models()), "{cli:?}");
+            assert_eq!(
+                ids(&supported_models(cli)),
+                ids(&static_models()),
+                "{cli:?}"
+            );
         }
     }
 }

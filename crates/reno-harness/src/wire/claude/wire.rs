@@ -45,7 +45,7 @@ pub(crate) struct ControlResponseBody {
 
 impl ControlResponseBody {
     /// The failure text of an `error` response; `None` for a success.
-    pub fn error_message(&self) -> Option<String> {
+    pub(crate) fn error_message(&self) -> Option<String> {
         if self.subtype != "error" {
             return None;
         }
@@ -145,7 +145,7 @@ pub(crate) struct MessageBody {
 }
 
 impl MessageBody {
-    pub fn blocks(&self) -> impl Iterator<Item = ContentBlock> + '_ {
+    pub(crate) fn blocks(&self) -> impl Iterator<Item = ContentBlock> + '_ {
         self.content
             .as_array()
             .map(|a| a.as_slice())
@@ -199,7 +199,7 @@ pub(crate) struct RateLimitInfo {
 impl RateLimitInfo {
     /// A rejected window that actually blocks the turn: an account spending
     /// provisioned overage keeps running despite the reject.
-    pub fn blocks(&self) -> bool {
+    pub(crate) fn blocks(&self) -> bool {
         self.status == "rejected"
             && !matches!(
                 self.overage_status.as_deref(),
