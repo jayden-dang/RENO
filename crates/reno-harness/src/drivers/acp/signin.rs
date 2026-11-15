@@ -20,6 +20,9 @@ use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Command, Stdio};
 use crate::shutdown_child;
 
+/// Builds the sign-in command from the program's arguments and its extra environment.
+type CommandBuilder<'a> = dyn Fn(&[String], &[(String, String)]) -> Command + Sync + 'a;
+
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(330);
 /// sign-out is local credential removal; this bound covers the server's cold
 /// start.
@@ -805,7 +808,7 @@ impl AcpExecutor {
         method: AuthMethod,
         exe: &Path,
         args: &[String],
-        command: &(dyn Fn(&[String], &[(String, String)]) -> Command + Sync),
+        command: &CommandBuilder<'_>,
         on_progress: &std::sync::Arc<dyn Fn(SignInProgress) + Send + Sync>,
     ) -> Result<(), HarnessError> {
         let display_name = self.spec.display_name;

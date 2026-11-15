@@ -32,7 +32,7 @@
 //! | `edit`, `delete`, `move` | allowed | allowed | asked |
 //! | anything else, or no kind | allowed | asked | asked |
 //!
-//! Looking around is allowed in every mode because the imported driver did so and an agent that
+//! Looking around is allowed in every mode because an agent that
 //! cannot read or search cannot work. "Allowed" is answered with the `allow_once` option and
 //! never with `allow_always`: Reno decides every time.
 //!

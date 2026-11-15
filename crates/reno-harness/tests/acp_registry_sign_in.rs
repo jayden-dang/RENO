@@ -23,14 +23,16 @@
 //!   (Gemini CLI): the page recorded for the app to open (no browser here),
 //!   and the callback it waits for finishes it.
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use reno_harness::RegistryAgent;
 use reno_harness::acp::{NEEDS_TERMINAL, SignInOptions, SignInProgress};
-use reno_harness::upstream_proto::RegistryAgent;
 use reno_harness::{AcpExecutor, acp_registry as reg};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

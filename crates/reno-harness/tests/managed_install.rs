@@ -8,6 +8,9 @@
 //!
 //! Single-test binary: it mutates RENO_ADAPTERS_DIR process-wide.
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+
 use futures::StreamExt;
 use reno_harness::AcpExecutor;
 use reno_harness::exec::{ExecControls, Executor};

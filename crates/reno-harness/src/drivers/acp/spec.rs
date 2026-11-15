@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use reno_proto::{AccessMode, Effort, Steering};
 
-use crate::upstream_proto::HarnessId;
+use crate::agent_id::HarnessId;
 
 /// Per-agent configuration: which binary to spawn and what the descriptor declares.
 pub(super) struct AcpAgentSpec {
@@ -66,7 +66,7 @@ pub(super) struct AcpAgentSpec {
     /// permission to decide.
     pub access_modes: &'static [AccessMode],
     /// The oldest CLI version and the newest one the driver was verified against, when the
-    /// imported code pins any. `None`: nothing is pinned, and the descriptor says so.
+    /// driver pins any. `None`: nothing is pinned, and the descriptor says so.
     pub cli_verified: Option<(&'static str, &'static str)>,
 }
 
@@ -180,8 +180,7 @@ pub(super) fn devin() -> AcpAgentSpec {
              `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
              `brew install --cask devin-cli`, then `devin auth login`; set \
              DEVIN_EXECUTABLE to override)",
-        // The imported driver listed three fallback rows and resolved a requested model through
-        // `devin models list`; nothing pins what the session advertises, so none is declared.
+        // Nothing pins what the session advertises, so none is declared.
         models: &[],
         // No `_session/steering` extension: a steer preempts the generation (waiting out running
         // tools) and continues the turn, immediately.
@@ -203,7 +202,7 @@ pub(super) fn devin() -> AcpAgentSpec {
 /// The spec every registry agent shares: nothing about the agent beyond its id and name, its
 /// launch read from its record each time (an update moves it), its sign-in from its own
 /// handshake.
-pub(super) fn registry(agent: crate::upstream_proto::RegistryAgent, name: &str) -> AcpAgentSpec {
+pub(super) fn registry(agent: crate::agent_id::RegistryAgent, name: &str) -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Registry(agent),
         // Interned with the agent's id: bounded by the agents ever added.

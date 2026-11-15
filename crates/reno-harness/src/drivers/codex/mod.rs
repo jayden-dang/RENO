@@ -1,7 +1,6 @@
 //! The native Codex executor: spawns the installed `codex` CLI as `codex app-server` and speaks
 //! JSON-RPC 2.0 over stdio, the interface the Codex IDE extension uses, and implements
-//! [`Executor`] without going through the imported `Harness` trait (stage B, ARCHITECTURE
-//! sections 2.1 and 5.1).
+//! [`Executor`].
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.experimentalApi`). The request
 //! shapes were read from the 0.164.0 schema and the driver's live fixtures start at 0.146.1;
@@ -26,8 +25,8 @@
 //!   `accept` or `decline`, never `acceptForSession`. An elicitation form and the agent's own
 //!   questions become `NeedsInput`, answered through `ExecHandle::answer_input`. No prose is
 //!   written or parsed on this path.
-//! - ONE RUN IS ONE `Done`. The imported driver kept the app-server and its thread for the next
-//!   turn; the run does not. The end of the turn ends the run and the app-server's process group
+//! - ONE RUN IS ONE `Done`. The app-server and its thread are not kept for a
+//!   next turn. The end of the turn ends the run and the app-server's process group
 //!   is torn down, so what the agent left running ends with it. The one exception is a steer
 //!   Codex refused because its turn just ended: that steer starts the next turn inside the same
 //!   run, and the first turn's end is not the run's.
@@ -182,22 +181,6 @@ fn mcp_overrides(servers: &[McpServerSpec], pre_approve: bool) -> Vec<(String, V
         }
     }
     overrides
-}
-
-/// A ready-to-spawn `codex login` command for the engine's account flow.
-///
-/// Shares the executor's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell snapshot,
-/// install locations) and its child-PATH composition, so "Add account" launches exactly the
-/// binary a run would. `CODEX_HOME` isolates the login from the live `~/.codex` session; the
-/// caller owns stdio wiring and cancellation.
-pub fn login_command(codex_home: &Path) -> Result<Command, HarnessError> {
-    let exe = CodexExecutor::new()
-        .resolve_executable()
-        .map_err(|error| HarnessError::NotInstalled(error.to_string()))?;
-    let mut cmd = Command::new(&exe);
-    crate::compose_child_path(&mut cmd, &exe);
-    cmd.arg("login").env("CODEX_HOME", codex_home);
-    Ok(cmd)
 }
 
 /// `Some(why)` when `version` is a CLI older than [`MIN_CLI_VERSION`]; an unknown version (a
@@ -403,11 +386,9 @@ impl CodexExecutor {
                 models.insert(0, model);
             }
             if models.is_empty() {
-                return Err(crate::CatalogFailure {
-                    code: crate::CatalogFailureCode::Failed,
-                    message: "Codex returned an empty model catalog".into(),
-                }
-                .into());
+                return Err(HarnessError::Protocol(
+                    "Codex returned an empty model catalog".into(),
+                ));
             }
             Ok::<Vec<ModelInfo>, HarnessError>(models)
         };

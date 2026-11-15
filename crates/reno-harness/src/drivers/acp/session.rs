@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::HarnessError;
+use crate::agent_id::HarnessId;
 use crate::jsonrpc::{Incoming, RpcClient};
-use crate::upstream_proto::HarnessId;
 use crate::wire::acp::permission;
 
 /// Bound on one session control call (model or config option switch).

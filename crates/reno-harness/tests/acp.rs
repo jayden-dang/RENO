@@ -1,11 +1,11 @@
 //! `AcpExecutor` integration tests against the fake ACP agents in `tests/fixtures` (no real
 //! `grok`, `devin`, `hermes` or Antigravity binary is involved, ARCH-16).
 //!
-//! Ported from the imported driver's tests onto the native contract: the same scenarios, now read
+//! Scenarios on the native contract, read
 //! as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide` and
 //! questions as `NeedsInput`. What the contract has no place for (model and command discovery,
 //! sign-in outside a run, turn stop, live reconfiguration, subagent chips, an idle steer between
-//! turns) lost its tests with its code. One run is one `Done`.
+//! turns) is not covered here. One run is one `Done`.
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use reno_harness::RegistryAgent;
 use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
-use reno_harness::upstream_proto::RegistryAgent;
 use reno_harness::{AcpExecutor, ProcessRecord};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId,
@@ -1187,7 +1187,7 @@ async fn a_missing_working_directory_is_a_failed_run_not_a_missing_binary() {
 }
 
 /// ARCH-15: an access mode the agent does not honor is refused before anything is resolved or
-/// spawned: not the imported driver's silent upgrade to full access, and not `NotInstalled` for
+/// spawned: not a silent upgrade to full access, and not `NotInstalled` for
 /// a binary that is missing too.
 #[tokio::test]
 async fn an_unsupported_access_mode_fails_before_anything_is_spawned() {

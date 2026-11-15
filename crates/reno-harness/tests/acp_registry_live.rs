@@ -6,10 +6,13 @@
 //!
 //!   cargo test -p reno-harness --test acp_registry_live -- --ignored --nocapture
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+
 use std::time::Duration;
 
+use reno_harness::RegistryAgent;
 use reno_harness::acp_registry as reg;
-use reno_harness::upstream_proto::RegistryAgent;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 

@@ -1,3 +1,5 @@
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 #![cfg(unix)]
 //! A Claude child is never torn down while Claude Code is saving a refreshed
 //! login: neither signalled nor sent EOF until the refresh lock is released.

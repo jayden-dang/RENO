@@ -1,14 +1,12 @@
 //! The kernel's port to harnesses (ARCH-7, ARCHITECTURE section 4.2).
 //!
-//! [`Executor`] is the one trait the kernel sees. Four things implement it today:
+//! [`Executor`] is the one trait the kernel sees. These implement it:
 //!
-//! - [`crate::ClaudeExecutor`] is native (stage B, ARCHITECTURE sections 2.1 and 5.1): it
-//!   speaks Claude Code's wire directly and emits `ExecEvent`s, with structured approvals.
-//! - [`crate::CodexExecutor`] is native too: it speaks the `codex app-server` JSON-RPC.
-//! - [`crate::AcpExecutor`] is native too, one instance per ACP agent (Grok, Devin, Hermes,
+//! - [`crate::ClaudeExecutor`] speaks Claude Code's wire directly and emits `ExecEvent`s, with
+//!   structured approvals.
+//! - [`crate::CodexExecutor`] speaks the `codex app-server` JSON-RPC.
+//! - [`crate::AcpExecutor`] is one instance per ACP agent (Grok, Devin, Hermes,
 //!   Antigravity, the agents of the ACP registry).
-//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A). No production driver
-//!   runs through it any more; it goes away in T1.0d.
 //! - [`MockExecutor`] plays a scripted run for kernel tests and the CLI's `--executor mock`.
 //!
 //! # What a native driver plugs into
@@ -53,11 +51,9 @@ use crate::proc::ProcessRecord;
 
 mod mock;
 mod requests;
-mod shim;
 
 pub use mock::{MockExecutor, MockLog, MockStep};
 pub use requests::{Open, OpenRequests, Resolved};
-pub use shim::{DROPPED_AGENT_EVENTS, HarnessExecutor};
 
 /// A harness run, as the kernel sees it. Object safe: the kernel holds `Arc<dyn Executor>`.
 #[async_trait]
@@ -163,8 +159,7 @@ pub struct ExecAnswer {
     pub answer: Answer,
 }
 
-/// The executor's half of a run's controls (ARCHITECTURE section 5.1: kept from the imported
-/// code, now owned by Reno).
+/// The executor's half of a run's controls (ARCHITECTURE section 5.1).
 #[derive(Debug)]
 pub struct ExecControls {
     /// Prompts to deliver at the harness's steering boundary. Bounded.

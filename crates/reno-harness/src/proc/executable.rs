@@ -175,8 +175,8 @@ fn version_cache() -> std::sync::MutexGuard<'static, VersionCache> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// An explicit install may replace wrappers without changing their metadata.
-/// Clear all candidates, including canonical paths behind vendor symlinks.
+/// Clear every cached candidate, including canonical paths behind symlinks (tests only).
+#[cfg(test)]
 pub(crate) fn invalidate_versions(names: &[&str]) {
     if VERSION_CACHE.get().is_some() {
         let mut cache = version_cache();
@@ -193,7 +193,7 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
 /// changes; a failure is retried after [`VERSION_FAILURE_TTL`], and a probe
 /// that timed out after [`INCONCLUSIVE_VERSION_TTL`], so one cold first exec
 /// cannot pin an older install for the life of the process.
-pub fn binary_version(path: &Path) -> Option<semver::Version> {
+pub(crate) fn binary_version(path: &Path) -> Option<semver::Version> {
     binary_version_with(path, VERSION_PROBE_TIMEOUT)
 }
 
@@ -332,6 +332,7 @@ fn probe_version(path: &Path, timeout: std::time::Duration) -> Probe {
             }
         };
         #[cfg(unix)]
+        #[expect(unsafe_code, reason = "kill(2) on the probe's own process group")]
         unsafe {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
         }

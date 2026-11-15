@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::HarnessError;
+use crate::agent_id::HarnessId;
 use crate::proc::scratch::ScratchDir;
 use crate::process::Command;
-use crate::upstream_proto::HarnessId;
 
 use super::install::newest_antigravity_install;
 use super::spec::AcpAgentSpec;

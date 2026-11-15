@@ -11,8 +11,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::HarnessError;
+use crate::agent_id::HarnessId;
 use crate::process::{Command, Stdio};
-use crate::upstream_proto::HarnessId;
 
 pub(super) fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {

@@ -1,5 +1,10 @@
 //! Owned agent processes: Tokio's command and child, plus process-group signalling and
 //! descendant tracking.
+
+#![expect(
+    unsafe_code,
+    reason = "process groups, signals and descendant discovery are libc calls with no safe std equivalent"
+)]
 pub use std::process::Stdio;
 pub use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 

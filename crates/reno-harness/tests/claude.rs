@@ -2,10 +2,9 @@
 //! (no real `claude` binary involved). Live tests against the real CLI are at the bottom,
 //! `#[ignore]`d.
 //!
-//! Ported from the imported driver's tests onto the native contract: the same scenarios, now
-//! read as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide`.
+//! Scenarios on the native contract, read as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide`.
 //! What the contract has no place for (title runs, command discovery, turn stop, background
-//! listings, live reconfiguration, subagent chips) lost its tests with its code.
+//! listings, live reconfiguration, subagent chips) is not covered here.
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.

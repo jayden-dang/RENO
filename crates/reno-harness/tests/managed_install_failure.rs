@@ -6,6 +6,8 @@
 //!
 //! Single-test binary: it mutates PATH/SHELL/RENO_* env process-wide.
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

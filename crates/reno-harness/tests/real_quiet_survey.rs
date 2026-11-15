@@ -151,7 +151,8 @@ async fn real_all_agents_quiet_survey() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
-    let agents: Vec<(&str, fn() -> AcpExecutor)> = vec![
+    type Make = fn() -> AcpExecutor;
+    let agents: Vec<(&str, Make)> = vec![
         ("devin", AcpExecutor::devin),
         ("grok", AcpExecutor::grok),
         ("hermes", AcpExecutor::hermes),

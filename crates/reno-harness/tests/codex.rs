@@ -2,8 +2,7 @@
 //! `tests/fixtures/fake-codex.sh` (no real `codex` binary involved). Live tests against the
 //! real CLI are at the bottom, `#[ignore]`d.
 //!
-//! Ported from the imported driver's tests onto the native contract: the same scenarios, now
-//! read as `ExecEvent`s, with approvals as `NeedsApproval` answered through
+//! Scenarios on the native contract, read as `ExecEvent`s, with approvals as `NeedsApproval` answered through
 //! `ExecHandle::decide`. What the contract has no place for (title runs, slash commands, turn
 //! stop, background listings, live reconfiguration, plan requests, subagent transcripts) lost
 //! its tests with its code; the recorded subagent captures are replayed to prove the child's

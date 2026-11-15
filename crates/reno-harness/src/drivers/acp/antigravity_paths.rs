@@ -1,3 +1,7 @@
+#![expect(
+    unsafe_code,
+    reason = "resolving the user's home directory is a libc passwd lookup"
+)]
 use std::path::{Path, PathBuf};
 
 use crate::HarnessError;

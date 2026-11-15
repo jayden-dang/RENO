@@ -1,6 +1,5 @@
 //! The native ACP executor: spawns an Agent Client Protocol agent (JSON-RPC 2.0 over stdio,
-//! protocol v1) and implements [`Executor`] directly, without going through the imported
-//! `Harness` trait (stage B, ARCHITECTURE sections 2.1 and 5.1).
+//! protocol v1) and implements [`Executor`] directly.
 //!
 //! One [`AcpExecutor`] serves one agent. The agents built ground-up on ACP are Grok
 //! ([`AcpExecutor::grok`], `grok agent stdio`), Devin ([`AcpExecutor::devin`], `devin acp`),
@@ -46,8 +45,7 @@
 //!
 //! Each agent honors only some access modes (the `access_modes` of its spec, declared in the
 //! descriptor); [`Executor::start`] refuses any other with [`ExecError::UnsupportedAccess`]
-//! before anything is resolved or spawned (ARCH-15). The imported driver ran such a request with
-//! full access instead; that is gone.
+//! before anything is resolved or spawned (ARCH-15). A request is never run with more access than asked.
 //!
 //! | Agent | `Supervised` | `AutoAcceptEdits` | `FullAccess` | Why |
 //! |---|---|---|---|---|
@@ -68,7 +66,7 @@
 //! | anything else, or no kind | answered here | `NeedsApproval` | `NeedsApproval` |
 //!
 //! "Answered here" is `allow_once`, never `allow_always`; looking around (`read`, `search`,
-//! `think`) is allowed in every mode, as the imported driver did, and that is the only place it
+//! `think`) is allowed in every mode, and that is the only place it
 //! is decided. In `FullAccess` the session is also switched to the agent's own no-prompts mode
 //! where it advertises one, and any other mode keeps an asking mode where it advertises one. A
 //! run that asks never starts in a session that approves on its own: an agent that rejects the
@@ -86,6 +84,8 @@ mod antigravity_paths;
 mod config;
 mod install;
 mod launch;
+#[cfg(test)]
+pub(crate) use launch::find_on_paths;
 mod session;
 mod signin;
 mod spec;
@@ -118,6 +118,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::agent_id::HarnessId;
 use crate::exec::{
     ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, Open, OpenRequests, Resolved,
     require_access,
@@ -125,14 +126,12 @@ use crate::exec::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::proc::scratch::ScratchDir;
 use crate::process::{Command, Stdio};
-use crate::upstream_proto::HarnessId;
 use crate::wire::acp::normalize::{self, Normalizer};
 use crate::wire::acp::permission;
 use crate::wire::acp::system_message::SystemMessageEchoFilter;
 use crate::{HarnessError, Signal, send_signal};
 use child::Child;
 use config::{ConfigRules, select_session_config};
-pub(crate) use launch::find_on_paths;
 use launch::{Launch, Launcher};
 use session::{
     authenticate_for_run, cancel_params, initialize_params, is_auth_required, is_sign_in_prompt,
@@ -254,10 +253,7 @@ impl AcpExecutor {
     /// ([`crate::acp_registry`]): the generic executor, the same for every registry agent. `name`
     /// is how it's shown. Its id is `acp.<registry id>`, which fails to be an executor id only
     /// for a registry id so long that the prefix pushes it past the limit.
-    pub fn registry(
-        agent: crate::upstream_proto::RegistryAgent,
-        name: &str,
-    ) -> Result<Self, IdError> {
+    pub fn registry(agent: crate::agent_id::RegistryAgent, name: &str) -> Result<Self, IdError> {
         Self::with_spec(spec::registry(agent, name))
     }
 
@@ -622,42 +618,6 @@ impl Executor for AcpExecutor {
     async fn shutdown(&self) {
         self.tracker.close();
         self.tracker.wait().await;
-    }
-}
-
-/// Background-install managed npm adapters for agents whose CLI is present on this device, so a
-/// first run never pays (or trips over) an npm run. Skips agents whose adapter is already
-/// resolvable; failures are logged and retried on the next daemon start or blocking launch. A
-/// no-op outside a tokio runtime. Archive-distributed servers require explicit installation.
-pub fn prewarm_managed_adapters() {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    for spec in [spec::grok()] {
-        let Some(pkg) = spec.npm_package else {
-            continue;
-        };
-        let pin = crate::adapter_install::NpmPin::parse(pkg);
-        if find_on_paths(spec.executable, (spec.extra_paths)()).is_some()
-            || crate::adapter_install::installed_entry(&pin, spec.executable).is_some()
-            || crate::adapter_install::find_npm().is_none()
-        {
-            continue;
-        }
-        let (bin_name, display_name) = (spec.executable, spec.display_name);
-        handle.spawn(async move {
-            match crate::adapter_install::ensure_installed(pin, bin_name, display_name).await {
-                Ok(entry) => tracing::info!(
-                    target: "reno_harness::adapter_install",
-                    adapter = %entry.display(),
-                    "prewarmed {display_name} ACP adapter"
-                ),
-                Err(e) => tracing::warn!(
-                    target: "reno_harness::adapter_install",
-                    "prewarm of the {display_name} ACP adapter failed: {e}"
-                ),
-            }
-        });
     }
 }
 
@@ -1270,7 +1230,12 @@ async fn run_session(session: Session) {
                     exit_drain_deadline.unwrap_or_else(tokio::time::Instant::now)
                 ), if exit_drain_deadline.is_some() => break 'main,
 
-            res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
+            res = async {
+                match turn.as_mut() {
+                    Some(turn) => turn.await,
+                    None => std::future::pending().await,
+                }
+            }, if turn.is_some() => {
                 drop(turn.take());
                 if res.is_err() && client.is_closed() {
                     break 'main;
@@ -1498,10 +1463,17 @@ async fn run_session(session: Session) {
                 }
             },
 
-            res = async { steering_call.as_mut().expect("guarded by if").1.as_mut().await },
+            res = async {
+                    match steering_call.as_mut() {
+                        Some((_, call)) => call.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                },
                 if steering_call.is_some() =>
             {
-                let (text, _) = steering_call.take().expect("guarded by if");
+                let Some((text, _)) = steering_call.take() else {
+                    continue;
+                };
                 let outcome = match &res {
                     Ok(resp) => resp
                         .get("outcome")
@@ -1825,14 +1797,14 @@ mod tests {
                 "acp.antigravity"
             ]
         );
-        let agent = crate::upstream_proto::RegistryAgent::new("gemini").unwrap();
+        let agent = crate::agent_id::RegistryAgent::new("gemini").unwrap();
         assert_eq!(
             AcpExecutor::registry(agent, "Gemini").unwrap().id.as_str(),
             "acp.gemini"
         );
         // A registry id long enough that the prefix breaks the executor id limit is refused, not
         // truncated into another agent's id.
-        let long = crate::upstream_proto::RegistryAgent::new(&"a".repeat(64)).unwrap();
+        let long = crate::agent_id::RegistryAgent::new(&"a".repeat(64)).unwrap();
         assert!(AcpExecutor::registry(long, "Long").is_err());
     }
 
