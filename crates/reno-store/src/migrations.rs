@@ -1,6 +1,7 @@
 //! Schema migrations (`user_version` based, via `rusqlite_migration`).
 //!
-//! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9. Status columns carry
+//! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
+//! process start time to `runs`. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -82,9 +83,13 @@ CREATE TABLE attempts (
 ) WITHOUT ROWID;
 ";
 
+/// Migration 2: the start time of the recorded child, so the orphan sweep can refuse a pid that
+/// was reused (ARCHITECTURE 17.3).
+const V2: &str = "ALTER TABLE runs ADD COLUMN process_start INTEGER;";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1)])
+    Migrations::new(vec![M::up(V1), M::up(V2)])
 }
 
 /// Brings `conn` to the latest schema. A second call is a no-op.
@@ -132,6 +137,29 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+    }
+
+    /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
+    /// 1) keeps its rows and gains the new column, empty.
+    #[test]
+    fn upgrade_from_a_version_one_database_keeps_its_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, pid, pgid, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 7, 7, 2);",
+        )
+        .unwrap();
+        run(&mut conn).unwrap();
+        let (pid, start): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT pid, process_start FROM runs WHERE id = 'run_a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((pid, start), (7, None));
     }
 }

@@ -1,12 +1,14 @@
 //! `cargo xtask check`: asserts the architecture rules that the compiler cannot.
 //!
-//! Sans-IO layout: [`run_cargo_metadata`] and [`wire_sources`] are the only functions that touch
+//! Sans-IO layout: [`run_cargo_metadata`] and [`rust_sources`] are the only functions that touch
 //! the machine. Everything else takes parsed data and returns [`Violation`]s.
 //!
 //! Rules:
 //! - `edges`: workspace members depend on each other only along the ARCH-1 allow-list.
 //! - `ownership`: ARCH-5 and friends; some external packages belong to one crate only.
 //! - `wire`: ARCH-6; `reno-harness/src/wire/` contains no I/O, clock or async tokens.
+//! - `kernel`: ARCH-7; `reno-kernel/src/` outside test code touches no file, process, socket or
+//!   clock. `SystemTime::now` is allowed in exactly one file, the `Clock` port.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -66,6 +68,26 @@ const WIRE_TOKENS: &[&str] = &[
     "Local::now",
     ".await",
 ];
+
+/// Tokens that the kernel's non-test sources must not contain (ARCH-7). Time goes through
+/// `Clock` (and `tokio::time`, which tests pause); everything else goes through the store and
+/// the executor port.
+const KERNEL_TOKENS: &[&str] = &[
+    "std::fs",
+    "tokio::fs",
+    "std::process",
+    "tokio::process",
+    "std::net",
+    "tokio::net",
+    "Instant::now",
+    "Utc::now",
+];
+
+/// Forbidden everywhere in the kernel except in [`KERNEL_CLOCK_MODULE`], the `SystemClock`.
+const KERNEL_CLOCK_TOKEN: &str = "SystemTime::now";
+
+/// The one kernel source that may read the system clock, matched by path components.
+const KERNEL_CLOCK_MODULE: &str = "reno-kernel/src/clock.rs";
 
 #[derive(Debug, Deserialize)]
 struct Metadata {
@@ -132,15 +154,22 @@ fn check() -> ExitCode {
     let mut violations = edge_violations(&metadata);
     violations.extend(ownership_violations(&metadata));
     let wire_dir = metadata.workspace_root.join("crates/reno-harness/src/wire");
-    match wire_sources(&wire_dir) {
-        Ok(sources) => {
-            for (path, source) in sources {
-                violations.extend(wire_violations(&path, &source));
+    let kernel_dir = metadata.workspace_root.join("crates/reno-kernel/src");
+    for (dir, is_wire) in [(&wire_dir, true), (&kernel_dir, false)] {
+        match rust_sources(dir) {
+            Ok(sources) => {
+                for (path, source) in sources {
+                    violations.extend(if is_wire {
+                        wire_violations(&path, &source)
+                    } else {
+                        kernel_violations(&path, &source)
+                    });
+                }
             }
-        }
-        Err(error) => {
-            eprintln!("xtask: reading {}: {error}", wire_dir.display());
-            return ExitCode::from(2);
+            Err(error) => {
+                eprintln!("xtask: reading {}: {error}", dir.display());
+                return ExitCode::from(2);
+            }
         }
     }
     for violation in &violations {
@@ -170,7 +199,7 @@ fn run_cargo_metadata() -> Result<Metadata, String> {
 }
 
 /// I/O: every `.rs` file under `dir`, as `(path, contents)`. Empty when `dir` does not exist.
-fn wire_sources(dir: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
+fn rust_sources(dir: &Path) -> std::io::Result<Vec<(PathBuf, String)>> {
     let mut found = Vec::new();
     if !dir.exists() {
         return Ok(found);
@@ -279,11 +308,54 @@ fn pattern_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// Rule `wire`: forbidden tokens in one `wire/` source file.
+fn wire_violations(path: &Path, source: &str) -> Vec<Violation> {
+    scan_tokens("wire", "reno-harness", path, source, WIRE_TOKENS)
+}
+
+/// Rule `kernel`: forbidden tokens in one `reno-kernel/src` source file.
+///
+/// A file that opens with the inner attribute `#![cfg(test)]` (after blank lines and comments)
+/// is compiled only in tests and is skipped whole: `#[cfg(test)] mod tests;` in its parent names
+/// no braces for the scan to count. `SystemTime::now` is allowed in the clock module only,
+/// decided by path.
+fn kernel_violations(path: &Path, source: &str) -> Vec<Violation> {
+    if is_test_only_file(source) {
+        return Vec::new();
+    }
+    let mut violations = scan_tokens("kernel", "reno-kernel", path, source, KERNEL_TOKENS);
+    if !path.ends_with(KERNEL_CLOCK_MODULE) {
+        violations.extend(scan_tokens(
+            "kernel",
+            "reno-kernel",
+            path,
+            source,
+            &[KERNEL_CLOCK_TOKEN],
+        ));
+    }
+    violations
+}
+
+/// Whether the first item of `source` is the inner attribute `#![cfg(test)]`.
+fn is_test_only_file(source: &str) -> bool {
+    source
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("//"))
+        == Some("#![cfg(test)]")
+}
+
+/// The line scan behind the `wire` and `kernel` rules.
 ///
 /// Approach: a line scan, not a parser. Text after `//` is ignored, so comments and doc comments
 /// may name the tokens. An item that follows `#[cfg(test)]` is skipped by counting braces from its
 /// first `{` to the matching `}`; this assumes braces do not appear in string literals there.
-fn wire_violations(path: &Path, source: &str) -> Vec<Violation> {
+fn scan_tokens(
+    rule: &'static str,
+    krate: &str,
+    path: &Path,
+    source: &str,
+    tokens: &[&str],
+) -> Vec<Violation> {
     let mut violations = Vec::new();
     let mut skip_depth: Option<i32> = None;
     let mut pending_cfg_test = false;
@@ -310,11 +382,11 @@ fn wire_violations(path: &Path, source: &str) -> Vec<Violation> {
             }
             continue;
         }
-        for token in WIRE_TOKENS {
+        for token in tokens {
             if code.contains(token) {
                 violations.push(Violation::new(
-                    "wire",
-                    "reno-harness",
+                    rule,
+                    krate,
                     format!("{}:{} contains `{token}`", path.display(), index + 1),
                 ));
             }
@@ -490,7 +562,104 @@ fn b() {}
 
     #[test]
     fn missing_wire_directory_yields_no_sources() {
-        let sources = wire_sources(Path::new("/nonexistent/reno/wire"));
+        let sources = rust_sources(Path::new("/nonexistent/reno/wire"));
         assert!(sources.is_ok_and(|found| found.is_empty()));
+    }
+
+    fn kernel(path: &str, source: &str) -> Vec<String> {
+        rendered(&kernel_violations(Path::new(path), source))
+    }
+
+    #[test]
+    fn kernel_io_and_clock_tokens_are_reported_with_location() {
+        let source = "\
+fn a() {
+    let _ = std::fs::read(\"x\");
+    let _ = tokio::fs::read(\"x\");
+    let _ = std::process::id();
+    let _ = tokio::process::Command::new(\"x\");
+    let _ = std::net::TcpStream::connect(\"x\");
+    let _ = tokio::net::TcpStream::connect(\"x\");
+    let _ = tokio::time::Instant::now();
+    let _ = chrono::Utc::now();
+}
+";
+        let found = kernel("crates/reno-kernel/src/a.rs", source);
+        assert_eq!(found.len(), 8, "{found:?}");
+        assert_eq!(
+            found[0],
+            "kernel: reno-kernel -> crates/reno-kernel/src/a.rs:2 contains `std::fs`"
+        );
+        assert!(
+            found[6].ends_with(":8 contains `Instant::now`"),
+            "{found:?}"
+        );
+        assert!(found[7].ends_with(":9 contains `Utc::now`"), "{found:?}");
+    }
+
+    #[test]
+    fn system_time_is_allowed_only_in_the_clock_module() {
+        let source = "fn now() { let _ = std::time::SystemTime::now(); }\n";
+        assert!(kernel("crates/reno-kernel/src/clock.rs", source).is_empty());
+        assert!(kernel("/abs/checkout/crates/reno-kernel/src/clock.rs", source).is_empty());
+        for other in [
+            "crates/reno-kernel/src/lib.rs",
+            "crates/reno-kernel/src/sub/clock.rs",
+            "crates/reno-kernel/src/clock_extra.rs",
+            "crates/other/src/clock.rs",
+        ] {
+            assert_eq!(
+                kernel(other, source),
+                [format!(
+                    "kernel: reno-kernel -> {other}:1 contains `SystemTime::now`"
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn the_clock_module_is_still_held_to_the_other_tokens() {
+        let source = "fn a() { let _ = std::fs::read(\"x\"); }\n";
+        assert_eq!(kernel("crates/reno-kernel/src/clock.rs", source).len(), 1);
+    }
+
+    #[test]
+    fn kernel_ignores_comments_and_inline_cfg_test_modules() {
+        let source = "\
+//! Never calls std::fs or Instant::now.
+/// Reads no SystemTime::now.
+fn a() {} // not std::process
+#[cfg(test)]
+mod tests {
+    fn t() {
+        let _ = std::process::Command::new(\"sleep\");
+    }
+}
+fn b() { let _ = tokio::net::lookup_host(\"x\"); }
+";
+        let found = kernel("crates/reno-kernel/src/a.rs", source);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains(":10 contains `tokio::net`"), "{found:?}");
+    }
+
+    #[test]
+    fn a_file_that_opens_with_cfg_test_is_skipped_whole() {
+        let source = "//! Tests.\n\n#![cfg(test)]\nuse std::process::Command;\nuse std::fs;\n";
+        assert!(kernel("crates/reno-kernel/src/tests.rs", source).is_empty());
+        assert!(is_test_only_file(source));
+        // Only when it is the first item: later in a file it proves nothing.
+        let late = "use std::fs;\n#![cfg(test)]\n";
+        assert!(!is_test_only_file(late));
+        assert_eq!(kernel("crates/reno-kernel/src/x.rs", late).len(), 1);
+        // A stray `#[cfg(test)] mod tests;` does not hide the file it names.
+        assert!(!is_test_only_file("#[cfg(test)]\nmod tests;\n"));
+    }
+
+    #[test]
+    fn wire_and_kernel_rules_do_not_share_their_token_lists() {
+        // `.await` is the kernel's daily bread; `std::fs` is forbidden in both.
+        let source = "async fn a() { f().await; }\n";
+        assert!(kernel("crates/reno-kernel/src/a.rs", source).is_empty());
+        assert_eq!(wire_violations(Path::new("w.rs"), source).len(), 1);
     }
 }

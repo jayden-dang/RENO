@@ -31,6 +31,18 @@
 //! Everything else is dropped; the list is [`DROPPED_AGENT_EVENTS`], and the mapping function
 //! matches every variant, so a new `AgentEvent` variant fails to compile until it is placed.
 //!
+//! # Process records
+//!
+//! The shim reports no `ProcessRecord` through `ExecControls::processes`. The imported drivers
+//! spawn their child deep inside their own tasks (`spawn_grouped` has seven call sites in the
+//! codex and acp drivers, the Claude driver spawns through another path, and some of those
+//! sites are logins and model probes, not runs), and none of them receives anything the shim
+//! could hand a sink to. Forwarding would mean threading a sink through `RunControls` into
+//! every driver, which is not a small edit. Until stage B replaces the drivers with native
+//! `Executor`s that own their spawn, a run through this shim leaves no process row, so the
+//! orphan sweep after a crash has nothing to find for it. `MockExecutor` reports records
+//! through `MockStep::Spawned`.
+//!
 //! # Guarantees
 //!
 //! - The stream ends with exactly one `Done`. Events after the first `Done` are discarded.
@@ -276,6 +288,7 @@ impl Executor for HarnessExecutor {
             steering,
             cancel,
             answers,
+            ..
         } = controls;
         let pending = Arc::new(Pending::default());
         let (prompt_tx, prompt_rx) = mpsc::channel(REQUEST_CAPACITY);

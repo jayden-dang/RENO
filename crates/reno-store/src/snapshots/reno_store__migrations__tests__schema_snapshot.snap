@@ -56,7 +56,7 @@ CREATE TABLE runs (
     created_at       INTEGER NOT NULL,
     started_at       INTEGER,
     ended_at         INTEGER
-);
+, process_start INTEGER);
 
 CREATE INDEX runs_claimable ON runs (created_at) WHERE status IN ('queued', 'leased');
 

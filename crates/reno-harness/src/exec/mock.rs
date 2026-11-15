@@ -17,6 +17,8 @@ use reno_proto::{
 };
 
 use super::{ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, require_access};
+#[cfg(unix)]
+use crate::proc::ProcessRecord;
 
 /// One step of a mock run.
 #[derive(Debug, Clone)]
@@ -33,6 +35,10 @@ pub enum MockStep {
     },
     /// Wait until the run's controls carry a steering prompt.
     AwaitSteer,
+    /// Report a spawned child on the run's process-record queue, as a real executor does right
+    /// after it spawns. Unix only, like `ProcessRecord`.
+    #[cfg(unix)]
+    Spawned(ProcessRecord),
 }
 
 impl MockStep {
@@ -247,6 +253,8 @@ impl Run {
                 }
                 MockStep::AwaitAnswer { request_id } => self.wait_answer(&request_id).await,
                 MockStep::AwaitSteer => self.wait_steer().await,
+                #[cfg(unix)]
+                MockStep::Spawned(record) => self.report_process(record).await,
             };
             match waited {
                 Waited::Got => {}
@@ -284,6 +292,16 @@ impl Run {
                 return Waited::Got;
             }
             self.stashed_answers.push(answer);
+        }
+    }
+
+    /// A supervisor that stopped listening does not end the run: the report is simply lost.
+    #[cfg(unix)]
+    async fn report_process(&mut self, record: ProcessRecord) -> Waited {
+        tokio::select! {
+            biased;
+            () = self.controls.cancel.cancelled() => Waited::Cancelled,
+            _ = self.controls.processes.report(record) => Waited::Got,
         }
     }
 
@@ -600,6 +618,33 @@ mod tests {
             runs.push(events);
         }
         assert_eq!(runs[0], runs[1]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_spawned_step_reports_the_record_once_on_the_handle() {
+        let record = ProcessRecord {
+            pid: 4242,
+            pgid: 4242,
+            start_time: 9,
+        };
+        let mock = MockExecutor::new(id("mock"))
+            .with_steps([MockStep::Spawned(record), MockStep::text("go")]);
+        let (controls, handle) = ExecControls::new(4);
+        let mut records = handle.take_process_records().unwrap();
+        assert!(
+            handle.clone().take_process_records().is_none(),
+            "taken once"
+        );
+        let events: Vec<_> = mock
+            .start(spec(AccessMode::Supervised), controls)
+            .await
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(records.recv().await, Some(record));
+        assert_eq!(records.recv().await, None, "closed with the controls");
     }
 
     #[tokio::test]

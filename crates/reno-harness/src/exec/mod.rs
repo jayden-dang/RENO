@@ -19,6 +19,13 @@
 //! The kernel creates a pair with [`ExecControls::new`]: the [`ExecControls`] half goes to
 //! `start`, the [`ExecHandle`] half stays with the run supervisor. Every channel is bounded
 //! (ARCH-11).
+//!
+//! # Process records
+//!
+//! An executor that spawns a child reports it through [`ExecControls::processes`] (unix only,
+//! like `ProcessRecord` itself). The supervisor takes the receiving end once, with
+//! [`ExecHandle::take_process_records`], and stores each record so the next start can sweep the
+//! orphan (ARCHITECTURE 17.3).
 
 #![deny(missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
@@ -27,6 +34,9 @@ use futures::stream::BoxStream;
 use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(unix)]
+use crate::proc::ProcessRecord;
 
 mod mock;
 mod shim;
@@ -144,6 +154,34 @@ pub struct ExecControls {
     /// Answers to `NeedsInput` and `NeedsApproval` requests. Bounded. A request still unanswered
     /// when `cancel` fires is denied.
     pub answers: mpsc::Receiver<ExecAnswer>,
+    /// Where to report each child process the run spawns. Bounded.
+    #[cfg(unix)]
+    pub processes: ProcessSink,
+}
+
+/// The executor's end of the process-record queue: report every child as soon as it is spawned.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct ProcessSink {
+    records: mpsc::Sender<ProcessRecord>,
+}
+
+#[cfg(unix)]
+impl ProcessSink {
+    /// Report a spawned child, waiting for room. `Err` means the supervisor no longer listens;
+    /// the run goes on.
+    pub async fn report(&self, record: ProcessRecord) -> Result<(), ControlsClosed> {
+        self.records.send(record).await.map_err(|_| ControlsClosed)
+    }
+
+    /// Report a spawned child without waiting, for callers that cannot `.await`. The record is
+    /// handed back when the queue is full or closed.
+    pub fn try_report(
+        &self,
+        record: ProcessRecord,
+    ) -> Result<(), mpsc::error::TrySendError<ProcessRecord>> {
+        self.records.try_send(record)
+    }
 }
 
 /// The run supervisor's half of a run's controls.
@@ -152,6 +190,9 @@ pub struct ExecHandle {
     steering: mpsc::Sender<String>,
     cancel: CancellationToken,
     answers: mpsc::Sender<ExecAnswer>,
+    /// The receiving end of the process-record queue, taken once.
+    #[cfg(unix)]
+    records: std::sync::Arc<std::sync::Mutex<Option<mpsc::Receiver<ProcessRecord>>>>,
 }
 
 /// The run has ended or dropped its controls.
@@ -182,16 +223,22 @@ impl ExecControls {
         let capacity = capacity.max(1);
         let (steer_tx, steer_rx) = mpsc::channel(capacity);
         let (answer_tx, answer_rx) = mpsc::channel(capacity);
+        #[cfg(unix)]
+        let (record_tx, record_rx) = mpsc::channel(capacity);
         (
             Self {
                 steering: steer_rx,
                 cancel: cancel.clone(),
                 answers: answer_rx,
+                #[cfg(unix)]
+                processes: ProcessSink { records: record_tx },
             },
             ExecHandle {
                 steering: steer_tx,
                 cancel,
                 answers: answer_tx,
+                #[cfg(unix)]
+                records: std::sync::Arc::new(std::sync::Mutex::new(Some(record_rx))),
             },
         )
     }
@@ -232,6 +279,17 @@ impl ExecHandle {
     ) -> Result<(), ControlsClosed> {
         self.send_answer(request_id.into(), Answer::Decision(decision))
             .await
+    }
+
+    /// The queue of process records the executor reports, once: the first call returns it and
+    /// later calls (on this handle or a clone) return `None`. It closes when the executor
+    /// drops its controls.
+    #[cfg(unix)]
+    pub fn take_process_records(&self) -> Option<mpsc::Receiver<ProcessRecord>> {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Stop the run.
