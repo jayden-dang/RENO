@@ -76,18 +76,14 @@ async fn silent_agent_errors_via_the_prompt_stall_watchdog() {
 
 #[tokio::test]
 async fn an_agent_without_a_stall_bound_is_not_cut_off() {
-    // Devin pins none; the fixture's turn would answer only after the bound grok pins elsewhere.
+    // Devin pins no stall bound, and the fixture's turn stays silent for a minute.
     let executor = AcpExecutor::devin().with_executable(fixture_path());
-    assert_eq!(
-        executor.descriptor().caps.access_modes,
-        vec![AccessMode::FullAccess]
-    );
     let (controls, handle) = ExecControls::new(8);
     let mut stream = executor
         .start(spec("scenario:prompt-stall"), controls)
         .await
         .unwrap();
-    // Silence for longer than the watchdog test's bound ends nothing.
+    // Silence for longer than the bound the test above gives Grok ends nothing.
     assert!(
         tokio::time::timeout(Duration::from_millis(1500), async {
             while let Some(event) = stream.next().await {

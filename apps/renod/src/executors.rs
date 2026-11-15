@@ -160,6 +160,13 @@ fn registry_executors(records: Vec<Record>, taken: &[ExecutorId]) -> Vec<AcpExec
     records
         .into_iter()
         .filter_map(|record| {
+            // The registry also lists agents Reno drives itself (`claude-acp`, `codex-acp`,
+            // `devin`, ...): they are never added from it, so a record for one is not an agent
+            // of its own.
+            if reno_harness::acp_registry::built_in(&record.id).is_some() {
+                tracing::warn!(agent = %record.id, "the registry id of an executor Reno drives itself; skipped");
+                return None;
+            }
             let Some(agent) = RegistryAgent::new(&record.id) else {
                 tracing::warn!(agent = %record.id, "not a registry agent id; skipped");
                 return None;

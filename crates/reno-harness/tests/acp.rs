@@ -752,6 +752,28 @@ async fn antigravity_supervised_leaves_yolo_or_does_not_start() {
     );
 }
 
+/// A session that opens in a mode that approves on its own and offers no mode that asks cannot
+/// run under Supervised: nothing would ever be asked.
+#[tokio::test]
+async fn a_supervised_run_does_not_start_in_a_session_that_cannot_ask() {
+    let dir = workspace("no-asking-mode-");
+    let mut spec = spec_in("permissions", &dir);
+    spec.access = AccessMode::Supervised;
+    let events = run_to_end(&antigravity(), spec).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error, "{events:?}");
+    assert!(
+        diagnostic.unwrap().contains("approves on its own"),
+        "{events:?}"
+    );
+    assert!(texts(&events).is_empty(), "{events:?}");
+    // In full access the same session is simply run.
+    let mut spec = spec_in("permissions", &dir);
+    spec.access = AccessMode::FullAccess;
+    let events = run_to_end(&antigravity(), spec).await;
+    assert_completed(&events);
+}
+
 /// Fetches, unknown kinds and deletes are asked about and classified by their kind; thinking is
 /// answered here like reading.
 #[tokio::test]
@@ -1603,12 +1625,39 @@ async fn acp_interrupt_kills_tool_process_group() {
     }
 }
 
+/// A model the agent advertises but refuses to switch to fails the run before it prompts: the
+/// agent's default is never run in its place.
 #[tokio::test]
-async fn acp_rejected_model_config_keeps_default_and_runs_prompt() {
+async fn a_rejected_model_switch_fails_the_run_and_never_prompts() {
     let mut spec = lifecycle_spec("config-rejected");
     spec.model = Some("mock/reject".into());
     let events = run_to_end(&lifecycle(), spec).await;
-    assert_completed(&events);
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error, "{events:?}");
+    assert!(
+        diagnostic
+            .unwrap()
+            .contains("rejected requested model mock/reject"),
+        "{events:?}"
+    );
+    assert!(texts(&events).is_empty(), "{events:?}");
+}
+
+/// A model the session does not advertise at all fails the same way, for an agent that had no
+/// strictness of its own before.
+#[tokio::test]
+async fn an_unadvertised_model_fails_the_run_for_every_agent() {
+    let mut spec = lifecycle_spec("hello");
+    spec.model = Some("mock/nope".into());
+    let events = run_to_end(&lifecycle(), spec).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error, "{events:?}");
+    assert!(
+        diagnostic
+            .unwrap()
+            .contains("does not advertise requested model mock/nope"),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]
@@ -1846,7 +1895,14 @@ fn the_models_an_agent_is_known_to_offer_are_requestable_ids() {
         models(AcpExecutor::antigravity()),
         ["gemini-3.7-flash", "gemini-3.1-pro"]
     );
-    assert!(models(AcpExecutor::fx()).is_empty());
+    // Nothing pins what these sessions advertise, so nothing is declared.
+    for executor in [
+        AcpExecutor::devin(),
+        AcpExecutor::hermes(),
+        AcpExecutor::fx(),
+    ] {
+        assert!(models(executor).is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1862,31 +1918,97 @@ async fn probe_reports_the_installed_agent_and_nothing_it_cannot_know() {
     assert!(missing.detail.is_some());
 }
 
-/// The registry agent of the fake: a record on disk, launched from it with the registry's own
-/// arguments. (The record's program is the fixture; `with_executable` is not used.)
+// ---------------------------------------------------------------------------
+// Detection: a missing server is never installed by a run
+// ---------------------------------------------------------------------------
+
+/// Whether Antigravity's server is found, in the six states a machine can be in, and that a
+/// missing or partly installed one is `NotInstalled` for a run and installs nothing. Each state
+/// runs in a child process of this test binary, because it sets HOME, PATH and the adapters
+/// directory.
+#[test]
+fn antigravity_detection_and_missing_server_never_install() {
+    use std::os::unix::fs::PermissionsExt;
+    for scenario in [
+        "cli-only",
+        "partial",
+        "server",
+        "par",
+        "override",
+        "invalid-override",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let name = match scenario {
+            "server" => "agy_acp_server",
+            "par" => "agy_acp_server.par",
+            "override" => "custom-server",
+            _ => "agy",
+        };
+        let exe = bin.join(name);
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let adapters = dir.path().join("adapters");
+        if scenario == "partial" {
+            let partial = adapters.join("antigravity-acp/1.2.1");
+            std::fs::create_dir_all(&partial).unwrap();
+            std::fs::write(partial.join("agy_acp_server.par"), "incomplete").unwrap();
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "antigravity_detection_subprocess", "--nocapture"])
+            .env("HOME", dir.path())
+            .env("PATH", &bin)
+            .env("SHELL", "/nonexistent-shell")
+            .env("RENO_ADAPTERS_DIR", &adapters)
+            .env("RENO_TEST_DETECTION", scenario)
+            .env_remove("ANTIGRAVITY_ACP_EXECUTABLE");
+        if scenario == "override" {
+            child.env("ANTIGRAVITY_ACP_EXECUTABLE", &exe);
+        }
+        if scenario == "invalid-override" {
+            child.env("ANTIGRAVITY_ACP_EXECUTABLE", bin.join("missing"));
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{scenario}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!adapters.join(".tmp-antigravity-acp-1.2.1").exists());
+    }
+}
+
 #[tokio::test]
-async fn a_registry_agent_runs_from_its_record_with_its_id() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("fake-agent");
-    std::fs::create_dir_all(&dir).unwrap();
-    let record = serde_json::json!({
-        "id": "fake-agent", "name": "Fake agent", "version": "1.2.3", "kind": "binary",
-        "program": fixture("fake-acp.sh"), "args": [], "env": {}, "verified": true
-    });
-    std::fs::write(dir.join("agent.json"), record.to_string()).unwrap();
-    // SAFETY: this is the only test in this binary that sets the variable, and it is set before
-    // the executor reads it; other tests do not use registry records.
-    unsafe { std::env::set_var("RENO_AGENTS_DIR", root.path()) };
-    let executor =
-        AcpExecutor::registry(RegistryAgent::new("fake-agent").unwrap(), "Fake agent").unwrap();
-    assert!(executor.installed());
-    let health = executor.probe().await;
-    assert!(health.installed);
-    assert_eq!(health.version.as_deref(), Some("1.2.3"));
-    assert!(executor.descriptor().adapter_version.contains("CLI 1.2.3"));
-    let events = run_to_end(&executor, spec("scenario:happy")).await;
-    assert!(events.contains(&text("Hello")));
-    assert_completed(&events);
-    // SAFETY: as above.
-    unsafe { std::env::remove_var("RENO_AGENTS_DIR") };
+async fn antigravity_detection_subprocess() {
+    let Ok(scenario) = std::env::var("RENO_TEST_DETECTION") else {
+        return;
+    };
+    let executor = AcpExecutor::antigravity();
+    let installed = matches!(scenario.as_str(), "server" | "par" | "override");
+    assert_eq!(executor.installed(), installed);
+    assert_eq!(executor.probe().await.installed, installed);
+    if installed {
+        assert!(executor.launch_program().is_ok());
+        return;
+    }
+    assert!(executor.launch_program().is_err());
+    let (controls, _handle) = ExecControls::new(8);
+    let error = executor
+        .start(spec("hello"), controls)
+        .await
+        .err()
+        .expect("nothing to start");
+    assert!(matches!(error, ExecError::NotInstalled(_)), "{error:?}");
+    let adapters = PathBuf::from(std::env::var_os("RENO_ADAPTERS_DIR").unwrap());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        std::fs::read_dir(adapters)
+            .map(|entries| entries
+                .map(Result::unwrap)
+                .all(|entry| entry.file_name() == "antigravity-acp"))
+            .unwrap_or(true)
+    );
 }

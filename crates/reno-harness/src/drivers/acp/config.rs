@@ -2,9 +2,12 @@
 //!
 //! ACP has had two model-selection surfaces. Newer config-option agents use `category: model`
 //! in the session's `configOptions`; Grok Build advertises only the first-class `models` state
-//! and requires `session/set_model`. An explicit model request is strict on both: prompting with
-//! a different model than the one asked for is worse than surfacing the error. Effort and any
-//! other auxiliary option is best-effort: a rejected set is logged and the agent's default runs.
+//! and requires `session/set_model`. An explicit model request is strict on both, for every
+//! agent: a model the session does not advertise, or one it refuses to switch to, fails the run
+//! before it prompts, because running a different model than the one asked for is worse than
+//! the error. Effort is best-effort: a rejected set is logged and the agent's default runs. The
+//! session mode is strict the other way: a run that asks must never be left in a mode that
+//! approves on its own.
 
 use reno_proto::{AccessMode, Effort, ExecSpec};
 use serde_json::{Value, json};
@@ -112,7 +115,7 @@ fn first_class_model_change(
     Ok(Some(requested.to_owned()))
 }
 
-/// Fail when the session's model config option does not offer `requested` (Antigravity).
+/// Fail when the session's model config option does not offer `requested`.
 fn validate_config_model_selection(
     session_response: &Value,
     requested: Option<&str>,
@@ -172,6 +175,26 @@ const NO_PROMPT_MODES: [&str; 7] = [
 /// Session mode values that ask before acting, for a run that is not in full access:
 /// Antigravity's `default` (its others are `auto_edit` and `yolo`).
 const ASKING_MODES: [&str; 1] = ["default"];
+
+/// The mode the session is in, when it is one that approves everything itself: the `mode`
+/// config option's current value, or the older `modes` state's.
+fn current_no_prompt_mode(session_response: &Value) -> Option<&str> {
+    let option = session_response
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|option| option.get("category").and_then(Value::as_str) == Some("mode"))
+        .and_then(|option| option.get("currentValue").and_then(Value::as_str));
+    let legacy = session_response
+        .get("modes")
+        .and_then(|modes| modes.get("currentModeId"))
+        .and_then(Value::as_str);
+    [option, legacy]
+        .into_iter()
+        .flatten()
+        .find(|mode| NO_PROMPT_MODES.contains(mode))
+}
 
 /// The `session/set_config_option` calls a session response's `configOptions` warrant for this
 /// run:
@@ -408,9 +431,7 @@ pub(super) async fn select_session_config(
         }
         model => model.map(str::to_owned),
     };
-    if rules.harness == HarnessId::Antigravity {
-        validate_config_model_selection(&session_response, requested_model.as_deref())?;
-    }
+    validate_config_model_selection(&session_response, requested_model.as_deref())?;
     if let Some(model) = first_class_model_change(&session_response, requested_model.as_deref())? {
         control_request(
             client,
@@ -480,10 +501,7 @@ pub(super) async fn select_session_config(
                     }
                 }
                 Err(e) => {
-                    if matches!(
-                        rules.harness,
-                        HarnessId::Antigravity | HarnessId::Devin | HarnessId::Fx
-                    ) && requested_model.is_some()
+                    if requested_model.is_some()
                         && is_model_config_option(&options_snapshot, &config_id)
                     {
                         return Err(HarnessError::Protocol(format!(
@@ -519,6 +537,17 @@ pub(super) async fn select_session_config(
             rules.access,
         );
         sets.retain(|(id, _)| !is_model_config_option(&options_snapshot, id));
+    }
+    // Left in a mode that approves on its own (one the agent offers no asking mode to leave), a
+    // run that asks would never see a permission: it must not start.
+    if rules.access != AccessMode::FullAccess
+        && let Some(mode) = current_no_prompt_mode(&options_snapshot)
+    {
+        return Err(HarnessError::Protocol(format!(
+            "the agent's session is in its {mode} mode, which approves on its own, and offers no \
+             mode that asks: a run in {:?} access cannot start",
+            rules.access
+        )));
     }
     Ok(options_snapshot)
 }
@@ -698,6 +727,23 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_session_left_in_a_no_prompt_mode_is_seen_whichever_way_it_says_so() {
+        let option = mode_option("yolo", &["auto_edit", "yolo"]);
+        assert_eq!(current_no_prompt_mode(&option), Some("yolo"));
+        let legacy = json!({ "modes": { "currentModeId": "bypassPermissions" } });
+        assert_eq!(current_no_prompt_mode(&legacy), Some("bypassPermissions"));
+        assert_eq!(
+            current_no_prompt_mode(&mode_option("default", &["default", "yolo"])),
+            None
+        );
+        assert_eq!(
+            current_no_prompt_mode(&json!({ "modes": { "currentModeId": "plan" } })),
+            None
+        );
+        assert_eq!(current_no_prompt_mode(&json!({})), None);
     }
 
     fn antigravity_signed_in_catalog() -> Value {

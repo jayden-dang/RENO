@@ -70,8 +70,17 @@
 //! "Answered here" is `allow_once`, never `allow_always`; looking around (`read`, `search`,
 //! `think`) is allowed in every mode, as the imported driver did, and that is the only place it
 //! is decided. In `FullAccess` the session is also switched to the agent's own no-prompts mode
-//! where it advertises one, and any other mode keeps an asking mode where it advertises one; an
-//! agent that rejects that switch does not start the run. No mode is widened mid-run.
+//! where it advertises one, and any other mode keeps an asking mode where it advertises one. A
+//! run that asks never starts in a session that approves on its own: an agent that rejects the
+//! switch to an asking mode, or has none to switch to while opening in a no-prompts mode, fails
+//! the run before it prompts. No mode is widened mid-run.
+//!
+//! # Models
+//!
+//! An explicit [`ExecSpec::model`] is strict for every agent: one the session does not
+//! advertise, or refuses to switch to, fails the run before it prompts, so the agent's default
+//! never runs in its place. The descriptor declares only the models the driver has seen the
+//! agent advertise (Grok's and Antigravity's); any model a session advertises can be asked for.
 
 mod antigravity_paths;
 mod config;

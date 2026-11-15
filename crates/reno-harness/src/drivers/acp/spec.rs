@@ -31,8 +31,10 @@ pub(super) struct AcpAgentSpec {
     pub extra_paths: fn() -> Vec<PathBuf>,
     /// Search summary and install hint for the `NotInstalled` error.
     pub install_hint: &'static str,
-    /// Models the agent is known to offer, as `(id, display name)`. Not exhaustive and not a
-    /// promise: the agent's own session decides, and a model it does not advertise fails the run.
+    /// Models the driver has seen the agent advertise, as `(id, display name)`: what the
+    /// descriptor declares. Not exhaustive: a caller may ask for any model the agent's session
+    /// advertises, and a model it does not advertise fails the run (see `config`). Empty where
+    /// nothing is pinned.
     pub models: &'static [(&'static str, &'static str)],
     /// When a steering message lands.
     pub steering: Steering,
@@ -71,8 +73,8 @@ pub(super) struct AcpAgentSpec {
 /// Only full access: the agent decides its own approvals.
 const FULL_ACCESS_ONLY: &[AccessMode] = &[AccessMode::FullAccess];
 
-/// Supervised and full access: an agent whose session mode that asks is known, but not one that
-/// auto-accepts edits.
+/// Supervised and full access: an agent whose permission requests reach Reno, without a session
+/// mode known to auto-accept edits.
 const SUPERVISED_OR_FULL: &[AccessMode] = &[AccessMode::Supervised, AccessMode::FullAccess];
 
 /// Every mode.
@@ -178,11 +180,9 @@ pub(super) fn devin() -> AcpAgentSpec {
              `curl -fsSL https://cli.devin.ai/install.sh | bash` or \
              `brew install --cask devin-cli`, then `devin auth login`; set \
              DEVIN_EXECUTABLE to override)",
-        models: &[
-            ("swe-1-7-medium", "SWE-1.7 Medium"),
-            ("claude-fable-5-1-high", "Claude Fable 5.1 High"),
-            ("adaptive", "Adaptive"),
-        ],
+        // The imported driver listed three fallback rows and resolved a requested model through
+        // `devin models list`; nothing pins what the session advertises, so none is declared.
+        models: &[],
         // No `_session/steering` extension: a steer preempts the generation (waiting out running
         // tools) and continues the turn, immediately.
         steering: Steering::StepBoundary,
@@ -291,12 +291,8 @@ pub(super) fn hermes() -> AcpAgentSpec {
              `cd ~/.hermes/hermes-agent && uv pip install -e '.[acp]'` for the ACP \
              server; set HERMES_EXECUTABLE to override)",
         // Hermes derives its model list from the providers the user has authenticated
-        // (`hermes model`); these are the Nous flagships every portal account gets. An id the
-        // agent doesn't advertise is skipped, and the agent's own default runs.
-        models: &[
-            ("hermes-4-405b", "Hermes 4 405B"),
-            ("hermes-4-70b", "Hermes 4 70B"),
-        ],
+        // (`hermes model`), so no model is declared: the session's own list decides.
+        models: &[],
         // No `_session/steering` extension: steers deliver at turn boundaries.
         steering: Steering::TurnBoundary,
         // Hermes exposes no effort config over ACP today (hybrid reasoning is model-internal).

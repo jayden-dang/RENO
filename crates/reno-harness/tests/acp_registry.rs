@@ -156,6 +156,11 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
     let executor = AcpExecutor::registry(agent, "Fake Agent").unwrap();
     assert_eq!(executor.descriptor().id.as_str(), "acp.fake-agent");
     assert!(executor.installed());
+    // Probed from its record: its version is the record's.
+    let health = executor.probe().await;
+    assert!(health.installed);
+    assert_eq!(health.version.as_deref(), Some("1.2.3"));
+    assert!(executor.descriptor().adapter_version.contains("CLI 1.2.3"));
     let (controls, _handle) = ExecControls::new(8);
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),

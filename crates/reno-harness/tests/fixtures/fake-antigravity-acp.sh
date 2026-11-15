@@ -6,7 +6,8 @@
 # session/new for a cwd containing "needs-login", and an `authenticate` that
 # prints its sign-in url to stderr like the real browser flow. the prompt
 # reply echoes every config option reno set. a cwd containing "yolo-current"
-# opens the session in yolo, one containing "reject-mode" refuses mode sets,
+# opens the session in yolo, one containing "no-asking-mode" opens in yolo with no mode that
+# asks to leave it for, one containing "reject-mode" refuses mode sets,
 # and a "permissions" prompt asks to read, edit and run before replying with
 # the option reno picked for each.
 
@@ -64,6 +65,10 @@ while read -r line; do
     if has "$line" 'reject-mode'; then REJECT_MODE=1; fi
     if has "$line" 'yolo-current'; then
       CURRENT=$(printf '%s' "$OPTIONS" | sed 's/"currentValue":"default"/"currentValue":"yolo"/')
+    fi
+    if has "$line" 'no-asking-mode'; then
+      # Opens in yolo and offers no mode that asks.
+      CURRENT=$(printf '%s' "$OPTIONS" | sed 's/{"value":"default","name":"Default"},//; s/"currentValue":"default"/"currentValue":"yolo"/')
     fi
     if has "$line" 'needs-login' && [ "$AUTHED" -eq 0 ]; then
       emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
