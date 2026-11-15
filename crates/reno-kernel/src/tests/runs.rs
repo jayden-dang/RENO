@@ -418,6 +418,35 @@ async fn an_executor_that_cannot_honour_the_access_mode_is_not_eligible() {
     assert!(m.log().specs.is_empty(), "nothing was started");
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_executor_that_does_not_declare_the_sandbox_level_is_not_eligible() {
+    // The kernel's default asks for `WorkspaceWrite`; this executor declares only `ReadOnly`.
+    let mut descriptor = MockExecutor::default_descriptor(id("mock"));
+    descriptor.caps.sandbox_levels = vec![reno_proto::SandboxLevel::ReadOnly];
+    let m = MockExecutor::new(id("mock")).with_descriptor(descriptor);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let run = fx.submit("hi").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    let events = fx.events(&run, None).await;
+    let done = events.last().unwrap().as_ref().unwrap().event.clone();
+    let why = diagnostic(&done);
+    assert!(why.starts_with("NoEligibleExecutor:"), "{done:?}");
+    assert!(
+        why.contains("sandbox") && why.contains("WorkspaceWrite") && why.contains("[ReadOnly]"),
+        "{why}"
+    );
+    assert!(m.log().specs.is_empty(), "nothing was started");
+
+    // An executor that declares no sandbox at all honours none but `Unrestricted`.
+    let mut descriptor = MockExecutor::default_descriptor(id("mock"));
+    descriptor.caps.sandbox_levels = Vec::new();
+    let bare = MockExecutor::new(id("mock")).with_descriptor(descriptor);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&bare))).await;
+    let run = fx.submit("hi").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    assert!(bare.log().specs.is_empty());
+}
+
 /// An executor whose `start` refuses every run, as a harness that is not signed in does.
 struct Refusing;
 

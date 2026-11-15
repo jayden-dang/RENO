@@ -111,7 +111,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, IdError,
-    ModelInfo, SessionRef, Steering, StopReason, VersionRange,
+    ModelInfo, SandboxLevel, SessionRef, Steering, StopReason, VersionRange,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -501,8 +501,10 @@ impl Executor for AcpExecutor {
                 steering: self.spec.steering,
                 resume: true,
                 access_modes: self.access_modes.clone(),
-                // The agent's own sandbox is not one Reno can set.
-                sandbox_levels: Vec::new(),
+                // The agent's own sandbox is not one Reno can set, so only `Unrestricted` (no
+                // sandbox, as asked) is honoured; the other levels would run with more latitude
+                // than requested and are not declared (ARCH-15).
+                sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
                 // `session/prompt`'s response is the turn's end.

@@ -1305,8 +1305,8 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
             AccessMode::FullAccess
         ]
     );
-    // The CLI has no sandbox of its own that Reno can set.
-    assert!(caps.sandbox_levels.is_empty());
+    // The CLI has no sandbox of its own that Reno can set: only "no sandbox" is honoured.
+    assert_eq!(caps.sandbox_levels, vec![SandboxLevel::Unrestricted]);
     assert!(caps.mcp_injection);
     assert!(!caps.structured_output);
     assert!(caps.deterministic_turn_end);

@@ -47,7 +47,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    McpServerSpec, Steering, StopReason, VersionRange,
+    McpServerSpec, SandboxLevel, Steering, StopReason, VersionRange,
 };
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -439,9 +439,11 @@ impl Executor for ClaudeExecutor {
                 steering: Steering::StepBoundary,
                 resume: true,
                 access_modes: self.access_modes.clone(),
-                // The CLI has no sandbox Reno can set; its permission system is what the
-                // access mode drives.
-                sandbox_levels: Vec::new(),
+                // The CLI has no sandbox Reno can set; its permission system is what the access
+                // mode drives. A run is therefore honoured only at `Unrestricted` (no sandbox,
+                // as asked); `ReadOnly` and `WorkspaceWrite` would be run with more latitude
+                // than requested, so they are not declared (ARCH-15).
+                sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the CLI's own terminal `result` frame.
@@ -1352,7 +1354,7 @@ impl Commands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reno_proto::{Effort, RunId, SandboxLevel};
+    use reno_proto::{Effort, RunId};
     use serde_json::json;
 
     fn spec(access: AccessMode) -> ExecSpec {

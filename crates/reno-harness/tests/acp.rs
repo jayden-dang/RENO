@@ -1892,10 +1892,14 @@ fn every_agent_declares_its_own_id_and_what_it_honors() {
         assert!(caps.mcp_injection, "{id}");
         assert!(caps.deterministic_turn_end, "{id}");
         // What a caller cannot request is not declared (ARCH-15): no schema, no plan mode,
-        // and no sandbox Reno could set on an agent's own.
+        // and no sandbox Reno could set on an agent's own: only "no sandbox" is honoured.
         assert!(!caps.structured_output, "{id}");
         assert!(!caps.plan_mode, "{id}");
-        assert!(caps.sandbox_levels.is_empty(), "{id}");
+        assert_eq!(
+            caps.sandbox_levels,
+            vec![SandboxLevel::Unrestricted],
+            "{id}"
+        );
     }
 }
 

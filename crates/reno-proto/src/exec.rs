@@ -385,7 +385,8 @@ pub struct ExecutorCaps {
     pub resume: bool,
     /// Access modes the executor can honour.
     pub access_modes: Vec<AccessMode>,
-    /// Sandbox levels the executor actually enforces.
+    /// Sandbox levels the executor can honour: a run is only started at a level listed here. An
+    /// executor with no sandbox of its own honours only `Unrestricted`.
     pub sandbox_levels: Vec<SandboxLevel>,
     /// False means it cannot join a team or use boards.
     pub mcp_injection: bool,

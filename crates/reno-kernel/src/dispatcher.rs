@@ -20,8 +20,9 @@
 //! descriptor is checked: an executor that does not declare the requested access mode is not
 //! eligible, and the run fails with a `NoEligibleExecutor` diagnostic. The run is never started
 //! with more access than it asked for (ARCH-15), and never with less access silently either.
-//! The sandbox level is passed through but not checked: no executor declares its sandbox
-//! levels yet, and refusing every run for that would make the field unusable.
+//! The sandbox level is checked the same way: an executor must declare the level the run asks
+//! for in `sandbox_levels`, else the run fails with `NoEligibleExecutor` before anything is
+//! spawned. An executor with no sandbox of its own declares only `Unrestricted`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -128,19 +129,28 @@ async fn launch_settings(
     Ok((bot.access, bot.sandbox))
 }
 
-/// The diagnostic of a run that no executor can honour, or `None` when `descriptor` can.
+/// The diagnostic of a run that no executor can honour, or `None` when `descriptor` can: it must
+/// declare both the access mode and the sandbox level the run asks for (ARCH-15).
 pub(crate) fn no_eligible_executor(
     descriptor: &ExecutorDescriptor,
     access: AccessMode,
+    sandbox: SandboxLevel,
 ) -> Option<String> {
-    if descriptor.caps.access_modes.contains(&access) {
-        return None;
+    if !descriptor.caps.access_modes.contains(&access) {
+        return Some(format!(
+            "NoEligibleExecutor: the run asks for access mode {access:?}, and executor {} supports \
+             only {:?}; a run is never started with a different access mode than it asked for",
+            descriptor.id, descriptor.caps.access_modes
+        ));
     }
-    Some(format!(
-        "NoEligibleExecutor: the run asks for access mode {access:?}, and executor {} supports \
-         only {:?}; a run is never started with a different access mode than it asked for",
-        descriptor.id, descriptor.caps.access_modes
-    ))
+    if !descriptor.caps.sandbox_levels.contains(&sandbox) {
+        return Some(format!(
+            "NoEligibleExecutor: the run asks for sandbox level {sandbox:?}, and executor {} \
+             declares only {:?}; a run is never started with a different sandbox than it asked for",
+            descriptor.id, descriptor.caps.sandbox_levels
+        ));
+    }
+    None
 }
 
 /// The task's prompt, working directory and model, as `submit` stored them.
@@ -218,7 +228,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         let why = format!("unknown executor {}", row.executor);
         return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
     };
-    if let Some(why) = no_eligible_executor(&executor.descriptor(), spec.access) {
+    if let Some(why) = no_eligible_executor(&executor.descriptor(), spec.access, spec.sandbox) {
         let account = Some(StartFailure::NoEligibleExecutor);
         return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
     }
