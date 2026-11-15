@@ -1,28 +1,21 @@
-//! The spike window: a translucent panel on the window material, with a live tick counter.
+//! The spike window: an opaque two-tone layout (shell and inset canvas) with a live tick counter,
+//! exercising the theme tokens, glass plates, the count pill, the notice chip and motion.
 
 use gpui::prelude::*;
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, canvas, div,
-    hsla, linear_color_stop, linear_gradient, px,
+    hsla, px,
 };
 
-use super::glass;
+use super::notice::{NoticeChipIcon, notice_chip};
+use super::running_pill::running_pill;
 use super::theme::{Appearance, Theme};
+use super::{glass, motion};
 use crate::model::{Event, Model};
-
-/// What paints behind the panel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Material {
-    /// System blur (`NSVisualEffectView` on macOS).
-    Blurred,
-    /// The named fallback: an app-painted gradient on a transparent window.
-    Gradient,
-}
 
 #[derive(Debug)]
 pub(crate) struct SpikeView {
     model: Entity<Model>,
-    material: Material,
     appearance_override: Option<Appearance>,
     _observe_model: Subscription,
     _observe_appearance: Subscription,
@@ -31,7 +24,6 @@ pub(crate) struct SpikeView {
 impl SpikeView {
     pub(crate) fn new(
         model: Entity<Model>,
-        material: Material,
         appearance_override: Option<Appearance>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -40,7 +32,6 @@ impl SpikeView {
             _observe_model: cx.observe(&model, |_, _, cx| cx.notify()),
             _observe_appearance: cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             model,
-            material,
             appearance_override,
         }
     }
@@ -54,19 +45,13 @@ impl Render for SpikeView {
         let theme = Theme::for_appearance(appearance);
         let state = &self.model.read(cx).state;
 
-        let mut root = div()
+        // Shell: the window background. Canvas: the inset content panel below.
+        let root = div()
             .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .pt(px(72.0));
-        if self.material == Material::Gradient {
-            root = root.bg(linear_gradient(
-                135.0,
-                linear_color_stop(hsla(0.62, 0.55, 0.30, 0.95), 0.0),
-                linear_color_stop(hsla(0.85, 0.50, 0.38, 0.95), 1.0),
-            ));
-        }
+            .bg(theme.shell)
+            .p(px(10.0))
+            .pt(px(38.0))
+            .text_color(theme.text);
 
         let row = |label: &'static str, value: String| {
             div()
@@ -78,15 +63,15 @@ impl Render for SpikeView {
         };
 
         let panel = div()
-            .w(px(340.0))
+            .size_full()
             .p(px(20.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .rounded(px(16.0))
-            .bg(theme.surface)
+            .rounded(px(14.0))
+            .bg(theme.canvas)
             .border_1()
-            .border_color(theme.line)
+            .border_color(theme.hairline)
             .text_size(px(13.5))
             .child(
                 div()
@@ -97,7 +82,37 @@ impl Render for SpikeView {
             .child(row("ticks", state.count.to_string()))
             .child(row("resets", state.resets.to_string()))
             .child(row("appearance", format!("{:?}", theme.appearance)))
-            .child(row("material", format!("{:?}", self.material)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().text_color(theme.muted).child("running"))
+                    .child(running_pill("spike-pill", 3, theme.accent, "Menlo")),
+            )
+            .child(
+                div()
+                    .rounded(px(10.0))
+                    .bg(theme.card)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .p(px(10.0))
+                    .child(
+                        div()
+                            .text_color(theme.muted)
+                            .child("A raised card: card fill with a hairline."),
+                    ),
+            )
+            .child(motion::fade_in(
+                "spike-notice",
+                notice_chip(
+                    &theme,
+                    true,
+                    "Held for you",
+                    "The push to origin needs approval.",
+                    NoticeChipIcon::Plain,
+                ),
+            ))
             .child(
                 div()
                     .flex()
