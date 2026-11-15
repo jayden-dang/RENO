@@ -43,6 +43,9 @@ pub(crate) enum Command {
     /// List, show and check bots, triggers and the policy.
     #[command(subcommand)]
     Defs(DefsCommand),
+    /// List triggers and their state, and fire one now.
+    #[command(subcommand)]
+    Trigger(TriggerCommand),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -118,6 +121,20 @@ pub(crate) struct RunTail {
 pub(crate) struct RunCancel {
     /// The run.
     pub(crate) run: RunId,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum TriggerCommand {
+    /// List every trigger: when it fires next, what it last did and whether it is backed off.
+    List,
+    /// Fire a trigger now: a manual trigger, or any enabled one.
+    Fire(TriggerFire),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TriggerFire {
+    /// The trigger, as `reno trigger list` shows it.
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Subcommand)]

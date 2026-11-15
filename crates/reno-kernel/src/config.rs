@@ -1,5 +1,6 @@
 //! Kernel tunables. Every default is a number from ARCHITECTURE 4.1 and 17.2.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use reno_proto::{AccessMode, SandboxLevel};
@@ -39,6 +40,8 @@ pub struct KernelConfig {
     /// How long an approval that asks a human waits before it is denied as expired, when the
     /// policy sets no `approval_ttl` of its own. A deadline, not a poll (ARCH-10).
     pub approval_ttl: Duration,
+    /// The working directory of the runs triggers start. The daemon points it at its workspace.
+    pub trigger_cwd: PathBuf,
 }
 
 impl Default for KernelConfig {
@@ -57,6 +60,7 @@ impl Default for KernelConfig {
             access: AccessMode::Supervised,
             sandbox: SandboxLevel::WorkspaceWrite,
             approval_ttl: Duration::from_secs(30 * 60),
+            trigger_cwd: PathBuf::from("."),
         }
     }
 }

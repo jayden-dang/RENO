@@ -1,4 +1,4 @@
-//! `reno task run`, `reno run ...`, `reno approval list`, `reno approval history`,
+//! `reno task run`, `reno run ...`, `reno trigger list|fire`, `reno approval list`, `reno approval history`,
 //! `reno approve` and `reno deny`.
 
 use std::io;
@@ -10,12 +10,13 @@ use reno_client::Client;
 use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, ExecEvent, RUN_LIST_MAX_LIMIT,
     RunCancelResult, RunId, RunListParams, RunListResult, Seq, StopReason, TaskRunParams,
+    TriggerListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, RunCancel, RunCommand, RunList, RunTail, TaskCommand,
-    TaskRun,
+    TaskRun, TriggerCommand, TriggerFire,
 };
 use crate::env::{Env, print_json, print_line};
 use crate::render::{self, Finished, Transcript};
@@ -31,6 +32,13 @@ pub(crate) async fn run(env: &Env, command: RunCommand) -> anyhow::Result<ExitCo
         RunCommand::List(args) => run_list(env, args).await,
         RunCommand::Tail(args) => run_tail(env, args).await,
         RunCommand::Cancel(args) => run_cancel(env, args).await,
+    }
+}
+
+pub(crate) async fn trigger(env: &Env, command: TriggerCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        TriggerCommand::List => trigger_list(env).await,
+        TriggerCommand::Fire(args) => trigger_fire(env, args).await,
     }
 }
 
@@ -196,6 +204,35 @@ async fn run_cancel(env: &Env, args: RunCancel) -> anyhow::Result<ExitCode> {
             args.run,
             render::status_name(status)
         ))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn trigger_list(env: &Env) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let triggers = client.list_triggers().await.map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&TriggerListResult { triggers })?;
+    } else if triggers.is_empty() {
+        print_line("no triggers are defined")?;
+    } else {
+        for trigger in &triggers {
+            print_line(render::trigger_line(trigger))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn trigger_fire(env: &Env, args: TriggerFire) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let fired = client
+        .fire_trigger(&args.name)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&fired)?;
+    } else {
+        print_line(render::fired_line(&args.name, &fired))?;
     }
     Ok(ExitCode::SUCCESS)
 }

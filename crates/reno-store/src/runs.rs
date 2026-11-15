@@ -114,7 +114,7 @@ pub(crate) fn status_str(s: RunStatus) -> &'static str {
     }
 }
 
-fn parse_status(s: &str) -> Result<RunStatus> {
+pub(crate) fn parse_status(s: &str) -> Result<RunStatus> {
     RunStatus::ALL
         .into_iter()
         .find(|&c| status_str(c) == s)

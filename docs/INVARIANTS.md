@@ -70,7 +70,9 @@ carries it, and a stale fence is rejected. An external effect records its intent
 
 **ARCH-10 — Nothing polls.** Every timer is a deadline: the next trigger, the next lease expiry,
 a live run's heartbeat, a checkpoint after the last write. Changes to files and git refs arrive
-as events.
+as events. One bounded exception: the scheduler never sleeps longer than an hour, because the
+monotonic timer does not advance while the Mac sleeps; that wake only reads the wall clock and
+writes nothing. It goes away once the daemon gets the system's wake notification.
 
 **ARCH-11 — Every queue is bounded, and every task is owned.** Each channel has a capacity. Each
 spawned task belongs to a task tracker and a cancellation token, so shutdown waits for it.

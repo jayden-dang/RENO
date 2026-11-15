@@ -12,6 +12,7 @@ serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
 # Definitions (src/defs): pure parsing and validation, no I/O.
+croner.workspace = true
 globset.workspace = true
 jiff.workspace = true
 sha2.workspace = true
