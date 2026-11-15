@@ -1,4 +1,4 @@
-//! `reno task run`, `reno run ...`, `reno trigger list|fire`, `reno approval list`, `reno approval history`,
+//! `reno task run`, `reno run ...`, `reno trigger list|fire`, `reno workspace list|show|clean`, `reno approval list`, `reno approval history`,
 //! `reno approve` and `reno deny`.
 
 use std::io;
@@ -8,15 +8,16 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
-    ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, ExecEvent, RUN_LIST_MAX_LIMIT,
-    RunCancelResult, RunId, RunListParams, RunListResult, Seq, StopReason, TaskRunParams,
-    TriggerListResult,
+    ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
+    RUN_LIST_MAX_LIMIT, RunCancelResult, RunId, RunListParams, RunListResult, Seq, StopReason,
+    TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, RunCancel, RunCommand, RunList, RunTail, TaskCommand,
-    TaskRun, TriggerCommand, TriggerFire,
+    TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList,
+    WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line};
 use crate::render::{self, Finished, Transcript};
@@ -39,6 +40,14 @@ pub(crate) async fn trigger(env: &Env, command: TriggerCommand) -> anyhow::Resul
     match command {
         TriggerCommand::List => trigger_list(env).await,
         TriggerCommand::Fire(args) => trigger_fire(env, args).await,
+    }
+}
+
+pub(crate) async fn workspace(env: &Env, command: WorkspaceCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        WorkspaceCommand::List(args) => workspace_list(env, args).await,
+        WorkspaceCommand::Show(args) => workspace_show(env, args).await,
+        WorkspaceCommand::Clean(args) => workspace_clean(env, args).await,
     }
 }
 
@@ -233,6 +242,65 @@ async fn trigger_fire(env: &Env, args: TriggerFire) -> anyhow::Result<ExitCode> 
         print_json(&fired)?;
     } else {
         print_line(render::fired_line(&args.name, &fired))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn workspace_list(env: &Env, args: WorkspaceList) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let status = (!args.status.is_empty()).then_some(args.status);
+    let workspaces = client
+        .list_workspaces(status)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&WorkspaceListResult { workspaces })?;
+    } else if workspaces.is_empty() {
+        print_line("no workspaces")?;
+    } else {
+        for workspace in &workspaces {
+            print_line(render::workspace_line(workspace))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn workspace_show(env: &Env, args: WorkspaceShow) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let workspace = client
+        .get_workspace(args.run)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&workspace)?;
+    } else {
+        for line in render::workspace_detail(&workspace) {
+            print_line(line)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn workspace_clean(env: &Env, args: WorkspaceClean) -> anyhow::Result<ExitCode> {
+    let target = match (args.run, args.merged, args.all_clean) {
+        (Some(run_id), false, false) => CleanTarget::Run { run_id },
+        (None, true, false) => CleanTarget::Merged,
+        (None, false, true) => CleanTarget::AllClean,
+        _ => bail!("give one of: a run, --merged or --all-clean"),
+    };
+    let client = env.connect().await?;
+    let items = client
+        .clean_workspaces(target, args.force)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&WorkspaceCleanResult { items })?;
+    } else if items.is_empty() {
+        print_line("nothing to clean")?;
+    } else {
+        for item in &items {
+            print_line(render::clean_line(item))?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

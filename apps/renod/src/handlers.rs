@@ -204,13 +204,12 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
             if !cwd.is_absolute() {
                 return Err(invalid("cwd must be an absolute path"));
             }
-            if !tokio::fs::metadata(&cwd)
-                .await
-                .is_ok_and(|meta| meta.is_dir())
-            {
-                return Err(invalid(format!("cwd {} is not a directory", cwd.display())));
+            // Resolved, so that where a run works does not depend on how the path was spelled
+            // (symlinks, `/var` against `/private/var`).
+            match tokio::fs::canonicalize(&cwd).await {
+                Ok(resolved) if resolved.is_dir() => resolved,
+                _ => return Err(invalid(format!("cwd {} is not a directory", cwd.display()))),
             }
-            cwd
         }
         None => ctx.default_cwd.clone(),
     };

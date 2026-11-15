@@ -211,8 +211,16 @@ impl Daemon {
             Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
 
         kernel.owner = format!("renod-{}", std::process::id());
-        kernel.trigger_cwd = paths.workspace();
-        kernel.scratch_root = Some(paths.workspace());
+        // Resolved once, so that it is comparable with the resolved working directories that
+        // `task.run` hands the kernel (a symlinked data directory must still count as scratch).
+        let scratch = tokio::fs::canonicalize(paths.workspace())
+            .await
+            .map_err(|source| DaemonError::Dir {
+                path: paths.workspace(),
+                source,
+            })?;
+        kernel.trigger_cwd.clone_from(&scratch);
+        kernel.scratch_root = Some(scratch.clone());
         let fs_watch = Arc::new(FsWatch::new());
         let setup = DefsSetup::new(fs_defs.clone(), context).with_watch(fs_watch.clone());
         let kernel = match Kernel::start_with(
@@ -237,7 +245,7 @@ impl Daemon {
             kernel: kernel.clone(),
             started: Instant::now(),
             executors: ids,
-            default_cwd: paths.workspace(),
+            default_cwd: scratch,
             stop: stop.clone(),
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));

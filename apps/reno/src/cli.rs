@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, ExecutorId, RunId, Seq};
+use reno_proto::{ApprovalId, ExecutorId, RunId, Seq, WorkspaceStatus};
 
 /// Talk to the Reno daemon.
 #[derive(Debug, Parser)]
@@ -46,6 +46,9 @@ pub(crate) enum Command {
     /// List triggers and their state, and fire one now.
     #[command(subcommand)]
     Trigger(TriggerCommand),
+    /// List the git worktrees write runs work in, and clean them up.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -135,6 +138,58 @@ pub(crate) enum TriggerCommand {
 pub(crate) struct TriggerFire {
     /// The trigger, as `reno trigger list` shows it.
     pub(crate) name: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// List workspaces, newest first: a write run works in its own git worktree on the branch
+    /// `reno/<run>`, never in your checkout.
+    List(WorkspaceList),
+    /// Show one run's workspace: where it is, which branch, what it was cut from, what it holds.
+    Show(WorkspaceShow),
+    /// Remove workspaces that hold nothing to lose. A workspace with unmerged commits or
+    /// uncommitted changes is kept unless --force.
+    ///
+    /// Give one run, or --merged (workspaces whose branch is merged into their repository's
+    /// current HEAD), or --all-clean (workspaces with no commits and no uncommitted changes).
+    Clean(WorkspaceClean),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceList {
+    /// Only workspaces in this status: preparing, active, kept, removed or lost. Repeatable.
+    #[arg(long, value_name = "STATUS", value_parser = parse_workspace_status)]
+    pub(crate) status: Vec<WorkspaceStatus>,
+}
+
+fn parse_workspace_status(text: &str) -> Result<WorkspaceStatus, String> {
+    WorkspaceStatus::ALL
+        .into_iter()
+        .find(|status| crate::render::wire_name(status) == text)
+        .ok_or_else(|| "expected one of preparing, active, kept, removed, lost".to_owned())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceShow {
+    /// The run.
+    pub(crate) run: RunId,
+}
+
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("target").required(true).args(["run", "merged", "all_clean"])))]
+pub(crate) struct WorkspaceClean {
+    /// Clean this run's workspace.
+    pub(crate) run: Option<RunId>,
+    /// Clean every kept workspace whose branch is merged into its repository's HEAD.
+    #[arg(long)]
+    pub(crate) merged: bool,
+    /// Clean every workspace that has no commits and no uncommitted changes.
+    #[arg(long)]
+    pub(crate) all_clean: bool,
+    /// Remove even a workspace with unmerged commits or uncommitted changes, deleting its
+    /// branch. This is the only way to lose work.
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug, Subcommand)]

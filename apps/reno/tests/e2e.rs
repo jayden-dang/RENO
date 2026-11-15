@@ -50,6 +50,10 @@ impl World {
         ensure_renod();
         let root = tempfile::tempdir().expect("tempdir");
         let data_dir = root.path().join("data");
+        // `reno` runs in the daemon's own scratch directory: a run's default working directory
+        // is the current one, and a write run in a git repository (the repository this test
+        // lives in) would get a worktree and a branch there.
+        std::fs::create_dir_all(data_dir.join("workspace")).expect("scratch directory");
         Self {
             _root: root,
             data_dir,
@@ -78,6 +82,7 @@ impl World {
             // `reno daemon start` passes its environment on to `renod`: never probe a real
             // harness CLI from a test.
             .env("RENO_NO_HARNESSES", "1")
+            .current_dir(self.data_dir.join("workspace"))
             .stdin(Stdio::null());
         if self.hold_mock {
             // `reno daemon start` passes its environment on to `renod`.
@@ -737,6 +742,111 @@ fn trigger_list_and_fire_through_the_cli() {
     assert_eq!(ghost.status.code(), Some(1));
     assert!(
         text(&ghost.stderr).contains("not found"),
+        "{}",
+        text(&ghost.stderr)
+    );
+}
+
+// ---- workspaces ---------------------------------------------------------------------------
+
+/// A hermetic `git`: nothing from the user's own configuration leaks in.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+    text(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn workspace_list_show_and_clean_through_the_cli() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    let repo = world._root.path().canonicalize().unwrap().join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let index_before = std::fs::read(repo.join(".git/index")).unwrap();
+    world.start_daemon();
+
+    let empty = world.reno(&["workspace", "list"]);
+    assert_eq!(text(&empty.stdout).trim(), "no workspaces");
+
+    let cwd = repo.to_str().unwrap();
+    let mut task = world
+        .command(&["task", "run", "--cwd", cwd, "work in a worktree"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let run = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+
+    let shown = world.json(&["workspace", "show", &run]);
+    assert_eq!(shown["status"], "active");
+    assert_eq!(shown["branch"], format!("reno/{run}"));
+    let path = PathBuf::from(shown["path"].as_str().unwrap());
+    assert!(path.starts_with(world.data_dir.join("worktrees")));
+    assert!(path.join("README.md").exists());
+    let detail = text(&world.reno(&["workspace", "show", &run]).stdout);
+    assert!(
+        detail.contains("worktree") && detail.contains("base"),
+        "{detail}"
+    );
+
+    // The agent commits in its worktree, and the run is cancelled.
+    std::fs::write(path.join("agent.txt"), "x\n").unwrap();
+    git(&path, &["add", "agent.txt"]);
+    git(&path, &["commit", "-qm", "agent"]);
+    assert!(world.reno(&["run", "cancel", &run]).status.success());
+    task.wait_with_output().expect("task run ends");
+
+    let listed = text(&world.reno(&["workspace", "list"]).stdout);
+    assert!(
+        listed.contains(&run) && listed.contains("kept") && listed.contains("1 commit(s)"),
+        "{listed}"
+    );
+    let only = world.json(&["workspace", "list", "--status", "removed"]);
+    assert!(only["workspaces"].as_array().unwrap().is_empty());
+
+    // Unmerged commits are kept by every clean, and removed only by --force.
+    for args in [
+        vec!["workspace", "clean", &run],
+        vec!["workspace", "clean", "--merged"],
+        vec!["workspace", "clean", "--all-clean"],
+    ] {
+        let out = world.reno(&args);
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert!(path.exists(), "{args:?}");
+    }
+    let kept = text(&world.reno(&["workspace", "clean", &run]).stdout);
+    assert!(kept.contains("kept") && kept.contains("--force"), "{kept}");
+
+    let forced = world.json(&["workspace", "clean", &run, "--force"]);
+    assert_eq!(forced["items"][0]["outcome"], "removed");
+    assert!(!path.exists());
+    assert_eq!(git(&repo, &["branch", "--list", "reno/*"]), "");
+    assert_eq!(
+        std::fs::read(repo.join(".git/index")).unwrap(),
+        index_before
+    );
+
+    // A target is required, and an unknown run is not found.
+    assert!(!world.reno(&["workspace", "clean"]).status.success());
+    let ghost = world.reno(&["workspace", "show", "run_ghost"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    assert!(
+        text(&ghost.stderr).contains("has no workspace"),
         "{}",
         text(&ghost.stderr)
     );

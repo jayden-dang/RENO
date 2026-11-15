@@ -52,6 +52,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Run(command) => commands::run(env, command).await,
         Command::Approval(command) => commands::approval(env, command).await,
         Command::Trigger(command) => commands::trigger(env, command).await,
+        Command::Workspace(command) => commands::workspace(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
         Command::Policy(command) => policy::run(env, command),
         Command::Approve(args) => commands::decide(env, args, ApprovalDecision::ApproveOnce).await,
