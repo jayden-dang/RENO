@@ -1,7 +1,7 @@
 //! Schema migrations (`user_version` based, via `rusqlite_migration`).
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
-//! process start time to `runs`. Status columns carry
+//! process start time to `runs`; migration 5 adds the durable approval records. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -116,9 +116,49 @@ CREATE TRIGGER definitions_are_kept BEFORE DELETE ON definitions
 BEGIN SELECT RAISE(ABORT, 'a stored definition version is never deleted'); END;
 ";
 
+/// Migration 5 (T1.6, approvals): one row per approval request, kept for life. A request is
+/// `pending` until it is decided once; after that the row never changes, which is what lets the
+/// repeat-denial rule and the history trust it. `decided_by` is `human`, `rule` (named in
+/// `rule`), `expired` or `repeat_denial`; an `expired` row was refused because nobody answered
+/// in time, the run ended, or the daemon restarted.
+const V5: &str = "
+CREATE TABLE approvals (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs (id),
+    request_id     TEXT NOT NULL,
+    subject        TEXT NOT NULL CHECK (json_valid(subject)),
+    subject_digest TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+    decided_by     TEXT CHECK (decided_by IS NULL
+        OR decided_by IN ('human', 'rule', 'expired', 'repeat_denial')),
+    rule           TEXT,
+    created_at     INTEGER NOT NULL,
+    decided_at     INTEGER,
+    expires_at     INTEGER NOT NULL,
+    CHECK ((status = 'pending') = (decided_by IS NULL)),
+    CHECK ((status = 'pending') = (decided_at IS NULL)),
+    CHECK (rule IS NULL OR decided_by = 'rule'),
+    CHECK (decided_by IS NOT 'rule' OR rule IS NOT NULL),
+    CHECK (status <> 'expired' OR decided_by = 'expired'),
+    CHECK (decided_by IS NOT 'expired' OR status = 'expired')
+);
+CREATE INDEX approvals_pending ON approvals (created_at) WHERE status = 'pending';
+CREATE INDEX approvals_denied ON approvals (run_id, subject_digest) WHERE status = 'denied';
+CREATE INDEX approvals_decided ON approvals (decided_at) WHERE status <> 'pending';
+CREATE INDEX approvals_run ON approvals (run_id, created_at);
+
+CREATE TRIGGER approvals_decided_are_final BEFORE UPDATE ON approvals
+WHEN OLD.status <> 'pending'
+BEGIN SELECT RAISE(ABORT, 'a decided approval is final'); END;
+
+CREATE TRIGGER approvals_are_kept BEFORE DELETE ON approvals
+BEGIN SELECT RAISE(ABORT, 'an approval record is never deleted'); END;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3), M::up(V4)])
+    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3), M::up(V4), M::up(V5)])
 }
 
 /// Brings `conn` to the latest schema. A second call is a no-op.
@@ -166,7 +206,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -191,6 +231,39 @@ mod tests {
             .unwrap();
         assert_eq!((pid, start), (7, None));
     }
+    /// Upgrading a database written before approvals were stored (schema 4): its runs keep their
+    /// rows, and the new table starts empty and works.
+    #[test]
+    fn upgrade_from_a_version_four_database_adds_an_empty_approvals_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at, bot_name, bot_version)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2, NULL, NULL);",
+        )
+        .unwrap();
+        assert!(
+            conn.prepare("SELECT 1 FROM approvals").is_err(),
+            "schema 4 has no approvals table"
+        );
+        run(&mut conn).unwrap();
+        let (runs, approvals): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM approvals)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((runs, approvals), (1, 0));
+        conn.execute(
+            "INSERT INTO approvals (id, run_id, request_id, subject, subject_digest, created_at, expires_at)
+             VALUES ('appr_a', 'run_a', 'q', '{}', 'd', 3, 4)",
+            [],
+        )
+        .unwrap();
+    }
+
     /// Upgrading a database written before definitions existed (schema 3): its runs keep their
     /// rows and carry no bot pin.
     #[test]

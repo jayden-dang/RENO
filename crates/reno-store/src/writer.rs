@@ -39,6 +39,8 @@ pub(crate) enum Durability {
 pub(crate) struct WriterStats {
     /// Transactions committed (a group counts once).
     pub(crate) commits: AtomicU64,
+    /// Of those, the transactions that ran with `synchronous=FULL`.
+    pub(crate) durable_commits: AtomicU64,
     /// Commands run, whether they succeeded or not.
     pub(crate) commands: AtomicU64,
     /// Idle checkpoints run.
@@ -238,6 +240,9 @@ fn commit_group(conn: &Connection, batch: Vec<Command>, stats: &WriterStats) {
         None => match conn.execute_batch("COMMIT") {
             Ok(()) => {
                 stats.commits.fetch_add(1, Ordering::Relaxed);
+                if full {
+                    stats.durable_commits.fetch_add(1, Ordering::Relaxed);
+                }
                 None
             }
             Err(err) => {

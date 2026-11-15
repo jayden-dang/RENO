@@ -2,6 +2,43 @@
 source: crates/reno-store/src/migrations.rs
 expression: schema(&conn)
 ---
+CREATE TABLE approvals (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs (id),
+    request_id     TEXT NOT NULL,
+    subject        TEXT NOT NULL CHECK (json_valid(subject)),
+    subject_digest TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
+    decided_by     TEXT CHECK (decided_by IS NULL
+        OR decided_by IN ('human', 'rule', 'expired', 'repeat_denial')),
+    rule           TEXT,
+    created_at     INTEGER NOT NULL,
+    decided_at     INTEGER,
+    expires_at     INTEGER NOT NULL,
+    CHECK ((status = 'pending') = (decided_by IS NULL)),
+    CHECK ((status = 'pending') = (decided_at IS NULL)),
+    CHECK (rule IS NULL OR decided_by = 'rule'),
+    CHECK (decided_by IS NOT 'rule' OR rule IS NOT NULL),
+    CHECK (status <> 'expired' OR decided_by = 'expired'),
+    CHECK (decided_by IS NOT 'expired' OR status = 'expired')
+);
+
+CREATE TRIGGER approvals_are_kept BEFORE DELETE ON approvals
+BEGIN SELECT RAISE(ABORT, 'an approval record is never deleted'); END;
+
+CREATE INDEX approvals_decided ON approvals (decided_at) WHERE status <> 'pending';
+
+CREATE TRIGGER approvals_decided_are_final BEFORE UPDATE ON approvals
+WHEN OLD.status <> 'pending'
+BEGIN SELECT RAISE(ABORT, 'a decided approval is final'); END;
+
+CREATE INDEX approvals_denied ON approvals (run_id, subject_digest) WHERE status = 'denied';
+
+CREATE INDEX approvals_pending ON approvals (created_at) WHERE status = 'pending';
+
+CREATE INDEX approvals_run ON approvals (run_id, created_at);
+
 CREATE TABLE attempts (
     run_id      TEXT NOT NULL REFERENCES runs (id),
     n           INTEGER NOT NULL,
