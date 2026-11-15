@@ -35,6 +35,7 @@ pub(super) const MAX_WALL_TIME: Duration = Duration::from_secs(24 * 3600);
 /// sandbox = "workspace_write"
 /// team = "core"                          # optional
 /// triggers = ["nightly"]                 # names of triggers/<name>.toml
+/// in_place_writes = false                # optional: allow writes in a non-git directory
 ///
 /// [budget]
 /// max_concurrent_runs = 2
@@ -66,6 +67,11 @@ pub struct BotDef {
     /// The limits on this bot's runs.
     #[serde(default)]
     pub budget: Budget,
+    /// Let this bot's write runs work directly in the directory they target when it is not a git
+    /// repository. Off by default: a write run on a non-git directory is refused, because there
+    /// is no worktree to isolate it in. A git repository is never written in place.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place_writes: bool,
 }
 
 fn default_access() -> AccessMode {
