@@ -41,6 +41,12 @@ tempfile = "3"
 proptest = "1"
 unicode-segmentation = "1"
 
+# Definitions (T1.4): TOML files, globs, time zones, and the file watcher (renod only).
+toml = "1"
+globset = { version = "0.4", default-features = false }
+jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+
 # SQLite: 0.41 because rusqlite_migration 2.7 requires rusqlite ^0.41 (links = "sqlite3").
 rusqlite = { version = "0.41", features = ["bundled"] }
 rusqlite_migration = "2.7"

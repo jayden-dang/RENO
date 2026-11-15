@@ -18,6 +18,7 @@
 //! - `transition` and `heartbeat` check, in order: the run exists, the fence is current, then
 //!   the lifecycle rule.
 
+use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{ExecutorId, RunId, RunStatus, TaskId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -86,6 +87,9 @@ pub struct RunRecord {
     /// When the run last changed, in milliseconds since the epoch: the time of its newest event,
     /// or its creation time if it has none.
     pub updated_at: i64,
+    /// The bot the run was submitted for, with the version of its definition the run is pinned
+    /// to for life.
+    pub bot: Option<BotPin>,
     /// When it was enqueued.
     pub created_at: i64,
     /// When it first ran.
@@ -155,7 +159,8 @@ const RUN_COLS: &str = "id, task_id, executor, model, status, lease_owner, lease
      (SELECT goal FROM tasks WHERE tasks.id = runs.task_id), \
      (SELECT spec FROM tasks WHERE tasks.id = runs.task_id), \
      COALESCE((SELECT MAX(ts) FROM events \
-               WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at)";
+               WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at), \
+     bot_name, bot_version";
 
 fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let id: String = row.get(0)?;
@@ -177,10 +182,21 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let goal: String = row.get(16)?;
     let spec: String = row.get(17)?;
     let updated_at = row.get(18)?;
+    let bot_name: Option<String> = row.get(19)?;
+    let bot_version: Option<i64> = row.get(20)?;
     Ok((|| {
         let id_u32 = |v: Option<i64>| {
             v.map(|v| u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("bad pid {v}"))))
                 .transpose()
+        };
+        let bot = match (bot_name, bot_version) {
+            (Some(name), Some(version)) => Some(BotPin {
+                name,
+                version: u32::try_from(version)
+                    .map_err(|_| StoreError::Corrupt(format!("bad bot version {version}")))?,
+            }),
+            (None, None) => None,
+            _ => return Err(StoreError::Corrupt(format!("run {id} has half a bot pin"))),
         };
         Ok(RunRecord {
             id: parse_id(&id, "run id")?,
@@ -202,6 +218,7 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
             spec: serde_json::from_str(&spec)
                 .map_err(|e| StoreError::Corrupt(format!("task spec: {e}")))?,
             updated_at,
+            bot,
             created_at,
             started_at,
             ended_at,
@@ -266,6 +283,7 @@ pub(crate) fn tx_enqueue_run(
     task: &TaskId,
     run: &RunId,
     executor: &ExecutorId,
+    bot: Option<&BotPin>,
     now: i64,
 ) -> Result<()> {
     let task_exists = conn
@@ -279,12 +297,27 @@ pub(crate) fn tx_enqueue_run(
             id: task.to_string(),
         });
     }
+    if let Some(bot) = bot
+        && !crate::definitions::version_exists(conn, DefKind::Bot, &bot.name, bot.version)?
+    {
+        return Err(StoreError::NotFound {
+            kind: "definition",
+            id: format!("bot/{} version {}", bot.name, bot.version),
+        });
+    }
     conn.prepare_cached(
-        "INSERT INTO runs (id, task_id, executor, status, created_at)
-         VALUES (?1, ?2, ?3, 'queued', ?4)",
+        "INSERT INTO runs (id, task_id, executor, status, created_at, bot_name, bot_version)
+         VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
     )
     .db()?
-    .execute(params![run.as_str(), task.as_str(), executor.as_str(), now])
+    .execute(params![
+        run.as_str(),
+        task.as_str(),
+        executor.as_str(),
+        now,
+        bot.map(|b| b.name.as_str()),
+        bot.map(|b| b.version)
+    ])
     .map_err(|e| {
         if is_unique_violation(&e) {
             StoreError::AlreadyExists {
@@ -301,7 +334,7 @@ pub(crate) fn tx_enqueue_run(
         "run.enqueued",
         ("run", run.as_str()),
         None,
-        &json!({ "task": task, "executor": executor }),
+        &json!({ "task": task, "executor": executor, "bot": bot }),
     )
 }
 
@@ -537,7 +570,25 @@ impl Store {
     ) -> Result<()> {
         let (task, run, executor) = (task.clone(), run.clone(), executor.clone());
         self.write(Durability::Normal, move |c| {
-            tx_enqueue_run(c, &task, &run, &executor, now)
+            tx_enqueue_run(c, &task, &run, &executor, None, now)
+        })
+        .await
+    }
+
+    /// Like [`enqueue_run`](Self::enqueue_run), and pins the run to `bot`: the version of the
+    /// bot's definition it was submitted under, which must be stored
+    /// ([`StoreError::NotFound`] otherwise). The pin never changes.
+    pub async fn enqueue_pinned_run(
+        &self,
+        task: &TaskId,
+        run: &RunId,
+        executor: &ExecutorId,
+        bot: &BotPin,
+        now: i64,
+    ) -> Result<()> {
+        let (task, run, executor, bot) = (task.clone(), run.clone(), executor.clone(), bot.clone());
+        self.write(Durability::Normal, move |c| {
+            tx_enqueue_run(c, &task, &run, &executor, Some(&bot), now)
         })
         .await
     }

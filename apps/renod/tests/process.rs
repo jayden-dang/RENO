@@ -29,6 +29,8 @@ impl Renod {
             .arg("--data-dir")
             .arg(data_dir)
             .env("RENO_MOCK_HOLD", "1")
+            // Keep the definitions inside the test's own directory.
+            .env("RENO_DEFS_DIR", data_dir.join("defs"))
             // Never so much as probe a real harness CLI.
             .env("RENO_NO_HARNESSES", "1")
             .env_remove("RENO_DATA_DIR")
@@ -116,7 +118,8 @@ fn data_dir() -> (tempfile::TempDir, PathBuf) {
 async fn start_live_run(client: &Client) -> RunId {
     let run = within(client.run_task(TaskRunParams {
         prompt: "stay alive".into(),
-        executor: id("mock"),
+        executor: Some(id("mock")),
+        bot: None,
         cwd: None,
         model: None,
     }))
@@ -143,6 +146,30 @@ macro_rules! process_test {
 }
 
 process_test! {
+    async fn the_real_daemon_creates_the_definitions_directory_on_first_start() {
+        let (_root, dir) = data_dir();
+        let defs = dir.join("defs");
+        assert!(!defs.exists());
+        let mut daemon = Renod::spawn(&dir);
+        let client = daemon.client().await;
+
+        // `reno-client` answers only after the daemon has loaded what it created.
+        assert!(defs.join("bots/example.toml").is_file());
+        assert!(defs.join("policy.toml").is_file());
+        assert!(defs.join("triggers").is_dir());
+        let snapshot = within(client.list_defs(None)).await.expect("def.list");
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        assert_eq!(snapshot.defs.len(), 2);
+        // With git installed the directory is a repository; without it the daemon still runs.
+        let git_installed = Command::new("git").arg("--version").output().is_ok();
+        assert_eq!(defs.join(".git").is_dir(), git_installed);
+
+        daemon.signal("TERM");
+        assert!(daemon.exit().await.success());
+    }
+}
+
+process_test! {
     async fn a_second_renod_on_the_same_data_dir_exits_non_zero_with_the_lock_message() {
         let (_root, dir) = data_dir();
         let mut first = Renod::spawn(&dir);
@@ -152,6 +179,7 @@ process_test! {
             .arg("--data-dir")
             .arg(&dir)
             .env("RENO_NO_HARNESSES", "1")
+            .env("RENO_DEFS_DIR", dir.join("defs"))
             .env_remove("RENO_DATA_DIR")
             .env_remove("RENO_SOCKET")
             .stdin(Stdio::null())

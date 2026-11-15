@@ -10,6 +10,10 @@
 //!   reno.sock              the socket (0600), unless `--socket` puts it elsewhere
 //! ```
 //!
+//! The definitions directory (`~/.reno`) is separate from the data directory: it is the user's
+//! to edit and to keep in git, so it is not under `Application Support` and not private to the
+//! daemon. [`crate::defs::default_defs_dir`] says where it is by default.
+//!
 //! The default data directory and socket path are the ones `reno-client` computes for the app and
 //! the CLI; a test in this crate keeps the two in step.
 
@@ -33,6 +37,8 @@ pub const DB_FILE: &str = "reno.db";
 pub const LOGS_DIR: &str = "logs";
 /// The default working directory's name.
 pub const WORKSPACE_DIR: &str = "workspace";
+/// Where [`Paths::new`] puts the definitions, inside the data directory.
+pub const DEFS_DIR: &str = "definitions";
 
 /// The platform's default data directory, or `None` when `HOME` is not set.
 ///
@@ -64,13 +70,29 @@ pub struct Paths {
     pub data_dir: PathBuf,
     /// The socket.
     pub socket: PathBuf,
+    /// The definitions directory. [`Paths::new`] puts it at `<data_dir>/definitions`, so that
+    /// paths made for a test can never reach the user's own `~/.reno`; the binary replaces it
+    /// with the real one through [`Paths::with_defs_dir`].
+    pub defs_dir: PathBuf,
 }
 
 impl Paths {
     /// Paths for `data_dir`, with the socket at `socket` or else inside the data directory.
     pub fn new(data_dir: PathBuf, socket: Option<PathBuf>) -> Self {
         let socket = socket.unwrap_or_else(|| data_dir.join(SOCKET_FILE));
-        Self { data_dir, socket }
+        let defs_dir = data_dir.join(DEFS_DIR);
+        Self {
+            data_dir,
+            socket,
+            defs_dir,
+        }
+    }
+
+    /// The same paths with the definitions directory at `defs_dir`.
+    #[must_use]
+    pub fn with_defs_dir(mut self, defs_dir: PathBuf) -> Self {
+        self.defs_dir = defs_dir;
+        self
     }
 
     /// The lock file.
@@ -161,6 +183,12 @@ mod tests {
             let socket = default_data_dir().map(|dir| Paths::new(dir, None).socket);
             assert_eq!(socket, reno_client::default_socket_path());
         }
+        if std::env::var_os(crate::defs::DEFS_DIR_ENV).is_none() {
+            assert_eq!(
+                crate::defs::default_defs_dir(),
+                reno_client::default_defs_dir()
+            );
+        }
     }
 
     #[test]
@@ -179,6 +207,10 @@ mod tests {
         assert_eq!(paths.workspace(), PathBuf::from("/d/workspace"));
         let elsewhere = Paths::new(PathBuf::from("/d"), Some(PathBuf::from("/s/x.sock")));
         assert_eq!(elsewhere.socket, PathBuf::from("/s/x.sock"));
+        // A made-up `Paths` never points at the real `~/.reno`.
+        assert_eq!(paths.defs_dir, PathBuf::from("/d/definitions"));
+        let moved = paths.with_defs_dir(PathBuf::from("/home/u/.reno"));
+        assert_eq!(moved.defs_dir, PathBuf::from("/home/u/.reno"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use renod::defs::{self, DEFS_DIR_ENV};
 use renod::paths::{self, DATA_DIR_ENV, SOCKET_ENV, ensure_private_dir};
 use renod::{Daemon, DaemonConfig, ExecutorSource, Paths, logging};
 use tokio::signal::unix::{SignalKind, signal};
@@ -30,6 +31,11 @@ struct Args {
     /// The socket to serve on [default: reno.sock in the data directory].
     #[arg(long, env = SOCKET_ENV, value_name = "PATH")]
     socket: Option<PathBuf>,
+    /// Where the bots, triggers and policy are kept, as TOML files in a git repository
+    /// [default: ~/.reno]. An example bot and the default policy are written there on first start,
+    /// when it holds no definitions yet.
+    #[arg(long, env = DEFS_DIR_ENV, value_name = "DIR")]
+    defs_dir: Option<PathBuf>,
     /// Leave the starting terminal's session, as `reno daemon start` does.
     #[arg(long, hide = true)]
     detach: bool,
@@ -62,7 +68,12 @@ fn run(args: Args) -> anyhow::Result<()> {
         None => paths::default_data_dir()
             .context("cannot find a data directory: set --data-dir, or HOME")?,
     };
-    let paths = Paths::new(data_dir, args.socket);
+    let defs_dir = match args.defs_dir {
+        Some(dir) => dir,
+        None => defs::default_defs_dir()
+            .context("cannot find the definitions directory: set --defs-dir, or HOME")?,
+    };
+    let paths = Paths::new(data_dir, args.socket).with_defs_dir(defs_dir);
 
     if args.detach {
         // A fresh session, so the terminal's hangup never reaches the daemon. It fails only when

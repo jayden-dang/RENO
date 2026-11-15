@@ -5,7 +5,7 @@
 //! | `daemon.hello` | none: checks the protocol version, answers version, features, pid |
 //! | `daemon.status` | `list_runs` (counts) |
 //! | `daemon.shutdown` | none: asks the daemon to begin its shutdown sequence |
-//! | `task.run` | `submit` |
+//! | `task.run` | `submit`, or `submit_for_bot` when it names a bot |
 //! | `run.get`, `run.list` | `get_run`, `list_runs` |
 //! | `run.cancel` | `cancel` |
 //! | `run.steer` | `get_run`, `steer` |
@@ -13,6 +13,10 @@
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
 //! | `approvals.watch` | `watch_approvals` |
+//! | `def.list` | `current_defs` |
+//! | `def.get` | `get_definition` |
+//! | `def.validate` | `validate_definition` |
+//! | `defs.watch` | `watch_defs` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
 //! handler for it. Every kernel failure goes through [`crate::errors`].
@@ -26,7 +30,11 @@ use std::time::Instant;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
-use reno_kernel::{Kernel, KernelError};
+use reno_kernel::{CurrentDefs, Kernel, KernelError};
+use reno_proto::defs::{
+    DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult, DefsSnapshot,
+    DefsWatchParams,
+};
 use reno_proto::{
     ApprovalDecide, ApprovalDecideParams, ApprovalDecideResult, ApprovalList, ApprovalListResult,
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
@@ -36,6 +44,7 @@ use reno_proto::{
     RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult, RunSummary,
     RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
 };
+use reno_proto::{DefGet, DefList, DefValidate, DefsWatch};
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -90,9 +99,13 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
+        .method::<DefList, _, _>(bind(ctx, def_list))
+        .method::<DefGet, _, _>(bind(ctx, def_get))
+        .method::<DefValidate, _, _>(bind(ctx, def_validate))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
+        .subscription::<DefsWatch, _, _, _>(bind(ctx, defs_watch))
 }
 
 type Reply<T> = Result<T, ErrorObject>;
@@ -152,13 +165,14 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
     if p.prompt.trim().is_empty() {
         return Err(invalid("the prompt is empty"));
     }
-    if !ctx.executors.contains(&p.executor) {
+    if let Some(executor) = &p.executor
+        && !ctx.executors.contains(executor)
+    {
         let known: Vec<_> = ctx.executors.iter().map(ExecutorId::as_str).collect();
         return Err(ErrorObject::new(
             ErrorCode::NotFound,
             format!(
-                "no executor `{}` on this daemon (available: {})",
-                p.executor,
+                "no executor `{executor}` on this daemon (available: {})",
                 known.join(", ")
             ),
         ));
@@ -179,11 +193,16 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
         None => ctx.default_cwd.clone(),
     };
     let model = p.model.filter(|model| !model.is_empty());
-    let run_id = ctx
-        .kernel
-        .submit(p.prompt, p.executor, cwd, model)
-        .await
-        .map_err(|e| kernel_error(&e))?;
+    let submitted = match (p.bot, p.executor) {
+        (Some(bot), executor) => {
+            ctx.kernel
+                .submit_for_bot(&bot, p.prompt, executor, cwd, model)
+                .await
+        }
+        (None, Some(executor)) => ctx.kernel.submit(p.prompt, executor, cwd, model).await,
+        (None, None) => return Err(invalid("a task needs an executor or a bot")),
+    };
+    let run_id = submitted.map_err(|e| kernel_error(&e))?;
     Ok(TaskRunResult { run_id })
 }
 
@@ -241,6 +260,21 @@ async fn approval_decide(ctx: Arc<Ctx>, p: ApprovalDecideParams) -> Reply<Approv
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(ApprovalDecideResult {})
+}
+
+async fn def_list(ctx: Arc<Ctx>, p: DefListParams) -> Reply<DefsSnapshot> {
+    Ok(ctx.kernel.current_defs().snapshot(p.kind))
+}
+
+async fn def_get(ctx: Arc<Ctx>, p: DefGetParams) -> Reply<DefRecord> {
+    ctx.kernel
+        .get_definition(p.kind, &p.name, p.version)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+async fn def_validate(ctx: Arc<Ctx>, p: DefValidateParams) -> Reply<DefValidateResult> {
+    Ok(ctx.kernel.validate_definition(p.kind, &p.name, &p.body))
 }
 
 // ---- subscriptions -------------------------------------------------------------------------
@@ -325,6 +359,16 @@ async fn runs_watch(
             }
             RunsSnapshot { runs }
         },
+    ))
+}
+
+async fn defs_watch(
+    ctx: Arc<Ctx>,
+    _: DefsWatchParams,
+) -> Reply<impl Stream<Item = SubItem<DefsSnapshot>> + Send + use<>> {
+    Ok(latest(
+        ctx.kernel.watch_defs(),
+        |current: &Arc<CurrentDefs>| current.snapshot(None),
     ))
 }
 

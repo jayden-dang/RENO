@@ -57,6 +57,11 @@ impl World {
         }
     }
 
+    /// Where this world's bots, triggers and policy live.
+    fn defs_dir(&self) -> PathBuf {
+        self._root.path().join("defs")
+    }
+
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(RENO);
         command
@@ -65,6 +70,9 @@ impl World {
             .args(args)
             .env_remove("RENO_DATA_DIR")
             .env_remove("RENO_SOCKET")
+            // Keep the definitions inside the test's own directory; `reno daemon start` passes
+            // this on to `renod`.
+            .env("RENO_DEFS_DIR", self.defs_dir())
             .env_remove("RENO_LOG")
             .env_remove("RENO_MOCK_HOLD")
             // `reno daemon start` passes its environment on to `renod`: never probe a real
@@ -348,4 +356,230 @@ fn a_cancelled_run_ends_the_task_command_non_zero() {
 
     let stop = world.reno(&["daemon", "stop"]);
     assert!(stop.status.success());
+}
+
+// ---- definitions --------------------------------------------------------------------------
+
+fn write_def(dir: &Path, rel: &str, text: &str) {
+    let path = dir.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+const TESTER: &str = "name = \"tester\"\ninstructions = \"test things\"\nexecutors = [\"mock\"]\n";
+
+#[test]
+fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
+    let world = World::new();
+    let dir = world.defs_dir();
+    write_def(
+        &dir,
+        "bots/keeper.toml",
+        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"claude-code\", \"codex\", \"x\"]\ntriggers = [\"nightly\", \"ghost\"]\n",
+    );
+    write_def(
+        &dir,
+        "triggers/nightly.toml",
+        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"61 2 * * *\"\ntimezone = \"Asia/Ho_Chi_Minh\"\n[target]\nbot = \"keeper\"\nprompt = \"go\"\n",
+    );
+    write_def(&dir, "policy.toml", "mode = 1\n");
+
+    let out = world.reno(&["defs", "check"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "bots/keeper.toml: executors[2]: unknown executor \"x\"\n\
+             bots/keeper.toml: triggers[1]: unknown trigger \"ghost\"\n\
+             triggers/nightly.toml: when.cron: minute field \"61\": 61 is outside 0..=59\n\
+             policy.toml: line 1, column 1: unknown field `mode`, expected `default` or `rules`\n\
+             4 error(s) in {}\n",
+            dir.display()
+        )
+    );
+
+    let json = {
+        let out = world.reno(&["--json", "defs", "check"]);
+        assert_eq!(out.status.code(), Some(1));
+        serde_json::from_slice::<Value>(&out.stdout).expect("one JSON document")
+    };
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["errors"].as_array().unwrap().len(), 4);
+    assert_eq!(json["errors"][0]["file"], "bots/keeper.toml");
+    assert_eq!(json["errors"][0]["path"], "executors[2]");
+
+    // `--executor` teaches it an executor that a daemon has.
+    write_def(
+        &dir,
+        "bots/keeper.toml",
+        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"acp.grok\"]\n",
+    );
+    write_def(
+        &dir,
+        "triggers/nightly.toml",
+        "name = \"nightly\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"keeper\"\nprompt = \"go\"\n",
+    );
+    write_def(&dir, "policy.toml", "");
+    let refused = world.reno(&["defs", "check"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let accepted = world.reno(&["defs", "check", "--executor", "acp.grok"]);
+    assert!(accepted.status.success(), "{}", text(&accepted.stdout));
+    assert_eq!(
+        text(&accepted.stdout),
+        format!("ok: 3 definition(s) in {}\n", dir.display())
+    );
+    let json = world.json(&["defs", "check", "--executor", "acp.grok"]);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["definitions"], 3);
+}
+
+#[test]
+fn defs_check_reports_a_directory_that_is_not_there() {
+    let world = World::new();
+    let out = world.reno(&["defs", "check"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("is not a directory"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn a_fresh_daemon_has_example_definitions_that_check_clean() {
+    let world = World::new();
+    world.start_daemon();
+    let check = world.reno(&["defs", "check"]);
+    assert!(check.status.success(), "{}", text(&check.stdout));
+    assert!(
+        text(&check.stdout).starts_with("ok: 2 definition(s)"),
+        "{}",
+        text(&check.stdout)
+    );
+
+    let listed = text(&world.reno(&["defs", "list"]).stdout);
+    let lines: Vec<&str> = listed.lines().collect();
+    assert_eq!(lines.len(), 2, "{listed}");
+    assert!(
+        lines[0].starts_with("bot      example") && lines[0].contains(" v1 "),
+        "{listed}"
+    );
+    assert!(
+        lines[1].starts_with("policy   policy") && lines[1].contains(" v1 "),
+        "{listed}"
+    );
+
+    let json = world.json(&["defs", "list", "--kind", "policy"]);
+    assert_eq!(json["defs"].as_array().unwrap().len(), 1);
+    assert_eq!(json["defs"][0]["kind"], "policy");
+    assert_eq!(json["errors"].as_array().map_or(0, Vec::len), 0);
+}
+
+#[test]
+fn defs_show_prints_a_version_as_toml() {
+    let world = World::new();
+    world.start_daemon();
+    let shown = world.reno(&["defs", "show", "bot", "example"]);
+    let out = text(&shown.stdout);
+    assert!(shown.status.success(), "{}", text(&shown.stderr));
+    let first = out.lines().next().unwrap();
+    assert!(first.starts_with("# bot example v1, latest  "), "{first}");
+    let body: toml::Table = toml::from_str(&out).expect("the body is TOML");
+    assert_eq!(body["name"].as_str(), Some("example"));
+    assert_eq!(body["access"].as_str(), Some("supervised"));
+    assert_eq!(body["budget"]["max_wall_time"].as_str(), Some("45m"));
+
+    let record = world.json(&["defs", "show", "bot", "example", "--version", "1"]);
+    assert_eq!(record["version"], 1);
+    assert_eq!(record["latest"], true);
+    assert_eq!(record["body"]["name"], "example");
+    let policy = world.json(&["defs", "show", "policy", "policy"]);
+    assert_eq!(policy["body"]["default"], "ask");
+
+    for args in [
+        ["defs", "show", "bot", "ghost"],
+        ["defs", "show", "trigger", "example"],
+    ] {
+        let missing = world.reno(&args);
+        assert_eq!(missing.status.code(), Some(1));
+        assert!(
+            text(&missing.stderr).contains("not found"),
+            "{}",
+            text(&missing.stderr)
+        );
+    }
+    let version = world.reno(&["defs", "show", "bot", "example", "--version", "7"]);
+    assert_eq!(version.status.code(), Some(1));
+    assert!(
+        text(&version.stderr).contains("version 7 not found"),
+        "{}",
+        text(&version.stderr)
+    );
+    // Not a kind: refused by the argument parser.
+    assert_eq!(
+        world.reno(&["defs", "show", "flow", "x"]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
+fn defs_list_says_so_when_the_files_have_errors() {
+    let world = World::new();
+    write_def(&world.defs_dir(), "bots/tester.toml", TESTER);
+    // `daemon start` returns once the daemon answers, which is after its first load.
+    world.start_daemon();
+    write_def(
+        &world.defs_dir(),
+        "bots/tester.toml",
+        &TESTER.replace("\"mock\"", "\"nope\""),
+    );
+    // The daemon reads the edit when its watcher reports it. There is no event to follow across
+    // a process boundary, so this asks again until the errors show, with a failsafe.
+    let mut listed = String::new();
+    for _ in 0..1200 {
+        listed = text(&world.reno(&["defs", "list"]).stdout);
+        if listed.contains("error(s)") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(listed.starts_with("bot      tester"), "{listed}");
+    assert!(
+        listed.contains("1 error(s); the definitions above are the last good set"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("bots/tester.toml: executors[0]: unknown executor \"nope\""),
+        "{listed}"
+    );
+}
+
+#[test]
+fn a_task_run_as_a_bot_is_pinned_to_the_bots_version() {
+    let world = World::new();
+    // A directory that already has definitions is not filled with examples.
+    write_def(&world.defs_dir(), "bots/tester.toml", TESTER);
+    world.start_daemon();
+
+    let run = world.reno(&["task", "run", "--bot", "tester", "hello"]);
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    let runs = world.runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["executor"], "mock", "the bot's first executor");
+    assert_eq!(runs[0]["bot"]["name"], "tester");
+    assert_eq!(runs[0]["bot"]["version"], 1);
+    let listed = world.json(&["defs", "list"]);
+    assert_eq!(
+        listed["defs"].as_array().unwrap().len(),
+        1,
+        "no examples were added"
+    );
+
+    let unknown = world.reno(&["task", "run", "--bot", "ghost", "hello"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        text(&unknown.stderr).contains("not found"),
+        "{}",
+        text(&unknown.stderr)
+    );
 }

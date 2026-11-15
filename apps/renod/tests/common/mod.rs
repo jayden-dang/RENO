@@ -20,7 +20,7 @@ use reno_proto::{
     StopReason, TaskRunParams,
 };
 use renod::executors::{mock_executor, mock_script};
-use renod::{Daemon, DaemonConfig, ExecutorSet, ExecutorSource, Paths, Stopped};
+use renod::{Daemon, DaemonConfig, ExecutorSet, ExecutorSource, GitOutcome, Paths, Stopped};
 use tempfile::TempDir;
 
 /// A failsafe, not a measurement: no test waits on it for a result.
@@ -110,6 +110,10 @@ pub(crate) fn config(dir: &TempDir, executors: &Executors) -> DaemonConfig {
         Paths::new(dir.path().join("data"), None),
         ExecutorSource::Given(executors.set()),
     );
+    // The definitions are in the test's own directory (`Paths::new`), edits are noticed quickly,
+    // and no test runs `git`.
+    config.defs_debounce = Duration::from_millis(50);
+    config.git_init = |_| Box::pin(async { GitOutcome::Initialized });
     // Short, so a test that does stall on shutdown fails instead of waiting a quarter minute.
     config.kernel = KernelConfig {
         shutdown_deadline: Duration::from_secs(10),
@@ -161,7 +165,8 @@ impl Fixture {
     pub(crate) async fn run(&self, executor: &str, prompt: &str) -> RunId {
         within(self.client.run_task(TaskRunParams {
             prompt: prompt.into(),
-            executor: id(executor),
+            executor: Some(id(executor)),
+            bot: None,
             cwd: None,
             model: None,
         }))

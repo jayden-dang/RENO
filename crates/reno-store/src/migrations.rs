@@ -91,9 +91,34 @@ const V2: &str = "ALTER TABLE runs ADD COLUMN process_start INTEGER;";
 /// index and a page reads only its own rows.
 const V3: &str = "CREATE INDEX runs_created ON runs (created_at);";
 
+/// Migration 4 (T1.4, definitions): a run submitted for a bot records the bot and the version of
+/// its definition, for life. A run for no bot has both NULL; one without the other is refused.
+/// Versions of a definition are immutable: only `status` may change, and rows are never deleted.
+const V4: &str = "
+ALTER TABLE runs ADD COLUMN bot_name TEXT;
+ALTER TABLE runs ADD COLUMN bot_version INTEGER;
+CREATE INDEX runs_bot ON runs (bot_name, bot_version) WHERE bot_name IS NOT NULL;
+
+CREATE TRIGGER runs_bot_pin_is_whole_insert BEFORE INSERT ON runs
+WHEN (NEW.bot_name IS NULL) <> (NEW.bot_version IS NULL)
+BEGIN SELECT RAISE(ABORT, 'a run pins both a bot name and a version, or neither'); END;
+
+CREATE TRIGGER runs_bot_pin_is_whole_update BEFORE UPDATE OF bot_name, bot_version ON runs
+WHEN (NEW.bot_name IS NULL) <> (NEW.bot_version IS NULL)
+  OR NEW.bot_name IS NOT OLD.bot_name OR NEW.bot_version IS NOT OLD.bot_version
+BEGIN SELECT RAISE(ABORT, 'the bot pin of a run never changes'); END;
+
+CREATE TRIGGER definitions_are_immutable BEFORE UPDATE OF kind, name, version, hash, body, created_at
+ON definitions
+BEGIN SELECT RAISE(ABORT, 'a stored definition version is immutable'); END;
+
+CREATE TRIGGER definitions_are_kept BEFORE DELETE ON definitions
+BEGIN SELECT RAISE(ABORT, 'a stored definition version is never deleted'); END;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3)])
+    Migrations::new(vec![M::up(V1), M::up(V2), M::up(V3), M::up(V4)])
 }
 
 /// Brings `conn` to the latest schema. A second call is a no-op.
@@ -141,7 +166,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -165,5 +190,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!((pid, start), (7, None));
+    }
+    /// Upgrading a database written before definitions existed (schema 3): its runs keep their
+    /// rows and carry no bot pin.
+    #[test]
+    fn upgrade_from_a_version_three_database_adds_an_empty_pin() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'queued', 2);
+             INSERT INTO definitions (kind, name, version, hash, body, status, created_at)
+             VALUES ('bot', 'old', 1, 'h', '{}', 'active', 3);",
+        )
+        .unwrap();
+        run(&mut conn).unwrap();
+        let (name, version): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT bot_name, bot_version FROM runs WHERE id = 'run_a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((name, version), (None, None));
+        // The existing definition row is untouched, and is now immutable.
+        let kept: i64 = conn
+            .query_row("SELECT count(*) FROM definitions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert!(conn.execute("DELETE FROM definitions", []).is_err());
     }
 }

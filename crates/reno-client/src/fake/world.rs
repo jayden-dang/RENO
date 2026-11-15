@@ -2,7 +2,8 @@
 //! synchronous methods; no I/O, no clock (time is a logical counter), no async.
 
 use reno_proto::{
-    Approval, ApprovalId, ExecEvent, IdError, RunId, RunStatus, RunSummary, Seq, StopReason, TaskId,
+    Approval, ApprovalId, ExecEvent, ExecutorId, IdError, RunId, RunStatus, RunSummary, Seq,
+    StopReason, TaskId,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -110,6 +111,7 @@ impl World {
     pub(super) fn create_run(
         &mut self,
         params: &reno_proto::TaskRunParams,
+        executor: ExecutorId,
         root: &CancellationToken,
     ) -> Result<RunId, IdError> {
         let n = self.next_id;
@@ -128,13 +130,14 @@ impl World {
             summary: RunSummary {
                 run_id: run_id.clone(),
                 task_id: TaskId::from_suffix(&format!("fake{n}"))?,
-                executor: params.executor.clone(),
+                executor,
                 status: RunStatus::Queued,
                 attempt: 1,
                 title,
                 prompt: Some(params.prompt.clone()),
                 model: params.model.clone(),
                 stop_reason: None,
+                bot: None,
                 created_at_ms: now,
                 updated_at_ms: now,
             },

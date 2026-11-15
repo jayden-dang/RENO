@@ -20,9 +20,37 @@ answers, `reno daemon stop` stops it.
 | `reno.db`, `journals/` | the store |
 | `logs/renod.<date>.log` | JSON lines, written through a non-blocking appender |
 | `workspace/` | where a task that names no working directory runs |
+| `~/.reno/` | the definitions, not part of the data directory (see below) |
 
 `RENO_DATA_DIR` and `RENO_SOCKET` are read by `renod`, `reno` and the app alike, for tests and
 for running two daemons side by side.
+
+## Definitions
+
+Bots, triggers and the policy are TOML files you own, in `~/.reno` (`--defs-dir` or
+`RENO_DEFS_DIR` moves it):
+
+```
+~/.reno/
+  bots/<name>.toml        one bot per file
+  triggers/<name>.toml    one trigger per file
+  policy.toml             the policy
+```
+
+- **First start.** When the directory holds none of `bots/`, `triggers/` and `policy.toml`,
+  `renod` writes `bots/example.toml` and `policy.toml` (the safe defaults) and runs `git init`
+  there, so every change has a diff and a revert. Without git on `PATH` it logs a warning that
+  says so and carries on. Anything that exists is never overwritten.
+- **Loading.** The files are read at start and again when `notify` reports a change, after they
+  have been quiet for 250 ms. The kernel validates the whole set. A set that validates is stored
+  as new versions (only what changed) and published; one that does not is reported through
+  `def.list` and `defs.watch`, and the last good set stays in force.
+- **Versions.** A version is identified by the SHA-256 of the definition's canonical JSON, so
+  comments, whitespace and key order never make one. Versions are immutable. A run submitted
+  for a bot (`task.run` with `bot`) is pinned to the version in force at that moment.
+- **Checking by hand.** `reno defs check` validates the files without a daemon.
+
+Changes to `.git/` and reads of the files do not trigger a reload.
 
 ## Logs
 

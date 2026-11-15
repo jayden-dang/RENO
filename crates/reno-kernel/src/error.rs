@@ -1,5 +1,6 @@
 //! The kernel's one error type (ARCH-14).
 
+use reno_proto::defs::DefKind;
 use reno_proto::{ApprovalId, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
@@ -32,6 +33,19 @@ pub enum KernelError {
     /// The kernel is shutting down.
     #[error("the kernel is shutting down")]
     ShuttingDown,
+    /// No such definition, or no such version of it.
+    #[error("{kind} {name:?} {}", match version { Some(v) => format!("version {v} not found"), None => "not found".to_owned() })]
+    DefinitionNotFound {
+        /// The kind that was looked up.
+        kind: DefKind,
+        /// The name that was looked up.
+        name: String,
+        /// The version, when one was asked for.
+        version: Option<u32>,
+    },
+    /// The `Definitions` port failed.
+    #[error("definitions: {0}")]
+    Definitions(String),
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]
     Invalid(String),

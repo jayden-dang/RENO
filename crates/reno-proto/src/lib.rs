@@ -12,6 +12,8 @@
 //! - [`exec`]: `ExecSpec`, `ExecEvent` and executor capability types.
 //! - [`protocol`]: `Method`, `Notification` and `Subscription`, the Phase 0 surface, and
 //!   [`protocol_schema`].
+//! - [`defs`]: bots, triggers and policy as TOML-backed definitions: parsing, validation and
+//!   content hashing, all pure. Its wire types are in the protocol.
 //! - [`error`]: stable wire error codes.
 //!
 //! # Serde conventions
@@ -40,6 +42,7 @@
 //!
 //! A new method, notification or subscription must also be added to [`protocol_schema`].
 
+pub mod defs;
 pub mod error;
 pub mod exec;
 pub mod ids;

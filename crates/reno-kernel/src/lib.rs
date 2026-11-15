@@ -12,6 +12,8 @@
 //! - `clock`: the `Clock` port, `SystemClock` (the one reader of the system clock), `ManualClock`.
 //! - `registry`: executors by id.
 //! - `kernel`: [`Kernel`], the façade, and the layout of tasks and channels.
+//! - `defs`: the `Definitions` port and the validated set in force; loading, storing versions
+//!   and publishing, with the last good set kept when files do not validate.
 //! - `dispatcher`: claims runs and starts them.
 //! - `supervisor`: one task per live run; owns its stream, journal, subscribers and heartbeat.
 //! - `events`: `run_events`, journal replay joined to the live tail.
@@ -32,6 +34,7 @@ mod approvals;
 mod clock;
 mod config;
 mod db;
+mod defs;
 mod dispatcher;
 mod error;
 mod events;
@@ -46,6 +49,7 @@ mod supervisor;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::KernelConfig;
+pub use defs::{CurrentDefs, DefSnapshot, Definitions, DefsSetup, StoredVersion};
 pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport};
 pub use registry::ExecutorRegistry;

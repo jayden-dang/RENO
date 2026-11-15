@@ -13,6 +13,7 @@
 //! test therefore runs a spinner task that keeps the runtime busy: time moves only when the test
 //! says so, in `until` (1 ms per probe) or `tokio::time::advance`.
 
+mod defs;
 mod queue;
 mod recovery;
 mod runs;
@@ -28,7 +29,7 @@ use reno_store::Store;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
-use crate::{ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock};
+use crate::{DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock};
 
 pub(super) fn id(name: &str) -> ExecutorId {
     name.parse().unwrap()
@@ -46,7 +47,7 @@ pub(super) async fn until<T>(mut probe: impl AsyncFnMut() -> Option<T>) -> T {
 }
 
 pub(super) struct Fx {
-    _dir: TempDir,
+    dir: Option<TempDir>,
     pub(super) store: Store,
     pub(super) clock: Arc<ManualClock>,
     pub(super) kernel: Kernel,
@@ -102,19 +103,66 @@ impl Fx {
         config: KernelConfig,
         executors: ExecutorRegistry,
     ) -> Self {
+        Self::start_over(dir, store, config, executors, None).await
+    }
+
+    /// A kernel over a fresh store that loads definitions through `definitions`.
+    pub(super) async fn with_definitions(
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: DefsSetup,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("reno.db")).unwrap();
+        Self::over_definitions(dir, store, config, executors, definitions).await
+    }
+
+    /// A kernel over an existing store that loads definitions through `definitions`.
+    pub(super) async fn over_definitions(
+        dir: TempDir,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: DefsSetup,
+    ) -> Self {
+        Self::start_over(dir, store, config, executors, Some(definitions)).await
+    }
+
+    /// Gives back the store and its directory, to start another kernel over them.
+    pub(super) fn into_store(mut self) -> (TempDir, Store) {
+        let dir = self.dir.take().expect("the directory is still here");
+        (dir, self.store.clone())
+    }
+
+    async fn start_over(
+        dir: TempDir,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+    ) -> Self {
         let spinner = spin();
         let clock = Arc::new(ManualClock::new(1_700_000_000_000));
-        let start = tokio::spawn(Kernel::start(
-            config,
-            store.clone(),
-            executors,
-            clock.clone(),
-        ));
+        let start = match definitions {
+            None => tokio::spawn(Kernel::start(
+                config,
+                store.clone(),
+                executors,
+                clock.clone(),
+            )),
+            Some(setup) => tokio::spawn(Kernel::start_with_definitions(
+                config,
+                store.clone(),
+                executors,
+                clock.clone(),
+                setup,
+            )),
+        };
         // Start-up may sleep on paused time (the orphan sweep), so drive it.
         until(async || start.is_finished().then_some(())).await;
         let kernel = start.await.unwrap().unwrap();
         Self {
-            _dir: dir,
+            dir: Some(dir),
             store,
             clock,
             kernel,

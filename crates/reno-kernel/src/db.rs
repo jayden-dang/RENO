@@ -8,8 +8,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{ExecutorId, RunId, RunStatus, TaskId};
-use reno_store::{Claim, Journals, NewTask, RunRecord, Store, StoreError};
+use reno_store::{
+    Applied, Claim, DefinitionRecord, Journals, NewDefinition, NewTask, RunRecord, Store,
+    StoreError,
+};
 
 use crate::clock::Clock;
 
@@ -73,6 +77,51 @@ impl Db {
         self.store
             .enqueue_run(task, run, executor, self.now_ms())
             .await
+    }
+
+    pub(crate) async fn enqueue_pinned_run(
+        &self,
+        task: &TaskId,
+        run: &RunId,
+        executor: &ExecutorId,
+        bot: &BotPin,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .enqueue_pinned_run(task, run, executor, bot, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn apply_definitions(
+        &self,
+        desired: Vec<NewDefinition>,
+        principal: &str,
+    ) -> Result<Applied> {
+        self.wrote();
+        self.store
+            .apply_definitions(desired, Some(principal), self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn current_definitions(&self) -> Result<Vec<DefinitionRecord>> {
+        self.store.current_definitions(None).await
+    }
+
+    pub(crate) async fn get_definition(
+        &self,
+        kind: DefKind,
+        name: &str,
+        version: u32,
+    ) -> Result<Option<DefinitionRecord>> {
+        self.store.get_definition(kind, name, version).await
+    }
+
+    pub(crate) async fn latest_definition(
+        &self,
+        kind: DefKind,
+        name: &str,
+    ) -> Result<Option<DefinitionRecord>> {
+        self.store.latest_definition(kind, name).await
     }
 
     pub(crate) async fn claim_next(&self, owner: &str, lease_ms: u64) -> Result<Option<Claim>> {

@@ -289,8 +289,10 @@ fn router(shared: &Arc<Shared>) -> Router {
     let hello = move |p: reno_proto::HelloParams, _| {
         let s = Arc::clone(&s);
         async move {
+            // The fake serves no definitions, so it does not claim the feature.
             let features = FEATURES
                 .iter()
+                .filter(|f| **f != reno_proto::FEATURE_DEFS)
                 .filter(|f| p.features.iter().any(|c| c == *f))
                 .map(|f| (*f).to_owned())
                 .collect();
@@ -327,7 +329,19 @@ fn router(shared: &Arc<Shared>) -> Router {
     let task_run = move |p: reno_proto::TaskRunParams, _| {
         let s = Arc::clone(&s);
         async move {
-            let run_id = s.with(|w| w.create_run(&p, &s.cancel)).map_err(internal)?;
+            // The fake has no definitions, so there is no bot to run as.
+            let executor = match (&p.bot, &p.executor) {
+                (None, Some(executor)) => executor.clone(),
+                _ => {
+                    return Err(ErrorObject::new(
+                        ErrorCode::InvalidParams,
+                        "the fake daemon runs tasks on a named executor, and has no bots",
+                    ));
+                }
+            };
+            let run_id = s
+                .with(|w| w.create_run(&p, executor, &s.cancel))
+                .map_err(internal)?;
             s.tracker
                 .spawn(script::run_new(Arc::clone(&s), run_id.clone(), p.prompt));
             Ok(TaskRunResult { run_id })

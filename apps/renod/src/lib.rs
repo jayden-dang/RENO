@@ -11,6 +11,8 @@
 //! - [`paths`]: the data directory layout and its defaults.
 //! - [`lock`]: the exclusive lock on the data directory.
 //! - [`executors`]: `mock`, and the harnesses that are installed.
+//! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
+//!   debounced `notify` watch.
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
 //! - [`daemon`]: [`Daemon`], start-up and the shutdown sequence.
@@ -19,6 +21,7 @@
 //! The binary (`main.rs`) is arguments, logging, the runtime and signals.
 
 pub mod daemon;
+pub mod defs;
 pub mod errors;
 pub mod executors;
 mod handlers;
@@ -29,5 +32,6 @@ pub mod paths;
 pub use daemon::{
     CONNECTION_GRACE, Daemon, DaemonConfig, DaemonError, ExecutorSource, SERVER_DEADLINE, Stopped,
 };
+pub use defs::{Bootstrapped, FsDefinitions, GitInit, GitOutcome};
 pub use executors::ExecutorSet;
 pub use paths::Paths;

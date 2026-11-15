@@ -15,13 +15,18 @@ use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
+use reno_proto::defs::{
+    DefGetParams, DefKind, DefListParams, DefRecord, DefValidateParams, DefValidateResult,
+    DefsSnapshot, DefsWatchParams,
+};
 use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideParams, ApprovalDecision, ApprovalList,
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
-    DaemonStatus, DaemonStatusInfo, FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION,
-    RunCancel, RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams,
-    RunId, RunList, RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSummary,
-    RunsSnapshot, RunsWatch, RunsWatchParams, Seq, TaskRun, TaskRunParams,
+    DaemonStatus, DaemonStatusInfo, DefGet, DefList, DefValidate, DefsWatch, FEATURES, HelloParams,
+    HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams, RunEventItem, RunEvents,
+    RunEventsParams, RunGet, RunGetParams, RunId, RunList, RunListParams, RunListResult, RunStatus,
+    RunSteer, RunSteerParams, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, Seq, TaskRun,
+    TaskRunParams,
 };
 use reno_rpc::{RpcError, SubEvent, SubStream};
 use serde::de::DeserializeOwned;
@@ -149,8 +154,12 @@ impl Client {
         Ok(())
     }
 
-    /// `task.run`: creates a task and its first run.
+    /// `task.run`: creates a task and its first run. Running as a `bot`, or leaving the executor
+    /// to the bot, needs feature `defs`.
     pub async fn run_task(&self, params: TaskRunParams) -> Result<RunId, ClientError> {
+        if params.bot.is_some() || params.executor.is_none() {
+            self.require(reno_proto::FEATURE_DEFS)?;
+        }
         Ok(self.rpc.call::<TaskRun>(params).await?.run_id)
     }
 
@@ -220,6 +229,59 @@ impl Client {
         };
         self.rpc.call::<ApprovalDecide>(params).await?;
         Ok(())
+    }
+
+    /// `def.list`: the definitions in force and the problems with the files on disk, optionally
+    /// of one kind. Needs feature `defs`.
+    pub async fn list_defs(&self, kind: Option<DefKind>) -> Result<DefsSnapshot, ClientError> {
+        self.require(reno_proto::FEATURE_DEFS)?;
+        Ok(self.rpc.call::<DefList>(DefListParams { kind }).await?)
+    }
+
+    /// `def.get`: one version of a definition with its body; the newest when `version` is
+    /// `None`. Needs feature `defs`.
+    pub async fn get_def(
+        &self,
+        kind: DefKind,
+        name: &str,
+        version: Option<u32>,
+    ) -> Result<DefRecord, ClientError> {
+        self.require(reno_proto::FEATURE_DEFS)?;
+        let params = DefGetParams {
+            kind,
+            name: name.to_owned(),
+            version,
+        };
+        Ok(self.rpc.call::<DefGet>(params).await?)
+    }
+
+    /// `def.validate`: checks a body against every rule without saving it. Needs feature `defs`.
+    pub async fn validate_def(
+        &self,
+        kind: DefKind,
+        name: &str,
+        body: serde_json::Value,
+    ) -> Result<DefValidateResult, ClientError> {
+        self.require(reno_proto::FEATURE_DEFS)?;
+        let params = DefValidateParams {
+            kind,
+            name: name.to_owned(),
+            body,
+        };
+        Ok(self.rpc.call::<DefValidate>(params).await?)
+    }
+
+    /// `defs.watch`: the definitions in force and the file problems, then a new full snapshot on
+    /// every change. Latest-value, like [`Client::watch_runs`]. Needs feature `defs`.
+    pub async fn watch_defs(
+        &self,
+    ) -> Result<BoxStream<'static, Result<DefsSnapshot, ClientError>>, ClientError> {
+        self.require(reno_proto::FEATURE_DEFS)?;
+        let sub = self
+            .rpc
+            .subscribe::<DefsWatch>(DefsWatchParams::default())
+            .await?;
+        Ok(watch_stream(sub))
     }
 
     /// `runs.watch`: the current run list, then a new full list on every change.

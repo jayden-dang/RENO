@@ -277,6 +277,7 @@ mod tests {
             prompt: None,
             model: None,
             stop_reason: None,
+            bot: None,
             created_at_ms: created,
             updated_at_ms: created,
         }

@@ -17,7 +17,8 @@ use reno_proto::{
 fn task(prompt: &str) -> TaskRunParams {
     TaskRunParams {
         prompt: prompt.to_owned(),
-        executor: "claude-code".parse().unwrap(),
+        executor: Some("claude-code".parse().unwrap()),
+        bot: None,
         cwd: None,
         model: None,
     }
@@ -524,4 +525,32 @@ async fn steering_a_live_run_journals_the_message_and_a_reply() {
     // A finished run cannot be steered.
     assert!(client.steer(&id, "late".to_owned()).await.is_err());
     assert!(client.steer(&run("nosuch"), "x".to_owned()).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_daemon_without_definitions_is_not_asked_for_bots_or_definitions() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    // The fake does not claim the `defs` feature, so the client refuses before sending.
+    assert!(!client.supports(reno_proto::FEATURE_DEFS));
+    let mut as_bot = task("go");
+    as_bot.bot = Some("keeper".to_owned());
+    for params in [
+        as_bot,
+        TaskRunParams {
+            executor: None,
+            ..task("go")
+        },
+    ] {
+        let error = client.run_task(params).await.unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Protocol(m) if m.contains("feature `defs`")),
+            "{error:?}"
+        );
+    }
+    assert!(matches!(
+        client.list_defs(None).await.unwrap_err(),
+        ClientError::Protocol(_)
+    ));
+    // A run on a named executor still works.
+    client.run_task(task("go")).await.unwrap();
 }

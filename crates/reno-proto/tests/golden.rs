@@ -5,6 +5,7 @@
 
 use std::fmt::Debug;
 
+use reno_proto::defs::*;
 use reno_proto::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -227,7 +228,7 @@ fn daemon_hello() {
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals", "run.steer",
-                            "daemon.shutdown"], "pid": 4242}),
+                            "daemon.shutdown", "defs"], "pid": 4242}),
     );
 }
 
@@ -369,6 +370,7 @@ fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
         prompt: prompt.map(str::to_owned),
         model: model.map(str::to_owned),
         stop_reason: None,
+        bot: None,
         created_at_ms: 10,
         updated_at_ms: 20,
     }
@@ -424,4 +426,210 @@ fn run_summary_without_prompt_still_parses() {
                "status": "running", "attempt": 1, "title": "first line",
                "createdAtMs": 10, "updatedAtMs": 20}),
     );
+}
+
+#[test]
+fn a_run_pinned_to_a_bot_carries_the_pin() {
+    let mut summary = run_summary(None, None);
+    summary.bot = Some(BotPin {
+        name: "keeper".into(),
+        version: 3,
+    });
+    golden(
+        &summary,
+        json!({"runId": "run_01HZX9", "taskId": "task_01HZX8", "executor": "mock",
+               "status": "running", "attempt": 1, "title": "first line",
+               "bot": {"name": "keeper", "version": 3},
+               "createdAtMs": 10, "updatedAtMs": 20}),
+    );
+}
+
+#[test]
+fn task_run_params_old_and_new_shapes() {
+    // A client that predates `bot` sends exactly this, and it still parses.
+    golden(
+        &TaskRunParams {
+            prompt: "go".into(),
+            executor: Some("mock".parse().unwrap()),
+            bot: None,
+            cwd: None,
+            model: None,
+        },
+        json!({"prompt": "go", "executor": "mock"}),
+    );
+    golden(
+        &TaskRunParams {
+            prompt: "go".into(),
+            executor: None,
+            bot: Some("keeper".into()),
+            cwd: None,
+            model: None,
+        },
+        json!({"prompt": "go", "bot": "keeper"}),
+    );
+}
+
+#[test]
+fn definitions_methods() {
+    assert_eq!(<DefList as Method>::NAME, "def.list");
+    assert_eq!(<DefGet as Method>::NAME, "def.get");
+    assert_eq!(<DefValidate as Method>::NAME, "def.validate");
+    assert_eq!(<DefsWatch as Subscription>::NAME, "defs.watch");
+    assert_eq!(FEATURE_DEFS, "defs");
+    assert!(FEATURES.contains(&FEATURE_DEFS));
+
+    golden(&DefListParams::default(), json!({}));
+    golden(
+        &DefListParams {
+            kind: Some(DefKind::Trigger),
+        },
+        json!({"kind": "trigger"}),
+    );
+    let summary = DefSummary {
+        kind: DefKind::Bot,
+        name: "keeper".into(),
+        version: 2,
+        hash: "ab".repeat(32),
+        created_at_ms: 99,
+    };
+    golden(
+        &summary,
+        json!({"kind": "bot", "name": "keeper", "version": 2, "hash": "ab".repeat(32),
+               "createdAtMs": 99}),
+    );
+    golden(
+        &DefsSnapshot {
+            defs: vec![summary],
+            errors: vec![DefError::new(
+                "bots/scout.toml",
+                "executors[0]",
+                "unknown executor \"x\"",
+            )],
+        },
+        json!({"defs": [{"kind": "bot", "name": "keeper", "version": 2,
+                         "hash": "ab".repeat(32), "createdAtMs": 99}],
+               "errors": [{"file": "bots/scout.toml", "path": "executors[0]",
+                           "message": "unknown executor \"x\""}]}),
+    );
+    // A daemon that has no errors to report may leave the key out.
+    let snapshot: DefsSnapshot = serde_json::from_value(json!({"defs": []})).unwrap();
+    assert_eq!(snapshot, DefsSnapshot::default());
+}
+
+#[test]
+fn definition_get_and_validate() {
+    golden(
+        &DefGetParams {
+            kind: DefKind::Policy,
+            name: "policy".into(),
+            version: None,
+        },
+        json!({"kind": "policy", "name": "policy"}),
+    );
+    golden(
+        &DefGetParams {
+            kind: DefKind::Bot,
+            name: "keeper".into(),
+            version: Some(2),
+        },
+        json!({"kind": "bot", "name": "keeper", "version": 2}),
+    );
+    golden(
+        &DefRecord {
+            kind: DefKind::Bot,
+            name: "keeper".into(),
+            version: 2,
+            hash: "cd".repeat(32),
+            body: json!({"name": "keeper", "executors": ["codex"]}),
+            created_at_ms: 5,
+            latest: true,
+        },
+        json!({"kind": "bot", "name": "keeper", "version": 2, "hash": "cd".repeat(32),
+               "body": {"name": "keeper", "executors": ["codex"]},
+               "createdAtMs": 5, "latest": true}),
+    );
+    golden(
+        &DefValidateParams {
+            kind: DefKind::Trigger,
+            name: "nightly".into(),
+            body: json!({"name": "nightly"}),
+        },
+        json!({"kind": "trigger", "name": "nightly", "body": {"name": "nightly"}}),
+    );
+    golden(
+        &DefValidateResult {
+            valid: false,
+            errors: vec![DefError::new("triggers/nightly.toml", "", "boom")],
+            hash: None,
+        },
+        json!({"valid": false, "errors": [{"file": "triggers/nightly.toml", "message": "boom"}]}),
+    );
+    golden(
+        &DefValidateResult {
+            valid: true,
+            errors: vec![],
+            hash: Some("ef".repeat(32)),
+        },
+        json!({"valid": true, "errors": [], "hash": "ef".repeat(32)}),
+    );
+}
+
+/// The file shape of each definition type is a contract too: `def.get` returns it and the files
+/// are written in it.
+#[test]
+fn definition_bodies_in_file_shape() {
+    let bot: BotDef = serde_json::from_value(json!({
+        "name": "keeper", "instructions": "x", "executors": ["codex", "claude-code"],
+        "access": "auto_accept_edits", "sandbox": "read_only", "team": "core",
+        "triggers": ["nightly"],
+        "budget": {"max_concurrent_runs": 2, "max_wall_time": "30m", "daily_token_ceiling": 5}
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&bot).unwrap()["budget"]["daily_token_ceiling"],
+        5
+    );
+
+    let trigger: TriggerDef = serde_json::from_value(json!({
+        "name": "nightly", "when": {"kind": "cron", "cron": "0 2 * * *", "timezone": "UTC"},
+        "target": {"bot": "keeper", "prompt": "go"}
+    }))
+    .unwrap();
+    assert!(trigger.enabled);
+    assert_eq!(
+        serde_json::to_value(&trigger.when).unwrap(),
+        json!({"kind": "cron", "cron": "0 2 * * *", "timezone": "UTC"})
+    );
+    assert_eq!(
+        serde_json::to_value(TriggerKind::Manual {}).unwrap(),
+        json!({"kind": "manual"})
+    );
+
+    let policy: PolicyDef = serde_json::from_value(json!({
+        "rules": [
+            {"effect": "deny", "match": {"action": "command", "command": "rm -rf *"}},
+            {"effect": "allow", "match": {"tool": "read*", "scope": ["keeper"]}}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(policy.default, PolicyEffect::Ask);
+    assert_eq!(policy.rules[0].matches.scope, RuleScope::All);
+    let back = serde_json::to_value(&policy).unwrap();
+    assert_eq!(back["rules"][0]["match"]["scope"], "*");
+    assert_eq!(back["rules"][1]["match"]["scope"], json!(["keeper"]));
+
+    // Unknown fields are refused at every level.
+    for bad in [
+        json!({"name": "a", "instructions": "x", "executors": [], "mood": 1}),
+        json!({"name": "a", "instructions": "x", "executors": [], "budget": {"cpu": 1}}),
+    ] {
+        assert!(serde_json::from_value::<BotDef>(bad).is_err());
+    }
+    assert!(
+        serde_json::from_value::<PolicyDef>(
+            json!({"rules": [{"effect": "ask", "match": {"x": 1}}]})
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_value::<RuleScope>(json!("keeper")).is_err());
 }

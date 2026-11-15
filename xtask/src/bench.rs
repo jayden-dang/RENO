@@ -349,6 +349,8 @@ impl Daemon {
             .arg(dir)
             .arg("--socket")
             .arg(socket(dir))
+            // Keep the definitions inside the benchmark's own directory.
+            .env("RENO_DEFS_DIR", dir.join("defs"))
             .env("RENO_NO_HARNESSES", "1")
             .env_remove("RENO_LOG")
             .stdin(Stdio::null())
@@ -428,6 +430,7 @@ fn reno_command(bins: &Bins, dir: &Path) -> Command {
     command
         .env("RENO_DATA_DIR", dir)
         .env("RENO_SOCKET", socket(dir))
+        .env("RENO_DEFS_DIR", dir.join("defs"))
         .current_dir(dir)
         .stdin(Stdio::null());
     command

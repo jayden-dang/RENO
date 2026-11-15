@@ -27,13 +27,15 @@ reno-harness.workspace = true
 reno-kernel.workspace = true
 reno-rpc.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 futures.workspace = true
 mimalloc = { workspace = true, optional = true }
+notify.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs", "process"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
@@ -42,7 +44,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 reno-client.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 
 [lints]
 workspace = true
