@@ -42,12 +42,9 @@ fn exec_event_every_variant() {
         (
             ExecEvent::Tool {
                 id: "t1".into(),
-                call: ToolCall {
-                    name: "bash".into(),
-                    input: json!({"cmd": "ls"}),
-                },
+                call: ToolCall::new("bash", json!({"cmd": "ls"}), ActionClass::Command),
             },
-            json!({"type": "tool", "id": "t1", "call": {"name": "bash", "input": {"cmd": "ls"}}}),
+            json!({"type": "tool", "id": "t1", "call": {"name": "bash", "input": {"cmd": "ls"}, "class": "command"}}),
         ),
         (
             ExecEvent::ToolResult {

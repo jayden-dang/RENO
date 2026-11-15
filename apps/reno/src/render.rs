@@ -205,7 +205,7 @@ pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> 
 
 #[cfg(test)]
 mod tests {
-    use reno_proto::{Question, Seq, ToolCall};
+    use reno_proto::{ActionClass, Question, Seq, ToolCall};
     use serde_json::json;
 
     use super::*;
@@ -255,10 +255,7 @@ mod tests {
                 text("world"),
                 ExecEvent::Tool {
                     id: "1".into(),
-                    call: ToolCall {
-                        name: "grep".into(),
-                        input: json!({"pattern": "x"}),
-                    },
+                    call: ToolCall::new("grep", json!({"pattern": "x"}), ActionClass::Read),
                 },
                 ExecEvent::ToolResult {
                     id: "1".into(),
@@ -324,10 +321,7 @@ mod tests {
             false,
             vec![ExecEvent::Tool {
                 id: "1".into(),
-                call: ToolCall {
-                    name: "t".into(),
-                    input: json!(long),
-                },
+                call: ToolCall::new("t", json!(long), ActionClass::Other),
             }],
         );
         assert!(out.chars().count() < 130, "{out}");

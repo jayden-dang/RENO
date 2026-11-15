@@ -361,10 +361,7 @@ mod tests {
     fn bash(id: &str, cmd: &str) -> ExecEvent {
         ExecEvent::Tool {
             id: id.into(),
-            call: ToolCall {
-                name: "bash".into(),
-                input: json!({ "command": cmd }),
-            },
+            call: ToolCall::new("bash", json!({ "command": cmd }), ActionClass::Command),
         }
     }
 

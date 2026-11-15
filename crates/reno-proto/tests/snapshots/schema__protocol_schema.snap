@@ -1499,12 +1499,17 @@ expression: protocol_schema()
           "ToolCall": {
             "description": "A tool invocation as far as Reno needs to know it.",
             "properties": {
+              "class": {
+                "$ref": "#/$defs/ActionClass",
+                "default": "other",
+                "description": "What kind of action this is, the same vocabulary approvals use. Every executor fills it,\nso views and policy never need a harness's own tool names. Absent on the wire means\n[`ActionClass::Other`]."
+              },
               "input": {
                 "default": null,
                 "description": "The tool's input, verbatim."
               },
               "name": {
-                "description": "Tool name as the harness reports it.",
+                "description": "Tool name as the harness reports it (`Bash`, `exec`, `mcp__server__tool`, …). Names\ndiffer between harnesses; use [`ToolCall::class`] to treat calls alike.",
                 "type": "string"
               }
             },

@@ -118,11 +118,28 @@ pub struct ExecSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCall {
-    /// Tool name as the harness reports it.
+    /// Tool name as the harness reports it (`Bash`, `exec`, `mcp__server__tool`, …). Names
+    /// differ between harnesses; use [`ToolCall::class`] to treat calls alike.
     pub name: String,
     /// The tool's input, verbatim.
     #[serde(default)]
     pub input: serde_json::Value,
+    /// What kind of action this is, the same vocabulary approvals use. Every executor fills it,
+    /// so views and policy never need a harness's own tool names. Absent on the wire means
+    /// [`ActionClass::Other`].
+    #[serde(default = "ActionClass::other")]
+    pub class: ActionClass,
+}
+
+impl ToolCall {
+    /// A call named `name` with `input`, classified as `class`.
+    pub fn new(name: impl Into<String>, input: serde_json::Value, class: ActionClass) -> Self {
+        Self {
+            name: name.into(),
+            input,
+            class,
+        }
+    }
 }
 
 /// One question put to a human by a harness.
@@ -157,6 +174,13 @@ pub enum ActionClass {
     McpTool,
     /// Anything else.
     Other,
+}
+
+impl ActionClass {
+    /// [`ActionClass::Other`], for serde defaults.
+    pub fn other() -> Self {
+        Self::Other
+    }
 }
 
 /// The exact thing a human is asked to approve.

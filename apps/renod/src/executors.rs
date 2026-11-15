@@ -13,7 +13,7 @@ use std::sync::Arc;
 use reno_harness::exec::{Executor, HarnessExecutor, MockExecutor, MockStep};
 use reno_harness::{ClaudeExecutor, CodexHarness};
 use reno_kernel::ExecutorRegistry;
-use reno_proto::{ExecEvent, IdError, StopReason, ToolCall};
+use reno_proto::{ActionClass, ExecEvent, IdError, StopReason, ToolCall};
 use serde_json::json;
 
 /// The id of the always-present mock executor.
@@ -77,10 +77,7 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
         MockStep::text("and pretending to work on it.\n"),
         MockStep::Emit(ExecEvent::Tool {
             id: "mock-call-1".into(),
-            call: ToolCall {
-                name: "mock_tool".into(),
-                input: json!({ "note": "canned" }),
-            },
+            call: ToolCall::new("mock_tool", json!({ "note": "canned" }), ActionClass::Other),
         }),
         MockStep::Emit(ExecEvent::ToolResult {
             id: "mock-call-1".into(),

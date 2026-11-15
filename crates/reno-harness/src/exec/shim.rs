@@ -63,8 +63,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
-    AccessMode, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    ModelInfo, Question, SandboxLevel, SessionRef, Steering, StopReason, ToolCall, VersionRange,
+    AccessMode, ActionClass, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor,
+    ExecutorId, ModelInfo, Question, SandboxLevel, SessionRef, Steering, StopReason, ToolCall,
+    VersionRange,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -770,6 +771,18 @@ impl Mapped {
 /// named `mcp__<server>__<tool>` and an unknown tool keeps the name the harness gave it, both
 /// with the harness's own input.
 fn tool_call(call: up::ToolCall) -> ToolCall {
+    let class = match &call {
+        up::ToolCall::Exec { .. } => ActionClass::Command,
+        up::ToolCall::ReadFile { .. } | up::ToolCall::Search { .. } | up::ToolCall::Glob { .. } => {
+            ActionClass::Read
+        }
+        up::ToolCall::WriteFile { .. }
+        | up::ToolCall::EditFile { .. }
+        | up::ToolCall::ApplyPatch { .. } => ActionClass::Edit,
+        up::ToolCall::WebFetch { .. } | up::ToolCall::WebSearch { .. } => ActionClass::Network,
+        up::ToolCall::Mcp { .. } => ActionClass::McpTool,
+        up::ToolCall::Todo { .. } | up::ToolCall::Unknown { .. } => ActionClass::Other,
+    };
     let name = match &call {
         up::ToolCall::Exec { .. } => "exec".to_owned(),
         up::ToolCall::ReadFile { .. } => "read_file".to_owned(),
@@ -797,7 +810,7 @@ fn tool_call(call: up::ToolCall) -> ToolCall {
             value
         }
     };
-    ToolCall { name, input }
+    ToolCall::new(name, input, class)
 }
 
 /// A one-line outcome: the exit code, then the last non-empty line of output, redacted.
@@ -1128,10 +1141,11 @@ mod tests {
                 ExecEvent::Text { text: "hi ".into() },
                 ExecEvent::Tool {
                     id: "t1".into(),
-                    call: ToolCall {
-                        name: "exec".into(),
-                        input: serde_json::json!({"command": "cargo test"}),
-                    },
+                    call: ToolCall::new(
+                        "exec",
+                        serde_json::json!({"command": "cargo test"}),
+                        ActionClass::Command,
+                    ),
                 },
                 ExecEvent::ToolResult {
                     id: "t1".into(),
@@ -1140,10 +1154,11 @@ mod tests {
                 },
                 ExecEvent::Tool {
                     id: "t2".into(),
-                    call: ToolCall {
-                        name: "mcp__reno__board_read".into(),
-                        input: serde_json::json!({"key": "k"}),
-                    },
+                    call: ToolCall::new(
+                        "mcp__reno__board_read",
+                        serde_json::json!({"key": "k"}),
+                        ActionClass::McpTool,
+                    ),
                 },
                 ExecEvent::ToolResult {
                     id: "t2".into(),

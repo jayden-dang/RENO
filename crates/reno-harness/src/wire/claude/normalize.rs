@@ -362,12 +362,12 @@ impl Normalizer {
                     .message
                     .blocks()
                     .filter(|b: &ContentBlock| b.kind == "tool_use")
-                    .map(|b| ExecEvent::Tool {
-                        id: b.id,
-                        call: ToolCall {
-                            name: b.name,
-                            input: b.input,
-                        },
+                    .map(|b| {
+                        let class = super::permission::action_class(&b.name);
+                        ExecEvent::Tool {
+                            id: b.id,
+                            call: ToolCall::new(b.name, b.input, class),
+                        }
                     })
                     .collect();
                 // A failed turn (usage limit, billing, auth, overloaded, ...) carries a terse
@@ -515,7 +515,7 @@ fn done(stop: StopReason, result: Option<String>, diagnostic: Option<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reno_proto::{SessionRef, StopReason, ToolCall};
+    use reno_proto::{ActionClass, SessionRef, StopReason, ToolCall};
     use serde_json::json;
 
     fn parse(raw: &str) -> Frame {
@@ -555,24 +555,19 @@ mod tests {
             vec![
                 ExecEvent::Tool {
                     id: "t1".into(),
-                    call: ToolCall {
-                        name: "Bash".into(),
-                        input: json!({"command": "ls -la"}),
-                    },
+                    call: ToolCall::new("Bash", json!({"command": "ls -la"}), ActionClass::Command),
                 },
                 ExecEvent::Tool {
                     id: "t2".into(),
-                    call: ToolCall {
-                        name: "mcp__linear__search".into(),
-                        input: json!({"q": "bug"}),
-                    },
+                    call: ToolCall::new(
+                        "mcp__linear__search",
+                        json!({"q": "bug"}),
+                        ActionClass::McpTool,
+                    ),
                 },
                 ExecEvent::Tool {
                     id: "t3".into(),
-                    call: ToolCall {
-                        name: "Mystery".into(),
-                        input: json!(null),
-                    },
+                    call: ToolCall::new("Mystery", json!(null), ActionClass::Other),
                 },
             ]
         );

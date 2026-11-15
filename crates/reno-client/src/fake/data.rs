@@ -84,12 +84,16 @@ pub(super) fn text(s: &str) -> ExecEvent {
 }
 
 pub(super) fn tool(id: &str, name: &str, input: serde_json::Value) -> ExecEvent {
+    let class = match name {
+        "bash" | "exec" => ActionClass::Command,
+        "fetch" | "web_fetch" => ActionClass::Network,
+        "read" | "read_file" => ActionClass::Read,
+        "edit" | "write" | "edit_file" => ActionClass::Edit,
+        _ => ActionClass::Other,
+    };
     ExecEvent::Tool {
         id: id.to_owned(),
-        call: ToolCall {
-            name: name.to_owned(),
-            input,
-        },
+        call: ToolCall::new(name, input, class),
     }
 }
 

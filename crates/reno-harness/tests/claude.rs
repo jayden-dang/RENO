@@ -223,17 +223,19 @@ async fn happy_path_maps_frames_to_exec_events_and_drops_subagent_traffic() {
     // Tool calls carry the harness's own name and input, verbatim.
     assert!(events.contains(&ExecEvent::Tool {
         id: "tool-1".into(),
-        call: ToolCall {
-            name: "Bash".into(),
-            input: serde_json::json!({ "command": "ls -la" }),
-        },
+        call: ToolCall::new(
+            "Bash",
+            serde_json::json!({ "command": "ls -la" }),
+            ActionClass::Command,
+        ),
     }));
     assert!(events.contains(&ExecEvent::Tool {
         id: "tool-2".into(),
-        call: ToolCall {
-            name: "mcp__linear__search".into(),
-            input: serde_json::json!({ "q": "bug" }),
-        },
+        call: ToolCall::new(
+            "mcp__linear__search",
+            serde_json::json!({ "q": "bug" }),
+            ActionClass::McpTool,
+        ),
     }));
     // A Bash result reports its exit code; another tool's reports nothing.
     assert!(events.contains(&ExecEvent::ToolResult {
