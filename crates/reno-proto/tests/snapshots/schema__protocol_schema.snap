@@ -59,7 +59,7 @@ expression: protocol_schema()
           "type": "string"
         },
         "SandboxLevel": {
-          "description": "The sandbox the harness itself enforces around its tools.",
+          "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
           "oneOf": [
             {
               "const": "read_only",
@@ -73,7 +73,7 @@ expression: protocol_schema()
             },
             {
               "const": "unrestricted",
-              "description": "No sandbox.",
+              "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
               "type": "string"
             }
           ]
@@ -81,7 +81,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
+      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
       "properties": {
         "access": {
           "$ref": "#/$defs/AccessMode",
@@ -113,8 +113,8 @@ expression: protocol_schema()
         },
         "sandbox": {
           "$ref": "#/$defs/SandboxLevel",
-          "default": "workspace_write",
-          "description": "The sandbox a run asks its harness for. Defaults to `workspace_write`."
+          "default": "unrestricted",
+          "description": "The sandbox ceiling a run asks its harness to enforce. Defaults to `unrestricted`: no\nceiling beyond `access`, so every listed executor is eligible. `workspace_write` or\n`read_only` makes only executors that enforce that level eligible."
         },
         "team": {
           "description": "The team the bot belongs to, if any. Teams arrive with T2.4, so only the name's shape is\nchecked.",

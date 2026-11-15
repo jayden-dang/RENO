@@ -1,7 +1,6 @@
 //! The native Codex executor: spawns the installed `codex` CLI as `codex app-server` and speaks
 //! JSON-RPC 2.0 over stdio, the interface the Codex IDE extension uses, and implements
-//! [`Executor`] without going through the imported `Harness` trait (stage B, ARCHITECTURE
-//! sections 2.1 and 5.1).
+//! [`Executor`].
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.experimentalApi`). The request
 //! shapes were read from the 0.164.0 schema and the driver's live fixtures start at 0.146.1;
@@ -26,8 +25,8 @@
 //!   `accept` or `decline`, never `acceptForSession`. An elicitation form and the agent's own
 //!   questions become `NeedsInput`, answered through `ExecHandle::answer_input`. No prose is
 //!   written or parsed on this path.
-//! - ONE RUN IS ONE `Done`. The imported driver kept the app-server and its thread for the next
-//!   turn; the run does not. The end of the turn ends the run and the app-server's process group
+//! - ONE RUN IS ONE `Done`. The app-server and its thread are not kept for a
+//!   next turn. The end of the turn ends the run and the app-server's process group
 //!   is torn down, so what the agent left running ends with it. The one exception is a steer
 //!   Codex refused because its turn just ended: that steer starts the next turn inside the same
 //!   run, and the first turn's end is not the run's.
@@ -78,7 +77,7 @@ use crate::exec::{
     Decision, ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, InputAnswer, Open,
     OpenRequests, ProcessSink, Resolved, require_access,
 };
-use crate::jsonrpc::{Incoming, RpcClient, RpcTasks, transport_lost};
+use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::owned::Child as OwnedChild;
 use crate::process::{Command, Stdio};
 use crate::{HarnessError, Signal, send_signal};
@@ -182,22 +181,6 @@ fn mcp_overrides(servers: &[McpServerSpec], pre_approve: bool) -> Vec<(String, V
         }
     }
     overrides
-}
-
-/// A ready-to-spawn `codex login` command for the engine's account flow.
-///
-/// Shares the executor's full resolution (`CODEX_EXECUTABLE`, PATH, login-shell snapshot,
-/// install locations) and its child-PATH composition, so "Add account" launches exactly the
-/// binary a run would. `CODEX_HOME` isolates the login from the live `~/.codex` session; the
-/// caller owns stdio wiring and cancellation.
-pub fn login_command(codex_home: &Path) -> Result<Command, HarnessError> {
-    let exe = CodexExecutor::new()
-        .resolve_executable()
-        .map_err(|error| HarnessError::NotInstalled(error.to_string()))?;
-    let mut cmd = Command::new(&exe);
-    crate::compose_child_path(&mut cmd, &exe);
-    cmd.arg("login").env("CODEX_HOME", codex_home);
-    Ok(cmd)
 }
 
 /// `Some(why)` when `version` is a CLI older than [`MIN_CLI_VERSION`]; an unknown version (a
@@ -361,7 +344,7 @@ impl CodexExecutor {
             child.shutdown(self.kill_grace).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
-        let (client, _incoming, rpc_tasks) = RpcClient::tracked(&self.tracker, stdin, stdout);
+        let (client, _incoming) = RpcClient::spawn(&self.tracker, stdin, stdout);
         let discovery = async {
             client
                 .request("initialize", initialize_params(false))
@@ -403,17 +386,15 @@ impl CodexExecutor {
                 models.insert(0, model);
             }
             if models.is_empty() {
-                return Err(crate::CatalogFailure {
-                    code: crate::CatalogFailureCode::Failed,
-                    message: "Codex returned an empty model catalog".into(),
-                }
-                .into());
+                return Err(HarnessError::Protocol(
+                    "Codex returned an empty model catalog".into(),
+                ));
             }
             Ok::<Vec<ModelInfo>, HarnessError>(models)
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         child.shutdown(self.kill_grace).await;
-        rpc_tasks.abort();
+        client.abort();
         let models = match result {
             Ok(inner) => inner?,
             Err(_) => return Err(HarnessError::Protocol("model discovery timed out".into())),
@@ -645,17 +626,16 @@ struct AppServer {
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     stderr_tail: crate::StderrTail,
-    /// The JSON-RPC writer and reader. Like the stderr reader they end when the child's pipes
-    /// close, which a grandchild that escaped teardown can hold open forever: the run aborts
-    /// them with [`Self::release`], so `shutdown` is bounded.
-    rpc_tasks: RpcTasks,
+    /// The JSON-RPC writer and reader belong to `client`. Like the stderr reader they end when
+    /// the child's pipes close, which a grandchild that escaped teardown can hold open forever:
+    /// the run aborts them with [`Self::release`], so `shutdown` is bounded.
     stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl AppServer {
     /// Stop the tasks that read and write the child's pipes, once the child is reaped.
     fn release(&mut self) {
-        self.rpc_tasks.abort();
+        self.client.abort();
         if let Some(handle) = self.stderr_task.take() {
             handle.abort();
         }
@@ -711,13 +691,12 @@ async fn launch(
             tail.close();
         })
     });
-    let (client, incoming, rpc_tasks) = RpcClient::tracked(tracker, stdin, stdout);
+    let (client, incoming) = RpcClient::spawn(tracker, stdin, stdout);
     Ok(AppServer {
         child,
         client,
         incoming,
         stderr_tail,
-        rpc_tasks,
         stderr_task,
     })
 }
@@ -1531,9 +1510,21 @@ impl Run {
     fn answer(&mut self, answer: ExecAnswer) {
         let request_id = answer.request_id.clone();
         match self.requests.resolve(answer) {
-            Resolved::Decision(payload, decision) => self
-                .client
-                .respond(&payload.rpc_id, payload.reply(decision == Decision::Allow)),
+            Resolved::Decision(payload, decision, message) => {
+                // The app-server's approval reply is `{decision}` and nothing else: it has no
+                // field for a reason, so a policy rule's message cannot reach the model. It is
+                // logged so the refusal is explainable from the daemon's side.
+                if let Some(message) = message.as_deref().filter(|_| decision == Decision::Deny) {
+                    tracing::info!(
+                        target: "reno_harness::codex",
+                        request_id,
+                        message,
+                        "declined by policy; the app-server reply cannot carry the message"
+                    );
+                }
+                self.client
+                    .respond(&payload.rpc_id, payload.reply(decision == Decision::Allow));
+            }
             Resolved::Input(payload, given) => {
                 self.client.respond(&payload.rpc_id, payload.reply(&given))
             }

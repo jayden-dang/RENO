@@ -279,6 +279,13 @@ case "$promptline" in
     *) picked=cancelled ;;
   esac
   update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"picked:$picked\"}}"
+  # The refusal's reason, when the client attached one (`_meta.denyMessage`).
+  case "$ans" in
+    *'"denyMessage":"'*)
+      reason=$(printf '%s' "$ans" | sed 's/.*"denyMessage":"\([^"]*\)".*/\1/')
+      update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"reason:$reason\"}}"
+      ;;
+  esac
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 

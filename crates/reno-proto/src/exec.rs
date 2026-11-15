@@ -23,7 +23,9 @@ pub enum AccessMode {
     FullAccess,
 }
 
-/// The sandbox the harness itself enforces around its tools.
+/// The sandbox the harness itself enforces around its tools: a ceiling below the access mode.
+/// A run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that
+/// level; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxLevel {
@@ -31,7 +33,7 @@ pub enum SandboxLevel {
     ReadOnly,
     /// Writes confined to the workspace.
     WorkspaceWrite,
-    /// No sandbox.
+    /// No sandbox ceiling beyond the access mode (and the run's worktree).
     Unrestricted,
 }
 
@@ -385,7 +387,8 @@ pub struct ExecutorCaps {
     pub resume: bool,
     /// Access modes the executor can honour.
     pub access_modes: Vec<AccessMode>,
-    /// Sandbox levels the executor actually enforces.
+    /// Sandbox levels the executor can honour: a run is only started at a level listed here. An
+    /// executor with no sandbox of its own honours only `Unrestricted`.
     pub sandbox_levels: Vec<SandboxLevel>,
     /// False means it cannot join a team or use boards.
     pub mcp_injection: bool,

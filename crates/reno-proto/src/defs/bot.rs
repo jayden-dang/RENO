@@ -32,7 +32,7 @@ pub(super) const MAX_WALL_TIME: Duration = Duration::from_secs(24 * 3600);
 /// """
 /// executors = ["claude-code", "codex"]   # most preferred first
 /// access = "supervised"
-/// sandbox = "workspace_write"
+/// sandbox = "workspace_write"          # optional: only executors that enforce it
 /// team = "core"                          # optional
 /// triggers = ["nightly"]                 # names of triggers/<name>.toml
 ///
@@ -53,7 +53,9 @@ pub struct BotDef {
     /// How much a run may do without asking. Defaults to the strictest, `supervised`.
     #[serde(default = "default_access")]
     pub access: AccessMode,
-    /// The sandbox a run asks its harness for. Defaults to `workspace_write`.
+    /// The sandbox ceiling a run asks its harness to enforce. Defaults to `unrestricted`: no
+    /// ceiling beyond `access`, so every listed executor is eligible. `workspace_write` or
+    /// `read_only` makes only executors that enforce that level eligible.
     #[serde(default = "default_sandbox")]
     pub sandbox: SandboxLevel,
     /// The team the bot belongs to, if any. Teams arrive with T2.4, so only the name's shape is
@@ -73,7 +75,7 @@ fn default_access() -> AccessMode {
 }
 
 fn default_sandbox() -> SandboxLevel {
-    SandboxLevel::WorkspaceWrite
+    SandboxLevel::Unrestricted
 }
 
 /// The limits on one bot's runs (ARCHITECTURE section 8, item 6). Enforcement is T1.7.

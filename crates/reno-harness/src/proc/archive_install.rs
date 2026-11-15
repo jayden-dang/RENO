@@ -39,6 +39,7 @@ const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
 /// an archive release whose integrity is proven after extraction (by a
 /// vendor code signature) rather than by a digest pinned in reno's source.
+#[derive(Debug)]
 pub struct VerifiedRelease<'a> {
     pub name: &'a str,
     pub version: &'a str,
@@ -169,7 +170,9 @@ where
     let root = adapters_root().ok_or_else(|| {
         HarnessError::Install("cannot locate an adapters directory (HOME is unset)".into())
     })?;
-    let final_dir = install_dir(source.name, source.version).expect("root resolved");
+    let final_dir = install_dir(source.name, source.version).ok_or_else(|| {
+        HarnessError::Install("cannot locate an adapters directory (HOME is unset)".into())
+    })?;
     let tmp_dir = root.join(format!(
         ".tmp-{}-{}-{}",
         source.name,

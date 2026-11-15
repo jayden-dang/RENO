@@ -32,7 +32,7 @@
 //! | `edit`, `delete`, `move` | allowed | allowed | asked |
 //! | anything else, or no kind | allowed | asked | asked |
 //!
-//! Looking around is allowed in every mode because the imported driver did so and an agent that
+//! Looking around is allowed in every mode because an agent that
 //! cannot read or search cannot work. "Allowed" is answered with the `allow_once` option and
 //! never with `allow_always`: Reno decides every time.
 //!
@@ -171,6 +171,17 @@ pub(crate) fn cancelled() -> Value {
 
 fn selected(option_id: &str) -> Value {
     json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
+}
+
+/// [`outcome`], with the reason for a refusal. ACP's permission response has no message field,
+/// so the reason rides in the response's `_meta` (the protocol's extension point on every type)
+/// as `denyMessage`; an agent that does not read it ignores it. An allow carries none.
+pub(crate) fn outcome_with_reason(options: &[Value], allow: bool, reason: Option<&str>) -> Value {
+    let mut response = outcome(options, allow);
+    if let Some(reason) = reason.map(str::trim).filter(|r| !allow && !r.is_empty()) {
+        response["_meta"] = json!({ "denyMessage": reason });
+    }
+    response
 }
 
 /// The answer to a tool permission: yes selects `allow_once`, never `allow_always`, which would

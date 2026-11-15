@@ -17,10 +17,10 @@ const VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 const GOOGLE_APPLE_TEAM: &str = "EQHXZ8M8AV";
 
 /// whether this platform can prove a download's origin without a pinned digest.
-pub const SUPPORTED: bool = cfg!(target_os = "macos");
+pub(crate) const SUPPORTED: bool = cfg!(target_os = "macos");
 
 /// verify that every file under `dir` is signed by google.
-pub async fn verify_google_signed(dir: &Path) -> Result<(), HarnessError> {
+pub(crate) async fn verify_google_signed(dir: &Path) -> Result<(), HarnessError> {
     let files = regular_files(dir)?;
     if files.is_empty() {
         return Err(unsigned("the archive contains no files"));

@@ -28,6 +28,11 @@
 //!
 //! Set `RENO_NO_LOGIN_SHELL=1` to disable the snapshot entirely.
 
+#![expect(
+    unsafe_code,
+    reason = "the login-shell probe calls getpwuid, setsid and kill from libc"
+)]
+
 use std::ffi::{OsStr, OsString};
 use std::sync::OnceLock;
 
@@ -107,19 +112,6 @@ fn defaults_for(
         defaults.push(("LC_CTYPE".into(), "en_US.UTF-8".into()));
     }
     defaults
-}
-
-/// Kick off the snapshot on a background thread so the first harness resolve
-/// doesn't pay the shell-startup latency inline. Call at daemon startup.
-pub fn prewarm() {
-    #[cfg(unix)]
-    {
-        let _ = std::thread::Builder::new()
-            .name("reno-shell-env".into())
-            .spawn(|| {
-                let _ = login_shell_path();
-            });
-    }
 }
 
 #[cfg(unix)]

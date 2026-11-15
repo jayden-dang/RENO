@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 
+use reno_harness::RegistryAgent;
 use reno_harness::acp_registry::Record;
 use reno_harness::exec::{Executor, MockExecutor, MockStep};
-use reno_harness::upstream_proto::RegistryAgent;
 use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ActionClass, ExecEvent, ExecutorId, IdError, StopReason, ToolCall};

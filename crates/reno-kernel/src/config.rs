@@ -35,7 +35,8 @@ pub struct KernelConfig {
     /// (ARCH-15: an executor that cannot honour it is refused). A run for a bot asks for its
     /// pinned bot's `access` instead.
     pub access: AccessMode,
-    /// The sandbox a run with no bot asks for. A run for a bot asks for its bot's `sandbox`.
+    /// The sandbox ceiling a run with no bot asks for; `Unrestricted` (the default) adds none
+    /// beyond the access mode. A run for a bot asks for its bot's `sandbox`.
     pub sandbox: SandboxLevel,
     /// How long an approval that asks a human waits before it is denied as expired, when the
     /// policy sets no `approval_ttl` of its own. A deadline, not a poll (ARCH-10).
@@ -58,7 +59,7 @@ impl Default for KernelConfig {
             watch_limit: 500,
             recent_runs: 50,
             access: AccessMode::Supervised,
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: SandboxLevel::Unrestricted,
             approval_ttl: Duration::from_secs(30 * 60),
             trigger_cwd: PathBuf::from("."),
         }

@@ -4,10 +4,8 @@
 //! stderr in debug logs). That text can carry authorization urls (with
 //! `state`, PKCE challenges, codes), device/user codes, and — from a buggy or
 //! verbose CLI — tokens. [`redact_output`] keeps the human part ("Device code
-//! request failed: 503") and replaces the rest. The doc fold runs a
-//! command's output tail through it before the tail enters a chat's doc
-//! (reno-doc `command_output_tail`). (Harness crash diagnostics use the
-//! narrower credential-marker redaction in reno-harness's crate root.)
+//! request failed: 503") and replaces the rest. (Harness crash diagnostics use the narrower
+//! credential-marker redaction in the crate root.)
 
 /// `text` with terminal escapes stripped and every secret-shaped token
 /// replaced:
@@ -20,38 +18,9 @@
 ///   (only its scheme word — `Bearer`, `Digest`, … — stays);
 /// - JWTs (`eyJ…`), vendor-prefixed keys (`sk-…`, `ghp_…`, `gho_…`, `xai-…`,
 ///   …), the value after `Bearer`, and long base64 / hex runs.
-pub fn redact_output(text: &str) -> String {
+pub(crate) fn redact_output(text: &str) -> String {
     redact_with(&strip_ansi(text), Redactor::default())
 }
-
-/// [`redact_output`], hardened for a command's output, which persists in a
-/// chat's doc (synced to the person's other devices and the cloud) where a
-/// sign-in error is only shown:
-/// - private key blocks (`-----BEGIN … PRIVATE KEY-----` … `-----END …`,
-///   PEM and OpenSSH) are dropped whole, an unterminated one to the end;
-/// - an env-style assignment (`AWS_SECRET_ACCESS_KEY=…`, `export PATH=…`:
-///   an uppercase `KEY=`) hides its value, whatever the key;
-/// - keys naming a password, private key or webhook (`DB_PASS`, `pwd`,
-///   `private_key`, `slack_webhook`) are secret labels too;
-/// - (as everywhere) url userinfo and queries, webhook urls' paths
-///   ([`WEBHOOK_HOSTS`]), JWTs, vendor keys and long opaque runs.
-///
-/// A command that prints secrets by nature keeps none of its output: see
-/// [`command_prints_secrets`].
-pub fn redact_command_output(text: &str) -> String {
-    let text = drop_private_keys(&strip_ansi(text));
-    redact_with(
-        &text,
-        Redactor {
-            command: true,
-            ..Redactor::default()
-        },
-    )
-}
-
-/// What a command's output is replaced with when the command prints
-/// secrets by nature ([`command_prints_secrets`]).
-pub const SECRET_OUTPUT_WITHHELD: &str = "(output not kept: may contain secrets)";
 
 fn redact_with(text: &str, mut redactor: Redactor) -> String {
     let mut word = String::new();
@@ -108,9 +77,6 @@ struct Redactor {
     /// The previous whole word, lowercased.
     previous: String,
     state: State,
-    /// A command's output ([`redact_command_output`]): env-style
-    /// assignments and the wider set of secret keys are hidden too.
-    command: bool,
 }
 
 impl Redactor {
@@ -175,19 +141,7 @@ impl Redactor {
     /// A word outside any value.
     fn text(&mut self, part: &str) {
         if let Some(parts) = parse_label(part) {
-            let kind = label_kind(parts.key, &self.previous)
-                .or_else(|| {
-                    (self.command && command_secret_key(parts.key)).then_some(Label::Secret)
-                })
-                .or_else(|| {
-                    // `KEY=value`: an environment variable's value, hidden
-                    // whatever its name (only with `=` attached: `ERROR:`
-                    // is a heading, not a key).
-                    let assigned = parts.rest.is_some_and(|rest| {
-                        part[..part.len() - rest.len()].ends_with('=') && !rest.is_empty()
-                    });
-                    (self.command && assigned && is_env_key(parts.key)).then_some(Label::Secret)
-                });
+            let kind = label_kind(parts.key, &self.previous);
             match (kind, parts.rest) {
                 // `token`, `"password"`: the separator may follow.
                 (Some(label), None) => {
@@ -333,8 +287,7 @@ struct LabelParts<'a> {
 }
 
 fn parse_label(word: &str) -> Option<LabelParts<'_>> {
-    let body = word
-        .trim_start_matches(|c: char| matches!(c, '"' | '\'' | '`' | '{' | '[' | '(' | ',' | '-'));
+    let body = word.trim_start_matches(['"', '\'', '`', '{', '[', '(', ',', '-']);
     let quote = word[..word.len() - body.len()]
         .chars()
         .last()
@@ -393,171 +346,9 @@ fn label_kind(key: &str, previous: &str) -> Option<Label> {
         .then_some(Label::Secret)
 }
 
-/// Keys a command's output hides beyond [`SECRET_KEYS`], matched by a whole
-/// `_`/`-`/`.` separated word of the key (`DB_PASS`, `pwd`, `private_key`;
-/// `passed` and `compass` stay readable) or anywhere for `webhook`.
-fn command_secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key.contains("webhook")
-        || key.contains("passphrase")
-        || key.contains("privatekey")
-        || key
-            .split(['_', '-', '.'])
-            .any(|w| matches!(w, "pass" | "pwd" | "passwd" | "private" | "pat" | "dsn"))
-}
-
-/// An environment variable's name: `AWS_SECRET_ACCESS_KEY`, `PATH`, `HOME`
-/// (uppercase letters, digits and `_`, starting with a letter).
-fn is_env_key(key: &str) -> bool {
-    key.len() >= 2
-        && key.starts_with(|c: char| c.is_ascii_uppercase())
-        && key
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// `text` without its private key blocks: from a `-----BEGIN … PRIVATE
-/// KEY-----` line through its `-----END …` line, one marker line instead.
-/// An unterminated block (the output was cut, or the key printed oddly) is
-/// dropped to the end.
-fn drop_private_keys(text: &str) -> String {
-    if !text.contains("PRIVATE KEY") {
-        return text.to_owned();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut inside = false;
-    for line in text.split_inclusive('\n') {
-        let begin = line.contains("-----BEGIN") && line.contains("PRIVATE KEY");
-        if !inside && begin {
-            inside = true;
-            out.push_str("[private key redacted]");
-            if line.ends_with('\n') {
-                out.push('\n');
-            }
-            // A key on one line (`…KEY----- MII… -----END …KEY-----`).
-            if line.contains("-----END") {
-                inside = false;
-            }
-            continue;
-        }
-        if inside {
-            if line.contains("-----END") && line.contains("PRIVATE KEY") {
-                inside = false;
-            }
-            continue;
-        }
-        out.push_str(line);
-    }
-    out
-}
-
-/// Programs and invocations whose output is a secret by nature: their
-/// output is never kept, not even redacted ([`SECRET_OUTPUT_WITHHELD`]).
-/// `command` is the whole command line as the harness gave it — several
-/// commands (`a | b`, `a && b`, `a; b`) and a shell wrapper (`bash -lc
-/// '…'`, Codex's `/usr/bin/zsh -lc '…'`) are looked through.
-pub fn command_prints_secrets(command: &str) -> bool {
-    // Quotes go: `zsh -lc 'env'` is `env` (a quoted file name reads the
-    // same unquoted).
-    let flat: String = command
-        .chars()
-        .map(|c| {
-            if matches!(c, '\'' | '"' | '`' | '(' | ')' | '{' | '}') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    flat.split(['|', ';', '&', '\n'])
-        .any(|segment| segment_prints_secrets(segment.split_whitespace().collect()))
-}
-
-fn segment_prints_secrets(words: Vec<&str>) -> bool {
-    let mut words = words.as_slice();
-    // What runs another command: `sudo`, `exec`, `time`, `VAR=x`, a shell's
-    // `-c` / `-lc`.
-    loop {
-        let Some((first, rest)) = words.split_first() else {
-            return false;
-        };
-        let name = first.rsplit('/').next().unwrap_or(first);
-        let shell = matches!(name, "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh");
-        if matches!(
-            name,
-            "sudo" | "exec" | "command" | "nohup" | "time" | "doas" | "xargs"
-        ) || (first.contains('=') && is_env_key(first.split('=').next().unwrap_or("")))
-        {
-            words = rest;
-        } else if shell
-            && rest
-                .first()
-                .is_some_and(|f| f.starts_with('-') && f.contains('c'))
-        {
-            words = &rest[1..];
-        } else {
-            break;
-        }
-    }
-    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
-    let args = &words[1..];
-    let has = |w: &str| args.contains(&w);
-    match name {
-        "printenv" => true,
-        // `env` alone (or with options/assignments only) lists the
-        // environment; `env FOO=1 cmd` runs `cmd`.
-        "env" => args.iter().all(|a| a.starts_with('-') || a.contains('=')),
-        "export" | "declare" | "typeset" => args.is_empty() || has("-p") || has("-x"),
-        "set" => args.is_empty(),
-        "cat" | "bat" | "less" | "more" | "head" | "tail" | "strings" | "xxd" | "nl" => {
-            args.iter().any(|a| secret_file(a))
-        }
-        "base64" => has("-d") || has("--decode") || has("-D"),
-        "gpg" | "gpg2" => has("-d") || has("--decrypt"),
-        "security" => args
-            .first()
-            .is_some_and(|a| matches!(*a, "find-generic-password" | "find-internet-password")),
-        "pass" | "gopass" => args.first().is_some_and(|a| matches!(*a, "show" | "cat")),
-        "op" => {
-            args.first()
-                .is_some_and(|a| matches!(*a, "read" | "inject"))
-                || (args.first() == Some(&"item") && args.get(1) == Some(&"get"))
-        }
-        "aws" => {
-            args.first() == Some(&"configure")
-                && args
-                    .get(1)
-                    .is_some_and(|a| matches!(*a, "get" | "export-credentials"))
-        }
-        "gcloud" => args.windows(2).any(|w| {
-            w[0] == "auth" && matches!(w[1], "print-access-token" | "print-identity-token")
-        }),
-        "gh" => args.first() == Some(&"auth") && args.get(1) == Some(&"token"),
-        "az" => args
-            .windows(2)
-            .any(|w| w == ["account", "get-access-token"]),
-        _ => false,
-    }
-}
-
-/// A file whose contents are secrets: `.env*`, `*credentials*`, `*.pem`,
-/// `*.key`, an ssh key (`id_*`), `.netrc`, `.pgpass`.
-fn secret_file(arg: &str) -> bool {
-    if arg.starts_with('-') {
-        return false;
-    }
-    let base = arg.rsplit('/').next().unwrap_or(arg).to_ascii_lowercase();
-    base.starts_with(".env")
-        || base.contains("credentials")
-        || base.ends_with(".pem")
-        || base.ends_with(".key")
-        || base.starts_with("id_")
-        || matches!(base.as_str(), ".netrc" | ".pgpass" | ".npmrc" | ".pypirc")
-}
-
 /// Hosts whose url path IS the credential (a webhook's token rides it):
 /// only the host is kept.
-pub const WEBHOOK_HOSTS: &[&str] = &[
+const WEBHOOK_HOSTS: &[&str] = &[
     "hooks.slack.com",
     "discord.com",
     "discordapp.com",
@@ -809,7 +600,7 @@ fn looks_like_device_code(token: &str) -> bool {
 }
 
 /// Terminal escape sequences (colours, cursor moves, OSC hyperlinks) removed.
-pub fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1015,50 +806,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_output_hides_environment_assignments_and_wider_keys() {
-        let out = redact_command_output(
-            "AWS_SECRET_ACCESS_KEY=abc/def+ghi\nexport GITHUB_TOKEN=gho_x\nRUST_LOG=debug\n\
-             db_pass=hunter2 pwd: s3cret private_key=\"k\" slack_webhook=https://x\n\
-             Tests passed: 5 compass=north ERROR: failed\n",
-        );
-        for secret in [
-            "abc/def",
-            "gho_x",
-            "debug",
-            "hunter2",
-            "s3cret",
-            "\"k\"",
-            "https://x",
-        ] {
-            assert!(!out.contains(secret), "{secret} survived: {out}");
-        }
-        assert!(out.contains("AWS_SECRET_ACCESS_KEY=[redacted]"), "{out}");
-        assert!(out.contains("export GITHUB_TOKEN=[redacted]"), "{out}");
-        // Not secrets: a heading, a count, a word that merely contains `pass`.
-        assert!(
-            out.contains("Tests passed: 5 compass=north ERROR: failed"),
-            "{out}"
-        );
-        // The sign-in redactor is unchanged: env-style keys only in commands.
-        assert_eq!(redact_output("RUST_LOG=debug"), "RUST_LOG=debug");
-    }
-
-    #[test]
-    fn command_output_drops_private_key_blocks() {
-        let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc\n-----END RSA PRIVATE KEY-----\nafter\n";
-        assert_eq!(
-            redact_command_output(pem),
-            "before\n[private key redacted]\nafter\n"
-        );
-        // Cut before its end: dropped through the end.
-        let cut = "x\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE\nmore";
-        assert_eq!(redact_command_output(cut), "x\n[private key redacted]\n");
-        // A public key or certificate stays.
-        let cert = "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----";
-        assert_eq!(redact_command_output(cert), cert);
-    }
-
-    #[test]
     fn webhook_urls_keep_only_their_host() {
         for (url, kept) in [
             (
@@ -1078,70 +825,12 @@ mod tests {
                 "https://acme.webhook.office.com/[redacted]?…",
             ),
         ] {
-            assert_eq!(redact_command_output(url), kept);
             assert_eq!(redact_output(url), kept);
         }
         assert_eq!(
             redact_output("https://github.com/example/repo"),
             "https://github.com/example/repo"
         );
-    }
-
-    #[test]
-    fn command_output_hides_tokens_after_separators() {
-        let out = redact_command_output(
-            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl\n\
-             id=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl\n\
-             sha: 0123456789abcdef0123456789abcdef01234567\n",
-        );
-        assert!(!out.contains("eyJ"), "{out}");
-        assert!(!out.contains("0123456789abcdef0123"), "{out}");
-    }
-
-    #[test]
-    fn commands_that_print_secrets_are_recognised() {
-        for command in [
-            "env",
-            "env | sort",
-            "printenv GITHUB_TOKEN",
-            "sudo env -0",
-            "export -p",
-            "set",
-            "cat .env",
-            "cat ./config/.env.production",
-            "head -n 5 ~/.aws/credentials",
-            "cat server.pem",
-            "cat ~/.ssh/id_ed25519",
-            "echo $X | base64 -d",
-            "base64 --decode secret.b64",
-            "gpg -d vault.gpg",
-            "security find-generic-password -s x -w",
-            "pass show work/github",
-            "op read op://vault/item/field",
-            "aws configure get aws_secret_access_key",
-            "gcloud auth print-access-token",
-            "gh auth token",
-            "cd /w && FOO=1 printenv",
-            "/usr/bin/zsh -lc 'cat .env.local'",
-            "bash -c \"env\"",
-        ] {
-            assert!(command_prints_secrets(command), "{command}");
-        }
-        for command in [
-            "cargo test",
-            "env RUST_LOG=debug cargo test",
-            "/usr/bin/env python3 x.py",
-            "cat README.md",
-            "set -euo pipefail; make",
-            "export PATH=$PATH:/x && make",
-            "base64 image.png",
-            "git log --oneline 2>&1 | head",
-            "pass",
-            "aws s3 ls",
-            "/usr/bin/zsh -lc 'ls -la'",
-        ] {
-            assert!(!command_prints_secrets(command), "{command}");
-        }
     }
 
     #[test]

@@ -15,7 +15,8 @@ use std::time::Duration;
 use reno_harness::ClaudeExecutor;
 use reno_kernel::{ExecutorRegistry, Kernel, KernelConfig, ManualClock};
 use reno_proto::{
-    ActionClass, ApprovalDecision, ExecEvent, ExecutorId, RunId, RunStatus, Seq, StopReason,
+    ActionClass, ApprovalDecision, ExecEvent, ExecutorId, RunId, RunStatus, SandboxLevel, Seq,
+    StopReason,
 };
 use reno_store::Store;
 
@@ -46,7 +47,13 @@ struct Fx {
 }
 
 impl Fx {
+    /// A kernel whose runs ask for no sandbox: Claude and the ACP agents have none of their
+    /// own, so `Unrestricted` is the only level they honour.
     async fn new() -> Self {
+        Self::with_sandbox(SandboxLevel::Unrestricted).await
+    }
+
+    async fn with_sandbox(sandbox: SandboxLevel) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("reno.db")).unwrap();
         let registry = ExecutorRegistry::new().with(Arc::new(
@@ -54,7 +61,10 @@ impl Fx {
         ));
         // The default access mode is Supervised: the strictest.
         let kernel = Kernel::start(
-            KernelConfig::default(),
+            KernelConfig {
+                sandbox,
+                ..KernelConfig::default()
+            },
             store.clone(),
             registry,
             // A fixed clock: the test reads no wall time (ARCH-16).
@@ -217,5 +227,35 @@ async fn the_child_process_record_is_persisted_on_the_run() {
             .any(|e| e.kind == "run.process_recorded" && e.data["pid"] == u64::from(pid)),
         "{events:?}"
     );
+    fx.kernel.shutdown().await;
+}
+
+/// ARCH-15: Claude declares no sandbox of its own, so a run that asks for `WorkspaceWrite` (the
+/// kernel's default) is refused before the CLI is spawned, with the reason journaled.
+#[tokio::test]
+async fn a_run_asking_for_a_sandbox_claude_does_not_declare_is_refused_before_it_spawns() {
+    let fx = Fx::with_sandbox(SandboxLevel::WorkspaceWrite).await;
+    let run = fx.submit("scenario:one-approval").await;
+    fx.status(&run, RunStatus::Failed).await;
+    let journal = fx.journal(&run).await;
+    match journal.last() {
+        Some(ExecEvent::Done {
+            stop: StopReason::Error,
+            diagnostic: Some(why),
+            ..
+        }) => assert!(
+            why.contains("NoEligibleExecutor") && why.contains("WorkspaceWrite"),
+            "{why}"
+        ),
+        other => panic!("{other:?} in {journal:?}"),
+    }
+    assert!(
+        !journal
+            .iter()
+            .any(|e| matches!(e, ExecEvent::Started { .. } | ExecEvent::Text { .. })),
+        "{journal:?}"
+    );
+    let row = fx.store.get_run(&run).await.unwrap().unwrap();
+    assert_eq!(row.pid, None, "nothing was spawned");
     fx.kernel.shutdown().await;
 }

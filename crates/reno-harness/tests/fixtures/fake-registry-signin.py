@@ -37,6 +37,13 @@ import time
 mode = os.environ.get("FAKE_SIGNIN", "droid")
 code = None
 state = os.environ.get("FAKE_STATE", "")
+if state:
+    # So a test can tell whether this process outlived its owner.
+    with open(os.path.join(state, "pid"), "w") as pid_file:
+        pid_file.write(str(os.getpid()))
+if mode == "droid-hang":
+    # The droid shape, in a record of its own for the test that abandons its sign-in.
+    mode = "droid"
 signed_out_file = os.path.join(state, "signed-out") if state else None
 signed_in = mode == "signed-in-email" or (
     mode == "droid-signed-in" and not (signed_out_file and os.path.exists(signed_out_file)))

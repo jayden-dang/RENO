@@ -4,6 +4,8 @@
 //! and warms the process-global login-shell snapshot cache, so it needs its
 //! own test binary with no parallel siblings.
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

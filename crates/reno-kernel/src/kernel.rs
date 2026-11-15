@@ -551,7 +551,8 @@ pub(crate) fn bot_launch(
         .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
     let eligible = |id: &&ExecutorId| {
         shared.executors.get(id).is_some_and(|executor| {
-            dispatcher::no_eligible_executor(&executor.descriptor(), def.access).is_none()
+            dispatcher::no_eligible_executor(&executor.descriptor(), def.access, def.sandbox)
+                .is_none()
         })
     };
     let executor = match executor {

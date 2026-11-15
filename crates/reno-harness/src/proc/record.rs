@@ -10,6 +10,10 @@
 //! calls here are `getpgid`, `getpgrp` and `kill`, each wrapped once below with its safety
 //! argument.
 
+#![expect(
+    unsafe_code,
+    reason = "liveness checks and group kills for orphan sweeping need libc"
+)]
 #![deny(missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;

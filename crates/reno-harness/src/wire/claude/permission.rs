@@ -41,6 +41,16 @@ pub(crate) const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 /// What a refused approval tells the agent.
 pub(crate) const DENIED: &str = "The user did not allow this.";
 
+/// What a refusal tells the agent: the deciding rule's own message when there is one, so the
+/// model can act on it (take another route, or stop) instead of retrying the call, else the
+/// generic [`DENIED`]. An empty message is no message.
+pub(crate) fn refusal_text(message: Option<&str>) -> String {
+    match message.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(message) => message.to_owned(),
+        None => DENIED.to_owned(),
+    }
+}
+
 /// What a declined `AskUserQuestion` tells the agent.
 pub(crate) const QUESTIONS_DISMISSED: &str = "The user dismissed the questions without answering.";
 
@@ -380,6 +390,12 @@ mod tests {
         let plan = allow(json!({"plan": "p"}), Some("acceptEdits"));
         assert_eq!(plan["updatedPermissions"][0]["mode"], "acceptEdits");
         assert_eq!(deny("nope"), json!({"behavior": "deny", "message": "nope"}));
+        assert_eq!(refusal_text(None), DENIED);
+        assert_eq!(refusal_text(Some("  ")), DENIED);
+        assert_eq!(
+            refusal_text(Some(" denied by policy: no pushes ")),
+            "denied by policy: no pushes"
+        );
         assert_eq!(DENIED, "The user did not allow this.");
         assert!(QUESTIONS_DISMISSED.contains("dismissed"));
     }

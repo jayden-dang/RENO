@@ -218,6 +218,7 @@ mod layout_tests {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, reason = "test helpers unwrap freely")]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

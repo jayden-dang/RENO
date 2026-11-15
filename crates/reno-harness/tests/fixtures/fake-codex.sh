@@ -391,7 +391,7 @@ case "$turnline" in
   ;;
 
 *scenario:file-change-inline*)
-  # An older app-server (and the imported fixtures) put the changes in the request itself.
+  # An older app-server put the changes in the request itself.
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"id":111,"method":"item/fileChange/requestApproval","params":{"itemId":"f9","changes":[{"path":"/tmp/a.rs","kind":"update"},{"path":"/tmp/b.rs","kind":"add"}]}}'

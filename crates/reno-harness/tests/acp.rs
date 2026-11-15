@@ -1,11 +1,11 @@
 //! `AcpExecutor` integration tests against the fake ACP agents in `tests/fixtures` (no real
 //! `grok`, `devin`, `hermes` or Antigravity binary is involved, ARCH-16).
 //!
-//! Ported from the imported driver's tests onto the native contract: the same scenarios, now read
+//! Scenarios on the native contract, read
 //! as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide` and
 //! questions as `NeedsInput`. What the contract has no place for (model and command discovery,
 //! sign-in outside a run, turn stop, live reconfiguration, subagent chips, an idle steer between
-//! turns) lost its tests with its code. One run is one `Done`.
+//! turns) is not covered here. One run is one `Done`.
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use reno_harness::RegistryAgent;
 use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
-use reno_harness::upstream_proto::RegistryAgent;
 use reno_harness::{AcpExecutor, ProcessRecord};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId,
@@ -139,6 +139,22 @@ async fn drive_with(
     mut decide: impl FnMut(&ApprovalSubject) -> Decision,
     answer: Answerer,
 ) -> Outcome {
+    drive_deciding(live, |subject| (decide(subject), None), answer).await
+}
+
+/// [`drive`], with the message each decision comes with (a policy rule's deny message).
+async fn drive_with_messages(
+    live: &mut Live,
+    decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+) -> Outcome {
+    drive_deciding(live, decide, first_option).await
+}
+
+async fn drive_deciding(
+    live: &mut Live,
+    mut decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+    answer: Answerer,
+) -> Outcome {
     let mut outcome = Outcome::default();
     let run = async {
         while let Some(event) = live.stream.next().await {
@@ -148,8 +164,9 @@ async fn drive_with(
                     subject,
                 } => {
                     outcome.approvals.push(subject.clone());
+                    let (decision, message) = decide(subject);
                     live.handle
-                        .decide(request_id.clone(), decide(subject))
+                        .decide_with_message(request_id.clone(), decision, message)
                         .await
                         .unwrap();
                 }
@@ -520,6 +537,32 @@ async fn a_decision_selects_allow_once_or_reject_once_and_never_the_lasting_opti
         permission_of("execute", AccessMode::Supervised, Decision::Deny).await;
     assert_eq!(approvals.len(), 1);
     assert_eq!(denied, "no");
+}
+
+/// A refusal's reason rides in the response's `_meta.denyMessage` (ACP's permission response has
+/// no message field); an allow, a refusal without a reason and a blank one carry nothing.
+#[tokio::test]
+async fn a_policy_deny_message_rides_in_the_response_meta() {
+    async fn reason_for(decision: Decision, message: Option<&str>) -> Option<String> {
+        let mut live = start(
+            &registry(),
+            spec_with("scenario:permission execute", AccessMode::Supervised),
+        )
+        .await;
+        let outcome =
+            drive_with_messages(&mut live, |_| (decision, message.map(str::to_owned))).await;
+        assert_eq!(dones(&outcome.events), 1, "{:?}", outcome.events);
+        texts(&outcome.events)
+            .iter()
+            .find_map(|t| t.strip_prefix("reason:").map(str::to_owned))
+    }
+    assert_eq!(
+        reason_for(Decision::Deny, Some("denied by policy: no rm -rf")).await,
+        Some("denied by policy: no rm -rf".into())
+    );
+    assert_eq!(reason_for(Decision::Deny, None).await, None);
+    assert_eq!(reason_for(Decision::Deny, Some("  ")).await, None);
+    assert_eq!(reason_for(Decision::Allow, Some("ignored")).await, None);
 }
 
 /// Reading, searching and thinking are allowed in every mode (the access table on the type), and
@@ -1187,7 +1230,7 @@ async fn a_missing_working_directory_is_a_failed_run_not_a_missing_binary() {
 }
 
 /// ARCH-15: an access mode the agent does not honor is refused before anything is resolved or
-/// spawned: not the imported driver's silent upgrade to full access, and not `NotInstalled` for
+/// spawned: not a silent upgrade to full access, and not `NotInstalled` for
 /// a binary that is missing too.
 #[tokio::test]
 async fn an_unsupported_access_mode_fails_before_anything_is_spawned() {
@@ -1849,10 +1892,14 @@ fn every_agent_declares_its_own_id_and_what_it_honors() {
         assert!(caps.mcp_injection, "{id}");
         assert!(caps.deterministic_turn_end, "{id}");
         // What a caller cannot request is not declared (ARCH-15): no schema, no plan mode,
-        // and no sandbox Reno could set on an agent's own.
+        // and no sandbox Reno could set on an agent's own: only "no sandbox" is honoured.
         assert!(!caps.structured_output, "{id}");
         assert!(!caps.plan_mode, "{id}");
-        assert!(caps.sandbox_levels.is_empty(), "{id}");
+        assert_eq!(
+            caps.sandbox_levels,
+            vec![SandboxLevel::Unrestricted],
+            "{id}"
+        );
     }
 }
 

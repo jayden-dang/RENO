@@ -19,6 +19,11 @@
 //! - `crate::shutdown_child` and `crate::shutdown_agent`, which Codex and ACP call on the
 //!   underlying child: `process::signal_target` names the group for a group leader, so the same
 //!   TERM, grace, KILL, reap sequence reaches the whole tree.
+
+#![expect(
+    unsafe_code,
+    reason = "reaping and signalling an owned process group needs libc"
+)]
 use std::ops::{Deref, DerefMut};
 
 use crate::process::{Child as ProcessChild, Command};
@@ -79,7 +84,10 @@ impl Child {
     pub(crate) fn new(inner: ProcessChild) -> Self {
         Self {
             #[cfg(unix)]
-            group: Some(-(inner.id().expect("newly spawned child") as i32)),
+            group: inner
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .map(|id| -id),
             inner,
         }
     }
@@ -180,6 +188,7 @@ impl Drop for Child {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, reason = "test helpers unwrap freely")]
 mod tests {
     use super::*;
     use crate::process::Stdio;

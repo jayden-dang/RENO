@@ -4890,12 +4890,10 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bzip2",
- "chrono",
  "filetime",
  "flate2",
  "futures",
  "libc",
- "pulldown-cmark",
  "reno-proto",
  "reqwest",
  "semver",

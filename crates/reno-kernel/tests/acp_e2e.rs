@@ -17,7 +17,8 @@ use std::time::Duration;
 use reno_harness::AcpExecutor;
 use reno_kernel::{ExecutorRegistry, Kernel, KernelConfig, ManualClock};
 use reno_proto::{
-    ActionClass, ApprovalDecision, ExecEvent, ExecutorId, RunId, RunStatus, Seq, StopReason,
+    ActionClass, ApprovalDecision, ExecEvent, ExecutorId, RunId, RunStatus, SandboxLevel, Seq,
+    StopReason,
 };
 use reno_store::Store;
 
@@ -48,7 +49,13 @@ struct Fx {
 }
 
 impl Fx {
+    /// A kernel whose runs ask for no sandbox: Claude and the ACP agents have none of their
+    /// own, so `Unrestricted` is the only level they honour.
     async fn new() -> Self {
+        Self::with_sandbox(SandboxLevel::Unrestricted).await
+    }
+
+    async fn with_sandbox(sandbox: SandboxLevel) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("reno.db")).unwrap();
         let registry = ExecutorRegistry::new()
@@ -62,7 +69,10 @@ impl Fx {
             ));
         // The default access mode is Supervised: the strictest.
         let kernel = Kernel::start(
-            KernelConfig::default(),
+            KernelConfig {
+                sandbox,
+                ..KernelConfig::default()
+            },
             store.clone(),
             registry,
             // A fixed clock: the test reads no wall time (ARCH-16).

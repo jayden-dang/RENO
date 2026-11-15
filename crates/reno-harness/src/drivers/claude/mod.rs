@@ -1,7 +1,6 @@
 //! The native Claude Code executor: spawns the installed `claude` CLI and speaks its
 //! stream-json protocol directly, with no adapter process in between, and implements
-//! [`Executor`] without going through the imported `Harness` trait (stage B, ARCHITECTURE
-//! sections 2.1 and 5.1).
+//! [`Executor`].
 //!
 //! - stdout JSONL frames are normalized into [`ExecEvent`]s by `wire::claude` (init dedupe,
 //!   subagent exclusion, error-code mapping). This module only does the I/O.
@@ -48,7 +47,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    McpServerSpec, ModelInfo, Steering, StopReason, VersionRange,
+    McpServerSpec, SandboxLevel, Steering, StopReason, VersionRange,
 };
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -66,9 +65,7 @@ use crate::{Signal, send_signal};
 use resume::Transcript;
 use wire::{ControlRequestFrame, Frame, control_error_line, control_response_line};
 
-/// The oldest Claude Code CLI this driver claims to work with. The imported code pins no
-/// minimum of its own (its only version table is the curated models', whose oldest row is
-/// 2.1.111); this is the oldest version its protocol code was live-validated against: the stdio
+/// The oldest Claude Code CLI this driver claims to work with: this is the oldest version its protocol code was live-validated against: the stdio
 /// permission channel and the stream-json frames, 2.1.228, where the `live-2.1.228-*.jsonl`
 /// fixtures were captured.
 pub const MIN_CLI_VERSION: &str = "2.1.228";
@@ -185,8 +182,7 @@ fn too_old_message(version: Option<&str>) -> Option<String> {
 ///
 /// `FullAccess` deliberately does not launch with `bypassPermissions` or a skip-permissions
 /// flag: the CLI refuses those as root outside a sandbox, so the run stays in `default` and this
-/// driver allows each request instead (the imported driver did the same for every run the
-/// imported host did not mark `auto_approve`). `ExitPlanMode` is a request like any other:
+/// driver allows each request instead. `ExitPlanMode` is a request like any other:
 /// asked in `AutoAcceptEdits` and `Supervised`, and approving it continues in the permission
 /// mode of the table. A request that arrives after the run was cancelled is denied at once.
 /// No mode is ever widened mid-run.
@@ -420,13 +416,7 @@ impl Executor for ClaudeExecutor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let models = catalog::supported_models(cli.as_deref())
-            .into_iter()
-            .map(|model| ModelInfo {
-                id: model.id,
-                display_name: Some(model.label),
-            })
-            .collect();
+        let models = catalog::supported_models(cli.as_deref());
         ExecutorDescriptor {
             id: ID.clone(),
             contract_version: CONTRACT_VERSION,
@@ -449,9 +439,11 @@ impl Executor for ClaudeExecutor {
                 steering: Steering::StepBoundary,
                 resume: true,
                 access_modes: self.access_modes.clone(),
-                // The CLI has no sandbox Reno can set; its permission system is what the
-                // access mode drives.
-                sandbox_levels: Vec::new(),
+                // The CLI has no sandbox Reno can set; its permission system is what the access
+                // mode drives. A run is therefore honoured only at `Unrestricted` (no sandbox,
+                // as asked); `ReadOnly` and `WorkspaceWrite` would be run with more latitude
+                // than requested, so they are not declared (ARCH-15).
+                sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the CLI's own terminal `result` frame.
@@ -843,7 +835,7 @@ fn apply_answer(
     let request_id = answer.request_id.clone();
     let after_plan = permission::permission_mode(access);
     match requests.resolve(answer) {
-        Resolved::Decision(open, crate::exec::Decision::Allow) => {
+        Resolved::Decision(open, crate::exec::Decision::Allow, _) => {
             let leave_plan = open.exit_plan.then_some(after_plan);
             respond(
                 stdin,
@@ -851,8 +843,11 @@ fn apply_answer(
                 permission::allow(open.input, leave_plan),
             );
         }
-        Resolved::Decision(_, crate::exec::Decision::Deny) => {
-            respond(stdin, &request_id, permission::deny(permission::DENIED));
+        Resolved::Decision(_, crate::exec::Decision::Deny, message) => {
+            // The model reads the permission response's message: a policy rule's own words
+            // reach it, so it does not retry a call policy will refuse again.
+            let message = permission::refusal_text(message.as_deref());
+            respond(stdin, &request_id, permission::deny(&message));
         }
         Resolved::Input(open, given) => {
             // No answers is the person closing the questions: a deny that says so, rather than
@@ -1359,7 +1354,7 @@ impl Commands {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reno_proto::{Effort, RunId, SandboxLevel};
+    use reno_proto::{Effort, RunId};
     use serde_json::json;
 
     fn spec(access: AccessMode) -> ExecSpec {

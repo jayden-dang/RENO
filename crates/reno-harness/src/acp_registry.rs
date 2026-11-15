@@ -2,7 +2,7 @@
 //! every agent that speaks the Agent Client Protocol): reading its index,
 //! choosing the build for this device, installing it, and how an added
 //! agent launches. Every registry agent goes through this one path and the
-//! generic ACP harness ([`crate::AcpHarness::registry`]); nothing here is
+//! generic ACP harness ([`crate::AcpExecutor::registry`]); nothing here is
 //! about any one agent.
 //!
 //! The index (`registry.json`) lists each agent with its distributions:
@@ -27,7 +27,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::upstream_proto::RegistryAgent;
+use crate::agent_id::RegistryAgent;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -182,15 +182,6 @@ pub fn safe_url(url: &str) -> bool {
     })
 }
 
-/// The index to read: `$RENO_ACP_REGISTRY_URL` (a test registry), else the
-/// published one.
-pub fn index_url() -> String {
-    std::env::var("RENO_ACP_REGISTRY_URL")
-        .ok()
-        .filter(|u| safe_url(u))
-        .unwrap_or_else(|| INDEX_URL.to_owned())
-}
-
 fn env_ok(env: &BTreeMap<String, String>) -> bool {
     env.len() <= 32
         && env.iter().all(|(k, v)| {
@@ -326,10 +317,10 @@ pub fn choose(entry: &Entry) -> Option<Choice<'_>> {
 
 fn choose_for<'a>(entry: &'a Entry, platform: Option<&str>) -> Option<Choice<'a>> {
     let d = &entry.distribution;
-    if let Some(platform) = platform {
-        if let Some(t) = d.binary.get(platform) {
-            return Some(Choice::Binary(t));
-        }
+    if let Some(platform) = platform
+        && let Some(t) = d.binary.get(platform)
+    {
+        return Some(Choice::Binary(t));
     }
     d.npx
         .as_ref()
@@ -465,11 +456,12 @@ pub fn installed(agent: RegistryAgent) -> bool {
     record(agent).is_some_and(|r| r.program.is_file())
 }
 
+/// What [`launch`] returns: the program, its arguments and its environment.
+pub type Launch = (PathBuf, Vec<String>, Vec<(String, String)>);
+
 /// How the agent launches: the program, its arguments (an npm bin runs
 /// under Node.js) and the environment the registry gives it.
-pub fn launch(
-    agent: RegistryAgent,
-) -> Result<(PathBuf, Vec<String>, Vec<(String, String)>), HarnessError> {
+pub fn launch(agent: RegistryAgent) -> Result<Launch, HarnessError> {
     let record = record(agent).ok_or_else(|| {
         HarnessError::NotInstalled(format!(
             "{} isn't added on this device",
@@ -604,7 +596,7 @@ pub fn own_id(name: &str) -> Option<String> {
     let slug = slug.trim_end_matches('-');
     let slug: String = slug.chars().take(48).collect();
     let id = format!("{OWN_PREFIX}{}", slug.trim_end_matches('-'));
-    (slug.len() > 0 && RegistryAgent::new(&id).is_some()).then_some(id)
+    (!slug.is_empty() && RegistryAgent::new(&id).is_some()).then_some(id)
 }
 
 /// A command as a shell splits it: words, `'…'` and `"…"` kept whole, `\`
@@ -654,68 +646,6 @@ pub fn split_command(command: &str) -> Result<Vec<String>, String> {
         return Err("no command".into());
     }
     Ok(words)
-}
-
-/// Adds an agent of your own: `name`, the `command` that runs it speaking
-/// ACP on stdio (its program, a path or a name on the device's PATH, then
-/// its arguments), and its environment. Launched as every registry agent
-/// is, through the generic harness.
-pub fn add_own(name: &str, command: &str, env: &str) -> Result<Record, HarnessError> {
-    let name = name.trim();
-    if !short(name, 80) {
-        return Err(HarnessError::Install("a name is needed".into()));
-    }
-    let id = own_id(name)
-        .ok_or_else(|| HarnessError::Install("the name needs a letter or digit".into()))?;
-    let agent = RegistryAgent::new(&id).expect("an own id is a registry id");
-    if record(agent).is_some() {
-        return Err(HarnessError::Install(format!(
-            "there's already an agent called {name}"
-        )));
-    }
-    let env_map = parse_env(env).map_err(HarnessError::Install)?;
-    let mut words = split_command(command).map_err(HarnessError::Install)?;
-    let first = words.remove(0);
-    let expanded = match first.strip_prefix("~/") {
-        Some(rest) => crate::executable::home_dir()
-            .map(|h| h.join(rest))
-            .unwrap_or_else(|| PathBuf::from(&first)),
-        None => PathBuf::from(&first),
-    };
-    let program = if expanded.components().count() > 1 || expanded.is_absolute() {
-        expanded
-    } else {
-        crate::executable::find_on_paths(&first, Vec::new()).ok_or_else(|| {
-            HarnessError::NotInstalled(format!("{first} isn't on this device's PATH"))
-        })?
-    };
-    if !program.is_file() {
-        return Err(HarnessError::NotInstalled(format!(
-            "{} isn't on this device",
-            program.display()
-        )));
-    }
-    let dir = agent_dir(agent)
-        .ok_or_else(|| HarnessError::Install("no data directory for agents".into()))?;
-    std::fs::create_dir_all(&dir)?;
-    let record = Record {
-        id: id.clone(),
-        name: name.to_owned(),
-        version: String::new(),
-        kind: Kind::Own,
-        description: String::new(),
-        authors: Vec::new(),
-        program,
-        args: words,
-        env: BTreeMap::new(),
-        icon_svg: None,
-        verified: false,
-    };
-    write_record(&dir, &record)?;
-    if !env_map.is_empty() {
-        set_user_env(agent, env)?;
-    }
-    Ok(record)
 }
 
 /// Removes the agent from this device: its record and every install.

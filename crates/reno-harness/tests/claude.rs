@@ -2,10 +2,9 @@
 //! (no real `claude` binary involved). Live tests against the real CLI are at the bottom,
 //! `#[ignore]`d.
 //!
-//! Ported from the imported driver's tests onto the native contract: the same scenarios, now
-//! read as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide`.
+//! Scenarios on the native contract, read as `ExecEvent`s, with approvals as `NeedsApproval` answered through `ExecHandle::decide`.
 //! What the contract has no place for (title runs, command discovery, turn stop, background
-//! listings, live reconfiguration, subagent chips) lost its tests with its code.
+//! listings, live reconfiguration, subagent chips) is not covered here.
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
@@ -101,6 +100,14 @@ struct Outcome {
 /// Drive `live` to its end. Approvals go to `decide`; the first option of every question (or
 /// `"A"` for free text) answers `NeedsInput`.
 async fn drive(live: &mut Live, mut decide: impl FnMut(&ApprovalSubject) -> Decision) -> Outcome {
+    drive_with_messages(live, |subject| (decide(subject), None)).await
+}
+
+/// [`drive`], with the message each decision comes with (a policy rule's deny message).
+async fn drive_with_messages(
+    live: &mut Live,
+    mut decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+) -> Outcome {
     let mut outcome = Outcome::default();
     let run = async {
         while let Some(event) = live.stream.next().await {
@@ -110,8 +117,9 @@ async fn drive(live: &mut Live, mut decide: impl FnMut(&ApprovalSubject) -> Deci
                     subject,
                 } => {
                     outcome.approvals.push(subject.clone());
+                    let (decision, message) = decide(subject);
                     live.handle
-                        .decide(request_id.clone(), decide(subject))
+                        .decide_with_message(request_id.clone(), decision, message)
                         .await
                         .unwrap();
                 }
@@ -589,6 +597,32 @@ async fn a_deny_decision_round_trips_a_deny_control_response_with_a_message() {
     assert_eq!(
         result_of(&outcome.events),
         "bash=allow edit=deny:The user did not allow this. mcp=allow net=allow read=allow other=allow"
+    );
+}
+
+/// A policy rule's deny message is what the model reads in the deny response, in place of the
+/// generic refusal; an allow ignores any message, and an empty one is no message.
+#[tokio::test]
+async fn a_policy_deny_message_reaches_the_model_in_the_deny_response() {
+    let mut live = start(
+        &executor(),
+        spec_with("scenario:approval-subjects", AccessMode::Supervised),
+    )
+    .await;
+    let outcome = drive_with_messages(&mut live, |subject| match subject.action {
+        ActionClass::Edit => (
+            Decision::Deny,
+            Some("denied by policy: no edits in vendor/".into()),
+        ),
+        ActionClass::Command => (Decision::Deny, Some("  ".into())),
+        _ => (Decision::Allow, Some("ignored on an allow".into())),
+    })
+    .await;
+    assert_eq!(
+        result_of(&outcome.events),
+        "bash=deny:The user did not allow this. \
+         edit=deny:denied by policy: no edits in vendor/ \
+         mcp=allow net=allow read=allow other=allow"
     );
 }
 
@@ -1271,8 +1305,8 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
             AccessMode::FullAccess
         ]
     );
-    // The CLI has no sandbox of its own that Reno can set.
-    assert!(caps.sandbox_levels.is_empty());
+    // The CLI has no sandbox of its own that Reno can set: only "no sandbox" is honoured.
+    assert_eq!(caps.sandbox_levels, vec![SandboxLevel::Unrestricted]);
     assert!(caps.mcp_injection);
     assert!(!caps.structured_output);
     assert!(caps.deterministic_turn_end);

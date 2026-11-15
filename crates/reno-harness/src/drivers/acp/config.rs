@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 
 use super::session::control_request;
 use crate::HarnessError;
+use crate::agent_id::HarnessId;
 use crate::jsonrpc::{Incoming, RpcClient};
-use crate::upstream_proto::HarnessId;
 
 /// How a session selects a run's model, effort and session mode.
 #[derive(Clone, Copy)]

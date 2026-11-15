@@ -6,14 +6,16 @@
 //! its models from its own handshake, and is removed again. A build whose
 //! download doesn't match its checksum never lands.
 
+// Tests unwrap freely and set environment variables.
+#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 #![cfg(unix)]
 
 use std::io::Write;
 use std::path::PathBuf;
 
 use futures::StreamExt;
+use reno_harness::RegistryAgent;
 use reno_harness::exec::{ExecControls, Executor};
-use reno_harness::upstream_proto::RegistryAgent;
 use reno_harness::{AcpExecutor, acp_registry as reg};
 use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel, StopReason};
 use sha2::{Digest, Sha256};
