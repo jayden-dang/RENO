@@ -146,7 +146,8 @@ daemon_test! {
         assert_eq!((status.active_runs, status.queued_runs), (1, 0));
 
         let cancelled = within(fx.client.cancel_run(&held, Some("test".into()))).await.unwrap();
-        assert_eq!(cancelled, RunStatus::Running);
+        // The reply carries the status at answer time; a fast executor may already have stopped.
+        assert!(matches!(cancelled, RunStatus::Running | RunStatus::Interrupted), "{cancelled:?}");
         while let Some(item) = within(events.next()).await {
             seen.push(item.unwrap().event);
         }
