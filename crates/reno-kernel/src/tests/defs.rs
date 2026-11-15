@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 /// A port whose files and failures the test sets, and whose change signal it fires.
 #[derive(Debug, Default)]
-struct FakePort {
+pub(super) struct FakePort {
     state: Mutex<Option<DefSnapshot>>,
     tx: Mutex<Option<mpsc::Sender<()>>>,
     snapshots: AtomicUsize,
@@ -24,13 +24,13 @@ struct FakePort {
 }
 
 impl FakePort {
-    fn with(files: Vec<DefFile>) -> Arc<Self> {
+    pub(super) fn with(files: Vec<DefFile>) -> Arc<Self> {
         let port = Self::default();
         port.set(files);
         Arc::new(port)
     }
 
-    fn set(&self, files: Vec<DefFile>) {
+    pub(super) fn set(&self, files: Vec<DefFile>) {
         *self.state.lock().unwrap() = Some(DefSnapshot {
             files,
             problems: Vec::new(),
@@ -64,7 +64,7 @@ impl FakePort {
     }
 
     /// Fires the signal and waits until the kernel has read the files for it.
-    async fn touch_and_wait(&self) {
+    pub(super) async fn touch_and_wait(&self) {
         let before = self.reads();
         self.touch();
         until(async || (self.reads() > before).then_some(())).await;
@@ -99,7 +99,7 @@ impl Definitions for FakePort {
     }
 }
 
-fn file(kind: DefKind, name: &str, text: &str) -> DefFile {
+pub(super) fn file(kind: DefKind, name: &str, text: &str) -> DefFile {
     DefFile {
         kind,
         name: name.to_owned(),
@@ -117,7 +117,7 @@ fn bot(name: &str, instructions: &str) -> DefFile {
     )
 }
 
-fn setup(port: &Arc<FakePort>) -> DefsSetup {
+pub(super) fn setup(port: &Arc<FakePort>) -> DefsSetup {
     DefsSetup {
         port: port.clone(),
         context: ValidationContext::with_builtin([]),

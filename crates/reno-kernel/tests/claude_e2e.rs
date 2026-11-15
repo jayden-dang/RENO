@@ -153,7 +153,7 @@ async fn a_supervised_run_asks_the_kernel_decides_approve_and_the_run_succeeds()
         ),
         "{journal:?}"
     );
-    assert!(fx.kernel.pending_approvals().is_empty());
+    assert!(fx.kernel.pending_approvals().await.unwrap().is_empty());
     fx.kernel.shutdown().await;
 }
 

@@ -19,11 +19,26 @@
 //! - `events`: `run_events`, journal replay joined to the live tail.
 //! - `recovery`: what start-up repairs.
 //! - `lifecycle`: how a `Done` becomes state.
-//! - `approvals`, `procs`, `db`, `shared`, `ids`, `config`, `error`: support.
+//! - `approvals`: the pending list that `approval.list` and `approvals.watch` show, read from the
+//!   store. What a supervisor does with a request is in `supervisor/approval.rs`.
+//! - `procs`, `db`, `shared`, `ids`, `config`, `error`: support.
 //!
-//! # Phase 0 limits
+//! # Approvals and launch settings (T1.6)
 //!
-//! - Approvals are in memory; recovery interrupts runs that were waiting on one.
+//! - A `NeedsApproval` is judged by the policy in force (`reno_proto::defs::evaluate`): a rule
+//!   answers at once, a repeated denial is refused unasked, anything else is stored as a pending
+//!   approval with a deadline and held for a human. Every outcome is a durable record and an
+//!   `ExecEvent::ApprovalResolved` in the journal. See `supervisor/approval.rs`.
+//! - Recovery and shutdown expire the pending approvals no supervisor is left to answer.
+//! - A run for a bot launches with its pinned bot version's `access` and `sandbox`; an executor
+//!   that does not declare that access mode is not eligible, and the run fails with
+//!   `NoEligibleExecutor`. See `dispatcher.rs`.
+//!
+//! # Limits
+//!
+//! - A rule's deny message is stored in the journal's `ApprovalResolved`, but the harness is told
+//!   only no: the executor's `Decision` carries no text.
+//! - A supervisor that panics leaves its run's approvals pending until the next start's recovery.
 //! - A run in `waiting_input` has no client path to an answer.
 //! - A run holds one process record; a second report replaces the first.
 //! - `RunSummary::stop_reason` is derived from the status (the store keeps no stop reason).

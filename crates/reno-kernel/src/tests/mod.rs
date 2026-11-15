@@ -13,6 +13,7 @@
 //! test therefore runs a spinner task that keeps the runtime busy: time moves only when the test
 //! says so, in `until` (1 ms per probe) or `tokio::time::advance`.
 
+mod approvals;
 mod defs;
 mod queue;
 mod recovery;
