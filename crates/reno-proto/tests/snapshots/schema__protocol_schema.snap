@@ -6,7 +6,8 @@ expression: protocol_schema()
   "features": [
     "run.events.resume",
     "runs.watch",
-    "sub.gap"
+    "sub.gap",
+    "approvals"
   ],
   "methods": [
     {
@@ -784,6 +785,195 @@ expression: protocol_schema()
         "title": "RunCancelResult",
         "type": "object"
       }
+    },
+    {
+      "name": "approval.list",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Empty params: serialises as `{}`.",
+        "title": "NoParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "An action a harness is held on, waiting for a human decision.",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/ApprovalId",
+                "description": "The approval, as `approval.decide` refers to it."
+              },
+              "requestedAtMs": {
+                "description": "When the action was held, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run that is held."
+              },
+              "subject": {
+                "$ref": "#/$defs/ApprovalSubject",
+                "description": "Exactly what is being approved."
+              }
+            },
+            "required": [
+              "id",
+              "runId",
+              "subject",
+              "requestedAtMs"
+            ],
+            "type": "object"
+          },
+          "ApprovalId": {
+            "pattern": "^appr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ApprovalSubject": {
+            "description": "The exact thing a human is asked to approve.",
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ActionClass",
+                "description": "Class of the action."
+              },
+              "command": {
+                "description": "The command line, for command actions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paths": {
+                "default": [],
+                "description": "Paths the action touches.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "raw": {
+                "default": null,
+                "description": "The harness's own request, kept for the audit record."
+              },
+              "tool": {
+                "description": "Tool the action goes through.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "tool"
+            ],
+            "type": "object"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `approval.list`.",
+        "properties": {
+          "approvals": {
+            "description": "Pending approvals, oldest first.",
+            "items": {
+              "$ref": "#/$defs/Approval"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "approvals"
+        ],
+        "title": "ApprovalListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "approval.decide",
+      "params": {
+        "$defs": {
+          "ApprovalDecision": {
+            "description": "A human's answer to an [`Approval`].",
+            "oneOf": [
+              {
+                "const": "approve_once",
+                "description": "Allow this one action; the next similar action asks again.",
+                "type": "string"
+              },
+              {
+                "const": "deny",
+                "description": "Refuse the action.",
+                "type": "string"
+              }
+            ]
+          },
+          "ApprovalId": {
+            "pattern": "^appr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `approval.decide`.",
+        "properties": {
+          "approvalId": {
+            "$ref": "#/$defs/ApprovalId",
+            "description": "The approval to answer."
+          },
+          "decision": {
+            "$ref": "#/$defs/ApprovalDecision",
+            "description": "The answer."
+          }
+        },
+        "required": [
+          "approvalId",
+          "decision"
+        ],
+        "title": "ApprovalDecideParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `approval.decide`: empty.",
+        "title": "ApprovalDecideResult",
+        "type": "object"
+      }
     }
   ],
   "notifications": [
@@ -1259,7 +1449,7 @@ expression: protocol_schema()
                 "type": "null"
               }
             ],
-            "description": "Resume after this sequence number; start from the beginning when absent."
+            "description": "First sequence number to deliver, **inclusive** — the value a `sub.gap` names as\n`resumeFrom`. Start from the beginning when absent."
           },
           "runId": {
             "$ref": "#/$defs/RunId",
@@ -1447,7 +1637,7 @@ expression: protocol_schema()
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One item of the `runs.watch` subscription: the whole current list (latest value wins).",
+        "description": "One item of the `runs.watch` subscription: the whole current list (latest value wins). The\nfirst item is always the current list, sent immediately on subscribe.",
         "properties": {
           "runs": {
             "description": "Current runs, newest first.",
@@ -1537,6 +1727,145 @@ expression: protocol_schema()
           }
         },
         "title": "RunsWatchParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "An action a harness is held on, waiting for a human decision.",
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/ApprovalId",
+                "description": "The approval, as `approval.decide` refers to it."
+              },
+              "requestedAtMs": {
+                "description": "When the action was held, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run that is held."
+              },
+              "subject": {
+                "$ref": "#/$defs/ApprovalSubject",
+                "description": "Exactly what is being approved."
+              }
+            },
+            "required": [
+              "id",
+              "runId",
+              "subject",
+              "requestedAtMs"
+            ],
+            "type": "object"
+          },
+          "ApprovalId": {
+            "pattern": "^appr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ApprovalSubject": {
+            "description": "The exact thing a human is asked to approve.",
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ActionClass",
+                "description": "Class of the action."
+              },
+              "command": {
+                "description": "The command line, for command actions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paths": {
+                "default": [],
+                "description": "Paths the action touches.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "raw": {
+                "default": null,
+                "description": "The harness's own request, kept for the audit record."
+              },
+              "tool": {
+                "description": "Tool the action goes through.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "tool"
+            ],
+            "type": "object"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of the `approvals.watch` subscription: the whole pending list (latest value wins).\nThe first item is the list as it stands when the subscription starts.",
+        "properties": {
+          "approvals": {
+            "description": "Pending approvals, oldest first.",
+            "items": {
+              "$ref": "#/$defs/Approval"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "approvals"
+        ],
+        "title": "ApprovalsSnapshot",
+        "type": "object"
+      },
+      "name": "approvals.watch",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `approvals.watch` subscription.",
+        "title": "ApprovalsWatchParams",
         "type": "object"
       }
     }

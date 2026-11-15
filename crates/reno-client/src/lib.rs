@@ -3,3 +3,26 @@
 //! Owns ARCH-2: the app and the CLI know the daemon only through this crate, and never link the
 //! kernel, the store or the harness layer. Every feature the app has, the CLI can reach through it.
 //! Its consumers are the CLI, the MCP server and the app (ARCH-3).
+//!
+//! # Modules
+//!
+//! - `client`: [`Client`], typed calls and subscriptions, with the checked `daemon.hello`
+//!   handshake and gap-free [`Client::run_events`].
+//! - `state`: [`State`], [`Update`] and [`Changed`]. Plain data with one pure `apply`; no tokio.
+//! - `mirror`: [`Mirror`], the tokio driver that turns subscriptions into [`Update`]s on a
+//!   bounded channel.
+//! - `error`: [`ClientError`].
+//! - `fake` (cargo feature `fake`): an in-process fake daemon over the in-memory transport.
+
+pub mod client;
+pub mod error;
+pub mod mirror;
+pub mod state;
+
+#[cfg(feature = "fake")]
+pub mod fake;
+
+pub use client::Client;
+pub use error::ClientError;
+pub use mirror::{Mirror, MirrorConfig, UPDATE_CAPACITY, Updates};
+pub use state::{Changed, ConnectionStatus, DaemonInfo, State, Transcript, Update};

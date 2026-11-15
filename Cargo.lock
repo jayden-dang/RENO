@@ -4251,6 +4251,17 @@ dependencies = [
 [[package]]
 name = "reno-client"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "reno-proto",
+ "reno-rpc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "reno-harness"

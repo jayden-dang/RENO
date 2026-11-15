@@ -220,7 +220,7 @@ fn daemon_hello() {
             pid: 4242,
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
-               "features": ["run.events.resume", "runs.watch", "sub.gap"], "pid": 4242}),
+               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals"], "pid": 4242}),
     );
 }
 
@@ -247,4 +247,82 @@ fn subscription_and_gap_payloads() {
         },
         json!({"subscription": "sub_a1", "resumeFrom": 41}),
     );
+}
+
+fn approval() -> Approval {
+    Approval {
+        id: "appr_01K1".parse().unwrap(),
+        run_id: run_id(),
+        subject: ApprovalSubject {
+            action: ActionClass::Command,
+            tool: "bash".into(),
+            command: Some("git push -u origin reno/keeper/deps-1115".into()),
+            paths: vec![],
+            raw: json!({}),
+        },
+        requested_at_ms: 1_794_700_000_000,
+    }
+}
+
+fn approval_wire() -> Value {
+    json!({
+        "id": "appr_01K1",
+        "runId": "run_01HZX9",
+        "subject": {
+            "action": "command",
+            "tool": "bash",
+            "command": "git push -u origin reno/keeper/deps-1115",
+            "paths": [],
+            "raw": {}
+        },
+        "requestedAtMs": 1_794_700_000_000u64
+    })
+}
+
+#[test]
+fn approval_types() {
+    golden(&approval(), approval_wire());
+    golden(
+        &ApprovalListResult {
+            approvals: vec![approval()],
+        },
+        json!({"approvals": [approval_wire()]}),
+    );
+    golden(
+        &ApprovalsSnapshot { approvals: vec![] },
+        json!({"approvals": []}),
+    );
+    golden(&ApprovalsWatchParams {}, json!({}));
+    golden(&ApprovalDecideResult {}, json!({}));
+}
+
+#[test]
+fn approval_decide() {
+    golden(
+        &ApprovalDecideParams {
+            approval_id: "appr_01K1".parse().unwrap(),
+            decision: ApprovalDecision::ApproveOnce,
+        },
+        json!({"approvalId": "appr_01K1", "decision": "approve_once"}),
+    );
+    golden(
+        &ApprovalDecideParams {
+            approval_id: "appr_01K1".parse().unwrap(),
+            decision: ApprovalDecision::Deny,
+        },
+        json!({"approvalId": "appr_01K1", "decision": "deny"}),
+    );
+    assert!(
+        serde_json::from_value::<ApprovalDecision>(json!("approve_always")).is_err(),
+        "unknown decisions are rejected, not guessed"
+    );
+}
+
+#[test]
+fn approval_method_names_and_feature() {
+    assert_eq!(<ApprovalList as Method>::NAME, "approval.list");
+    assert_eq!(<ApprovalDecide as Method>::NAME, "approval.decide");
+    assert_eq!(<ApprovalsWatch as Subscription>::NAME, "approvals.watch");
+    assert_eq!(FEATURE_APPROVALS, "approvals");
+    assert!(FEATURES.contains(&FEATURE_APPROVALS));
 }
