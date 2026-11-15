@@ -48,10 +48,11 @@ use std::time::Duration;
 use futures::{Stream, stream};
 use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideResult, ApprovalList, ApprovalListResult,
-    ApprovalsSnapshot, ApprovalsWatch, DaemonHello, DaemonStatus, DaemonStatusInfo, ErrorCode,
-    ErrorObject, FEATURES, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelResult,
-    RunEventItem, RunEvents, RunGet, RunId, RunList, RunListResult, RunSteer, RunSteerResult,
-    RunSummary, RunsSnapshot, RunsWatch, SubGap, SubGapParams, TaskRun, TaskRunResult,
+    ApprovalsSnapshot, ApprovalsWatch, DaemonHello, DaemonShutdown, DaemonShutdownResult,
+    DaemonStatus, DaemonStatusInfo, ErrorCode, ErrorObject, FEATURES, HelloResult, NoParams,
+    PROTOCOL_VERSION, RunCancel, RunCancelResult, RunEventItem, RunEvents, RunGet, RunId, RunList,
+    RunListResult, RunSteer, RunSteerResult, RunSummary, RunsSnapshot, RunsWatch, SubGap,
+    SubGapParams, TaskRun, TaskRunResult,
 };
 use reno_rpc::{Router, Server, ServerConfig, ServerStats, SubItem, connect_in_memory_with_buffer};
 use tokio::sync::watch;
@@ -418,7 +419,8 @@ fn router(shared: &Arc<Shared>) -> Router {
                 .read(|w| w.run(&p.run_id).map(|r| r.journal_tx.subscribe()))
                 .ok_or_else(|| not_found("run"))?;
             s.event_subscriptions.fetch_add(1, Ordering::SeqCst);
-            let from = p.from_seq.map_or(0, |seq| seq.0);
+            // Journals count from 1; `0` and an absent `fromSeq` both start at the beginning.
+            let from = p.from_seq.map_or(1, |seq| seq.0.max(1));
             Ok(journal(Arc::clone(&s), p.run_id, from, rx))
         }
     };
@@ -456,6 +458,8 @@ fn router(shared: &Arc<Shared>) -> Router {
     Router::new()
         .method::<DaemonHello, _, _>(hello)
         .method::<DaemonStatus, _, _>(status)
+        // The fake has no process to stop: it accepts the request and carries on.
+        .method::<DaemonShutdown, _, _>(|_: NoParams, _| async { Ok(DaemonShutdownResult {}) })
         .method::<TaskRun, _, _>(task_run)
         .method::<RunGet, _, _>(run_get)
         .method::<RunList, _, _>(run_list)

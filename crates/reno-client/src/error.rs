@@ -1,5 +1,7 @@
 //! The one error type of this crate (ARCH-14).
 
+use std::path::PathBuf;
+
 use reno_proto::{ErrorCode, ErrorObject};
 use reno_rpc::RpcError;
 
@@ -9,6 +11,10 @@ pub enum ClientError {
     /// The connection to the daemon closed, or was never usable.
     #[error("disconnected from the daemon")]
     Disconnected,
+    /// Nothing is listening on the daemon's socket: the file is missing or the connection was
+    /// refused.
+    #[error("no daemon is listening on {}", .0.display())]
+    NotRunning(PathBuf),
     /// The daemon speaks a protocol version this client cannot use.
     #[error(
         "incompatible daemon: client speaks protocol {client}, daemon answered {}",

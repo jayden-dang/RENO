@@ -84,8 +84,7 @@ pub(crate) async fn run_events(
         changed: shared.live_changed.subscribe(),
         shared,
         run,
-        // Journals count from 1 (`journal.rs`); `ids.rs` still says 0. Starting at 0 is right
-        // for both.
+        // Journals count from 1 (`journal.rs`), so `Seq(0)` and "absent" both mean the start.
         from: from.unwrap_or(Seq(0)),
     };
     Ok(stream::unfold((ctx, Phase::Resolve), |(ctx, phase)| step(ctx, phase)).boxed())

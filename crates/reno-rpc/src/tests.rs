@@ -38,6 +38,7 @@ fn summary(n: u64) -> RunSummary {
         status: RunStatus::Running,
         attempt: 1,
         title: format!("v{n}"),
+        prompt: None,
         model: None,
         stop_reason: None,
         created_at_ms: 0,
@@ -573,6 +574,51 @@ async fn cancelling_the_server_returns_promptly_and_empties_the_tracker() {
     assert!(!path.exists(), "the socket file is removed on shutdown");
     let err = client.call::<DaemonStatus>(NoParams {}).await;
     assert!(matches!(err, Err(RpcError::Disconnected)));
+}
+
+#[tokio::test]
+async fn stopping_accept_closes_the_socket_but_open_connections_carry_on() {
+    let (server, _) = server();
+    let server = Arc::new(server);
+    let dir = private_tempdir();
+    let path = dir.path().join("reno.sock");
+    let listener = UnixServer::bind(&path).await.expect("bind");
+    let (stop_accepting, cancel) = (CancellationToken::new(), CancellationToken::new());
+    let serving = {
+        let server = Arc::clone(&server);
+        let (stop_accepting, cancel) = (stop_accepting.clone(), cancel.clone());
+        tokio::spawn(async move { server.serve_until(listener, stop_accepting, cancel).await })
+    };
+    let client = connect_unix(&path, CancellationToken::new())
+        .await
+        .expect("connect");
+    client
+        .call::<DaemonStatus>(NoParams {})
+        .await
+        .expect("status");
+
+    stop_accepting.cancel();
+    // The listener is dropped inside `serve_until`; wait for the file to go without polling.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while path.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the socket file goes once accepting stops");
+    assert!(
+        connect_unix(&path, CancellationToken::new()).await.is_err(),
+        "nobody new can connect"
+    );
+    client
+        .call::<DaemonStatus>(NoParams {})
+        .await
+        .expect("an open connection still works");
+    assert!(!serving.is_finished(), "serve waits for the connections");
+
+    cancel.cancel();
+    serving.await.expect("join").expect("serve");
+    assert!(server.tracker().is_empty());
 }
 
 #[tokio::test]

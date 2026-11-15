@@ -226,7 +226,8 @@ fn daemon_hello() {
             pid: 4242,
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
-               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals", "run.steer"], "pid": 4242}),
+               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals", "run.steer",
+                            "daemon.shutdown"], "pid": 4242}),
     );
 }
 
@@ -346,4 +347,51 @@ fn run_steer() {
     assert_eq!(<RunSteer as Method>::NAME, "run.steer");
     assert_eq!(FEATURE_RUN_STEER, "run.steer");
     assert!(FEATURES.contains(&FEATURE_RUN_STEER));
+}
+
+#[test]
+fn daemon_shutdown() {
+    golden(&NoParams {}, json!({}));
+    golden(&DaemonShutdownResult {}, json!({}));
+    assert_eq!(<DaemonShutdown as Method>::NAME, "daemon.shutdown");
+    assert_eq!(FEATURE_DAEMON_SHUTDOWN, "daemon.shutdown");
+    assert!(FEATURES.contains(&FEATURE_DAEMON_SHUTDOWN));
+}
+
+fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
+    RunSummary {
+        run_id: run_id(),
+        task_id: "task_01HZX8".parse().unwrap(),
+        executor: "mock".parse().unwrap(),
+        status: RunStatus::Running,
+        attempt: 1,
+        title: "first line".into(),
+        prompt: prompt.map(str::to_owned),
+        model: model.map(str::to_owned),
+        stop_reason: None,
+        created_at_ms: 10,
+        updated_at_ms: 20,
+    }
+}
+
+#[test]
+fn run_summary_carries_prompt_and_model() {
+    golden(
+        &run_summary(Some("first line\nsecond line"), Some("mock-1")),
+        json!({"runId": "run_01HZX9", "taskId": "task_01HZX8", "executor": "mock",
+               "status": "running", "attempt": 1, "title": "first line",
+               "prompt": "first line\nsecond line", "model": "mock-1",
+               "createdAtMs": 10, "updatedAtMs": 20}),
+    );
+}
+
+#[test]
+fn run_summary_without_prompt_still_parses() {
+    // A daemon that predates `prompt` sends no such key; both ends must cope.
+    golden(
+        &run_summary(None, None),
+        json!({"runId": "run_01HZX9", "taskId": "task_01HZX8", "executor": "mock",
+               "status": "running", "attempt": 1, "title": "first line",
+               "createdAtMs": 10, "updatedAtMs": 20}),
+    );
 }

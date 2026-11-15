@@ -9,20 +9,23 @@
 //! clone of a [`Client`], and of every stream taken from it, closes the connection.
 
 use std::any::Any;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
 use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideParams, ApprovalDecision, ApprovalList,
-    ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonStatus,
-    DaemonStatusInfo, FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel,
-    RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunId,
-    RunList, RunListParams, RunStatus, RunSteer, RunSteerParams, RunSummary, RunsSnapshot,
+    ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
+    DaemonStatus, DaemonStatusInfo, FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION,
+    RunCancel, RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams,
+    RunId, RunList, RunListParams, RunStatus, RunSteer, RunSteerParams, RunSummary, RunsSnapshot,
     RunsWatch, RunsWatchParams, Seq, TaskRun, TaskRunParams,
 };
-use reno_rpc::{SubEvent, SubStream};
+use reno_rpc::{RpcError, SubEvent, SubStream};
 use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::ClientError;
 
@@ -82,6 +85,28 @@ impl Client {
         })
     }
 
+    /// Connects to the daemon's Unix socket at `path` and performs the `daemon.hello` handshake.
+    ///
+    /// Fails with [`ClientError::NotRunning`] when the socket file is missing or refuses the
+    /// connection. The connection closes when the last clone of the client is dropped.
+    pub async fn connect_unix(path: impl AsRef<Path>) -> Result<Self, ClientError> {
+        let path = path.as_ref();
+        let rpc = reno_rpc::connect_unix(path, CancellationToken::new())
+            .await
+            .map_err(|e| match e {
+                RpcError::Io(io)
+                    if matches!(
+                        io.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    ClientError::NotRunning(path.to_path_buf())
+                }
+                other => ClientError::from(other),
+            })?;
+        Self::connect(rpc).await
+    }
+
     /// Attaches a value that is dropped together with the last clone of this client.
     #[must_use]
     pub fn with_keepalive(mut self, keepalive: Arc<dyn Any + Send + Sync>) -> Self {
@@ -112,6 +137,16 @@ impl Client {
     /// `daemon.status`: daemon health and load.
     pub async fn status(&self) -> Result<DaemonStatusInfo, ClientError> {
         Ok(self.rpc.call::<DaemonStatus>(NoParams {}).await?)
+    }
+
+    /// `daemon.shutdown`: asks the daemon to stop. Needs feature `daemon.shutdown`.
+    ///
+    /// The daemon answers once shutdown has begun, then closes its connections. To know it has
+    /// stopped, wait for its socket to disappear; do not wait for this connection to stay open.
+    pub async fn shutdown_daemon(&self) -> Result<(), ClientError> {
+        self.require(reno_proto::FEATURE_DAEMON_SHUTDOWN)?;
+        self.rpc.call::<DaemonShutdown>(NoParams {}).await?;
+        Ok(())
     }
 
     /// `task.run`: creates a task and its first run.
@@ -221,7 +256,8 @@ impl Client {
         let state = EventsState {
             rpc: self.rpc.clone(),
             run_id,
-            next: from.unwrap_or(Seq(0)),
+            // A run's journal counts from 1, so an absent `from` and `Seq(0)` both mean the start.
+            next: from.unwrap_or(Seq(1)).max(Seq(1)),
             sub: None,
             stalled: 0,
             finished: false,

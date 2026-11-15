@@ -21,6 +21,11 @@ a reason.
 `cargo xtask check` asserts this edge list from `cargo metadata`. The `xtask` tool itself sits
 outside it.
 
+`renod` is the composition root, so besides the kernel and `reno-rpc` it also names `reno-store`
+and `reno-harness` directly: it opens the store and builds the executors that it hands to the
+kernel (ARCH-7 puts the ports' implementations outside the kernel). Its only edge on
+`reno-client` is a dev-dependency, for tests.
+
 **ARCH-2 — The app and the CLI never link the kernel, the store or the harness layer.** They
 know the daemon only through `reno-client`. Every feature the app has, the CLI can reach.
 

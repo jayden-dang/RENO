@@ -44,7 +44,7 @@ async fn events(client: &Client, run: &RunId) -> Vec<(Seq, ExecEvent)> {
 
 fn assert_consecutive(events: &[(Seq, ExecEvent)]) {
     for (i, (seq, _)) in events.iter().enumerate() {
-        assert_eq!(seq.0, i as u64, "events must be ordered and gap-free");
+        assert_eq!(seq.0, i as u64 + 1, "events must be ordered and gap-free");
     }
 }
 
@@ -270,7 +270,7 @@ async fn run_events_resumes_across_gaps_and_stays_ordered() {
 
     let mut stream = Box::pin(client.run_events(id.clone(), None));
     let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.seq, Seq(0));
+    assert_eq!(first.seq, Seq(1));
     // A slow consumer: let the connection's queues overflow before reading on.
     for _ in 0..1_000 {
         tokio::task::yield_now().await;
@@ -281,7 +281,7 @@ async fn run_events_resumes_across_gaps_and_stays_ordered() {
     }
     assert!(seen.len() > 700);
     assert!(
-        seen.iter().enumerate().all(|(i, s)| *s == i as u64),
+        seen.iter().enumerate().all(|(i, s)| *s == i as u64 + 1),
         "ordered, no duplicates, no holes"
     );
     assert!(

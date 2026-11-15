@@ -136,7 +136,7 @@ pub(crate) struct Built {
     pub(crate) facts: Facts,
 }
 
-/// Builds the rows. `prompt` is the run's first prompt line, `pending` the approvals the state
+/// Builds the rows. `prompt` is the run's prompt, `pending` the approvals the state
 /// holds for this run.
 pub(crate) fn build_rows(
     prompt: Option<&str>,
