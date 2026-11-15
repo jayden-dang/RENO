@@ -93,12 +93,18 @@ pub(crate) fn per_run_mib(idle_kib: f64, loaded_kib: f64, runs: usize) -> f64 {
     mib(loaded_kib - idle_kib) / runs as f64
 }
 
-/// How far `after` is above `before`, as a fraction (0.10 is ten percent).
-pub(crate) fn growth(before: f64, after: f64) -> f64 {
-    if before <= 0.0 {
+/// Mean RSS added per 1,000 runs by the batches after the first, from the RSS read after each
+/// batch (`series_mib`, one value per batch of `batch_runs` runs). Zero with fewer than two
+/// batches. This is the leak signal: the first batch's jump is warm-up and is left out.
+pub(crate) fn steady_growth_per_1000(series_mib: &[f64], batch_runs: usize) -> f64 {
+    let (Some(first), Some(last)) = (series_mib.first(), series_mib.last()) else {
+        return 0.0;
+    };
+    if series_mib.len() < 2 || batch_runs == 0 {
         return 0.0;
     }
-    (after - before) / before
+    let batches = (series_mib.len() - 1) as f64;
+    (last - first) / batches * (1000.0 / batch_runs as f64)
 }
 
 /// How long each phase of a run of the benchmark lasts.
@@ -109,15 +115,30 @@ pub(crate) struct Plan {
     pub(crate) idle_settle_s: u64,
     /// Seconds of idle CPU measurement.
     pub(crate) idle_cpu_s: u64,
+    /// Runs in one batch (1,000, or 200 in quick mode).
     pub(crate) runs: usize,
+    /// Runs done before the first batch and not measured. In quick mode they bring the first
+    /// batch to 4,000 runs in all, because SQLite's page caches take 1,000 to 2,000 runs to
+    /// fill and a short first batch would read the fill as growth.
+    pub(crate) warmup_runs: usize,
+    /// Batches after the first, to tell warm-up from growth.
+    pub(crate) extra_batches: usize,
     pub(crate) concurrency: usize,
-    /// Seconds of idle after the runs, before the final RSS.
+    /// Seconds of idle after each batch, before its RSS is read.
     pub(crate) post_idle_s: u64,
     pub(crate) live_runs: usize,
     pub(crate) append_events: usize,
 }
 
 impl Plan {
+    /// Budget (b), in MiB per 1,000 runs: 1 in full mode. Quick mode reads 600 runs, in 200-run
+    /// batches, and an RSS reading moves by 0.1 to 0.3 MiB between batches, which scaling to 1,000
+    /// runs multiplies by 5/3 or more; its limit is 3, which still fails the 3.8 measured with the
+    /// whole history in the watch.
+    pub(crate) fn steady_limit_mib_per_1000(&self) -> f64 {
+        if self.quick { 3.0 } else { 1.0 }
+    }
+
     pub(crate) fn new(quick: bool) -> Self {
         if quick {
             Self {
@@ -125,6 +146,8 @@ impl Plan {
                 idle_settle_s: 5,
                 idle_cpu_s: 10,
                 runs: 200,
+                warmup_runs: 3_800,
+                extra_batches: 3,
                 concurrency: 8,
                 post_idle_s: 5,
                 live_runs: 20,
@@ -136,6 +159,8 @@ impl Plan {
                 idle_settle_s: 30,
                 idle_cpu_s: 60,
                 runs: 1_000,
+                warmup_runs: 0,
+                extra_batches: 3,
                 concurrency: 8,
                 post_idle_s: 30,
                 live_runs: 20,
@@ -155,11 +180,16 @@ pub(crate) struct Measured {
     /// RSS before, at the peak of, and after the runs, MiB.
     pub(crate) runs_before_mib: f64,
     pub(crate) runs_peak_mib: f64,
+    /// RSS after the first batch, MiB (`runs_series_mib[0]`).
     pub(crate) runs_after_mib: f64,
+    /// RSS after each batch, MiB, in order.
+    pub(crate) runs_series_mib: Vec<f64>,
+    /// Wall time of the first batch.
     pub(crate) runs_wall_s: f64,
+    /// Runs completed over all batches.
     pub(crate) runs_done: usize,
-    /// After over before, minus one.
-    pub(crate) runs_growth: f64,
+    /// Mean MiB added per 1,000 runs by the batches after the first.
+    pub(crate) runs_steady_mib_per_1000: f64,
     /// Extra RSS per live run, MiB.
     pub(crate) per_run_mib: f64,
     /// Claim to executor start, milliseconds (event timestamps have 1 ms resolution).
@@ -207,15 +237,18 @@ impl Check {
 
 /// The ARCHITECTURE 12 budgets, and the roadmap's boot threshold, against `m` and the append
 /// latency in microseconds.
-pub(crate) fn checks(m: &Measured, append: Option<&Latency>) -> Vec<Check> {
+pub(crate) fn checks(plan: &Plan, m: &Measured, append: Option<&Latency>) -> Vec<Check> {
     let mut out = vec![
         Check::at_most("idle RSS", "MiB", 40.0, m.idle_rss_mib),
         Check::below("idle CPU", "%", 0.5, m.idle_cpu_pct),
+        // (a) The daemon budget: SQLite's page cache filling on first use is a one-off cost.
+        Check::at_most("RSS after the first batch", "MiB", 40.0, m.runs_after_mib),
+        // (b) After that, history must not cost memory: the leak check.
         Check::at_most(
-            "RSS after the runs vs before",
-            "% growth",
-            10.0,
-            m.runs_growth * 100.0,
+            "RSS growth per 1,000 more runs",
+            "MiB",
+            plan.steady_limit_mib_per_1000(),
+            m.runs_steady_mib_per_1000,
         ),
         Check::at_most("RSS per live run", "MiB", 4.0, m.per_run_mib),
     ];
@@ -266,10 +299,11 @@ pub(crate) fn table(report: &Report) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "reno bench ({}, {}, {} mode: {} runs, idle {} s / cpu {} s)",
+        "reno bench ({}, {}, {} mode: {} batches of {} runs, idle {} s / cpu {} s)",
         report.os,
         report.arch,
         if report.plan.quick { "quick" } else { "full" },
+        1 + report.plan.extra_batches,
         report.plan.runs,
         report.plan.idle_settle_s,
         report.plan.idle_cpu_s,
@@ -286,14 +320,15 @@ pub(crate) fn table(report: &Report) -> String {
         let _ = writeln!(out, "\nallocator: {}", variant.allocator);
         let _ = writeln!(
             out,
-            "  idle {:.1} MiB; runs {:.1} -> peak {:.1} -> {:.1} MiB in {:.1} s ({} done)",
-            m.idle_rss_mib,
-            m.runs_before_mib,
-            m.runs_peak_mib,
-            m.runs_after_mib,
-            m.runs_wall_s,
-            m.runs_done
+            "  idle {:.1} MiB; runs {:.1} -> peak {:.1} MiB; first batch {:.1} s ({} runs done)",
+            m.idle_rss_mib, m.runs_before_mib, m.runs_peak_mib, m.runs_wall_s, m.runs_done
         );
+        let series: Vec<String> = m
+            .runs_series_mib
+            .iter()
+            .map(|r| format!("{r:.1}"))
+            .collect();
+        let _ = writeln!(out, "  RSS after each batch: {} MiB", series.join(", "));
         if let Some(l) = &m.claim_to_start_ms {
             let _ = writeln!(out, "  claim to start: p50 {} ms, p99 {} ms", l.p50, l.p99);
         }
@@ -387,8 +422,18 @@ mod tests {
     fn per_run_memory_and_growth() {
         assert!((per_run_mib(20_480.0, 20_480.0 + 20.0 * 2048.0, 20) - 2.0).abs() < 1e-9);
         assert_eq!(per_run_mib(1.0, 2.0, 0), 0.0);
-        assert!((growth(100.0, 110.0) - 0.1).abs() < 1e-9);
-        assert_eq!(growth(0.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn steady_growth_leaves_out_the_warm_up_and_scales_to_1000_runs() {
+        // The first batch's jump (14.6 -> 25.3) is warm-up; 25.3 -> 33.4 over three batches.
+        let full = [25.3, 28.8, 30.9, 33.4];
+        assert!((steady_growth_per_1000(&full, 1000) - 8.1 / 3.0).abs() < 1e-9);
+        // Batches of 200 runs: 0.1 MiB per batch is 0.5 MiB per 1,000 runs.
+        let quick = [20.0, 20.1, 20.2, 20.3];
+        assert!((steady_growth_per_1000(&quick, 200) - 0.5).abs() < 1e-9);
+        assert_eq!(steady_growth_per_1000(&[20.0], 200), 0.0);
+        assert_eq!(steady_growth_per_1000(&[], 200), 0.0);
     }
 
     #[test]
@@ -403,24 +448,35 @@ mod tests {
         let mut m = Measured {
             idle_rss_mib: 30.0,
             idle_cpu_pct: 0.1,
-            runs_growth: 0.05,
+            runs_after_mib: 30.0,
+            runs_steady_mib_per_1000: 0.5,
             per_run_mib: 1.0,
             claim_to_start_ms: Latency::of(&[1.0, 2.0, 3.0]),
             boot_ms: vec![100.0, 120.0, 110.0],
             ..Measured::default()
         };
         let append = Latency::of(&[10.0, 20.0]);
-        let all = checks(&m, append.as_ref());
-        assert_eq!(all.len(), 7);
+        let all = checks(&Plan::new(false), &m, append.as_ref());
+        assert_eq!(all.len(), 8);
         assert!(all.iter().all(|c| c.pass));
         m.per_run_mib = 4.5;
         m.boot_ms = vec![400.0];
-        let failed: Vec<_> = checks(&m, None)
+        m.runs_after_mib = 41.0;
+        m.runs_steady_mib_per_1000 = 2.5;
+        let failed: Vec<_> = checks(&Plan::new(false), &m, None)
             .into_iter()
             .filter(|c| !c.pass)
             .map(|c| c.name)
             .collect();
-        assert_eq!(failed, ["RSS per live run", "boot with ended runs"]);
+        assert_eq!(
+            failed,
+            [
+                "RSS after the first batch",
+                "RSS growth per 1,000 more runs",
+                "RSS per live run",
+                "boot with ended runs"
+            ]
+        );
     }
 
     #[test]
@@ -443,7 +499,7 @@ mod tests {
             append_us: Latency::of(&[5.0]),
             variants: vec![Variant {
                 allocator: "system".into(),
-                checks: checks(&measured, None),
+                checks: checks(&Plan::new(true), &measured, None),
                 measured,
             }],
         };

@@ -33,7 +33,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::stats::{
-    self, Latency, Measured, Plan, Report, Variant, cpu_percent, growth, median, mib, per_run_mib,
+    self, Latency, Measured, Plan, Report, Variant, cpu_percent, median, mib, per_run_mib,
+    steady_growth_per_1000,
 };
 
 type Result<T> = std::result::Result<T, String>;
@@ -139,7 +140,7 @@ fn bench(options: &Options) -> Result<Report> {
         println!("== allocator: {label}");
         let bins = build(&root, &target, &out_dir, label, flags)?;
         let measured = measure(&plan, &bins, &store_bench, &scratch.join(label))?;
-        let checks = stats::checks(&measured, Some(&append));
+        let checks = stats::checks(&plan, &measured, Some(&append));
         variants.push(Variant {
             allocator: (*label).to_owned(),
             measured,
@@ -477,21 +478,31 @@ fn measure(plan: &Plan, bins: &Bins, store_bench: &Path, scratch: &Path) -> Resu
 
     // 2. The runs.
     println!(
-        "runs: {} mock runs, {} at a time",
-        plan.runs, plan.concurrency
+        "runs: {} batches of {} mock runs, {} at a time",
+        1 + plan.extra_batches,
+        plan.runs,
+        plan.concurrency
     );
-    let before = rss_kib(daemon.pid)?;
-    let sampler = Sampler::start(daemon.pid);
-    let wall = Instant::now();
-    m.runs_done = run_many(bins, &main_dir, plan.runs, plan.concurrency)?;
-    m.runs_wall_s = wall.elapsed().as_secs_f64();
-    let peak = sampler.finish();
-    pause(plan.post_idle_s);
-    let after = rss_median(daemon.pid, 3, Duration::from_millis(500))?;
-    m.runs_before_mib = mib(before);
+    m.runs_before_mib = mib(rss_kib(daemon.pid)?);
+    if plan.warmup_runs > 0 {
+        m.runs_done += run_many(bins, &main_dir, plan.warmup_runs, plan.concurrency)?;
+    }
+    let mut peak = 0.0_f64;
+    for batch in 0..=plan.extra_batches {
+        let sampler = Sampler::start(daemon.pid);
+        let wall = Instant::now();
+        m.runs_done += run_many(bins, &main_dir, plan.runs, plan.concurrency)?;
+        if batch == 0 {
+            m.runs_wall_s = wall.elapsed().as_secs_f64();
+        }
+        peak = peak.max(sampler.finish());
+        pause(plan.post_idle_s);
+        let after = rss_median(daemon.pid, 3, Duration::from_millis(500))?;
+        m.runs_series_mib.push(mib(after));
+    }
     m.runs_peak_mib = mib(peak);
-    m.runs_after_mib = mib(after);
-    m.runs_growth = growth(before, after);
+    m.runs_after_mib = m.runs_series_mib.first().copied().unwrap_or_default();
+    m.runs_steady_mib_per_1000 = steady_growth_per_1000(&m.runs_series_mib, plan.runs);
     daemon.stop()?;
 
     // 4. Claim to start, from the events the daemon left.
