@@ -9,15 +9,17 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use reno_client::{ConnectionStatus, Update};
-use reno_proto::{ApprovalDecision, RunId};
+use reno_proto::{ApprovalDecision, RunId, RunStatus, StopReason};
 
 use crate::app::RootView;
 use crate::nav::Nav;
+use crate::route::Class;
 use crate::screens::home::Headline;
 use crate::store::Store;
 use crate::summary::{self, Attention, Finding};
+use crate::transcript::{Outcome, Row};
 use crate::ui::theme::Appearance;
 use crate::ui::toast;
 
@@ -54,7 +56,12 @@ fn window<'a>(
 ) -> (Entity<RootView>, &'a mut VisualTestContext) {
     let toasts = cx.update(toast::install);
     let store = store.clone();
-    cx.add_window_view(move |window, cx| RootView::new(store, toasts, Some(appearance), window, cx))
+    let (root, vcx) = cx.add_window_view(move |window, cx| {
+        RootView::new(store, toasts, Some(appearance), window, cx)
+    });
+    // Tall enough that the whole sidebar is inside its scroll area and clickable.
+    vcx.simulate_resize(size(px(1280.0), px(960.0)));
+    (root, vcx)
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -246,4 +253,431 @@ fn palette_navigation_and_actions(cx: &mut TestAppContext) {
     // Other destinations do not navigate.
     root.update_in(vcx, |r, window, cx| r.navigate(Nav::Inbox, window, cx));
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+}
+
+// --- Simulated mouse clicks -----------------------------------------------------------------
+//
+// These tests click at the centre of an element's painted bounds with GPUI's input simulation, so
+// they go through hit testing, the active-element rules and `on_click`, not through a method the
+// view happens to expose. Elements are found by `debug_selector`.
+
+fn click(vcx: &mut VisualTestContext, selector: &str) {
+    // `debug_bounds` wants a `'static` key; the strings here are few and the test is short-lived.
+    let key: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    let bounds = vcx
+        .debug_bounds(key)
+        .unwrap_or_else(|| panic!("`{selector}` was not painted"));
+    vcx.simulate_click(bounds.center(), Modifiers::none());
+    vcx.run_until_parked();
+}
+
+fn painted(vcx: &mut VisualTestContext, selector: &str) -> bool {
+    let key: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    vcx.debug_bounds(key).is_some()
+}
+
+fn run_id(name: &str) -> RunId {
+    RunId::from_suffix(name).unwrap()
+}
+
+/// Waits (in real time, the fake daemon is on tokio) for `done` and redraws each time.
+fn wait_drawn(vcx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+    vcx.executor().allow_parking();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(vcx);
+        if done(vcx) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the screen"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn rows_of(vcx: &mut VisualTestContext, root: &Entity<RootView>) -> Vec<Row> {
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned());
+    screen.map_or_else(Vec::new, |s| s.read_with(vcx, |s, _| s.rows().to_vec()))
+}
+
+fn kinds(rows: &[Row]) -> Vec<&'static str> {
+    rows.iter()
+        .map(|r| match r {
+            Row::User { steer: false, .. } => "prompt",
+            Row::User { steer: true, .. } => "steer",
+            Row::Prose { .. } => "prose",
+            Row::Reasoning { .. } => "reasoning",
+            Row::Tools { .. } => "tools",
+            Row::Question { .. } => "question",
+            Row::Approval { .. } => "approval",
+            Row::Asked { .. } => "asked",
+            Row::Done { .. } => "done",
+        })
+        .collect()
+}
+
+fn run_status(vcx: &VisualTestContext, store: &Entity<Store>, run: &RunId) -> Option<RunStatus> {
+    store.read_with(vcx, |s, _| s.state().run(run).map(|r| r.status))
+}
+
+/// Sends `prompt` from Home and returns the opened run's id once the Run screen shows.
+fn send_from_home(vcx: &mut VisualTestContext, root: &Entity<RootView>, prompt: &str) -> RunId {
+    let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
+    composer.update_in(vcx, |c, window, cx| c.fill(prompt, window, cx));
+    draw(vcx);
+    click(vcx, "send");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    screen.read_with(vcx, |s, _| s.run_id().clone())
+}
+
+#[gpui::test]
+fn clicking_approve_on_the_home_card_approves(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "approve-appr_keeperpush");
+    assert!(
+        store.read_with(vcx, |s, _| s
+            .is_deciding(&"appr_keeperpush".parse().unwrap()))
+            || approvals(vcx, &store) == 1,
+        "the click reached the store"
+    );
+    wait_until(vcx, |cx| approvals(cx, &store) == 1);
+    assert_eq!(
+        store.read_with(vcx, |s, _| s.state().approvals()[0].id.to_string()),
+        "appr_scoutfetch"
+    );
+}
+
+#[gpui::test]
+fn clicking_deny_on_the_home_card_denies(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "deny-appr_scoutfetch");
+    wait_until(vcx, |cx| approvals(cx, &store) == 1);
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state().run(&run_id("scout1")).map(|r| r.status) == Some(RunStatus::Failed)
+        })
+    });
+}
+
+#[gpui::test]
+fn clicking_the_class_chips_selects_a_class(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
+    for (selector, class) in [
+        ("class-review", Class::Review),
+        ("class-research", Class::Research),
+        ("class-triage", Class::Triage),
+        ("class-implement", Class::Implement),
+    ] {
+        click(vcx, selector);
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.class()),
+            class,
+            "{selector}"
+        );
+        draw(vcx);
+    }
+}
+
+#[gpui::test]
+fn clicking_send_sends_only_with_a_draft(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let before = store.read_with(cx, |s, _| s.state().runs().len());
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+
+    // Greyed and inert while the draft is empty.
+    click(vcx, "send");
+    std::thread::sleep(Duration::from_millis(50));
+    vcx.run_until_parked();
+    assert_eq!(store.read_with(vcx, |s, _| s.state().runs().len()), before);
+    assert!(root.read_with(vcx, |r, _| r.run_screen().is_none()));
+
+    // With a draft the click sends, and the app opens the new run.
+    let run = send_from_home(vcx, &root, "write a haiku");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| s.state().runs().len()) == before + 1
+    });
+    assert!(store.read_with(vcx, |s, _| s.state().run(&run).is_some()));
+}
+
+#[gpui::test]
+fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+
+    click(vcx, "recent-run_keeper1");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.run_id().clone()),
+        run_id("keeper1")
+    );
+    draw(vcx);
+
+    // A nav row that has a screen goes there; "+" does too.
+    click(vcx, "nav-Home");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    draw(vcx);
+    click(vcx, "recent-run_scout1");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
+    draw(vcx);
+    click(vcx, "new-task");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    draw(vcx);
+
+    // A destination with no screen yet stays put.
+    click(vcx, "nav-Inbox");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+}
+
+// --- The Run screen -------------------------------------------------------------------------
+
+#[gpui::test]
+fn opening_a_run_from_the_sidebar_shows_its_transcript(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| {
+        let rows = rows_of(vcx, &root);
+        rows.iter().any(|r| matches!(r, Row::Approval { .. }))
+    });
+    let rows = rows_of(vcx, &root);
+    assert_eq!(kinds(&rows), ["prompt", "prose", "tools", "approval"]);
+    let Row::Prose { text, .. } = &rows[1] else {
+        panic!("expected prose");
+    };
+    assert!(text.starts_with("Three crates have minor updates"));
+    // The header, the details pane and the card are on screen.
+    assert!(painted(vcx, "approve"));
+    assert!(painted(vcx, "stop"));
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    let facts = screen.read_with(vcx, |s, _| s.facts().clone());
+    assert_eq!(facts.model.as_deref(), Some("opus-5.5"));
+}
+
+#[gpui::test]
+fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = send_from_home(vcx, &root, "write a haiku");
+
+    // Rows only ever grow at the end while the run streams; the final shape is fixed.
+    let mut seen: Vec<Vec<&'static str>> = Vec::new();
+    wait_drawn(vcx, |vcx| {
+        let k = kinds(&rows_of(vcx, &root));
+        if seen.last() != Some(&k) {
+            seen.push(k.clone());
+        }
+        k.last() == Some(&"done")
+    });
+    assert_eq!(
+        seen.last().unwrap(),
+        &["prompt", "prose", "tools", "prose", "done"]
+    );
+    for pair in seen.windows(2) {
+        assert!(
+            pair[1].len() >= pair[0].len() && pair[1].starts_with(&pair[0][..pair[0].len() - 1]),
+            "rows changed out of order: {pair:?}"
+        );
+    }
+    let rows = rows_of(vcx, &root);
+    let Row::Prose { text, .. } = &rows[1] else {
+        panic!("expected prose");
+    };
+    assert_eq!(
+        text.trim_end(),
+        "I will start by looking at the repository layout."
+    );
+    assert_eq!(run_status(vcx, &store, &run), Some(RunStatus::Succeeded));
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    let usage = screen.read_with(vcx, |s, _| s.facts().usage).unwrap();
+    assert_eq!((usage.input, usage.output), (1200, 340));
+    assert!(
+        screen.read_with(vcx, |s, _| s.is_following_tail()),
+        "the list follows the tail while streaming"
+    );
+}
+
+#[gpui::test]
+fn approving_inline_with_a_click_resumes_the_run(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve"));
+
+    click(vcx, "approve");
+    wait_drawn(vcx, |vcx| {
+        kinds(&rows_of(vcx, &root)).last() == Some(&"done")
+    });
+    assert_eq!(
+        run_status(vcx, &store, &run_id("keeper1")),
+        Some(RunStatus::Succeeded)
+    );
+    assert_eq!(approvals(vcx, &store), 1, "only scout's approval is left");
+    let rows = rows_of(vcx, &root);
+    assert!(!rows.iter().any(|r| matches!(r, Row::Approval { .. })));
+    assert!(rows.iter().any(|r| matches!(r, Row::Asked { .. })));
+    assert!(!painted(vcx, "approve"), "the card is gone");
+    // The tool call that was held got its result.
+    let tools_outcome = rows.iter().find_map(|r| match r {
+        Row::Tools { calls, .. } => calls.last().map(|c| c.outcome.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        tools_outcome,
+        Some(Outcome::Ok(Some("approved once".to_owned())))
+    );
+}
+
+#[gpui::test]
+fn denying_inline_with_a_click_fails_the_run(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_scout1");
+    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
+    click(vcx, "deny");
+    wait_drawn(vcx, |vcx| {
+        kinds(&rows_of(vcx, &root)).last() == Some(&"done")
+    });
+    assert_eq!(
+        run_status(vcx, &store, &run_id("scout1")),
+        Some(RunStatus::Failed)
+    );
+}
+
+#[gpui::test]
+fn stop_cancels_the_run(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = send_from_home(vcx, &root, "a long job");
+    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
+    click(vcx, "stop");
+    wait_drawn(vcx, |vcx| {
+        run_status(vcx, &store, &run) == Some(RunStatus::Cancelled)
+    });
+    wait_drawn(vcx, |vcx| !painted(vcx, "stop"));
+    let rows = rows_of(vcx, &root);
+    assert!(matches!(
+        rows.last(),
+        Some(Row::Done {
+            stop: StopReason::Interrupted,
+            ..
+        })
+    ));
+}
+
+#[gpui::test]
+fn steering_appends_the_message_and_a_reply(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let _run = send_from_home(vcx, &root, "a long job");
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+
+    // Greyed while empty.
+    assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
+    steer.update_in(vcx, |c, window, cx| c.fill("use fewer words", window, cx));
+    draw(vcx);
+    assert!(steer.read_with(vcx, |c, cx| c.can_send(cx)));
+    click(vcx, "send");
+    assert_eq!(steer.read_with(vcx, |c, _| c.text().to_owned()), "");
+
+    wait_drawn(vcx, |vcx| {
+        let rows = rows_of(vcx, &root);
+        rows.iter()
+            .any(|r| matches!(r, Row::User { steer: true, .. }))
+            && rows
+                .iter()
+                .any(|r| matches!(r, Row::Prose { text, .. } if text.contains("Understood")))
+    });
+    let rows = rows_of(vcx, &root);
+    let steer_at = rows
+        .iter()
+        .position(|r| matches!(r, Row::User { steer: true, text, .. } if text == "use fewer words"))
+        .unwrap();
+    assert!(
+        matches!(&rows[steer_at + 1], Row::Prose { text, .. } if text.starts_with("Understood")),
+        "the reply follows the steer: {:?}",
+        kinds(&rows)
+    );
+}
+
+#[gpui::test]
+fn a_finished_run_cannot_be_steered(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_reviewer1");
+    wait_drawn(vcx, |vcx| {
+        kinds(&rows_of(vcx, &root)).last() == Some(&"done")
+    });
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    steer.update_in(vcx, |c, window, cx| c.fill("one more thing", window, cx));
+    draw(vcx);
+    assert!(
+        !steer.read_with(vcx, |c, cx| c.can_send(cx)),
+        "follow-up is disabled in Phase 0"
+    );
+    click(vcx, "send");
+    steer.update_in(vcx, |c, window, cx| c.submit(window, cx));
+    assert_eq!(
+        steer.read_with(vcx, |c, _| c.text().to_owned()),
+        "one more thing",
+        "the draft stays"
+    );
+    let rows = rows_of(vcx, &root);
+    assert!(
+        !rows
+            .iter()
+            .any(|r| matches!(r, Row::User { steer: true, .. }))
+    );
+}
+
+#[gpui::test]
+fn the_run_screen_draws_in_both_appearances_and_toggles_details(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    for appearance in [Appearance::Dark, Appearance::Light] {
+        let (root, vcx) = window(cx, &store, appearance);
+        draw(vcx);
+        click(vcx, "recent-run_keeper1");
+        wait_drawn(vcx, |vcx| painted(vcx, "approve"));
+        click(vcx, "details-toggle");
+        draw(vcx);
+        click(vcx, "details-toggle");
+        draw(vcx);
+        assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
+    }
 }

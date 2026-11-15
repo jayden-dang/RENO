@@ -33,12 +33,16 @@ pub const FEATURE_SUB_GAP: &str = "sub.gap";
 /// Feature: `approval.list`, `approval.decide` and the `approvals.watch` subscription exist.
 pub const FEATURE_APPROVALS: &str = "approvals";
 
+/// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
+pub const FEATURE_RUN_STEER: &str = "run.steer";
+
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EVENTS_RESUME,
     FEATURE_RUNS_WATCH,
     FEATURE_SUB_GAP,
     FEATURE_APPROVALS,
+    FEATURE_RUN_STEER,
 ];
 
 /// A request with a single reply.
@@ -216,6 +220,20 @@ pub struct RunCancelResult {
     pub status: RunStatus,
 }
 
+/// Params of `run.steer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteerParams {
+    /// The live run to steer.
+    pub run_id: RunId,
+    /// The steering message, delivered at the executor's next step or turn boundary.
+    pub prompt: String,
+}
+
+/// Result of `run.steer`: empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RunSteerResult {}
+
 /// Params of the `run.events` subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -378,6 +396,10 @@ method!(
     RunCancel, "run.cancel", RunCancelParams => RunCancelResult
 );
 method!(
+    /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
+    RunSteer, "run.steer", RunSteerParams => RunSteerResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -449,6 +471,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunGet>(),
             method_entry::<RunList>(),
             method_entry::<RunCancel>(),
+            method_entry::<RunSteer>(),
             method_entry::<ApprovalList>(),
             method_entry::<ApprovalDecide>(),
         ],

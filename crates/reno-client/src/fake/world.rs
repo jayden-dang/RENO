@@ -184,6 +184,20 @@ impl World {
         true
     }
 
+    /// Journals a steering message. Returns the run when it is live (not finished), else `None`.
+    pub(super) fn steer(&mut self, id: &RunId, prompt: &str) -> Option<RunId> {
+        if self.run(id)?.finished() {
+            return None;
+        }
+        self.push(
+            id,
+            ExecEvent::UserMessage {
+                text: prompt.to_owned(),
+            },
+        );
+        Some(id.clone())
+    }
+
     /// Adds a pending approval for `run`, returning it.
     pub(super) fn hold(
         &mut self,

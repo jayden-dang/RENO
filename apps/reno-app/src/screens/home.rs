@@ -16,6 +16,7 @@ use crate::store::Store;
 use crate::summary::{self, Finding};
 use crate::ui::attention::AttentionDock;
 use crate::ui::composer::Composer;
+use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::sidebar::daemon_label;
 use crate::ui::theme::{self, Theme};
@@ -36,6 +37,16 @@ const SUGGESTIONS: [(&str, &str); 3] = [
         "Research how ACP v2 changes permission requests",
     ),
 ];
+
+/// One entry of the settings line: a muted icon and its text.
+fn setting(theme: &Theme, glyph: Icon, text: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(icon(glyph, 14.0, theme.muted))
+        .child(text)
+}
 
 /// What the top of the column says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,11 +145,11 @@ impl HomeScreen {
                         .child("Review"),
                 ),
             Headline::Finding(Finding::Calm { text }) => pill
-                .child(div().text_color(theme.success).child("✓"))
+                .child(icon(Icon::Check, 16.0, theme.success))
                 .child(div().text_color(theme.muted).child(text.clone())),
             Headline::Offline { .. } => pill
                 .border_color(theme.warning.opacity(0.4))
-                .child(div().text_color(theme.warning).child("!"))
+                .child(icon(Icon::Question, 16.0, theme.warning))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -169,9 +180,9 @@ impl HomeScreen {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(kit::chip(theme, format!("▷ {live} live")))
+            .child(kit::icon_chip(theme, Icon::Play, format!("{live} live")))
             .child(
-                kit::chip(theme, "⌕ ⌘K")
+                kit::icon_chip(theme, Icon::Search, "⌘K")
                     .id("open-palette")
                     .cursor_pointer()
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx)),
@@ -203,9 +214,9 @@ impl Render for HomeScreen {
             .px(px(14.0))
             .text_size(px(13.5))
             .text_color(theme.muted)
-            .child(format!("⑂ {}", route.worktree))
-            .child(format!("⛨ {}", route.access))
-            .child("◷ now · or schedule");
+            .child(setting(&theme, Icon::Branch, route.worktree))
+            .child(setting(&theme, Icon::Shield, route.access))
+            .child(setting(&theme, Icon::Clock, "now · or schedule"));
 
         let suggestions = div()
             .flex()
@@ -235,8 +246,8 @@ impl Render for HomeScreen {
             .flex()
             .justify_end()
             .gap(px(8.0))
-            .child(kit::chip(&theme, "⚇ team core"))
-            .child(kit::chip(&theme, "▭ reno"));
+            .child(kit::icon_chip(&theme, Icon::Team, "team core"))
+            .child(kit::icon_chip(&theme, Icon::Folder, "reno"));
 
         let column = div()
             .w_full()

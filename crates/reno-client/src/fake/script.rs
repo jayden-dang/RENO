@@ -43,7 +43,8 @@ impl Script {
 
     async fn say(&self, text: &str) -> bool {
         self.step(|w, run| {
-            w.push(run, data::text(text));
+            // Each message is a paragraph, so consecutive ones read as separate paragraphs.
+            w.push(run, data::text(&format!("{text}\n\n")));
             true
         })
         .await
@@ -212,4 +213,15 @@ pub(super) async fn resume(shared: Arc<Shared>, run: RunId, decision: ApprovalDe
                 })
                 .await;
     }
+}
+
+/// The short scripted reply to a steering message, one step after it. A run that finished or
+/// was cancelled meanwhile gets no reply.
+pub(super) async fn reply_to_steer(shared: Arc<Shared>, run: RunId) {
+    let Some(script) = Script::new(shared, run) else {
+        return;
+    };
+    let _ = script
+        .say("Understood. I will take that into account.")
+        .await;
 }

@@ -2,7 +2,9 @@
 
 pub(crate) mod attention;
 pub(crate) mod composer;
+pub(crate) mod icon;
 pub(crate) mod kit;
+pub(crate) mod markdown_view;
 pub(crate) mod motion;
 pub(crate) mod notice;
 pub(crate) mod palette;

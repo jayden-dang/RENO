@@ -87,6 +87,12 @@ fn exec_event_every_variant() {
             ]}),
         ),
         (
+            ExecEvent::UserMessage {
+                text: "use the other branch".into(),
+            },
+            json!({"type": "user_message", "text": "use the other branch"}),
+        ),
+        (
             ExecEvent::NeedsApproval {
                 request_id: "r1".into(),
                 subject: ApprovalSubject {
@@ -220,7 +226,7 @@ fn daemon_hello() {
             pid: 4242,
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
-               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals"], "pid": 4242}),
+               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals", "run.steer"], "pid": 4242}),
     );
 }
 
@@ -325,4 +331,19 @@ fn approval_method_names_and_feature() {
     assert_eq!(<ApprovalsWatch as Subscription>::NAME, "approvals.watch");
     assert_eq!(FEATURE_APPROVALS, "approvals");
     assert!(FEATURES.contains(&FEATURE_APPROVALS));
+}
+
+#[test]
+fn run_steer() {
+    golden(
+        &RunSteerParams {
+            run_id: run_id(),
+            prompt: "prefer small commits".into(),
+        },
+        json!({"runId": "run_01HZX9", "prompt": "prefer small commits"}),
+    );
+    golden(&RunSteerResult {}, json!({}));
+    assert_eq!(<RunSteer as Method>::NAME, "run.steer");
+    assert_eq!(FEATURE_RUN_STEER, "run.steer");
+    assert!(FEATURES.contains(&FEATURE_RUN_STEER));
 }

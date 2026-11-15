@@ -6,7 +6,9 @@ use std::rc::Rc;
 
 use gpui::{App, Div, FontWeight, SharedString, Window, div, prelude::*, px};
 use reno_client::ConnectionStatus;
+use reno_proto::RunId;
 
+use super::icon::{Icon, icon};
 use super::kit;
 use super::theme::Theme;
 use crate::nav::Nav;
@@ -22,11 +24,12 @@ const RECENT: usize = 6;
 
 pub(crate) type NavHandler = Rc<dyn Fn(Nav, &mut Window, &mut App)>;
 pub(crate) type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+pub(crate) type RunHandler = Rc<dyn Fn(RunId, &mut Window, &mut App)>;
 
 pub(crate) struct SidebarHandlers {
     pub(crate) navigate: NavHandler,
     pub(crate) hide: ActionHandler,
-    pub(crate) recent_run: ActionHandler,
+    pub(crate) recent_run: RunHandler,
     pub(crate) settings: ActionHandler,
 }
 
@@ -68,6 +71,7 @@ fn nav_row(
     let hover = theme.row_selected();
     let row = div()
         .id(SharedString::from(format!("nav-{}", nav.label())))
+        .debug_selector(move || format!("nav-{}", nav.label()))
         .h(px(34.0))
         .px(px(10.0))
         .flex()
@@ -80,15 +84,11 @@ fn nav_row(
         .when(selected, |r| r.bg(theme.row_selected()))
         .when(!selected, |r| r.hover(move |s| s.bg(hover.opacity(0.6))))
         .on_click(move |_, window, cx| on_nav(nav, window, cx))
-        .child(
-            div()
-                .w(px(18.0))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .text_size(px(14.0))
-                .child(nav.glyph()),
-        )
+        .child(icon(
+            nav.icon(),
+            16.0,
+            if selected { theme.text } else { theme.muted },
+        ))
         .child(div().flex_1().child(nav.label()));
     match badge(nav, counts) {
         Some(b) => row.child(
@@ -139,11 +139,12 @@ pub(crate) fn sidebar(
         .gap(px(2.0))
         .pr(px(10.0))
         .child(
-            kit::icon_button(theme, "hide-sidebar", "◧", 28.0)
+            kit::icon_button(theme, "hide-sidebar", Icon::Sidebar, 28.0)
                 .on_click(move |_, window, cx| hide(window, cx)),
         )
         .child(
-            kit::icon_button(theme, "new-task", "+", 28.0)
+            kit::icon_button(theme, "new-task", Icon::Plus, 28.0)
+                .debug_selector(|| "new-task".to_owned())
                 .on_click(move |_, window, cx| new_task(Nav::Home, window, cx)),
         );
 
@@ -165,6 +166,7 @@ pub(crate) fn sidebar(
             .gap(px(2.0))
             .children(state.runs().into_iter().take(RECENT).map(|run| {
                 let open = Rc::clone(&handlers.recent_run);
+                let run_id = run.run_id.clone();
                 div()
                     .id(SharedString::from(format!("recent-{}", run.run_id)))
                     .h(px(32.0))
@@ -180,7 +182,8 @@ pub(crate) fn sidebar(
                         let hover = theme.row_selected().opacity(0.6);
                         move |s| s.bg(hover)
                     })
-                    .on_click(move |_, window, cx| open(window, cx))
+                    .on_click(move |_, window, cx| open(run_id.clone(), window, cx))
+                    .debug_selector(|| format!("recent-{}", run.run_id))
                     .child(kit::dot(kit::status_color(theme, run.status), 7.0))
                     .child(kit::exec_glyph(theme, run.executor.as_str(), 12.0))
                     .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
@@ -227,7 +230,7 @@ pub(crate) fn sidebar(
                 .child(daemon_text),
         )
         .child(
-            kit::icon_button(theme, "settings", "☼", 28.0)
+            kit::icon_button(theme, "settings", Icon::Settings, 28.0)
                 .on_click(move |_, window, cx| settings(window, cx)),
         );
 

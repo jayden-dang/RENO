@@ -21,13 +21,16 @@ use gpui::{
     WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use reno_client::ConnectionStatus;
+use reno_proto::RunId;
 
+use super::icon::Icon;
 use super::kit;
 use super::text_model::{EnterOutcome, TextModel};
 use super::theme::{self, Theme};
 use super::toast;
 use crate::route::{self, Class};
 use crate::store::Store;
+use crate::summary;
 
 actions!(
     composer,
@@ -93,8 +96,18 @@ pub(crate) fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// What the composer is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Home: a new task, with class chips and a route preview.
+    Home,
+    /// The Run screen: steers this run while it is live; a follow-up once it has finished.
+    Steer(RunId),
+}
+
 pub(crate) struct Composer {
     store: Entity<Store>,
+    mode: Mode,
     focus_handle: FocusHandle,
     model: TextModel,
     class: Class,
@@ -119,6 +132,7 @@ impl Composer {
         Self {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
+            mode: Mode::Home,
             focus_handle: cx.focus_handle(),
             model: TextModel::new(),
             class: Class::default(),
@@ -126,6 +140,13 @@ impl Composer {
             layout: None,
             selecting: false,
         }
+    }
+
+    /// A composer that steers `run`.
+    pub(crate) fn steer(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
+        let mut composer = Self::new(store, cx);
+        composer.mode = Mode::Steer(run);
+        composer
     }
 
     pub(crate) fn class(&self) -> Class {
@@ -156,15 +177,28 @@ impl Composer {
         self.store.read(cx).connection() == ConnectionStatus::Connected
     }
 
-    fn can_send(&self, cx: &App) -> bool {
-        self.model.can_submit() && self.connected(cx)
+    /// Steering needs a live run; Phase 0 has no follow-up once it has finished.
+    fn target_live(&self, cx: &App) -> bool {
+        match &self.mode {
+            Mode::Home => true,
+            Mode::Steer(run) => self
+                .store
+                .read(cx)
+                .state()
+                .run(run)
+                .is_some_and(|r| summary::is_steerable(r.status)),
+        }
+    }
+
+    pub(crate) fn can_send(&self, cx: &App) -> bool {
+        self.model.can_submit() && self.connected(cx) && self.target_live(cx)
     }
 
     /// Enter: send non-blank text to the daemon. A blank draft does nothing; with no daemon the
     /// draft is kept and a notice says why.
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Enter belongs to the IME while it is composing.
-        if self.model.marked().is_some() || !self.model.can_submit() {
+        if self.model.marked().is_some() || !self.model.can_submit() || !self.target_live(cx) {
             return;
         }
         if !self.connected(cx) {
@@ -177,9 +211,18 @@ impl Composer {
             return;
         }
         if let EnterOutcome::Submitted(prompt) = self.model.enter(false) {
-            let executor = route::route_for(self.class).executor_id;
-            self.store
-                .update(cx, |store, cx| store.run_task(prompt, executor, cx));
+            match &self.mode {
+                Mode::Home => {
+                    let executor = route::route_for(self.class).executor_id;
+                    self.store
+                        .update(cx, |store, cx| store.run_task(prompt, executor, cx));
+                }
+                Mode::Steer(run) => {
+                    let run = run.clone();
+                    self.store
+                        .update(cx, |store, cx| store.steer(run, prompt, cx));
+                }
+            }
             window.notify_text_input_changed(&self.focus_handle);
             cx.notify();
         }
@@ -815,6 +858,22 @@ impl Render for Composer {
         let focused = self.focus_handle.is_focused(window);
         let entity = cx.entity();
 
+        let placeholder: SharedString = match &self.mode {
+            Mode::Home => "What should Reno orchestrate?".into(),
+            Mode::Steer(run) => {
+                let state = self.store.read(cx);
+                let summary = state.state().run(run);
+                let bot = summary
+                    .and_then(|r| summary::parse_title(&r.title).bot.map(str::to_owned))
+                    .unwrap_or_else(|| "the run".to_owned());
+                if self.target_live(cx) {
+                    format!("Steer {bot}\u{2026} (delivered at the next step)").into()
+                } else {
+                    format!("Follow up with {bot}\u{2026} (not available yet)").into()
+                }
+            }
+        };
+
         let text_area = div()
             .w_full()
             .px(px(22.0))
@@ -831,13 +890,14 @@ impl Render for Composer {
             .child(TextArea {
                 composer: entity,
                 theme,
-                placeholder: "What should Reno orchestrate?".into(),
+                placeholder,
             });
 
         let class_chips = Class::ALL.map(|class| {
             let selected = class == self.class;
             div()
                 .id(SharedString::from(format!("class-{}", class.label())))
+                .debug_selector(move || format!("class-{}", class.label()))
                 .h(px(26.0))
                 .px(px(12.0))
                 .flex()
@@ -870,60 +930,68 @@ impl Render for Composer {
             }))
             .child("why?");
 
-        let send = div()
-            .id("send")
-            .flex_none()
-            .size(px(34.0))
-            .rounded(px(17.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(16.0))
-            .font_weight(FontWeight::BOLD)
+        let send = kit::send_button(&theme, can_send)
+            .debug_selector(|| "send".to_owned())
             .when(can_send, |s| {
-                s.bg(theme.accent)
-                    .text_color(gpui::white())
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
-            })
-            .when(!can_send, |s| {
-                s.bg(theme.raised.opacity(0.6)).text_color(theme.faint)
-            })
-            .child("↑");
+                s.on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+            });
 
-        let foot = div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(18.0))
-            .pb(px(14.0))
-            .child(
-                kit::icon_button(&theme, "attach", "⌁", 28.0)
-                    .on_click(|_, _, cx| toast::not_yet(cx, "Attachments")),
-            )
-            .children(class_chips)
-            .child(div().flex_1())
-            .child(
+        let foot = match &self.mode {
+            Mode::Home => div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(18.0))
+                .pb(px(14.0))
+                .child(
+                    kit::icon_button(&theme, "attach", Icon::Clip, 28.0)
+                        .on_click(|_, _, cx| toast::not_yet(cx, "Attachments")),
+                )
+                .children(class_chips)
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(13.0))
+                        .child(kit::exec_glyph(&theme, route.executor_id, 14.0))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(route.executor),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.muted)
+                                .child(format!("{} \u{b7} {}", route.model, route.bot)),
+                        )
+                        .child(why),
+                )
+                .child(send),
+            Mode::Steer(run) => {
+                let store = self.store.read(cx);
+                let summary = store.state().run(run);
+                let executor = summary.map_or("", |r| r.executor.as_str());
+                let model = summary
+                    .and_then(|r| r.model.clone())
+                    .unwrap_or_else(|| "model".to_owned());
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(13.0))
-                    .child(kit::exec_glyph(&theme, route.executor_id, 14.0))
+                    .gap(px(8.0))
+                    .px(px(18.0))
+                    .pb(px(14.0))
                     .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(route.executor),
+                        kit::chip(&theme, "")
+                            .child(kit::exec_glyph(&theme, executor, 13.0))
+                            .child(model),
                     )
-                    .child(
-                        div()
-                            .text_color(theme.muted)
-                            .child(format!("{} · {}", route.model, route.bot)),
-                    )
-                    .child(why),
-            )
-            .child(send);
+                    .child(div().flex_1())
+                    .child(send)
+            }
+        };
 
         div()
             .id("composer")

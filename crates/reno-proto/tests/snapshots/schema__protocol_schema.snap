@@ -7,7 +7,8 @@ expression: protocol_schema()
     "run.events.resume",
     "runs.watch",
     "sub.gap",
-    "approvals"
+    "approvals",
+    "run.steer"
   ],
   "methods": [
     {
@@ -787,6 +788,41 @@ expression: protocol_schema()
       }
     },
     {
+      "name": "run.steer",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.steer`.",
+        "properties": {
+          "prompt": {
+            "description": "The steering message, delivered at the executor's next step or turn boundary.",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The live run to steer."
+          }
+        },
+        "required": [
+          "runId",
+          "prompt"
+        ],
+        "title": "RunSteerParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.steer`: empty.",
+        "title": "RunSteerResult",
+        "type": "object"
+      }
+    },
+    {
       "name": "approval.list",
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1278,6 +1314,24 @@ expression: protocol_schema()
                   "type",
                   "requestId",
                   "subject"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A message from the human, added by `run.steer`. Only daemons that negotiate the\n`run.steer` feature emit it.",
+                "properties": {
+                  "text": {
+                    "description": "The message text.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "user_message",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
                 ],
                 "type": "object"
               },

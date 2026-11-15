@@ -4508,6 +4508,7 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "reno-client",
+ "reno-markdown",
  "reno-proto",
  "serde_json",
  "tokio",
