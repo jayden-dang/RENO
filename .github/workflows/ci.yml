@@ -30,6 +30,23 @@ jobs:
       - run: cargo test --workspace
       - run: cargo xtask check
 
+  # Quick benchmarks on Linux: shorter idle windows and 200 runs instead of 1,000. The job fails
+  # only when a number goes past an ARCHITECTURE 12 budget. The macOS numbers, and the full
+  # 1,000-run ones, are taken locally with `cargo xtask bench` (see docs/BENCHMARKS.md); a shared
+  # macOS runner is too noisy to hold a budget.
+  bench:
+    name: bench (ubuntu, quick)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask bench --quick
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-report
+          path: target/bench/report.*
+
   supply-chain:
     name: deny and unused deps
     runs-on: ubuntu-latest

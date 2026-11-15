@@ -10,6 +10,11 @@ use renod::paths::{self, DATA_DIR_ENV, SOCKET_ENV, ensure_private_dir};
 use renod::{Daemon, DaemonConfig, ExecutorSource, Paths, logging};
 use tokio::signal::unix::{SignalKind, signal};
 
+/// The allocator is chosen by measurement (ARCHITECTURE 17.8): the `mimalloc` feature selects v2.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The worker threads of the runtime (ARCHITECTURE 17.2).
 const WORKER_THREADS: usize = 2;
 /// The blocking pool: store opens and journal replay, nothing else.
@@ -34,6 +39,9 @@ struct Args {
     /// Register only the mock executor: look for no harness CLI, for tests.
     #[arg(long, env = "RENO_NO_HARNESSES", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
     no_harnesses: bool,
+    /// How many runs may be live at once [default: the kernel's own], for benchmarks.
+    #[arg(long, env = "RENO_MAX_CONCURRENT", hide = true, value_name = "N")]
+    max_concurrent: Option<usize>,
 }
 
 #[allow(clippy::print_stderr)]
@@ -75,21 +83,34 @@ fn run(args: Args) -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("cannot start the async runtime")?;
-    let outcome = runtime.block_on(serve(paths, args.mock_hold, !args.no_harnesses));
+    let outcome = runtime.block_on(serve(
+        paths,
+        args.mock_hold,
+        !args.no_harnesses,
+        args.max_concurrent,
+    ));
     if let Err(error) = &outcome {
         tracing::error!(%error, "renod failed");
     }
     outcome
 }
 
-async fn serve(paths: Paths, mock_hold: bool, harnesses: bool) -> anyhow::Result<()> {
-    let config = DaemonConfig::new(
+async fn serve(
+    paths: Paths,
+    mock_hold: bool,
+    harnesses: bool,
+    max_concurrent: Option<usize>,
+) -> anyhow::Result<()> {
+    let mut config = DaemonConfig::new(
         paths,
         ExecutorSource::Discover {
             hold_mock: mock_hold,
             harnesses,
         },
     );
+    if let Some(limit) = max_concurrent {
+        config.kernel.max_concurrent = limit;
+    }
     let daemon = Daemon::start(config).await?;
 
     let mut terminate = signal(SignalKind::terminate()).context("cannot watch SIGTERM")?;

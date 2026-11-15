@@ -18,6 +18,11 @@ mod tests;
 
 use std::process::ExitCode;
 
+/// The allocator is chosen by measurement (ARCHITECTURE 17.8): the `mimalloc` feature selects v2.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[allow(clippy::print_stderr)]
 fn main() -> ExitCode {
     let options = match app::Options::parse(std::env::args().skip(1), |key| std::env::var(key).ok())

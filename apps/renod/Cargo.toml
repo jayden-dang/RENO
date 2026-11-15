@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "renod"
 path = "src/main.rs"
 
+[features]
+# The allocator is chosen by measurement (`cargo xtask bench --compare-allocators`); see ARCHITECTURE 17.8.
+default = []
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 reno-proto.workspace = true
 reno-store.workspace = true
@@ -24,6 +29,7 @@ reno-rpc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
+mimalloc = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 thiserror.workspace = true

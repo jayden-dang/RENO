@@ -50,6 +50,9 @@ gpui = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }
 gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }
 
+# Allocator (T0.11). The v2 line, as ARCHITECTURE 17.8 names it; optional in renod and reno-app.
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+
 # Harness layer (imported).
 async-trait = "0.1"
 base64 = "0.22"

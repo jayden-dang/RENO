@@ -19,6 +19,9 @@ use std::process::{Command, ExitCode};
 
 use serde::Deserialize;
 
+mod bench;
+mod stats;
+
 /// Allowed normal and build dependencies between workspace members (ARCH-1).
 /// A member that is not listed is itself a violation.
 const ALLOWED_EDGES: &[(&str, &[&str])] = &[
@@ -145,10 +148,15 @@ impl fmt::Display for Violation {
 }
 
 fn main() -> ExitCode {
-    match std::env::args().nth(1).as_deref() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
         Some("check") => check(),
+        Some("bench") => bench::run(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask check");
+            eprintln!(
+                "usage: cargo xtask check | {}",
+                &bench::USAGE["usage: ".len()..]
+            );
             ExitCode::from(2)
         }
     }

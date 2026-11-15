@@ -6,11 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 reno-proto.workspace = true
 reno-markdown.workspace = true
 reno-client = { workspace = true, features = ["fake"] }
 futures.workspace = true
+mimalloc = { workspace = true, optional = true }
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 gpui.workspace = true
