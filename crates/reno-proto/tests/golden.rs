@@ -107,6 +107,61 @@ fn exec_event_every_variant() {
             }}),
         ),
         (
+            ExecEvent::ApprovalResolved {
+                request_id: "r1".into(),
+                decision: ApprovalOutcome::Approved,
+                by: ResolvedBy::Rule {
+                    name: "cargo in the worktree".into(),
+                },
+                message: None,
+            },
+            json!({"type": "approval_resolved", "requestId": "r1", "decision": "approved",
+                   "by": {"type": "rule", "name": "cargo in the worktree"}}),
+        ),
+        (
+            ExecEvent::ApprovalResolved {
+                request_id: "r2".into(),
+                decision: ApprovalOutcome::Denied,
+                by: ResolvedBy::Rule {
+                    name: "force push".into(),
+                },
+                message: Some("denied by policy: force push".into()),
+            },
+            json!({"type": "approval_resolved", "requestId": "r2", "decision": "denied",
+                   "by": {"type": "rule", "name": "force push"},
+                   "message": "denied by policy: force push"}),
+        ),
+        (
+            ExecEvent::ApprovalResolved {
+                request_id: "r3".into(),
+                decision: ApprovalOutcome::Approved,
+                by: ResolvedBy::Human,
+                message: None,
+            },
+            json!({"type": "approval_resolved", "requestId": "r3", "decision": "approved",
+                   "by": {"type": "human"}}),
+        ),
+        (
+            ExecEvent::ApprovalResolved {
+                request_id: "r4".into(),
+                decision: ApprovalOutcome::Denied,
+                by: ResolvedBy::Expired,
+                message: None,
+            },
+            json!({"type": "approval_resolved", "requestId": "r4", "decision": "denied",
+                   "by": {"type": "expired"}}),
+        ),
+        (
+            ExecEvent::ApprovalResolved {
+                request_id: "r5".into(),
+                decision: ApprovalOutcome::Denied,
+                by: ResolvedBy::RepeatDenial,
+                message: None,
+            },
+            json!({"type": "approval_resolved", "requestId": "r5", "decision": "denied",
+                   "by": {"type": "repeat_denial"}}),
+        ),
+        (
             ExecEvent::Done {
                 stop: StopReason::MaxTokens,
                 result: Some("partial".into()),
@@ -224,8 +279,8 @@ fn daemon_hello() {
             pid: 4242,
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
-               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals", "run.steer",
-                            "daemon.shutdown", "defs"], "pid": 4242}),
+               "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
+                            "approval.history", "run.steer", "daemon.shutdown", "defs"], "pid": 4242}),
     );
 }
 
@@ -330,6 +385,100 @@ fn approval_method_names_and_feature() {
     assert_eq!(<ApprovalsWatch as Subscription>::NAME, "approvals.watch");
     assert_eq!(FEATURE_APPROVALS, "approvals");
     assert!(FEATURES.contains(&FEATURE_APPROVALS));
+}
+
+#[test]
+fn approval_history() {
+    let decided = ApprovalRecord {
+        id: "appr_01K1".parse().unwrap(),
+        run_id: run_id(),
+        request_id: "r1".into(),
+        subject: approval().subject,
+        status: ApprovalStatus::Approved,
+        decided_by: Some(ResolvedBy::Human),
+        created_at_ms: 1_794_700_000_000,
+        decided_at_ms: Some(1_794_700_060_000),
+        expires_at_ms: 1_794_701_800_000,
+    };
+    let wire = json!({
+        "id": "appr_01K1",
+        "runId": "run_01HZX9",
+        "requestId": "r1",
+        "subject": approval_wire()["subject"].clone(),
+        "status": "approved",
+        "decidedBy": {"type": "human"},
+        "createdAtMs": 1_794_700_000_000u64,
+        "decidedAtMs": 1_794_700_060_000u64,
+        "expiresAtMs": 1_794_701_800_000u64
+    });
+    golden(&decided, wire.clone());
+    let pending = ApprovalRecord {
+        status: ApprovalStatus::Pending,
+        decided_by: None,
+        decided_at_ms: None,
+        ..decided.clone()
+    };
+    let value = serde_json::to_value(&pending).unwrap();
+    assert_eq!(value["status"], "pending");
+    assert!(value.get("decidedBy").is_none() && value.get("decidedAtMs").is_none());
+    for (status, name) in [
+        (ApprovalStatus::Denied, "denied"),
+        (ApprovalStatus::Expired, "expired"),
+    ] {
+        assert_eq!(serde_json::to_value(status).unwrap(), json!(name));
+    }
+    golden(
+        &ApprovalHistoryResult {
+            approvals: vec![decided],
+        },
+        json!({"approvals": [wire]}),
+    );
+    golden(&ApprovalHistoryParams::default(), json!({}));
+    golden(
+        &ApprovalHistoryParams {
+            run: Some(run_id()),
+            limit: Some(10),
+        },
+        json!({"run": "run_01HZX9", "limit": 10}),
+    );
+    assert_eq!(<ApprovalHistory as Method>::NAME, "approval.history");
+    assert_eq!(FEATURE_APPROVAL_HISTORY, "approval.history");
+    assert!(FEATURES.contains(&FEATURE_APPROVAL_HISTORY));
+}
+
+#[test]
+fn an_approval_subject_digest_ignores_the_raw_request_and_tells_subjects_apart() {
+    let base = approval().subject;
+    assert_eq!(base.digest().len(), 64);
+    let with_other_raw = ApprovalSubject {
+        raw: json!({"toolUseId": "toolu_2"}),
+        ..base.clone()
+    };
+    assert_eq!(
+        base.digest(),
+        with_other_raw.digest(),
+        "raw is not part of identity"
+    );
+    for other in [
+        ApprovalSubject {
+            command: Some("git push origin main".into()),
+            ..base.clone()
+        },
+        ApprovalSubject {
+            tool: "sh".into(),
+            ..base.clone()
+        },
+        ApprovalSubject {
+            action: ActionClass::Network,
+            ..base.clone()
+        },
+        ApprovalSubject {
+            paths: vec!["/x".into()],
+            ..base.clone()
+        },
+    ] {
+        assert_ne!(base.digest(), other.digest(), "{other:?}");
+    }
 }
 
 #[test]

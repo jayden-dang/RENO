@@ -202,6 +202,58 @@ pub struct ApprovalSubject {
     pub raw: serde_json::Value,
 }
 
+impl ApprovalSubject {
+    /// A digest that identifies this subject for the repeat-denial rule: the SHA-256, as 64
+    /// lowercase hex digits, of the canonical JSON of the action class, tool, command and paths.
+    ///
+    /// `raw` is left out on purpose. It is the harness's own request and may carry a per-request
+    /// id, which would make every repeat of a denied action look new. Paths are digested as
+    /// written; two spellings of one path are two subjects, which errs towards asking again.
+    pub fn digest(&self) -> String {
+        crate::defs::content_hash(&serde_json::json!({
+            "action": self.action,
+            "tool": self.tool,
+            "command": self.command,
+            "paths": self.paths,
+        }))
+    }
+}
+
+/// How an approval request ended: the executor was told yes or no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOutcome {
+    /// The action may proceed.
+    Approved,
+    /// The action is refused.
+    Denied,
+}
+
+/// Who or what resolved an approval request, and so why the transcript shows the outcome it
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ResolvedBy {
+    /// A person decided it.
+    Human,
+    /// A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or
+    /// `rules[N]` when it has none, or `default` when no rule matched and the policy's default
+    /// effect applied.
+    Rule {
+        /// The rule's name.
+        name: String,
+    },
+    /// Nobody decided before the approval's time limit, or the run ended or the daemon
+    /// restarted first. Always an outcome of `denied`.
+    Expired,
+    /// The same action was denied earlier in this run, so it was denied again unasked.
+    RepeatDenial,
+}
+
 /// One event from a running executor. A failing harness yields `Done { stop: Error }`; the
 /// stream itself never errors mid-run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -265,6 +317,22 @@ pub enum ExecEvent {
         request_id: String,
         /// What is being approved.
         subject: ApprovalSubject,
+    },
+    /// An approval request was resolved, by a person, a policy rule, a time limit or the
+    /// repeat-denial rule. Follows the `NeedsApproval` it answers, so a transcript shows why the
+    /// harness was told yes or no. Only daemons that negotiate the `approval.history` feature
+    /// emit it.
+    ApprovalResolved {
+        /// The `request_id` of the `NeedsApproval` this answers.
+        request_id: String,
+        /// What the harness was told.
+        decision: ApprovalOutcome,
+        /// Who or what decided.
+        by: ResolvedBy,
+        /// For a denial by a rule, the rule's message. The harness's own decision type carries no
+        /// text, so this is where the reason is kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// A message from the human, added by `run.steer`. Only daemons that negotiate the
     /// `run.steer` feature emit it.

@@ -286,8 +286,15 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "The policy: rules in order, and what to do when none matches.\n\n**The first rule that matches decides.** Put the narrow and dangerous rules first.\n\n```toml\ndefault = \"ask\"\n\n[[rules]]\nnote = \"never reset hard\"\neffect = \"deny\"\nmatch = { action = \"command\", command = \"git reset --hard*\" }\n\n[[rules]]\neffect = \"allow\"\nmatch = { action = \"command\", command = \"cargo *\", scope = [\"keeper\", \"builder\"] }\n```\n\nPaths in a rule are matched relative to the run's worktree when they are inside it, and as\nabsolute paths otherwise. So `src/**` means the worktree's `src`, and `/**` matches only\npaths outside the worktree.",
+      "description": "The policy: rules in order, and what to do when none matches.\n\n**The first rule that matches decides.** Put the narrow and dangerous rules first.\n\n```toml\ndefault = \"ask\"\n\n[[rules]]\nnote = \"never reset hard\"\neffect = \"deny\"\nmatch = { action = \"command\", command = \"git reset --hard*\" }\n\n[[rules]]\neffect = \"allow\"\nmatch = { action = \"command\", command = \"cargo *\", scope = [\"keeper\", \"builder\"] }\n```\n\nPaths in a rule are matched relative to the run's worktree when they are inside it, and as\nabsolute paths otherwise. So `src/**` means the worktree's `src`, and `/**` matches only\npaths outside the worktree. The exact rules, including how a path with `..` is judged, are\nin the docs of `reno_proto::defs::evaluate`.\n\nAn action that asks waits for a human for at most `approval_ttl` (30 minutes unless the\ndaemon is configured otherwise), then it is denied as expired.",
       "properties": {
+        "approval_ttl": {
+          "description": "How long an `ask` waits for a human before it is denied as expired, as a duration such\nas `30m`. The daemon's own default applies when absent. A change applies to approvals\nraised after it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "default": {
           "$ref": "#/$defs/PolicyEffect",
           "default": "ask",
@@ -593,6 +600,7 @@ expression: protocol_schema()
     "runs.watch",
     "sub.gap",
     "approvals",
+    "approval.history",
     "run.steer",
     "daemon.shutdown",
     "defs"
@@ -1729,6 +1737,297 @@ expression: protocol_schema()
       }
     },
     {
+      "name": "approval.history",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `approval.history`.",
+        "properties": {
+          "limit": {
+            "description": "Most records, newest decision first. Defaults to [`APPROVAL_HISTORY_DEFAULT_LIMIT`] and\nis cut to [`APPROVAL_HISTORY_MAX_LIMIT`].",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only this run's approvals; every run's when absent."
+          }
+        },
+        "title": "ApprovalHistoryParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          },
+          "ApprovalId": {
+            "pattern": "^appr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ApprovalRecord": {
+            "description": "The stored record of one approval request: what was asked, and how it was resolved.",
+            "properties": {
+              "createdAtMs": {
+                "description": "When it was raised, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "decidedAtMs": {
+                "description": "When it was decided. Absent while pending.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "decidedBy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResolvedBy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Who or what decided. Absent while the approval is pending."
+              },
+              "expiresAtMs": {
+                "description": "The deadline after which an undecided approval is denied as expired.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "$ref": "#/$defs/ApprovalId",
+                "description": "The approval's id."
+              },
+              "requestId": {
+                "description": "The harness's id for the request (the `requestId` of the `NeedsApproval` event).",
+                "type": "string"
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run that raised it."
+              },
+              "status": {
+                "$ref": "#/$defs/ApprovalStatus",
+                "description": "Where it stands."
+              },
+              "subject": {
+                "$ref": "#/$defs/ApprovalSubject",
+                "description": "Exactly what was asked."
+              }
+            },
+            "required": [
+              "id",
+              "runId",
+              "requestId",
+              "subject",
+              "status",
+              "createdAtMs",
+              "expiresAtMs"
+            ],
+            "type": "object"
+          },
+          "ApprovalStatus": {
+            "description": "Where an approval record stands.",
+            "oneOf": [
+              {
+                "const": "pending",
+                "description": "Waiting for a human.",
+                "type": "string"
+              },
+              {
+                "const": "approved",
+                "description": "The harness was told yes.",
+                "type": "string"
+              },
+              {
+                "const": "denied",
+                "description": "The harness was told no.",
+                "type": "string"
+              },
+              {
+                "const": "expired",
+                "description": "Nobody decided in time, or the run ended or the daemon restarted first. The harness, if\nit was still there, was told no.",
+                "type": "string"
+              }
+            ]
+          },
+          "ApprovalSubject": {
+            "description": "The exact thing a human is asked to approve.",
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ActionClass",
+                "description": "Class of the action."
+              },
+              "command": {
+                "description": "The command line, for command actions.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paths": {
+                "default": [],
+                "description": "Paths the action touches.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "raw": {
+                "default": null,
+                "description": "The harness's own request, kept for the audit record."
+              },
+              "tool": {
+                "description": "Tool the action goes through.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "tool"
+            ],
+            "type": "object"
+          },
+          "ResolvedBy": {
+            "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",
+            "oneOf": [
+              {
+                "description": "A person decided it.",
+                "properties": {
+                  "type": {
+                    "const": "human",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "properties": {
+                  "name": {
+                    "description": "The rule's name.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "rule",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "properties": {
+                  "type": {
+                    "const": "expired",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The same action was denied earlier in this run, so it was denied again unasked.",
+                "properties": {
+                  "type": {
+                    "const": "repeat_denial",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `approval.history`.",
+        "properties": {
+          "approvals": {
+            "description": "Decided approvals (never pending ones), newest decision first.",
+            "items": {
+              "$ref": "#/$defs/ApprovalRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "approvals"
+        ],
+        "title": "ApprovalHistoryResult",
+        "type": "object"
+      }
+    },
+    {
       "name": "def.list",
       "params": {
         "$defs": {
@@ -2184,6 +2483,21 @@ expression: protocol_schema()
               }
             ]
           },
+          "ApprovalOutcome": {
+            "description": "How an approval request ended: the executor was told yes or no.",
+            "oneOf": [
+              {
+                "const": "approved",
+                "description": "The action may proceed.",
+                "type": "string"
+              },
+              {
+                "const": "denied",
+                "description": "The action is refused.",
+                "type": "string"
+              }
+            ]
+          },
           "ApprovalSubject": {
             "description": "The exact thing a human is asked to approve.",
             "properties": {
@@ -2413,6 +2727,41 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "An approval request was resolved, by a person, a policy rule, a time limit or the\nrepeat-denial rule. Follows the `NeedsApproval` it answers, so a transcript shows why the\nharness was told yes or no. Only daemons that negotiate the `approval.history` feature\nemit it.",
+                "properties": {
+                  "by": {
+                    "$ref": "#/$defs/ResolvedBy",
+                    "description": "Who or what decided."
+                  },
+                  "decision": {
+                    "$ref": "#/$defs/ApprovalOutcome",
+                    "description": "What the harness was told."
+                  },
+                  "message": {
+                    "description": "For a denial by a rule, the rule's message. The harness's own decision type carries no\ntext, so this is where the reason is kept.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "requestId": {
+                    "description": "The `request_id` of the `NeedsApproval` this answers.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "approval_resolved",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requestId",
+                  "decision",
+                  "by"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "A message from the human, added by `run.steer`. Only daemons that negotiate the\n`run.steer` feature emit it.",
                 "properties": {
                   "text": {
@@ -2494,6 +2843,68 @@ expression: protocol_schema()
               "prompt"
             ],
             "type": "object"
+          },
+          "ResolvedBy": {
+            "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",
+            "oneOf": [
+              {
+                "description": "A person decided it.",
+                "properties": {
+                  "type": {
+                    "const": "human",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "properties": {
+                  "name": {
+                    "description": "The rule's name.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "rule",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "properties": {
+                  "type": {
+                    "const": "expired",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The same action was denied earlier in this run, so it was denied again unasked.",
+                "properties": {
+                  "type": {
+                    "const": "repeat_denial",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "Seq": {
             "description": "A per-run event sequence number. A run's journal numbers its events from 1 without gaps; a\n`from` of `Seq(0)` therefore means \"from the start\".",

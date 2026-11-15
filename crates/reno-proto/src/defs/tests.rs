@@ -859,6 +859,43 @@ fn policy_rules_are_bounded() {
 }
 
 #[test]
+fn policy_approval_ttl_is_a_bounded_duration() {
+    let set = load(&[file(DefKind::Policy, "policy", "approval_ttl = \"10m\"")]).unwrap();
+    assert_eq!(
+        set.policy().unwrap().approval_ttl(),
+        Some(std::time::Duration::from_secs(600))
+    );
+    assert_eq!(PolicyDef::default().approval_ttl(), None);
+    for (text, message) in [
+        ("0s", "is zero"),
+        ("1ms", "is under the minimum of 1s"),
+        ("8d", "is over the maximum of 168h"),
+        ("soon", "is not a duration"),
+    ] {
+        let errors = policy_errors(&format!("approval_ttl = \"{text}\""));
+        assert_one(&errors, "policy.toml: approval_ttl: ");
+        assert!(errors[0].contains(message), "{text}: {errors:?}");
+    }
+}
+
+#[test]
+fn an_unset_approval_ttl_leaves_the_content_hash_alone() {
+    let before = load(&[file(DefKind::Policy, "policy", "default = \"ask\"")]).unwrap();
+    let hash = before.policy().unwrap().hash().to_owned();
+    // The canonical form of a policy with no TTL has no `approval_ttl` key at all, so every
+    // version stored before the field existed keeps its hash.
+    assert!(
+        !before
+            .policy()
+            .unwrap()
+            .canonical()
+            .contains("approval_ttl")
+    );
+    let with = load(&[file(DefKind::Policy, "policy", "approval_ttl = \"5m\"")]).unwrap();
+    assert_ne!(with.policy().unwrap().hash(), hash);
+}
+
+#[test]
 fn policy_unknown_keys_are_refused() {
     let errors = policy_errors("mode = \"strict\"");
     assert_one(

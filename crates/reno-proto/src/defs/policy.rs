@@ -1,13 +1,15 @@
 //! `policy.toml`: an ordered list of rules that decide what happens to an action
-//! (ARCHITECTURE section 8). This version loads, validates and versions the policy. Enforcement
-//! is T1.6.
+//! (ARCHITECTURE section 8). Loading, validating and versioning are here; the pure evaluation
+//! of a rule list against an approval subject is in [`super::evaluate`].
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::time::check_duration;
 use super::trigger::check_glob;
 use super::{Sink, check_ref_name};
 use crate::exec::ActionClass;
@@ -18,6 +20,10 @@ pub(super) const MAX_RULES: usize = 1000;
 pub(super) const MAX_SCOPE_BOTS: usize = 256;
 /// The longest `note`, in characters.
 pub(super) const MAX_NOTE_CHARS: usize = 200;
+/// The shortest `approval_ttl`.
+const MIN_APPROVAL_TTL: Duration = Duration::from_secs(1);
+/// The longest `approval_ttl`.
+const MAX_APPROVAL_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// What a matching rule does to the action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -50,13 +56,22 @@ pub enum PolicyEffect {
 ///
 /// Paths in a rule are matched relative to the run's worktree when they are inside it, and as
 /// absolute paths otherwise. So `src/**` means the worktree's `src`, and `/**` matches only
-/// paths outside the worktree.
+/// paths outside the worktree. The exact rules, including how a path with `..` is judged, are
+/// in the docs of `reno_proto::defs::evaluate`.
+///
+/// An action that asks waits for a human for at most `approval_ttl` (30 minutes unless the
+/// daemon is configured otherwise), then it is denied as expired.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDef {
     /// The effect when no rule matches. Defaults to `ask`.
     #[serde(default = "default_effect")]
     pub default: PolicyEffect,
+    /// How long an `ask` waits for a human before it is denied as expired, as a duration such
+    /// as `30m`. The daemon's own default applies when absent. A change applies to approvals
+    /// raised after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_ttl: Option<String>,
     /// The rules, in order.
     #[serde(default)]
     pub rules: Vec<PolicyRule>,
@@ -70,6 +85,7 @@ impl Default for PolicyDef {
     fn default() -> Self {
         Self {
             default: default_effect(),
+            approval_ttl: None,
             rules: Vec::new(),
         }
     }
@@ -174,7 +190,30 @@ impl JsonSchema for RuleScope {
 }
 
 impl PolicyDef {
+    /// The time limit of an `ask`, when the policy sets one. A policy that passed validation
+    /// never holds a value that does not parse, so `None` means "not set".
+    pub fn approval_ttl(&self) -> Option<Duration> {
+        let text = self.approval_ttl.as_deref()?;
+        check_duration(
+            text,
+            MIN_APPROVAL_TTL,
+            MAX_APPROVAL_TTL,
+            "the approval time limit",
+        )
+        .ok()
+    }
+
     pub(super) fn validate(&self, sink: &mut Sink<'_>) {
+        if let Some(text) = &self.approval_ttl
+            && let Err(message) = check_duration(
+                text,
+                MIN_APPROVAL_TTL,
+                MAX_APPROVAL_TTL,
+                "the approval time limit",
+            )
+        {
+            sink.err("approval_ttl", message);
+        }
         if self.rules.len() > MAX_RULES {
             sink.err(
                 "rules",

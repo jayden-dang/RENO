@@ -54,6 +54,7 @@
 //!   bot it names.
 
 mod bot;
+mod eval;
 mod hash;
 mod policy;
 mod time;
@@ -72,6 +73,7 @@ use serde_json::Value;
 use crate::ids::ExecutorId;
 
 pub use bot::{BotDef, Budget};
+pub use eval::{DEFAULT_RULE, EvalContext, PolicyDecision, RuleRef, evaluate};
 pub use hash::{canonical_json, content_hash};
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
 pub use time::{MIN_EVERY, parse_duration};

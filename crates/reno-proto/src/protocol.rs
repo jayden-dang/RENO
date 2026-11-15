@@ -21,12 +21,17 @@ use crate::defs::{
     BotDef, BotPin, DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult,
     DefsSnapshot, DefsWatchParams, PolicyDef, TriggerDef,
 };
-use crate::exec::{ApprovalSubject, ExecEvent};
+use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
 
 /// The wire protocol version. Bumped only for a breaking change.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Records `approval.history` returns when `limit` is absent.
+pub const APPROVAL_HISTORY_DEFAULT_LIMIT: u32 = 50;
+/// The most records one `approval.history` call returns; a larger `limit` is cut to this.
+pub const APPROVAL_HISTORY_MAX_LIMIT: u32 = 500;
 
 /// Characters of a prompt a list or watch summary carries (`run.get` has the whole prompt).
 pub const PROMPT_SUMMARY_CHARS: usize = 280;
@@ -48,6 +53,9 @@ pub const FEATURE_APPROVALS: &str = "approvals";
 /// `task.run` accepts `bot`.
 pub const FEATURE_DEFS: &str = "defs";
 
+/// Feature: `approval.history` exists, and journals may carry `ExecEvent::ApprovalResolved`.
+pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
+
 /// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
 pub const FEATURE_RUN_STEER: &str = "run.steer";
 /// Feature: `daemon.shutdown` exists.
@@ -59,6 +67,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUNS_WATCH,
     FEATURE_SUB_GAP,
     FEATURE_APPROVALS,
+    FEATURE_APPROVAL_HISTORY,
     FEATURE_RUN_STEER,
     FEATURE_DAEMON_SHUTDOWN,
     FEATURE_DEFS,
@@ -366,6 +375,68 @@ pub struct ApprovalDecideParams {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalDecideResult {}
 
+/// Where an approval record stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    /// Waiting for a human.
+    Pending,
+    /// The harness was told yes.
+    Approved,
+    /// The harness was told no.
+    Denied,
+    /// Nobody decided in time, or the run ended or the daemon restarted first. The harness, if
+    /// it was still there, was told no.
+    Expired,
+}
+
+/// The stored record of one approval request: what was asked, and how it was resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRecord {
+    /// The approval's id.
+    pub id: ApprovalId,
+    /// The run that raised it.
+    pub run_id: RunId,
+    /// The harness's id for the request (the `requestId` of the `NeedsApproval` event).
+    pub request_id: String,
+    /// Exactly what was asked.
+    pub subject: ApprovalSubject,
+    /// Where it stands.
+    pub status: ApprovalStatus,
+    /// Who or what decided. Absent while the approval is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<ResolvedBy>,
+    /// When it was raised, in milliseconds since the Unix epoch.
+    pub created_at_ms: u64,
+    /// When it was decided. Absent while pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at_ms: Option<u64>,
+    /// The deadline after which an undecided approval is denied as expired.
+    pub expires_at_ms: u64,
+}
+
+/// Params of `approval.history`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalHistoryParams {
+    /// Only this run's approvals; every run's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunId>,
+    /// Most records, newest decision first. Defaults to [`APPROVAL_HISTORY_DEFAULT_LIMIT`] and
+    /// is cut to [`APPROVAL_HISTORY_MAX_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of `approval.history`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalHistoryResult {
+    /// Decided approvals (never pending ones), newest decision first.
+    pub approvals: Vec<ApprovalRecord>,
+}
+
 /// Params of the `approvals.watch` subscription.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalsWatchParams {}
@@ -471,6 +542,11 @@ method!(
     /// `approval.decide`: answers one pending approval. Needs feature `approvals`.
     ApprovalDecide, "approval.decide", ApprovalDecideParams => ApprovalDecideResult
 );
+method!(
+    /// `approval.history`: decided approvals, who decided each and by which rule. Needs feature
+    /// `approval.history`.
+    ApprovalHistory, "approval.history", ApprovalHistoryParams => ApprovalHistoryResult
+);
 
 subscription!(
     /// `run.events`: a run's journal from a sequence number, then live.
@@ -545,6 +621,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunSteer>(),
             method_entry::<ApprovalList>(),
             method_entry::<ApprovalDecide>(),
+            method_entry::<ApprovalHistory>(),
             method_entry::<DefList>(),
             method_entry::<DefGet>(),
             method_entry::<DefValidate>(),
