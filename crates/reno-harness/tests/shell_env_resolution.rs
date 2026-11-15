@@ -78,7 +78,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         .expect("hermes resolves via login-shell PATH");
     assert_eq!(hermes, shell_bin.join("hermes"), "{hermes:?}");
     assert!(
-        reno_harness::CodexHarness::new().installed(),
+        reno_harness::CodexExecutor::new().installed(),
         "codex resolves via login-shell PATH"
     );
 }

@@ -1,10 +1,9 @@
 #![cfg(unix)]
-use reno_harness::{AcpHarness, CodexHarness, Harness};
+use reno_harness::{AcpHarness, Harness};
 use std::{path::Path, sync::Arc};
 
 fn harnesses(binary: &Path) -> Vec<Arc<dyn Harness>> {
     vec![
-        Arc::new(CodexHarness::new().with_executable(binary)),
         Arc::new(AcpHarness::grok().with_executable(binary)),
         Arc::new(AcpHarness::hermes().with_executable(binary)),
         Arc::new(AcpHarness::antigravity().with_executable(binary)),
@@ -93,49 +92,6 @@ async fn every_native_catalog_retains_last_good_and_cold_failure_stays_an_error(
     }
 }
 
-#[tokio::test]
-async fn codex_empty_catalogs_retire_children_and_next_request_spawns_fresh() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = binary(dir.path());
-    let harness = CodexHarness::new().with_executable(binary);
-    let state = dir.path().join("state.json");
-    std::fs::write(&state, r#"{"fail":false,"empty":true,"id":"ignored"}"#).unwrap();
-    let error = harness.model_catalog(true).await.unwrap_err();
-    assert_eq!(
-        reno_harness::CatalogFailure::classify(&error),
-        reno_harness::CatalogFailureCode::Failed
-    );
-    let reaped = |expected: usize| {
-        let ids: Vec<i32> = std::fs::read_to_string(dir.path().join("pids"))
-            .unwrap()
-            .lines()
-            .map(|line| line.parse().unwrap())
-            .collect();
-        assert_eq!(ids.len(), expected);
-        for pid in ids {
-            assert_eq!(
-                unsafe { libc::kill(pid, 0) },
-                -1,
-                "discovery child {pid} still exists"
-            );
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            );
-        }
-    };
-    reaped(3);
-    std::fs::write(&state, r#"{"fail":false,"id":"good"}"#).unwrap();
-    let good = harness.model_catalog(true).await.unwrap();
-    assert_eq!(good.models[0].id, "good");
-    reaped(4);
-    std::fs::write(&state, r#"{"fail":false,"empty":true,"id":"ignored"}"#).unwrap();
-    let retained = harness.model_catalog(true).await.unwrap();
-    assert_eq!(retained.source, "cache");
-    assert_eq!(retained.models, good.models);
-    reaped(7);
-}
-
 #[test]
 fn auth_context_child() {
     let Some(root) = std::env::var_os("RENO_MODEL_CONTEXT_TEST_ROOT") else {
@@ -144,7 +100,6 @@ fn auth_context_child() {
     let root = std::path::PathBuf::from(root);
     let binary = binary(&root);
     for (harness, auth) in harnesses(&binary).into_iter().zip([
-        ".codex/auth.json",
         ".grok/auth.json",
         ".hermes/auth.json",
         ".gemini/antigravity-acp/oauth_creds.json",

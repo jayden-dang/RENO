@@ -3,7 +3,11 @@
 #
 # Speaks scripted JSON-RPC 2.0 over stdio: initialize handshake, thread
 # start/resume, then a scenario picked from the turn/start prompt text. Driven
-# by crates/harness/tests/codex.rs.
+# by crates/reno-harness/tests/codex.rs and crates/reno-kernel/tests/codex_e2e.rs.
+#
+# The approval request shapes follow the app-server protocol of codex-cli 0.164.0
+# (codex-rs/app-server-protocol, v2/item.rs and v2/mcp.rs). They are hand-written, not
+# captures: no fixture here is a live transcript except tests/fixtures/codex/live-*.jsonl.
 
 emit() { printf '%s\n' "$1"; }
 rid() { printf '%s' "$1" | sed 's/.*"id":\([0-9]*\).*/\1/'; }
@@ -12,6 +16,11 @@ has() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
 fail_turn() { # $1 = request id, $2 = message
   emit "{\"id\":$1,\"result\":{\"turn\":{\"id\":\"t-bad\"}}}"
   emit "{\"method\":\"turn/failed\",\"params\":{\"turn\":{\"id\":\"t-bad\",\"error\":{\"message\":\"$2\"}}}}"
+}
+
+# A completed agent message: the run's result text.
+say() {
+  emit "{\"method\":\"item/completed\",\"params\":{\"item\":{\"id\":\"final\",\"type\":\"agentMessage\",\"text\":\"$1\"}}}"
 }
 
 # ---- handshake -------------------------------------------------------------
@@ -35,32 +44,18 @@ has "$line" '"method":"initialized"' || exit 1
 
 # ---- thread start / resume -------------------------------------------------
 read -r line || exit 1
-if has "$line" '"method":"account/read"'; then
-  emit "{\"id\":$(rid "$line"),\"result\":{\"account\":null,\"requiresOpenaiAuth\":false}}"
-  read -r line || exit 1
-fi
-if has "$line" '"method":"config/read"'; then
-  emit "{\"id\":$(rid "$line"),\"result\":{\"config\":{\"mcp_servers\":{\"test\":{\"enabled\":true}}}}}"
-  read -r line || exit 1
-fi
 thread_line="$line"
 if has "$line" 'crash-on-thread-start'; then
   # The app-server dies under thread/start: the run must report why.
   echo 'thread 1 panicked at config.rs: bad toml in mcp_servers' >&2
   exit 3
 fi
-if has "$line" '"method":"skills/list"'; then
-  # Skill discovery probe: answer with two cwd groups sharing one skill
-  # (dedupe by identity) and settle; no thread ever starts.
-  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"cwd\":\"/w\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"Model-facing paragraph about images.\",\"interface\":{\"displayName\":\"Image Gen\",\"shortDescription\":\"Generate or edit images\"}},{\"name\":\"bare\",\"path\":\"/skills/bare/SKILL.md\",\"description\":\"No interface block\"}]},{\"cwd\":\"/x\",\"skills\":[{\"name\":\"imagegen\",\"path\":\"/skills/imagegen/SKILL.md\",\"description\":\"dupe\",\"interface\":{\"shortDescription\":\"dupe\"}}]}]}}"
-  exec sleep 30
-fi
 if has "$line" '"method":"model/list"'; then
   # Live model discovery: force pagination and put the default model second,
-  # proving the harness consumes nextCursor and honors isDefault.
+  # proving the driver consumes nextCursor and honors isDefault.
   has "$line" '"includeHidden":false' || exit 1
   has "$line" '"limit":20' || exit 1
-  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"id\":\"gpt-5.6-terra\",\"model\":\"gpt-5.6-terra\",\"displayName\":\"GPT-5.6-Terra\",\"description\":\"Balanced agentic coding model for everyday work.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"high\"}],\"additionalSpeedTiers\":[],\"serviceTiers\":[],\"defaultServiceTier\":null,\"isDefault\":false},{\"id\":\"gpt-6-astra\",\"model\":\"gpt-6-astra\",\"displayName\":\"GPT-6-Astra\",\"description\":\"Our most capable model for complex, demanding work.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"medium\"},{\"reasoningEffort\":\"high\"},{\"reasoningEffort\":\"xhigh\"},{\"reasoningEffort\":\"max\"},{\"reasoningEffort\":\"ultra\"}],\"additionalSpeedTiers\":[\"fast\"],\"serviceTiers\":[{\"id\":\"priority\",\"name\":\"Fast\"}],\"defaultServiceTier\":null,\"isDefault\":true}],\"nextCursor\":\"page-2\"}}"
+  emit "{\"id\":$(rid "$line"),\"result\":{\"data\":[{\"id\":\"gpt-5.6-terra\",\"model\":\"gpt-5.6-terra\",\"displayName\":\"GPT-5.6-Terra\",\"description\":\"Balanced agentic coding model for everyday work.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"high\"}],\"additionalSpeedTiers\":[],\"serviceTiers\":[],\"defaultServiceTier\":null,\"isDefault\":false},{\"id\":\"gpt-hidden\",\"model\":\"gpt-hidden\",\"displayName\":\"Hidden\",\"hidden\":true,\"isDefault\":false},{\"id\":\"gpt-6-astra\",\"model\":\"gpt-6-astra\",\"displayName\":\"GPT-6-Astra\",\"description\":\"Our most capable model for complex, demanding work.\",\"hidden\":false,\"supportedReasoningEfforts\":[{\"reasoningEffort\":\"low\"},{\"reasoningEffort\":\"ultra\"}],\"additionalSpeedTiers\":[\"fast\"],\"serviceTiers\":[{\"id\":\"priority\",\"name\":\"Fast\"}],\"defaultServiceTier\":null,\"isDefault\":true}],\"nextCursor\":\"page-2\"}}"
   read -r line || exit 1
   has "$line" '"method":"model/list"' || exit 1
   has "$line" '"cursor":"page-2"' || exit 1
@@ -70,8 +65,6 @@ fi
 if has "$line" '"method":"thread/resume"'; then
   if has "$line" '"threadId":"resume-with-child-v1"'; then
     emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
-  elif has "$line" '"threadId":"resume-with-child-v2"'; then
-    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"subAgentActivity\",\"id\":\"spawn-alpha\",\"kind\":\"started\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"},{\"type\":\"subAgentActivity\",\"id\":\"subagent-completed-old\",\"kind\":\"completed\",\"agentThreadId\":\"child-alpha\",\"agentPath\":\"/root/alpha\"}]}]}}}"
   elif has "$line" '"threadId":"resume-fail"'; then
     # Missing rollout (live 0.164.0 wording): reject, expect the fresh-start
     # fallback.
@@ -119,76 +112,9 @@ fi
 read -r turnline || exit 1
 tid=$(rid "$turnline")
 
-if has "$turnline" '"method":"thread/compact/start"'; then
-  emit "{\"id\":$tid,\"result\":{}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"native-1"}}}'
-  emit '{"method":"item/completed","params":{"item":{"id":"compact-1","type":"contextCompaction"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
-  exec sleep 30
-fi
-if has "$turnline" '"method":"review/start"'; then
-  has "$turnline" '"delivery":"inline"' || exit 1
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"native-1\"}}}"
-  emit '{"method":"item/completed","params":{"item":{"id":"review-1","type":"exitedReviewMode","review":"Review fixture result"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"native-1","status":"completed"}}}'
-  exec sleep 30
-fi
-
 case "$turnline" in
-*scenario:native-skills*)
-  for want in '"type":"skill"' '"path":"/repo/a b/SKILL.md"' '[lib.rs](src/lib.rs)'; do
-    has "$turnline" "$want" || { fail_turn "$tid" "initial native skill or file path missing"; exit 0; }
-  done
-  if has "$turnline" 'reno-invoke:' || has "$turnline" 'reno-file:'; then
-    fail_turn "$tid" "private chip URI leaked"; exit 0
-  fi
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  read -r steerline || exit 1
-  sid=$(rid "$steerline")
-  for want in '"method":"turn/steer"' '"type":"skill"' '"path":"/repo/other/SKILL.md"'; do
-    has "$steerline" "$want" || { fail_turn "$sid" "steered native skill missing"; exit 0; }
-  done
-  emit "{\"id\":$sid,\"result\":{}}"
-  emit '{"method":"item/agentMessage/delta","params":{"delta":"native skills accepted"}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
-  ;;
-
-*scenario:native-queue-order*)
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
-  sleep 0.1
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
-  read -r next || exit 1
-  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "followup overtook queued review"; exit 0; }
-  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
-  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
-  read -r next || exit 1
-  has "$next" '"method":"turn/start"' && has "$next" 'Follow up after review' || { fail_turn "$(rid "$next")" "followup was lost"; exit 0; }
-  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
-  emit '{"method":"item/agentMessage/delta","params":{"delta":"followup"}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-3","status":"completed"}}}'
-  ;;
-
-*scenario:native-queue*)
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"delta":"working"}}'
-  sleep 0.1
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
-  read -r next || exit 1
-  has "$next" '"method":"review/start"' || { fail_turn "$(rid "$next")" "native command was sent as prompt text"; exit 0; }
-  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
-  emit '{"method":"item/completed","params":{"item":{"id":"review-2","type":"exitedReviewMode","review":"Queued review result"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
-  ;;
-
-
 *scenario:lease-shutdown*)
-  # Keep the child alive until the harness escalates and reaps it. The update
-  # writer must not acquire its gate just because the host drops the stream.
+  # Keep the child alive until the driver escalates and reaps it: it ignores SIGTERM.
   trap '' TERM
   printf '%s\n' "$$" > lease-child.pid
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
@@ -218,17 +144,6 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
-*scenario:title*)
-  for want in '"sandbox":"read-only"' '"ephemeral":true' '"baseInstructions":"You generate session titles.' '"features.shell_tool":false' '"mcp_servers.test.enabled":false' '"features.multi_agent":false' '"features.multi_agent_v2":false' '"agents.enabled":false'; do
-    has "$thread_line" "$want" || { fail_turn "$tid" "title restriction missing"; exit 0; }
-  done
-  has "$turnline" '"sandboxPolicy":{"type":"readOnly"}' || { fail_turn "$tid" "title turn not read-only"; exit 0; }
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","delta":"Fix Login Flow"}}'
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  ;;
-
-
 *scenario:reasoning*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"spawned","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
@@ -247,25 +162,20 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   ;;
 
-*scenario:publication*)
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"publication-turn\"}}}"
-  emit '{"method":"item/agentMessage/delta","params":{"itemId":"publication-answer","delta":"Publication turn completed"}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"publication-turn","status":"completed"}}}'
-  ;;
-
 *scenario:happy*)
-  # Verify the turn/start + thread/start params the harness must send.
-  for want in '"method":"turn/start"' '"effort":"ultra"' '"model":"gpt-5.6-sol"' \
+  # Verify the turn/start + thread/start params the driver must send.
+  for want in '"method":"turn/start"' '"effort":"high"' '"model":"gpt-5.6-sol"' \
     '"sandboxPolicy":{"type":"dangerFullAccess"}' \
-    '"approvalPolicy":"never"' '"summary":"auto"' \
-    '"serviceTier":"fast"'; do
+    '"approvalPolicy":"never"' '"summary":"auto"'; do
     has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
-  for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"' \
-    '"serviceTier":"fast"'; do
+  # The prompt is one text input, verbatim.
+  has "$turnline" '"type":"text"' && has "$turnline" '"text":"scenario:happy"' ||
+    { fail_turn "$tid" "turn input is not the prompt"; exit 0; }
+  for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
-  # Full access is the wire as it was before access modes and plan mode.
+  # Full access is never asked about, and no mode is named for a thread that never planned.
   for unwanted in 'approvalsReviewer' 'collaborationMode'; do
     if has "$thread_line" "$unwanted" || has "$turnline" "$unwanted"; then
       fail_turn "$tid" "full access sent $unwanted"; exit 0
@@ -274,19 +184,15 @@ case "$turnline" in
   for want in '"optOutNotificationMethods":[' '"turn/diff/updated"' '"item/fileChange/outputDelta"'; do
     has "$init_line" "$want" || { fail_turn "$tid" "initialize opt-out missing: $want"; exit 0; }
   done
-  # Command output stays on: a command that outlives its turn shows its tail.
-  if has "$init_line" '"item/commandExecution/outputDelta"'; then
-    fail_turn "$tid" "initialize opted out of command output"; exit 0
-  fi
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  # Deltas — both field spellings must be accepted.
+  # Deltas: both field spellings must be accepted.
   emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"Hello"}}'
   emit '{"method":"item/reasoning/textDelta","params":{"itemId":"r1","textDelta":"thinking hard"}}'
   emit '{"method":"item/reasoning/summaryTextDelta","params":{"itemId":"r1","delta":"summary"}}'
   # Item lifecycles.
   emit '{"method":"item/started","params":{"item":{"id":"c1","type":"commandExecution","command":"ls -la"}}}'
-  emit '{"method":"item/completed","params":{"item":{"id":"c1","type":"commandExecution","command":"ls -la","status":"completed","exitCode":1}}}'
+  emit '{"method":"item/completed","params":{"item":{"id":"c1","type":"commandExecution","command":"ls -la","status":"completed","exitCode":1,"aggregatedOutput":"first\nno such file\n"}}}'
   emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
   emit '{"method":"item/completed","params":{"item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
   emit '{"method":"item/started","params":{"item":{"id":"mcp1","type":"mcpToolCall","server":"linear","tool":"search","arguments":{"q":"bug"}}}}'
@@ -320,43 +226,58 @@ case "$turnline" in
   cat "$(dirname "$0")/codex/v2-lifecycle.jsonl"
   ;;
 
+*scenario:live-multi-agent*)
+  # The notifications of a live codex-cli 0.146.1 multi-agent capture, replayed. Its first
+  # two lines are responses (initialize, thread/start), which this script already sent.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  # The capture's root thread is this fake's `th-1`; its two children keep their own ids.
+  grep '^{"method"' "$(dirname "$0")/codex/live-0.146.1-multi-agent.jsonl" |
+    sed 's/01a00fe7-c301-7d52-ae1f-41ecda48b29b/th-1/g'
+  ;;
+
 *scenario:subagent*)
-  # Multi-agent v2 child-thread routing: registration via subAgentActivity,
-  # tagged child items, consumed child turn bookkeeping (must never settle
-  # the parent turn), tagged Done on thread/closed.
+  # Multi-agent v2 child-thread routing: the child's items and turn bookkeeping must never
+  # reach the parent's feed, nor settle the parent turn.
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  # Parent spawn item registers the child (call id = the parent chip).
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
   emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"call_alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
-  # The wire also emits subAgentActivity about the ROOT during collab runs:
-  # no chip, no registration.
+  # The wire also emits subAgentActivity about the ROOT during collab runs.
   emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"call_root","type":"subAgentActivity","kind":"interacted","agentThreadId":"th-1","agentPath":"/root"}}}'
-  # Child traffic: status is consumed; item lifecycles arrive tagged.
   emit '{"method":"thread/status/changed","params":{"threadId":"child-1","status":{"type":"running"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-1","itemId":"cm1","delta":"child says hi"}}'
   emit '{"method":"item/started","params":{"threadId":"child-1","item":{"id":"cs1","type":"commandExecution","command":"echo hi"}}}'
   emit '{"method":"item/completed","params":{"threadId":"child-1","item":{"id":"cs1","type":"commandExecution","command":"echo hi","status":"completed","exitCode":0}}}'
-  # The parent steering the child (collab send_message): a userMessage item
-  # on the CHILD thread — tagged UserMessage, emitted once (completed only).
   emit '{"method":"item/started","params":{"threadId":"child-1","item":{"id":"cu1","type":"userMessage","text":"also check the rebuild"}}}'
   emit '{"method":"item/completed","params":{"threadId":"child-1","item":{"id":"cu1","type":"userMessage","text":"also check the rebuild"}}}'
-  # The child settles ITS turn — the parent turn must keep running.
+  # The child settles ITS turn: the parent turn must keep running.
   emit '{"method":"turn/completed","params":{"threadId":"child-1","turn":{"id":"ct-1"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"parent still going"}}'
-  # Unknown method addressed to the child must fall through, not vanish.
+  # An unknown method addressed to the child falls through, never vanishes.
   emit '{"method":"thread/somethingBrandNew","params":{"threadId":"child-1"}}'
-  # Child closes → tagged terminal; the spawn chip resolves on the parent.
   emit '{"method":"thread/closed","params":{"threadId":"child-1"}}'
   emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"subagent-completed-alpha","type":"subAgentActivity","kind":"completed","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   ;;
 
-# NOTE: steer-race before steer — `case` takes the first matching glob.
+*scenario:child-approval*)
+  # A child thread asks for approval: the request is Reno's to answer, like the parent's.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":151,"method":"item/commandExecution/requestApproval","params":{"threadId":"child-1","turnId":"ct-1","itemId":"cc1","startedAtMs":1,"command":"make deploy","cwd":"/work"}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":151' && has "$a1" '"decision":"decline"'; } ||
+    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"child command not declined"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"threadId":"child-1","turn":{"id":"ct-1"}}}'
+  say "child refused"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  ;;
+
+# NOTE: steer-race before steer: `case` takes the first matching glob.
 *scenario:steer-item*)
-  # Live shape (0.159.3): an accepted turn/steer joins the turn only when
-  # the reply streaming ahead of it finishes — its userMessage item carries
-  # the clientUserMessageId it was sent with as `clientId`.
+  # Live shape (0.159.3): an accepted turn/steer joins the turn only when the reply streaming
+  # ahead of it finishes; its userMessage item carries the clientUserMessageId it was sent
+  # with as `clientId`.
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"first"}}'
@@ -384,73 +305,6 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
-*scenario:stop-before-announce*)
-  # The turn/start response lands before the app-server registers the turn:
-  # an interrupt now is rejected ("no active turn to interrupt", live
-  # 0.159.3). The stop must wait for turn/started.
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m1","delta":"working"}}'
-  if read -t 1 early; then
-    has "$early" '"method":"turn/interrupt"' &&
-      emit "{\"id\":$(rid "$early"),\"error\":{\"code\":-32600,\"message\":\"no active turn to interrupt\"}}"
-    exec sleep 30
-  fi
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  read -r intline || exit 1
-  has "$intline" '"method":"turn/interrupt"' && has "$intline" '"turnId":"t-1"' || exit 9
-  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"interrupted"}}}'
-  cat >/dev/null
-  ;;
-
-*scenario:background-commands*)
-  # A command still running after its turn is background work; an
-  # interrupted turn's foreground command is killed without item/completed
-  # (live, 0.159.3) and must not pin the runtime once its process is gone.
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  # processId names Codex's own exec session, not an OS process: only
-  # thread/backgroundTerminals/list can tell it still runs.
-  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","command":"npm run dev","processId":"codex-pty-7","status":"inProgress"}}}'
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
-  read -r next || exit 1
-  emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-2"}}}'
-  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"fg","command":"sleep 60","processId":"999999","status":"inProgress"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"m2","delta":"running"}}'
-  read -r intline || exit 1
-  has "$intline" '"method":"turn/interrupt"' || exit 9
-  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-2","status":"interrupted"}}}'
-  while read -r last; do
-    has "$last" '"method":"thread/backgroundTerminals/list"' || break
-    has "$last" '"threadId":"th-1"' || exit 9
-    emit "{\"id\":$(rid "$last"),\"result\":{\"data\":[{\"processId\":\"codex-pty-7\",\"itemId\":\"bg\",\"command\":\"npm run dev\",\"cwd\":\"/tmp\",\"osPid\":null}],\"nextCursor\":null}}"
-  done
-  has "$last" '"method":"turn/start"' || exit 9
-  emit "{\"id\":$(rid "$last"),\"result\":{\"turn\":{\"id\":\"t-3\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-3"}}}'
-  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"completed"}}}'
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-3","status":"completed"}}}'
-  cat >/dev/null
-  ;;
-
-*scenario:background-terminate*)
-  # A command outliving its turn streams output, and a host stop terminates
-  # its exec session by processId; its item/completed follows the exit.
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","command":"/usr/bin/zsh -lc '"'"'npm run dev'"'"'","processId":"codex-pty-7","status":"inProgress"}}}'
-  emit '{"method":"item/commandExecution/outputDelta","params":{"threadId":"th-1","turnId":"t-1","itemId":"bg","delta":"\u001b[32mready\u001b[0m on :3000\r\n"}}'
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
-  read -r stop || exit 1
-  has "$stop" '"method":"thread/backgroundTerminals/terminate"' || exit 9
-  has "$stop" '"processId":"codex-pty-7"' || exit 9
-  emit "{\"id\":$(rid "$stop"),\"result\":{\"terminated\":true}}"
-  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"commandExecution","id":"bg","status":"failed","exitCode":143}}}'
-  cat >/dev/null
-  ;;
-
 *scenario:steer-race*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
@@ -461,13 +315,10 @@ case "$turnline" in
   # The turn completed under the steer: reject, then announce completion.
   emit "{\"id\":$sid,\"error\":{\"code\":-32602,\"message\":\"turn already completed\"}}"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
-  # The harness must fall back to a follow-up turn/start carrying the text.
+  # The driver must fall back to a follow-up turn/start carrying the text, and the run must
+  # not end at the first turn's completion.
   read -r followline || exit 1
   fid=$(rid "$followline")
-  if has "$steerline" '"type":"skill"'; then
-    has "$followline" '"type":"skill"' && has "$followline" '"path":"/repo/followup/SKILL.md"' ||
-      { fail_turn "$fid" "native skill lost on steer fallback"; exit 0; }
-  fi
   if has "$followline" '"method":"turn/start"' && has "$followline" 'redirect please'; then
     emit "{\"id\":$fid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
     emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
@@ -496,9 +347,26 @@ case "$turnline" in
   fi
   ;;
 
+*scenario:one-approval*)
+  # One command approval; the result text says how the app-server saw the answer. Shared by
+  # the harness tests and the kernel end-to-end test.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":701,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"rm -rf build","cwd":"/work","reason":"clean the build"}}'
+  read -r a1 || exit 1
+  if has "$a1" '"id":701' && has "$a1" '"decision":"accept"'; then
+    say "ran"
+  elif has "$a1" '"id":701' && has "$a1" '"decision":"decline"'; then
+    say "refused"
+  else
+    say "unexpected: $a1"
+  fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *scenario:approve*)
-  # Supervised: codex asks before anything it does not know to be safe, in
-  # a read-only sandbox, and every approval round-trips as an input question.
+  # Supervised: codex asks before anything it does not know to be safe, in a read-only sandbox.
+  # Each approval is a structured request the driver surfaces and the test decides.
   for want in '"approvalPolicy":"untrusted"' '"sandbox":"read-only"' '"approvalsReviewer":"user"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "supervised thread param missing: $want"; exit 0; }
   done
@@ -507,21 +375,36 @@ case "$turnline" in
   done
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /tmp/x"}}'
+  emit '{"id":101,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /tmp/x","cwd":"/tmp"}}'
   read -r a1 || exit 1
-  { has "$a1" '"id":101' && has "$a1" '"decision":"accept"'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"command approval not accepted"}}}}'; exit 0; }
-  emit '{"id":102,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","changes":[{"path":"/tmp/a.rs","kind":"update"}]}}'
+  has "$a1" '"id":101' || { say "lost 101"; exit 0; }
+  if has "$a1" '"decision":"accept"'; then first=accept; else first=decline; fi
+  # The file change shape of the 0.164.0 schema: the request names only the item; its paths
+  # came with the item's own started notification.
+  emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","status":"inProgress","changes":[{"path":"/tmp/a.rs","kind":"update"}]}}}'
+  emit '{"id":102,"method":"item/fileChange/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"f1","startedAtMs":2,"reason":"write outside the sandbox"}}'
   read -r a2 || exit 1
-  { has "$a2" '"id":102' && has "$a2" '"decision":"accept"'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file approval not accepted"}}}}'; exit 0; }
+  has "$a2" '"id":102' || { say "lost 102"; exit 0; }
+  if has "$a2" '"decision":"accept"'; then second=accept; else second=decline; fi
+  say "command=$first file=$second"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:file-change-inline*)
+  # An older app-server (and the imported fixtures) put the changes in the request itself.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"id":111,"method":"item/fileChange/requestApproval","params":{"itemId":"f9","changes":[{"path":"/tmp/a.rs","kind":"update"},{"path":"/tmp/b.rs","kind":"add"}]}}'
+  read -r a1 || exit 1
+  if has "$a1" '"decision":"accept"'; then say "file=accept"; else say "file=decline"; fi
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
 *scenario:auto-edits*)
-  # Auto-accept edits: the workspace is writable (network on) and codex asks
-  # to step outside it. A file change is accepted without asking; a command
-  # and a permission grant are asked (the test answers No).
+  # Auto-accept edits: the workspace is writable (network on) and codex asks about everything
+  # it does not know to be safe, file changes included. A file change whose paths are all
+  # inside the working directory is accepted without asking; everything else is asked.
+  cwd=$(printf '%s' "$thread_line" | sed 's/.*"cwd":"\([^"]*\)".*/\1/')
   for want in '"approvalPolicy":"untrusted"' '"sandbox":"workspace-write"' '"approvalsReviewer":"user"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "auto-edits thread param missing: $want"; exit 0; }
   done
@@ -531,74 +414,163 @@ case "$turnline" in
   has "$turnline" 'collaborationMode' && { fail_turn "$tid" "collaborationMode without plan"; exit 0; }
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"id":401,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","changes":[{"path":"/outside/a.rs","kind":"update"}]}}'
+  # 401: inside the working directory (one absolute path, one relative): accepted, not asked.
+  emit "{\"method\":\"item/started\",\"params\":{\"item\":{\"id\":\"f1\",\"type\":\"fileChange\",\"changes\":[{\"path\":\"$cwd/src/a.rs\",\"kind\":\"update\"},{\"path\":\"b.rs\",\"kind\":\"add\"}]}}}"
+  emit '{"id":401,"method":"item/fileChange/requestApproval","params":{"itemId":"f1","startedAtMs":1}}'
   read -r a1 || exit 1
-  { has "$a1" '"id":401' && has "$a1" '"decision":"accept"'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"file change not accepted"}}}}'; exit 0; }
-  emit '{"id":402,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"git push"}}'
+  { has "$a1" '"id":401' && has "$a1" '"decision":"accept"'; } || { say "401 not accepted: $a1"; exit 0; }
+  # 402: outside: asked.
+  emit '{"method":"item/started","params":{"item":{"id":"f2","type":"fileChange","changes":[{"path":"/outside/a.rs","kind":"update"}]}}}'
+  emit '{"id":402,"method":"item/fileChange/requestApproval","params":{"itemId":"f2","startedAtMs":2}}'
   read -r a2 || exit 1
-  { has "$a2" '"id":402' && has "$a2" '"decision":"decline"'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"command not declined"}}}}'; exit 0; }
-  emit '{"id":403,"method":"item/permissions/requestApproval","params":{"itemId":"p1","reason":"fetch","permissions":{"network":{"enabled":true}}}}'
+  { has "$a2" '"id":402' && has "$a2" '"decision":"decline"'; } || { say "402 not declined: $a2"; exit 0; }
+  # 403: a path that climbs out through `..`: asked.
+  emit "{\"method\":\"item/started\",\"params\":{\"item\":{\"id\":\"f3\",\"type\":\"fileChange\",\"changes\":[{\"path\":\"$cwd/../escape.rs\",\"kind\":\"add\"}]}}}"
+  emit '{"id":403,"method":"item/fileChange/requestApproval","params":{"itemId":"f3","startedAtMs":3}}'
   read -r a3 || exit 1
-  { has "$a3" '"id":403' && has "$a3" '"permissions":{}'; } ||
-    { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"permissions not refused"}}}}'; exit 0; }
+  { has "$a3" '"id":403' && has "$a3" '"decision":"decline"'; } || { say "403 not declined: $a3"; exit 0; }
+  # 404: an item the driver never saw: no paths known, so asked.
+  emit '{"id":404,"method":"item/fileChange/requestApproval","params":{"itemId":"never-seen","startedAtMs":4}}'
+  read -r a4 || exit 1
+  { has "$a4" '"id":404' && has "$a4" '"decision":"decline"'; } || { say "404 not declined: $a4"; exit 0; }
+  # 405: inside, but a session-wide write grant: asked.
+  emit "{\"method\":\"item/started\",\"params\":{\"item\":{\"id\":\"f5\",\"type\":\"fileChange\",\"changes\":[{\"path\":\"$cwd/c.rs\",\"kind\":\"update\"}]}}}"
+  emit "{\"id\":405,\"method\":\"item/fileChange/requestApproval\",\"params\":{\"itemId\":\"f5\",\"startedAtMs\":5,\"grantRoot\":\"$cwd\"}}"
+  read -r a5 || exit 1
+  { has "$a5" '"id":405' && has "$a5" '"decision":"decline"'; } || { say "405 not declined: $a5"; exit 0; }
+  # 406: a command: asked.
+  emit '{"id":406,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"git push","cwd":"/work"}}'
+  read -r a6 || exit 1
+  { has "$a6" '"id":406' && has "$a6" '"decision":"decline"'; } || { say "406 not declined: $a6"; exit 0; }
+  # 407: a permission grant: asked, and refused with an empty grant.
+  emit '{"id":407,"method":"item/permissions/requestApproval","params":{"itemId":"p1","cwd":"/work","reason":"fetch","permissions":{"network":{"enabled":true}}}}'
+  read -r a7 || exit 1
+  { has "$a7" '"id":407' && has "$a7" '"permissions":{}'; } || { say "407 not refused: $a7"; exit 0; }
+  say "all asked"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
-  ;;
-
-*scenario:plan*)
-  # Plan mode rides turn/start as the `plan` collaboration mode, repeating
-  # the turn's model and effort; the proposed plan arrives as a `plan` item.
-  # Leaving plan (and going supervised) is the next turn's explicit
-  # `default`, and a later plain turn still names it.
-  for want in '"collaborationMode":{' '"mode":"plan"' '"model":"gpt-5.6-sol"' '"reasoning_effort":"ultra"' \
-    '"developer_instructions":null' '"approvalPolicy":"never"'; do
-    has "$turnline" "$want" || { fail_turn "$tid" "plan turn param missing: $want"; exit 0; }
-  done
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"Here is the plan."}}'
-  emit '{"method":"item/completed","params":{"item":{"id":"m1","type":"agentMessage","text":"Here is the plan."}}}'
-  emit '{"method":"item/plan/delta","params":{"itemId":"p1","delta":"# Plan"}}'
-  emit '{"method":"item/completed","params":{"item":{"id":"p1","type":"plan","text":"# Plan\n\n1. Read\n2. Change\n"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
-  n=2
-  for want in 'build it|"mode":"default"|"approvalPolicy":"untrusted"' \
-    'plain|"mode":"default"|"approvalPolicy":"untrusted"'; do
-    read -r next || exit 1
-    text=${want%%|*}; rest=${want#*|}; mode=${rest%%|*}; policy=${rest#*|}
-    { has "$next" '"method":"turn/start"' && has "$next" "\"text\":\"$text\"" \
-      && has "$next" '"collaborationMode":{' && has "$next" "$mode" && has "$next" "$policy" \
-      && has "$next" '"sandboxPolicy":{"type":"readOnly"}' && ! has "$next" '"mode":"plan"'; } \
-      || { fail_turn "$(rid "$next")" "turn $n: wanted $text with $mode $policy"; exit 0; }
-    emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-$n\"}}}"
-    emit "{\"method\":\"turn/started\",\"params\":{\"turn\":{\"id\":\"t-$n\"}}}"
-    emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m$n\",\"delta\":\"$text\"}}"
-    emit "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t-$n\",\"status\":\"completed\"}}}"
-    n=$((n + 1))
-  done
-  cat >/dev/null
-  ;;
-
-*scenario:leave-plan*)
-  # A resumed thread still in plan mode, on a run that is not: the turn
-  # names `default`, with the model and effort the thread reported.
-  for want in '"collaborationMode":{' '"mode":"default"' '"model":"gpt-resumed"' '"reasoning_effort":"medium"'; do
-    has "$turnline" "$want" || { fail_turn "$tid" "leave-plan turn param missing: $want"; exit 0; }
-  done
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
 *scenario:decline*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"id":201,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":"rm -rf /"}}'
+  emit '{"id":201,"method":"item/commandExecution/requestApproval","params":{"itemId":"c1","command":["rm","-rf","/"],"cwd":"/"}}'
   read -r a1 || exit 1
   { has "$a1" '"id":201' && has "$a1" '"decision":"decline"'; } ||
     { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"expected decline"}}}}'; exit 0; }
+  # Never `acceptForSession`: Reno decides every time.
+  has "$a1" 'ForSession' && { emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"session-wide decision"}}}}'; exit 0; }
+  say "declined"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:mcp-approval*)
+  # An MCP tool call's approval is an elicitation whose `_meta` names its kind (0.164.0
+  # codex-rs/core/src/mcp_tool_call.rs): a form with no fields.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":801,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","turnId":"t-1","serverName":"reno","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_name":"board_post","tool_title":"Post to the board","tool_params":{"text":"hi"}},"message":"Allow the reno MCP server to run tool \"board_post\"?","requestedSchema":{"type":"object","properties":{}}}}'
+  read -r a1 || exit 1
+  has "$a1" '"id":801' || { say "lost 801"; exit 0; }
+  # A persisting answer would amend Codex's own policy; only a plain accept or decline is sent.
+  has "$a1" 'persist' && { say "persisting answer"; exit 0; }
+  if has "$a1" '"action":"accept"'; then say "tool=accept"; else say "tool=decline"; fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:user-input*)
+  # `item/tool/requestUserInput` (experimental): the agent asks the person a question.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":901,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"u1","questions":[{"id":"mode","header":"Mode","question":"Which mode?","isOther":false,"options":[{"label":"fast","description":"quick"},{"label":"safe","description":"careful"}]}]}}'
+  read -r a1 || exit 1
+  has "$a1" '"id":901' || { say "lost 901"; exit 0; }
+  if has "$a1" '"answers":{"mode":{"answers":["safe"]}}'; then
+    say "mode=safe"
+  elif has "$a1" '"answers":{}'; then
+    say "mode=none"
+  else
+    say "unexpected: $a1"
+  fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:elicitation-form*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":303,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"deploy","mode":"form","message":"Ship it?","requestedSchema":{"type":"object","required":["confirm"],"properties":{"confirm":{"type":"boolean","title":"Confirm"}}}}}'
+  read -r r3 || exit 1
+  has "$r3" '"id":303' || { say "lost 303"; exit 0; }
+  if has "$r3" '"action":"accept"' && has "$r3" '"confirm":true'; then say "form=accepted"
+  elif has "$r3" '"action":"decline"'; then say "form=declined"
+  else say "unexpected: $r3"; fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:server-requests*)
+  # Requests the driver answers without asking anyone: an elicitation it cannot show, and a
+  # method it does not know.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":302,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"auth","mode":"url","message":"Sign in","url":"https://example.invalid","elicitationId":"e1"}}'
+  read -r r2 || exit 1
+  { has "$r2" '"id":302' && has "$r2" '"action":"decline"' && ! has "$r2" '"error"'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"url elicitation not declined"}}}}'; exit 0; }
+  emit '{"id":304,"method":"brand/newRequest","params":{}}'
+  read -r r4 || exit 1
+  { has "$r4" '"id":304' && has "$r4" '"code":-32601'; } ||
+    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"unknown request not refused"}}}}'; exit 0; }
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:permissions*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":301,"method":"item/permissions/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"p1","cwd":"/tmp","startedAtMs":1,"reason":"fetch deps","permissions":{"network":{"enabled":true},"fileSystem":{"write":["/repo/.cache"]}}}}'
+  read -r r1 || exit 1
+  has "$r1" '"id":301' || { say "lost 301"; exit 0; }
+  if has "$r1" '"permissions":{}'; then
+    say "permissions=none"
+  elif has "$r1" '"network":{"enabled":true}' && has "$r1" '"write":["/repo/.cache"]' && has "$r1" '"scope":"turn"'; then
+    say "permissions=turn"
+  else
+    say "unexpected: $r1"
+  fi
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:open-then-cancel*)
+  # An approval is open when the run is cancelled: it must be declined before anything else.
+  cwd=$(printf '%s' "$thread_line" | sed 's/.*"cwd":"\([^"]*\)".*/\1/')
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"id":501,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"make","cwd":"/work"}}'
+  read -r a1 || exit 1
+  { has "$a1" '"id":501' && has "$a1" '"decision":"decline"'; } || { printf 'wrong: %s\n' "$a1" > "$cwd/open-request.txt"; exit 0; }
+  printf 'declined\n' > "$cwd/open-request.txt"
+  read -r intline || exit 1
+  has "$intline" '"method":"turn/interrupt"' || exit 9
+  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
+  emit '{"method":"turn/aborted","params":{"turn":{"id":"t-1"}}}'
+  cat >/dev/null
+  ;;
+
+*scenario:request-after-cancel*)
+  # A request that arrives after the run was cancelled is declined at once.
+  cwd=$(printf '%s' "$thread_line" | sed 's/.*"cwd":"\([^"]*\)".*/\1/')
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  read -r intline || exit 1
+  has "$intline" '"method":"turn/interrupt"' || exit 9
+  emit "{\"id\":$(rid "$intline"),\"result\":{}}"
+  emit '{"id":601,"method":"item/commandExecution/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"c1","startedAtMs":1,"command":"make","cwd":"/work"}}'
+  emit '{"id":602,"method":"item/tool/requestUserInput","params":{"threadId":"th-1","turnId":"t-1","itemId":"u1","questions":[{"id":"q","header":"Q","question":"Why?","options":[]}]}}'
+  read -r a1 || exit 1
+  read -r a2 || exit 1
+  { has "$a1" '"id":601' && has "$a1" '"decision":"decline"'; } || { printf 'wrong: %s\n' "$a1" > "$cwd/late-request.txt"; exit 0; }
+  { has "$a2" '"id":602' && has "$a2" '"answers":{}'; } || { printf 'wrong: %s\n' "$a2" > "$cwd/late-request.txt"; exit 0; }
+  printf 'declined\n' > "$cwd/late-request.txt"
+  emit '{"method":"turn/aborted","params":{"turn":{"id":"t-1"}}}'
+  cat >/dev/null
   ;;
 
 *scenario:interrupt*)
@@ -616,64 +588,17 @@ case "$turnline" in
   fi
   ;;
 
-*scenario:stop-in-place*)
-  # A turn stop: turn/interrupt ends the turn, the app-server stays up, and
-  # the next prompt is a turn/start on the same thread.
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"working"}}'
-  read -r intline || exit 1
-  iid=$(rid "$intline")
-  has "$intline" '"method":"turn/interrupt"' && has "$intline" '"turnId":"t-1"' || exit 8
-  emit "{\"id\":$iid,\"result\":{}}"
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"interrupted"}}}'
-  read -r nextline || exit 1
-  has "$nextline" '"method":"turn/start"' && has "$nextline" '"threadId":"th-1"' || exit 9
-  emit "{\"id\":$(rid "$nextline"),\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"resumed"}}'
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2","status":"completed"}}}'
-  cat >/dev/null
-  ;;
-
-*scenario:reconfigure*)
-  # Model changes sent mid-turn (A -> B -> A, then a plain follow-up): none
-  # may ride turn/steer, which carries no model. Each starts its own turn
-  # with the configuration it was sent with.
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
-  emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"working"}}'
-  sleep 0.5
-  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
-  n=2
-  for want in 'to-b|"model":"model-b"|"effort":"low"' \
-    'back-to-a|"model":"gpt-5.6-sol"|"effort":"ultra"' \
-    'plain|"model":"gpt-5.6-sol"|"effort":"ultra"'; do
-    read -r next || exit 1
-    text=${want%%|*}; rest=${want#*|}; model=${rest%%|*}; effort=${rest#*|}
-    { has "$next" '"method":"turn/start"' && has "$next" "\"text\":\"$text\"" \
-      && has "$next" "$model" && has "$next" "$effort"; } \
-      || { fail_turn "$(rid "$next")" "turn $n: wanted $text with $model $effort"; exit 0; }
-    emit "{\"id\":$(rid "$next"),\"result\":{\"turn\":{\"id\":\"t-$n\"}}}"
-    emit "{\"method\":\"turn/started\",\"params\":{\"turn\":{\"id\":\"t-$n\"}}}"
-    emit "{\"method\":\"item/agentMessage/delta\",\"params\":{\"itemId\":\"m$n\",\"delta\":\"$text\"}}"
-    emit "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t-$n\",\"status\":\"completed\"}}}"
-    n=$((n + 1))
-  done
-  cat >/dev/null
-  ;;
-
 *scenario:wedge*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"itemId":"m1","delta":"working"}}'
-  # Ignore turn/interrupt entirely — forces the SIGTERM escalation path.
+  # Ignore turn/interrupt entirely: forces the SIGTERM escalation path.
   exec sleep 30
   ;;
 
 *scenario:retry-errors*)
-  # Live shapes (0.164.0 schema): retries announce themselves as `error`
-  # with willRetry; the final error repeats as turn.error.
+  # Live shapes (0.164.0 schema): retries announce themselves as `error` with willRetry; the
+  # final error repeats as turn.error.
   resets=$(( $(date +%s) + 2 * 3600 + 600 ))
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
@@ -701,26 +626,40 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"interrupted"}}}'
   ;;
 
-*scenario:server-requests*)
+*scenario:mcp-config*)
+  # The thread's config overrides carry the injected servers. Reno's own (the first) is
+  # pre-approved only when nothing is asked of the person.
+  for want in '"mcp_servers.reno.command":"/opt/reno/reno"' '"mcp_servers.reno.args":["mcp"]' \
+    '"mcp_servers.reno.env":{"RENO_RUN":"r1"}' '"mcp_servers.reno.tool_timeout_sec":3720' \
+    '"mcp_servers.reno.startup_timeout_sec":30' \
+    '"mcp_servers.plugin-focus.command":"/opt/focus/server"'; do
+    has "$thread_line" "$want" || { fail_turn "$tid" "mcp override missing: $want"; exit 0; }
+  done
+  has "$thread_line" 'mcp_servers.plugin-focus.default_tools_approval_mode' &&
+    { fail_turn "$tid" "a plugin's tools were pre-approved"; exit 0; }
+  if has "$thread_line" '"approvalPolicy":"never"'; then
+    has "$thread_line" '"mcp_servers.reno.default_tools_approval_mode":"approve"' ||
+      { fail_turn "$tid" "full access should pre-approve Reno's own tools"; exit 0; }
+  else
+    has "$thread_line" 'mcp_servers.reno.default_tools_approval_mode' &&
+      { fail_turn "$tid" "Reno's tools were pre-approved while the person is asked"; exit 0; }
+  fi
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
-  emit '{"id":301,"method":"item/permissions/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"p1","cwd":"/tmp","startedAtMs":1,"reason":"fetch deps","permissions":{"network":{"enabled":true}}}}'
-  read -r r1 || exit 1
-  { has "$r1" '"id":301' && has "$r1" '"permissions":{"network":{"enabled":true}}' && has "$r1" '"scope":"turn"'; } ||
-    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"permissions not granted"}}}}'; exit 0; }
-  emit '{"id":302,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"auth","mode":"url","message":"Sign in","url":"https://example.invalid","elicitationId":"e1"}}'
-  read -r r2 || exit 1
-  { has "$r2" '"id":302' && has "$r2" '"action":"decline"' && ! has "$r2" '"error"'; } ||
-    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"url elicitation not declined"}}}}'; exit 0; }
-  emit '{"id":303,"method":"mcpServer/elicitation/request","params":{"threadId":"th-1","serverName":"deploy","mode":"form","message":"Ship it?","requestedSchema":{"type":"object","required":["confirm"],"properties":{"confirm":{"type":"boolean","title":"Confirm"}}}}}'
-  read -r r3 || exit 1
-  { has "$r3" '"id":303' && has "$r3" '"action":"accept"' && has "$r3" '"confirm":true'; } ||
-    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"form elicitation not answered"}}}}'; exit 0; }
-  emit '{"id":304,"method":"brand/newRequest","params":{}}'
-  read -r r4 || exit 1
-  { has "$r4" '"id":304' && has "$r4" '"code":-32601'; } ||
-    { emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"failed","error":{"message":"unknown request not refused"}}}}'; exit 0; }
-  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  say "configured"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:policy*)
+  # Report what the thread and the turn were launched with, as the run's result.
+  ap=$(printf '%s' "$thread_line" | sed 's/.*"approvalPolicy":"\([^"]*\)".*/\1/')
+  sb=$(printf '%s' "$thread_line" | sed 's/.*"sandbox":"\([^"]*\)".*/\1/')
+  tp=$(printf '%s' "$turnline" | sed 's/.*"approvalPolicy":"\([^"]*\)".*/\1/')
+  ts=$(printf '%s' "$turnline" | sed 's/.*"sandboxPolicy":{"type":"\([^"]*\)".*/\1/')
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  say "thread=$ap/$sb turn=$tp/$ts"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
 *scenario:fail*)
@@ -729,13 +668,15 @@ case "$turnline" in
   emit '{"method":"turn/failed","params":{"turn":{"id":"t-1","error":{"message":"boom"}}}}'
   ;;
 
-*scenario:resumed-child*)
-  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
-  emit '{"method":"turn/started","params":{"threadId":"child-alpha","turn":{"id":"alpha-resumed"}}}'
-  emit '{"method":"item/completed","params":{"threadId":"th-resumed","item":{"type":"subAgentActivity","id":"resumed-interaction","kind":"interacted","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}'
-  emit '{"method":"item/completed","params":{"threadId":"child-alpha","item":{"type":"agentMessage","id":"resumed-answer","text":"resumed alpha"}}}'
-  emit '{"method":"turn/completed","params":{"threadId":"child-alpha","turn":{"id":"alpha-resumed","status":"completed"}}}'
-  emit '{"method":"turn/completed","params":{"threadId":"th-resumed","turn":{"id":"t-2","status":"completed"}}}'
+*scenario:leave-plan*)
+  # A resumed thread still in plan mode, on a run that is not: the turn names `default`, with
+  # the model and effort the thread reported.
+  for want in '"collaborationMode":{' '"mode":"default"' '"model":"gpt-resumed"' '"reasoning_effort":"medium"'; do
+    has "$turnline" "$want" || { fail_turn "$tid" "leave-plan turn param missing: $want"; exit 0; }
+  done
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
 *scenario:resumed*)
