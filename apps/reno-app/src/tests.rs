@@ -23,7 +23,10 @@ use crate::transcript::{Outcome, Row};
 use crate::ui::theme::Appearance;
 use crate::ui::toast;
 
-fn wait_until(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+pub(crate) fn wait_until(
+    cx: &mut TestAppContext,
+    mut done: impl FnMut(&mut TestAppContext) -> bool,
+) {
     cx.executor().allow_parking();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -36,7 +39,7 @@ fn wait_until(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext)
     }
 }
 
-fn fake_store(cx: &mut TestAppContext) -> Entity<Store> {
+pub(crate) fn fake_store(cx: &mut TestAppContext) -> Entity<Store> {
     cx.update(gpui_tokio::init);
     cx.new(|cx| {
         let mut store = Store::connecting();
@@ -45,11 +48,11 @@ fn fake_store(cx: &mut TestAppContext) -> Entity<Store> {
     })
 }
 
-fn approvals(cx: &TestAppContext, store: &Entity<Store>) -> usize {
+pub(crate) fn approvals(cx: &TestAppContext, store: &Entity<Store>) -> usize {
     store.read_with(cx, |s, _| s.state().approvals().len())
 }
 
-fn window<'a>(
+pub(crate) fn window<'a>(
     cx: &'a mut TestAppContext,
     store: &Entity<Store>,
     appearance: Appearance,
@@ -64,7 +67,7 @@ fn window<'a>(
     (root, vcx)
 }
 
-fn draw(cx: &mut VisualTestContext) {
+pub(crate) fn draw(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
@@ -187,7 +190,7 @@ fn no_daemon_at_the_socket_says_how_to_start_one(cx: &mut TestAppContext) {
     store.read_with(cx, |s, _| {
         assert_eq!(s.connection(), ConnectionStatus::Disconnected);
         assert_eq!(
-            s.offline_reason(),
+            s.offline_reason().as_deref(),
             Some("Daemon not running — run `reno daemon start`")
         );
     });
@@ -271,7 +274,7 @@ fn palette_navigation_and_actions(cx: &mut TestAppContext) {
     root.update_in(vcx, |r, window, cx| r.toggle_theme(window, cx));
     draw(vcx);
     // Other destinations do not navigate.
-    root.update_in(vcx, |r, window, cx| r.navigate(Nav::Inbox, window, cx));
+    root.update_in(vcx, |r, window, cx| r.navigate(Nav::Flows, window, cx));
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
 }
 
@@ -281,7 +284,7 @@ fn palette_navigation_and_actions(cx: &mut TestAppContext) {
 // they go through hit testing, the active-element rules and `on_click`, not through a method the
 // view happens to expose. Elements are found by `debug_selector`.
 
-fn click(vcx: &mut VisualTestContext, selector: &str) {
+pub(crate) fn click(vcx: &mut VisualTestContext, selector: &str) {
     // `debug_bounds` wants a `'static` key; the strings here are few and the test is short-lived.
     let key: &'static str = Box::leak(selector.to_owned().into_boxed_str());
     let bounds = vcx
@@ -291,17 +294,20 @@ fn click(vcx: &mut VisualTestContext, selector: &str) {
     vcx.run_until_parked();
 }
 
-fn painted(vcx: &mut VisualTestContext, selector: &str) -> bool {
+pub(crate) fn painted(vcx: &mut VisualTestContext, selector: &str) -> bool {
     let key: &'static str = Box::leak(selector.to_owned().into_boxed_str());
     vcx.debug_bounds(key).is_some()
 }
 
-fn run_id(name: &str) -> RunId {
+pub(crate) fn run_id(name: &str) -> RunId {
     RunId::from_suffix(name).unwrap()
 }
 
 /// Waits (in real time, the fake daemon is on tokio) for `done` and redraws each time.
-fn wait_drawn(vcx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+pub(crate) fn wait_drawn(
+    vcx: &mut VisualTestContext,
+    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+) {
     vcx.executor().allow_parking();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -484,8 +490,11 @@ fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
     draw(vcx);
 
     // A destination with no screen yet stays put.
-    click(vcx, "nav-Inbox");
+    click(vcx, "nav-Flows");
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    // One that has a screen goes there.
+    click(vcx, "nav-Inbox");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Inbox);
 }
 
 // --- The Run screen -------------------------------------------------------------------------
@@ -617,7 +626,7 @@ fn stop_cancels_the_run(cx: &mut TestAppContext) {
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    let run = send_from_home(vcx, &root, "a long job");
+    let run = send_from_home(vcx, &root, "/long job");
     wait_drawn(vcx, |vcx| painted(vcx, "stop"));
     click(vcx, "stop");
     wait_drawn(vcx, |vcx| {
@@ -640,7 +649,7 @@ fn steering_appends_the_message_and_a_reply(cx: &mut TestAppContext) {
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    let _run = send_from_home(vcx, &root, "a long job");
+    let _run = send_from_home(vcx, &root, "/long job");
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
 

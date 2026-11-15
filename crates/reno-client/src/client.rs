@@ -281,11 +281,11 @@ impl Client {
     ) -> Result<BoxStream<'static, Result<reno_proto::TriggersSnapshot, ClientError>>, ClientError>
     {
         self.require(reno_proto::FEATURE_TRIGGERS)?;
-        let sub = self
-            .rpc
-            .subscribe::<reno_proto::TriggersWatch>(reno_proto::TriggersWatchParams::default())
-            .await?;
-        Ok(watch_stream(sub))
+        watch_stream::<reno_proto::TriggersWatch>(
+            &self.rpc,
+            reno_proto::TriggersWatchParams::default(),
+        )
+        .await
     }
 
     /// `approval.list`: the pending approvals, oldest first.
@@ -371,11 +371,7 @@ impl Client {
         &self,
     ) -> Result<BoxStream<'static, Result<DefsSnapshot, ClientError>>, ClientError> {
         self.require(reno_proto::FEATURE_DEFS)?;
-        let sub = self
-            .rpc
-            .subscribe::<DefsWatch>(DefsWatchParams::default())
-            .await?;
-        Ok(watch_stream(sub))
+        watch_stream::<DefsWatch>(&self.rpc, DefsWatchParams::default()).await
     }
 
     /// `runs.watch`: the current run list, then a new full list on every change.
@@ -385,11 +381,7 @@ impl Client {
     pub async fn watch_runs(
         &self,
     ) -> Result<BoxStream<'static, Result<RunsSnapshot, ClientError>>, ClientError> {
-        let sub = self
-            .rpc
-            .subscribe::<RunsWatch>(RunsWatchParams::default())
-            .await?;
-        Ok(watch_stream(sub))
+        watch_stream::<RunsWatch>(&self.rpc, RunsWatchParams::default()).await
     }
 
     /// `approvals.watch`: the pending approvals, then a new full list on every change.
@@ -399,11 +391,7 @@ impl Client {
         &self,
     ) -> Result<BoxStream<'static, Result<ApprovalsSnapshot, ClientError>>, ClientError> {
         self.require(reno_proto::FEATURE_APPROVALS)?;
-        let sub = self
-            .rpc
-            .subscribe::<ApprovalsWatch>(ApprovalsWatchParams::default())
-            .await?;
-        Ok(watch_stream(sub))
+        watch_stream::<ApprovalsWatch>(&self.rpc, ApprovalsWatchParams::default()).await
     }
 
     /// `run.events`: the run's journal from `from` (inclusive; the start when `None`), then
@@ -442,25 +430,86 @@ impl Client {
     }
 }
 
-/// Maps a latest-value subscription to a plain stream of values. A gap cannot happen on a
-/// latest-value subscription; if one is reported anyway, it is an error and the stream ends.
-fn watch_stream<T>(sub: SubStream<T>) -> BoxStream<'static, Result<T, ClientError>>
+/// Starts a latest-value subscription and maps it to a plain stream of values.
+///
+/// A latest-value subscription has no sequence numbers, so a daemon should never send `sub.gap`
+/// on one. If it does, the subscription is started again: its first item is the whole current
+/// value, which is the refetch. Gaps in a row with no item between them end the stream with
+/// [`ClientError::Protocol`].
+async fn watch_stream<S>(
+    rpc: &reno_rpc::Client,
+    params: S::Params,
+) -> Result<BoxStream<'static, Result<S::Item, ClientError>>, ClientError>
 where
-    T: DeserializeOwned + Send + 'static,
+    S: reno_proto::Subscription + 'static,
+    S::Params: Clone + Send + 'static,
+    S::Item: DeserializeOwned + Send + 'static,
 {
-    stream::unfold(sub, |mut sub| async move {
-        match sub.next().await {
-            Some(SubEvent::Item(item)) => Some((Ok(item), sub)),
-            Some(SubEvent::Gap { .. }) => Some((
-                Err(ClientError::Protocol(
-                    "gap on a latest-value subscription".to_owned(),
-                )),
-                sub,
-            )),
-            Some(SubEvent::Done) | None => None,
+    let sub = rpc.subscribe::<S>(params.clone()).await?;
+    let state = WatchState::<S> {
+        rpc: rpc.clone(),
+        params,
+        sub: Some(sub),
+        stalled: 0,
+        failed: false,
+    };
+    Ok(stream::unfold(state, WatchState::step).boxed())
+}
+
+struct WatchState<S: reno_proto::Subscription> {
+    rpc: reno_rpc::Client,
+    params: S::Params,
+    sub: Option<SubStream<S::Item>>,
+    stalled: u32,
+    failed: bool,
+}
+
+impl<S> WatchState<S>
+where
+    S: reno_proto::Subscription,
+    S::Params: Clone,
+    S::Item: DeserializeOwned + Send + 'static,
+{
+    async fn step(mut self) -> Option<(Result<S::Item, ClientError>, Self)> {
+        if self.failed {
+            return None;
         }
-    })
-    .boxed()
+        match self.advance().await {
+            Ok(Some(item)) => Some((Ok(item), self)),
+            Ok(None) => None,
+            Err(e) => {
+                self.failed = true;
+                Some((Err(e), self))
+            }
+        }
+    }
+
+    async fn advance(&mut self) -> Result<Option<S::Item>, ClientError> {
+        loop {
+            let sub = match self.sub.as_mut() {
+                Some(sub) => sub,
+                None => self
+                    .sub
+                    .insert(self.rpc.subscribe::<S>(self.params.clone()).await?),
+            };
+            match sub.next().await {
+                Some(SubEvent::Item(item)) => {
+                    self.stalled = 0;
+                    return Ok(Some(item));
+                }
+                Some(SubEvent::Gap { .. }) => {
+                    self.sub = None;
+                    self.stalled += 1;
+                    if self.stalled > MAX_STALLED_GAPS {
+                        return Err(ClientError::Protocol(
+                            "a watch keeps gapping without delivering a value".to_owned(),
+                        ));
+                    }
+                }
+                Some(SubEvent::Done) | None => return Ok(None),
+            }
+        }
+    }
 }
 
 struct EventsState {

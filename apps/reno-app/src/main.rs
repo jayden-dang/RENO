@@ -12,7 +12,10 @@ mod store;
 mod summary;
 mod transcript;
 mod ui;
+mod vm;
 
+#[cfg(test)]
+mod screen_tests;
 #[cfg(test)]
 mod tests;
 

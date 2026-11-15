@@ -10,7 +10,7 @@ use gpui::{
 };
 use reno_client::ConnectionStatus;
 
-use crate::actions::OpenPalette;
+use crate::actions::{GoInbox, OpenPalette};
 use crate::route;
 use crate::store::Store;
 use crate::summary::{self, Finding};
@@ -20,7 +20,6 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::sidebar::daemon_label;
 use crate::ui::theme::{self, Theme};
-use crate::ui::toast;
 
 /// The suggestion chips: label, then the text they put in the composer.
 const SUGGESTIONS: [(&str, &str); 3] = [
@@ -93,8 +92,7 @@ impl HomeScreen {
             ConnectionStatus::Disconnected => Headline::Offline {
                 reason: store
                     .offline_reason()
-                    .unwrap_or("The daemon connection closed.")
-                    .to_owned(),
+                    .unwrap_or_else(|| "The daemon connection closed.".to_owned()),
             },
             ConnectionStatus::Connecting => Headline::Connecting,
             ConnectionStatus::Connected => {
@@ -141,7 +139,7 @@ impl HomeScreen {
                             let hover = theme.raised;
                             move |s| s.bg(hover)
                         })
-                        .on_click(|_, _, cx| toast::not_yet(cx, "Inbox"))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoInbox), cx))
                         .child("Review"),
                 ),
             Headline::Finding(Finding::Calm { text }) => pill

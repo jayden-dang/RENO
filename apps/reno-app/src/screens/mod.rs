@@ -1,4 +1,17 @@
-//! Screens: Home and the Run screen exist in Phase 0.
+//! Screens: Home, Inbox, Runs, one Run, Triggers and Settings.
+
+use reno_proto::RunId;
 
 pub(crate) mod home;
+pub(crate) mod inbox;
 pub(crate) mod run;
+pub(crate) mod runs;
+pub(crate) mod settings;
+pub(crate) mod triggers;
+
+/// What a screen asks the shell to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ScreenEvent {
+    /// Open a run's transcript.
+    OpenRun(RunId),
+}

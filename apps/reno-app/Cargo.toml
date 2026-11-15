@@ -13,6 +13,7 @@ mimalloc = ["dep:mimalloc"]
 [dependencies]
 reno-proto.workspace = true
 reno-markdown.workspace = true
+reno-syntax.workspace = true
 reno-client = { workspace = true, features = ["fake"] }
 futures.workspace = true
 mimalloc = { workspace = true, optional = true }

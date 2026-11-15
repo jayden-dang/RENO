@@ -413,6 +413,7 @@ async fn the_mirror_converges_on_the_daemons_state() {
 
     mirror
         .client()
+        .unwrap()
         .decide(&appr("keeperpush"), ApprovalDecision::ApproveOnce)
         .await
         .unwrap();
@@ -439,7 +440,13 @@ async fn the_mirror_converges_on_the_daemons_state() {
 async fn a_full_update_channel_collapses_lists_and_loses_nothing() {
     let client = FakeDaemon::spawn().await.unwrap();
     // One slot: the consumer cannot keep up with the stream of changes.
-    let (mirror, mut rx) = Mirror::start(client.clone(), MirrorConfig { update_capacity: 1 });
+    let (mirror, mut rx) = Mirror::start(
+        client.clone(),
+        MirrorConfig {
+            update_capacity: 1,
+            ..MirrorConfig::default()
+        },
+    );
     let ids = [
         client.run_task(task("one")).await.unwrap(),
         client.run_task(task("two")).await.unwrap(),
@@ -529,7 +536,12 @@ async fn steering_a_live_run_journals_the_message_and_a_reply() {
 
 #[tokio::test(start_paused = true)]
 async fn a_daemon_without_definitions_is_not_asked_for_bots_or_definitions() {
-    let client = FakeDaemon::spawn().await.unwrap();
+    let client = FakeDaemon::spawn_with(FakeConfig {
+        without_features: vec![reno_proto::FEATURE_DEFS.to_owned()],
+        ..FakeConfig::default()
+    })
+    .await
+    .unwrap();
     // The fake does not claim the `defs` feature, so the client refuses before sending.
     assert!(!client.supports(reno_proto::FEATURE_DEFS));
     let mut as_bot = task("go");

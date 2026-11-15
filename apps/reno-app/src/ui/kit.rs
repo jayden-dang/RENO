@@ -138,3 +138,70 @@ pub(crate) fn send_button(theme: &Theme, enabled: bool) -> Stateful<Div> {
         .when(enabled, |s| s.cursor_pointer())
         .child(icon(Icon::Up, 17.0, arrow))
 }
+
+/// How a [`pill_button`] looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tone {
+    /// The one primary action of a card: accent fill.
+    Primary,
+    /// Refusing: a danger outline.
+    Danger,
+    /// Everything else: a hairline outline.
+    Quiet,
+}
+
+/// A pill button. The id doubles as the accessible label and the test selector. The caller adds
+/// `on_click` (and dims it with [`Stateful::opacity`] when busy).
+pub(crate) fn pill_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: &'static str,
+    tone: Tone,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    let base = div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex_none()
+        .h(px(30.0))
+        .px(px(14.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded(px(999.0))
+        .text_size(px(13.5))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .child(label);
+    match tone {
+        Tone::Primary => base.bg(theme.accent).text_color(gpui::white()),
+        Tone::Danger => {
+            let hover = theme.danger.opacity(0.1);
+            base.border_1()
+                .border_color(theme.danger.opacity(0.5))
+                .text_color(theme.danger)
+                .hover(move |s| s.bg(hover))
+        }
+        Tone::Quiet => {
+            let hover = theme.raised;
+            base.border_1()
+                .border_color(theme.hairline)
+                .text_color(theme.text)
+                .hover(move |s| s.bg(hover))
+        }
+    }
+}
+
+/// The status mark of a run: a dot and the state's words, in the state's colour.
+pub(crate) fn status_pill(theme: &Theme, status: RunStatus) -> Div {
+    let color = status_color(theme, status);
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .text_color(color)
+        .child(dot(color, 7.0))
+        .child(crate::summary::status_label(status))
+}

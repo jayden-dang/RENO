@@ -10,17 +10,22 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowOptions, div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
+    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
-use reno_proto::RunId;
+use reno_proto::{FiringOutcome, RunId};
 
-use crate::actions::{self, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
+use crate::actions::{self, GoInbox, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
 use crate::nav::Nav;
+use crate::screens::ScreenEvent;
 use crate::screens::home::HomeScreen;
+use crate::screens::inbox::InboxScreen;
 use crate::screens::run::RunScreen;
+use crate::screens::runs::RunsScreen;
+use crate::screens::settings::SettingsScreen;
+use crate::screens::triggers::TriggersScreen;
 use crate::store::{Store, StoreEvent};
 use crate::ui::composer;
 use crate::ui::icon::{Assets, Icon};
@@ -112,7 +117,7 @@ pub(crate) fn run(options: Options) {
             store
         });
 
-        let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
+        let bounds = default_bounds(cx);
         let appearance = options.appearance;
         let opened = cx.open_window(
             WindowOptions {
@@ -155,22 +160,50 @@ pub(crate) fn run(options: Options) {
     });
 }
 
+/// The window's opening size: most of the visible screen, within a range that keeps the
+/// sidebar, a 760 px transcript and the details pane readable, centred on the primary display.
+pub(crate) fn window_size(visible: gpui::Size<gpui::Pixels>) -> gpui::Size<gpui::Pixels> {
+    let width = (visible.width * 0.82).clamp(px(1100.0), px(1480.0));
+    let height = (visible.height * 0.86).clamp(px(700.0), px(960.0));
+    size(width.min(visible.width), height.min(visible.height))
+}
+
+fn default_bounds(cx: &App) -> Bounds<gpui::Pixels> {
+    match cx.primary_display() {
+        Some(display) => {
+            let visible = display.visible_bounds();
+            Bounds::centered_at(visible.center(), window_size(visible.size))
+        }
+        None => Bounds::new(point(px(0.0), px(0.0)), size(px(1280.0), px(820.0))),
+    }
+}
+
 /// What the canvas panel shows.
 #[derive(Clone)]
 enum Screen {
     Home,
+    Inbox,
+    Runs,
     Run(Entity<RunScreen>),
+    Triggers,
+    Settings,
 }
 
 pub(crate) struct RootView {
     store: Entity<Store>,
     home: Entity<HomeScreen>,
+    inbox: Entity<InboxScreen>,
+    runs: Entity<RunsScreen>,
+    triggers: Entity<TriggersScreen>,
+    settings: Entity<SettingsScreen>,
     toasts: Entity<Toasts>,
     screen: Screen,
     sidebar_hidden: bool,
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
     appearance_override: Option<Appearance>,
     palette: Option<Entity<Palette>>,
+    /// The run a trigger just started; the Triggers screen keeps showing, the toast says so.
+    pending_fired: Option<RunId>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -184,8 +217,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Self {
         let home = cx.new(|cx| HomeScreen::new(store.clone(), cx));
+        let inbox = cx.new(|cx| InboxScreen::new(store.clone(), cx));
+        let runs = cx.new(|cx| RunsScreen::new(store.clone(), cx));
+        let triggers = cx.new(|cx| TriggersScreen::new(store.clone(), cx));
+        let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
         let subscriptions =
             vec![
+                cx.subscribe_in(&inbox, window, Self::on_screen_event),
+                cx.subscribe_in(&runs, window, Self::on_screen_event),
+                cx.subscribe_in(&triggers, window, Self::on_screen_event),
                 cx.observe(&store, |_, _, cx| cx.notify()),
                 cx.observe(&toasts, |_, _, cx| cx.notify()),
                 cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
@@ -200,12 +240,35 @@ impl RootView {
                             );
                         }
                         StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
+                        StoreEvent::TriggerFired { name, outcome, run } => {
+                            let what = match outcome {
+                                FiringOutcome::Fired => format!("{name} started a run."),
+                                FiringOutcome::Coalesced => {
+                                    format!("{name} is still running; this firing joined it.")
+                                }
+                                FiringOutcome::Duplicate => {
+                                    format!("{name} had already fired for this occurrence.")
+                                }
+                                FiringOutcome::BackedOff => {
+                                    format!("{name} could not start a run and is backing off.")
+                                }
+                            };
+                            toast::push(cx, toast::Tone::Info, "Trigger fired", what);
+                            if let (FiringOutcome::Fired, Some(run)) = (outcome, run) {
+                                this.pending_fired = Some(run.clone());
+                            }
+                        }
                     }
                 }),
             ];
         Self {
             store,
             home,
+            inbox,
+            runs,
+            triggers,
+            settings,
+            pending_fired: None,
             toasts,
             screen: Screen::Home,
             sidebar_hidden: false,
@@ -216,11 +279,26 @@ impl RootView {
         }
     }
 
+    fn on_screen_event(
+        &mut self,
+        _: &Entity<impl EventEmitter<ScreenEvent>>,
+        event: &ScreenEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ScreenEvent::OpenRun(run) => self.open_run(run.clone(), window, cx),
+        }
+    }
+
     /// The sidebar destination the screen belongs to.
     pub(crate) fn nav(&self) -> Nav {
         match self.screen {
             Screen::Home => Nav::Home,
-            Screen::Run(_) => Nav::Runs,
+            Screen::Inbox => Nav::Inbox,
+            Screen::Runs | Screen::Run(_) => Nav::Runs,
+            Screen::Triggers => Nav::Triggers,
+            Screen::Settings => Nav::Settings,
         }
     }
 
@@ -228,8 +306,28 @@ impl RootView {
     pub(crate) fn run_screen(&self) -> Option<&Entity<RunScreen>> {
         match &self.screen {
             Screen::Run(run) => Some(run),
-            Screen::Home => None,
+            _ => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbox(&self) -> &Entity<InboxScreen> {
+        &self.inbox
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> &Entity<RunsScreen> {
+        &self.runs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn triggers(&self) -> &Entity<TriggersScreen> {
+        &self.triggers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> &Entity<SettingsScreen> {
+        &self.settings
     }
 
     #[cfg(test)]
@@ -252,25 +350,41 @@ impl RootView {
             .unwrap_or_else(|| Appearance::from(window.appearance()))
     }
 
-    /// Focuses the screen's text input: Home's composer or the run's steer input.
+    /// Focuses the screen's text input: Home's composer or the run's steer input. A screen
+    /// without one keeps focus on the root, so the keyboard shortcuts still work.
     pub(crate) fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = match &self.screen {
             Screen::Home => self.home.read(cx).composer().focus_handle(cx),
             Screen::Run(run) => run.read(cx).focus_handle(cx),
+            _ => self.focus_handle.clone(),
         };
         window.focus(&handle, cx);
     }
 
-    /// Home is the only destination with a screen of its own (runs open from the sidebar or
-    /// after a send); every other destination is a toast.
+    /// Shows a built destination; the others say they are not built yet.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
-        if nav.is_built() {
-            self.screen = Screen::Home;
-            self.focus_composer(window, cx);
-            cx.notify();
-        } else {
+        if !nav.is_built() {
             toast::not_yet(cx, nav.label());
+            return;
         }
+        self.screen = match nav {
+            Nav::Inbox => {
+                self.inbox.update(cx, |screen, cx| screen.shown(cx));
+                Screen::Inbox
+            }
+            Nav::Runs => {
+                self.runs.update(cx, |screen, cx| screen.shown(cx));
+                Screen::Runs
+            }
+            Nav::Triggers => Screen::Triggers,
+            Nav::Settings => {
+                self.settings.update(cx, |screen, cx| screen.shown(cx));
+                Screen::Settings
+            }
+            _ => Screen::Home,
+        };
+        self.focus_composer(window, cx);
+        cx.notify();
     }
 
     /// Shows one run and follows its transcript.
@@ -280,6 +394,7 @@ impl RootView {
         {
             return;
         }
+        self.pending_fired = None;
         let store = self.store.clone();
         let screen = cx.new(|cx| RunScreen::new(store, run, cx));
         self.screen = Screen::Run(screen);
@@ -362,7 +477,12 @@ impl RootView {
                     this.update(cx, |root, cx| root.open_run(run, window, cx));
                 })
             },
-            settings: Rc::new(|_, cx| toast::not_yet(cx, "Settings")),
+            settings: {
+                let this = this.clone();
+                Rc::new(move |window: &mut Window, cx: &mut App| {
+                    this.update(cx, |root, cx| root.navigate(Nav::Settings, window, cx));
+                })
+            },
         }
     }
 
@@ -413,7 +533,11 @@ impl Render for RootView {
             .overflow_hidden()
             .child(match &self.screen {
                 Screen::Home => self.home.clone().into_any_element(),
+                Screen::Inbox => self.inbox.clone().into_any_element(),
+                Screen::Runs => self.runs.clone().into_any_element(),
                 Screen::Run(run) => run.clone().into_any_element(),
+                Screen::Triggers => self.triggers.clone().into_any_element(),
+                Screen::Settings => self.settings.clone().into_any_element(),
             });
 
         let main = div()
@@ -435,6 +559,12 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(
+                cx.listener(|this, _: &GoInbox, window, cx| this.navigate(Nav::Inbox, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &GoRuns, window, cx| this.navigate(Nav::Runs, window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &ToggleTheme, window, cx| this.toggle_theme(window, cx)),
             )
@@ -507,5 +637,22 @@ mod tests {
             &[("RENO_APPEARANCE", "plaid"), ("RENO_QUIT_AFTER_MS", "soon")],
         );
         assert_eq!(o, Ok(Options::default()));
+    }
+
+    #[test]
+    fn the_window_opens_large_on_a_laptop_and_capped_on_a_big_display() {
+        let at = |w: f32, h: f32| window_size(size(px(w), px(h)));
+        // A 14-inch laptop's visible area: most of it, not the whole.
+        assert_eq!(
+            at(1512.0, 944.0),
+            size(px(1239.84), px(811.84)).max(&size(px(1100.0), px(700.0)))
+        );
+        // A small screen: never larger than the screen.
+        assert_eq!(at(1024.0, 640.0), size(px(1024.0), px(640.0)));
+        // A big display: capped, so lines stay readable.
+        assert_eq!(at(3440.0, 1440.0), size(px(1480.0), px(960.0)));
+        // Never below the minimum the layout needs when the screen allows it.
+        let s = at(1280.0, 800.0);
+        assert!(s.width >= px(1100.0) && s.height >= px(700.0));
     }
 }

@@ -101,6 +101,25 @@ pub(crate) fn age_label(age_ms: u64) -> String {
     }
 }
 
+/// "6h ago", "14m ago", or "just now".
+pub(crate) fn ago_label(age_ms: u64) -> String {
+    match age_label(age_ms).as_str() {
+        "just now" => "just now".to_owned(),
+        short => format!("{short} ago"),
+    }
+}
+
+/// "in 18h", "in 40m", or "due now" for a time at or before `now_ms`.
+pub(crate) fn until_label(due_ms: u64, now_ms: u64) -> String {
+    if due_ms <= now_ms {
+        return "due now".to_owned();
+    }
+    match age_label(due_ms - now_ms).as_str() {
+        "just now" => "in under a minute".to_owned(),
+        short => format!("in {short}"),
+    }
+}
+
 /// The state pill's words.
 pub(crate) fn status_label(status: RunStatus) -> &'static str {
     match status {
@@ -305,6 +324,17 @@ mod tests {
         assert_eq!((p.bot, p.repo, p.what), (None, None, "just a title"));
         let p = parse_title("note: no bot");
         assert_eq!((p.bot, p.what), (None, "note: no bot"));
+    }
+
+    #[test]
+    fn relative_labels() {
+        assert_eq!(ago_label(5_000), "just now");
+        assert_eq!(ago_label(14 * 60_000), "14m ago");
+        assert_eq!(until_label(NOW + 18 * HOUR, NOW), "in 18h");
+        assert_eq!(until_label(NOW + 40 * 60_000, NOW), "in 40m");
+        assert_eq!(until_label(NOW + 10_000, NOW), "in under a minute");
+        assert_eq!(until_label(NOW, NOW), "due now");
+        assert_eq!(until_label(NOW - 1, NOW), "due now");
     }
 
     #[test]
