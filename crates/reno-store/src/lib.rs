@@ -17,6 +17,7 @@
 //! - `runs`: tasks and runs, claims, fences and transitions.
 //! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
 //! - `triggers`: the scheduler's state and firings, fired atomically with the run they start.
+//! - `workspaces`: the worktree of each write run, recorded before it is made.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
 //! - `error`: [`StoreError`].
@@ -35,6 +36,7 @@ pub mod journal;
 mod migrations;
 pub mod runs;
 pub mod triggers;
+mod workspaces;
 mod writer;
 
 pub use approvals::{ExpireScope, Expired, NewApproval, StoredApproval};
@@ -55,3 +57,5 @@ mod definition_tests;
 mod tests;
 #[cfg(test)]
 mod trigger_tests;
+#[cfg(test)]
+mod workspace_tests;
