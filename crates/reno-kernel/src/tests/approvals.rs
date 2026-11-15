@@ -1176,7 +1176,7 @@ async fn a_bot_run_launches_with_the_bots_access_and_sandbox() {
     assert_eq!(specs[0].sandbox, SandboxLevel::ReadOnly);
     assert_eq!(specs[0].cwd, std::path::PathBuf::from(WORKTREE));
 
-    // A bot that says nothing gets the strictest access and the workspace sandbox.
+    // A bot that says nothing gets the strictest access and no sandbox ceiling beyond it.
     port.set(vec![bot("keeper", ""), bot("plain", "")]);
     port.touch_and_wait().await;
     bot_at(&fx, "plain", 1).await;
@@ -1189,7 +1189,7 @@ async fn a_bot_run_launches_with_the_bots_access_and_sandbox() {
     let specs = m.log().specs;
     assert_eq!(
         (specs[1].access, specs[1].sandbox),
-        (AccessMode::Supervised, SandboxLevel::WorkspaceWrite)
+        (AccessMode::Supervised, SandboxLevel::Unrestricted)
     );
 }
 

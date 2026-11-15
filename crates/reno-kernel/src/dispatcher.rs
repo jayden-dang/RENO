@@ -143,7 +143,8 @@ pub(crate) fn no_eligible_executor(
             descriptor.id, descriptor.caps.access_modes
         ));
     }
-    if !descriptor.caps.sandbox_levels.contains(&sandbox) {
+    // `Unrestricted` asks for no ceiling beyond the access mode, so it needs no declaration.
+    if sandbox != SandboxLevel::Unrestricted && !descriptor.caps.sandbox_levels.contains(&sandbox) {
         return Some(format!(
             "NoEligibleExecutor: the run asks for sandbox level {sandbox:?}, and executor {} \
              declares only {:?}; a run is never started with a different sandbox than it asked for",

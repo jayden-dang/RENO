@@ -420,11 +420,13 @@ async fn an_executor_that_cannot_honour_the_access_mode_is_not_eligible() {
 
 #[tokio::test(start_paused = true)]
 async fn an_executor_that_does_not_declare_the_sandbox_level_is_not_eligible() {
-    // The kernel's default asks for `WorkspaceWrite`; this executor declares only `ReadOnly`.
+    // The run asks for `WorkspaceWrite`; this executor declares only `ReadOnly`.
     let mut descriptor = MockExecutor::default_descriptor(id("mock"));
     descriptor.caps.sandbox_levels = vec![reno_proto::SandboxLevel::ReadOnly];
     let m = MockExecutor::new(id("mock")).with_descriptor(descriptor);
-    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let mut cfg = config(1);
+    cfg.sandbox = reno_proto::SandboxLevel::WorkspaceWrite;
+    let fx = Fx::new(cfg, registry(std::slice::from_ref(&m))).await;
     let run = fx.submit("hi").await;
     fx.wait_status(&run, RunStatus::Failed).await;
     let events = fx.events(&run, None).await;
@@ -437,14 +439,25 @@ async fn an_executor_that_does_not_declare_the_sandbox_level_is_not_eligible() {
     );
     assert!(m.log().specs.is_empty(), "nothing was started");
 
-    // An executor that declares no sandbox at all honours none but `Unrestricted`.
+    // An executor that declares no sandbox enforces none: it takes a run that asks for no
+    // ceiling (`Unrestricted`, the default) and refuses one that asks for a sandbox.
     let mut descriptor = MockExecutor::default_descriptor(id("mock"));
     descriptor.caps.sandbox_levels = Vec::new();
     let bare = MockExecutor::new(id("mock")).with_descriptor(descriptor);
     let fx = Fx::new(config(1), registry(std::slice::from_ref(&bare))).await;
     let run = fx.submit("hi").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(bare.log().specs.len(), 1);
+    let mut cfg = config(1);
+    cfg.sandbox = reno_proto::SandboxLevel::WorkspaceWrite;
+    let fx = Fx::new(cfg, registry(std::slice::from_ref(&bare))).await;
+    let run = fx.submit("hi").await;
     fx.wait_status(&run, RunStatus::Failed).await;
-    assert!(bare.log().specs.is_empty());
+    assert_eq!(
+        bare.log().specs.len(),
+        1,
+        "the second run was never started"
+    );
 }
 
 /// An executor whose `start` refuses every run, as a harness that is not signed in does.

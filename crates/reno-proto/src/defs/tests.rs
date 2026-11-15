@@ -1024,7 +1024,7 @@ fn whitespace_comments_and_key_order_do_not_change_the_hash() {
 fn spelling_out_a_default_does_not_change_the_hash() {
     let a = hash_of_bot(&bot_with(""));
     let explicit = bot_with(
-        "access = \"supervised\"\nsandbox = \"workspace_write\"\ntriggers = []\n[budget]\nmax_concurrent_runs = 1\nmax_wall_time = \"45m\"",
+        "access = \"supervised\"\nsandbox = \"unrestricted\"\ntriggers = []\n[budget]\nmax_concurrent_runs = 1\nmax_wall_time = \"45m\"",
     );
     assert_eq!(hash_of_bot(&explicit), a);
 }
