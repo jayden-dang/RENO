@@ -26,8 +26,9 @@ use reno_proto::defs::{
 };
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, Approval, ApprovalDecision,
-    ApprovalId, ApprovalRecord, ApprovalStatus, ExecutorId, RunEventItem, RunId, RunStatus,
-    RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo,
+    ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget, ExecutorId, RunEventItem,
+    RunId, RunStatus, RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo,
+    WorkspaceStatus,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -45,6 +46,8 @@ use crate::recovery;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{self, SchedCmd};
 use crate::shared::{Shared, SupCmd};
+use crate::workspace::Workspace;
+use crate::workspaces;
 
 /// How often `submit` mints a new id after the store says the last one exists.
 const MINT_ATTEMPTS: usize = 8;
@@ -75,7 +78,7 @@ impl Kernel {
         executors: ExecutorRegistry,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        Self::start_inner(config, store, executors, clock, None).await
+        Self::start_inner(config, store, executors, clock, None, None).await
     }
 
     /// Like [`start`](Self::start), and loads definitions through `definitions` (the
@@ -89,7 +92,22 @@ impl Kernel {
         clock: Arc<dyn Clock>,
         definitions: DefsSetup,
     ) -> Result<Self> {
-        Self::start_inner(config, store, executors, clock, Some(definitions)).await
+        Self::start_inner(config, store, executors, clock, Some(definitions), None).await
+    }
+
+    /// The general form of [`start`](Self::start): with or without definitions, and with or
+    /// without a `Workspace` port. With the port, a write run works in a git worktree and is
+    /// refused where it cannot be isolated (see [`Placement`](crate::Placement)); without it,
+    /// every run works in the directory its task named.
+    pub async fn start_with(
+        config: KernelConfig,
+        store: reno_store::Store,
+        executors: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        definitions: Option<DefsSetup>,
+        workspace: Option<Arc<dyn Workspace>>,
+    ) -> Result<Self> {
+        Self::start_inner(config, store, executors, clock, definitions, workspace).await
     }
 
     async fn start_inner(
@@ -98,6 +116,7 @@ impl Kernel {
         executors: ExecutorRegistry,
         clock: Arc<dyn Clock>,
         definitions: Option<DefsSetup>,
+        workspace: Option<Arc<dyn Workspace>>,
     ) -> Result<Self> {
         // Without a port the kernel still validates bodies, against the executors it has.
         let watch_port = definitions.as_ref().and_then(|setup| setup.watch.clone());
@@ -111,8 +130,10 @@ impl Kernel {
             executors,
             config,
             context,
+            workspace,
         ));
         recovery::recover(&shared).await?;
+        workspaces::sweep(&shared).await?;
         shared.approvals.refresh(&shared.db).await?;
         if let Some(setup) = definitions {
             defs::start(&shared, setup).await?;
@@ -335,6 +356,7 @@ impl Kernel {
                         .await
                     {
                         Ok(()) => {
+                            workspaces::release_after_run(&self.shared, run).await;
                             self.shared.notify_status_changed();
                             self.shared.mark_runs_dirty();
                             return Ok(RunStatus::Cancelled);
@@ -356,6 +378,42 @@ impl Kernel {
             run: run.clone(),
             status: last,
         })
+    }
+
+    /// The workspace of `run`, when it has one: it ran, or runs, in a worktree.
+    pub async fn workspace(&self, run: &RunId) -> Result<WorkspaceInfo> {
+        self.shared
+            .db
+            .get_workspace(run)
+            .await?
+            .ok_or_else(|| KernelError::WorkspaceNotFound(run.clone()))
+    }
+
+    /// Workspaces in one of `status` (all when `None`), newest first.
+    pub async fn workspaces(
+        &self,
+        status: Option<&[WorkspaceStatus]>,
+    ) -> Result<Vec<WorkspaceInfo>> {
+        Ok(self
+            .shared
+            .db
+            .list_workspaces(status.unwrap_or_default())
+            .await?)
+    }
+
+    /// Removes workspaces: see `CleanTarget`. Without `force`, only what holds nothing to lose
+    /// (or, for `Merged` and a single run, what is merged) goes, and a branch with unmerged
+    /// commits is never deleted. A single run whose run has not ended is
+    /// [`WorkspaceError::InUse`](crate::WorkspaceError::InUse).
+    pub async fn clean_workspaces(
+        &self,
+        target: CleanTarget,
+        force: bool,
+    ) -> Result<Vec<CleanItem>> {
+        if self.shared.root.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
+        workspaces::clean(&self.shared, target, force).await
     }
 
     /// One run.

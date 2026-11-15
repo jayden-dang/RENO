@@ -19,6 +19,7 @@ mod queue;
 mod recovery;
 mod runs;
 mod triggers;
+mod workspaces;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +32,9 @@ use reno_store::Store;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
-use crate::{DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock};
+use crate::{
+    DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock, Workspace,
+};
 
 pub(super) fn id(name: &str) -> ExecutorId {
     name.parse().unwrap()
@@ -216,23 +219,61 @@ impl Fx {
         definitions: Option<DefsSetup>,
         now_ms: i64,
     ) -> Self {
+        Self::start_over_with(dir, store, config, executors, definitions, None, now_ms).await
+    }
+
+    /// A kernel over a fresh store with `workspace` as its `Workspace` port.
+    pub(super) async fn with_workspace(
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+        workspace: Arc<dyn Workspace>,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("reno.db")).unwrap();
+        Self::over_workspace(dir, store, config, executors, definitions, workspace).await
+    }
+
+    /// A kernel over an existing store with `workspace` as its `Workspace` port.
+    pub(super) async fn over_workspace(
+        dir: TempDir,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+        workspace: Arc<dyn Workspace>,
+    ) -> Self {
+        Self::start_over_with(
+            Some(dir),
+            store,
+            config,
+            executors,
+            definitions,
+            Some(workspace),
+            START_MS,
+        )
+        .await
+    }
+
+    async fn start_over_with(
+        dir: Option<TempDir>,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+        workspace: Option<Arc<dyn Workspace>>,
+        now_ms: i64,
+    ) -> Self {
         let spinner = spin();
         let clock = Arc::new(ManualClock::new(now_ms));
-        let start = match definitions {
-            None => tokio::spawn(Kernel::start(
-                config,
-                store.clone(),
-                executors,
-                clock.clone(),
-            )),
-            Some(setup) => tokio::spawn(Kernel::start_with_definitions(
-                config,
-                store.clone(),
-                executors,
-                clock.clone(),
-                setup,
-            )),
-        };
+        let start = tokio::spawn(Kernel::start_with(
+            config,
+            store.clone(),
+            executors,
+            clock.clone(),
+            definitions,
+            workspace,
+        ));
         // Start-up may sleep on paused time (the orphan sweep), so drive it.
         until(async || start.is_finished().then_some(())).await;
         let kernel = start.await.unwrap().unwrap();

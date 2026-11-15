@@ -40,6 +40,7 @@ use crate::lifecycle;
 use crate::scheduler::{SchedCmd, StartFailure};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
 use crate::supervisor::{RunInfo, Supervisor};
+use crate::workspaces;
 
 pub(crate) async fn run(shared: Arc<Shared>) {
     loop {
@@ -128,6 +129,22 @@ async fn launch_settings(
     Ok((bot.access, bot.sandbox))
 }
 
+/// Whether the run's pinned bot lets it write in a directory that is not a git repository.
+async fn in_place_opt_in(shared: &Shared, row: &RunRecord) -> bool {
+    let Some(pin) = &row.bot else {
+        return false;
+    };
+    let stored = shared
+        .db
+        .get_definition(DefKind::Bot, &pin.name, pin.version)
+        .await
+        .ok()
+        .flatten();
+    stored
+        .and_then(|stored| serde_json::from_value::<BotDef>(stored.body).ok())
+        .is_some_and(|bot| bot.in_place_writes)
+}
+
 /// The diagnostic of a run that no executor can honour, or `None` when `descriptor` can.
 pub(crate) fn no_eligible_executor(
     descriptor: &ExecutorDescriptor,
@@ -207,13 +224,34 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     }
     shared.mark_runs_dirty();
 
-    let spec = match launch_settings(shared, &row)
+    let mut spec = match launch_settings(shared, &row)
         .await
         .and_then(|(access, sandbox)| exec_spec(&row, access, sandbox))
     {
         Ok(spec) => spec,
         Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
     };
+    // Where the run works: its own worktree for a write run in a git repository (T1.3).
+    let opted_in = in_place_opt_in(shared, &row).await;
+    let placed = tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        placed = workspaces::place(shared, &row, spec.cwd.clone(), spec.sandbox, opted_in) => {
+            Some(placed)
+        }
+    };
+    match placed {
+        None => {
+            let why = "cancelled while the workspace was being prepared".to_owned();
+            let stop = StopReason::Interrupted;
+            return conclude(shared, &run_id, fence, stop, why, cmd_rx, slot).await;
+        }
+        Some(Err(error)) => {
+            let why = format!("WorkspaceRefused: {error}");
+            return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
+        }
+        Some(Ok(placement)) => spec.cwd = placement.cwd(),
+    }
     let Some(executor) = shared.executors.get(&row.executor).cloned() else {
         let why = format!("unknown executor {}", row.executor);
         return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
@@ -316,6 +354,7 @@ async fn conclude(
 ) {
     match lifecycle::end_run(&shared.db, run, fence, RunStatus::Running, stop).await {
         Ok(_) => {
+            workspaces::release_after_run(shared, run).await;
             let done = ExecEvent::Done {
                 stop,
                 result: None,

@@ -42,6 +42,10 @@ pub struct KernelConfig {
     pub approval_ttl: Duration,
     /// The working directory of the runs triggers start. The daemon points it at its workspace.
     pub trigger_cwd: PathBuf,
+    /// Reno's own scratch directory, the working directory of a run that names none. A run whose
+    /// directory is under it works there in place, with no worktree: it is not the user's
+    /// checkout. `None` for a kernel with no scratch directory.
+    pub scratch_root: Option<PathBuf>,
 }
 
 impl Default for KernelConfig {
@@ -61,6 +65,7 @@ impl Default for KernelConfig {
             sandbox: SandboxLevel::WorkspaceWrite,
             approval_ttl: Duration::from_secs(30 * 60),
             trigger_cwd: PathBuf::from("."),
+            scratch_root: None,
         }
     }
 }

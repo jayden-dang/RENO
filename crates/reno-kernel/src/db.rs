@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
-use reno_proto::{ApprovalId, ApprovalOutcome, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId};
+use reno_proto::{
+    ApprovalId, ApprovalOutcome, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId,
+    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+};
 use reno_store::{
     Applied, Claim, DefinitionRecord, ExpireScope, Expired, FireResult, Journals, NewApproval,
     NewDefinition, NewFiring, NewTask, RunRecord, Store, StoreError, StoredApproval, TriggerRow,
@@ -267,6 +270,46 @@ impl Db {
     pub(crate) async fn trigger_recovered(&self, name: &str, run: &RunId) -> Result<bool> {
         self.wrote();
         self.store.trigger_recovered(name, run, self.now_ms()).await
+    }
+
+    pub(crate) async fn begin_workspace(&self, info: WorkspaceInfo) -> Result<()> {
+        self.wrote();
+        self.store.begin_workspace(info, self.now_ms()).await
+    }
+
+    pub(crate) async fn set_workspace_status(
+        &self,
+        run: &RunId,
+        status: WorkspaceStatus,
+        changes: Option<WorkspaceChanges>,
+    ) -> Result<WorkspaceInfo> {
+        self.wrote();
+        self.store
+            .set_workspace_status(run, status, changes, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn record_in_place(
+        &self,
+        run: &RunId,
+        cwd: String,
+        reason: &str,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .record_in_place(run, cwd, reason, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn get_workspace(&self, run: &RunId) -> Result<Option<WorkspaceInfo>> {
+        self.store.get_workspace(run).await
+    }
+
+    pub(crate) async fn list_workspaces(
+        &self,
+        statuses: &[WorkspaceStatus],
+    ) -> Result<Vec<WorkspaceInfo>> {
+        self.store.list_workspaces(statuses).await
     }
 
     pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {

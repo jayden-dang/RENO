@@ -4,6 +4,8 @@ use reno_proto::defs::DefKind;
 use reno_proto::{ApprovalId, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
+use crate::workspace::WorkspaceError;
+
 /// Everything a kernel call can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
@@ -52,6 +54,12 @@ pub enum KernelError {
     /// The trigger is disabled in its definition, so it cannot be fired.
     #[error("trigger {0:?} is disabled")]
     TriggerDisabled(String),
+    /// No workspace was recorded for this run: it ran in place, or has not started.
+    #[error("run {0} has no workspace")]
+    WorkspaceNotFound(RunId),
+    /// The `Workspace` port refused or failed.
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
     /// The `Definitions` port failed.
     #[error("definitions: {0}")]
     Definitions(String),
