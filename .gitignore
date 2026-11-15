@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# Internal — planning and research that reference third-party projects.
+# Not for publication. Keep anything that names outside codebases here.
+# ---------------------------------------------------------------------------
+/docs/ARCHITECTURE.md
+/docs/ROADMAP.md
+/docs/design/
+/docs/internal/
+/draft-ui/
+
+# Agent tooling and local session memory
+/.skills/
+/.remember/
+/.claude/settings.local.json
+
+# Rust
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Reno — README hero (source)</title>
+<!-- Render: Chrome headless, --window-size=1600,1000 --force-device-scale-factor=2 → ../hero.jpg -->
+<style>
+  @font-face { font-family: "Geist"; src: url("fonts/Geist.ttf"); font-weight: 400; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-Medium.ttf"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-SemiBold.ttf"); font-weight: 600; }
+  :root { --ink: #17171c; --muted: #5d5d68; --accent: #5b43e8; --line: #e4e2ee; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1600px; height: 1000px; overflow: hidden; }
+  body {
+    font-family: "Geist", system-ui, sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(40% 45% at 12% 8%, #ffe1ec 0%, transparent 70%),
+      radial-gradient(38% 40% at 88% 6%, #ffe7d4 0%, transparent 70%),
+      radial-gradient(60% 50% at 50% 0%, #e7e6ff 0%, transparent 75%),
+      #fbfbfd;
+    position: relative;
+  }
+  .brand { position: absolute; top: 34px; left: 40px; display: flex; align-items: center; gap: 10px; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
+  .mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    background: radial-gradient(70% 70% at 25% 20%, #f6c4d8 0%, transparent 70%), linear-gradient(160deg, #6f7fe6 0%, #8b7cf6 55%, #c9b8ff 100%);
+    box-shadow: inset 0 0 0 1px rgb(255 255 255 / .35), 0 4px 12px rgb(91 67 232 / .25); }
+  .mark svg { width: 20px; height: 20px; }
+  .top { position: absolute; top: 44px; left: 0; right: 0; display: grid; justify-items: center; gap: 18px; text-align: center; }
+  .pill { display: inline-flex; align-items: center; gap: 10px; height: 30px; padding: 0 14px 0 6px; border-radius: 999px; background: #fff; border: 1px solid var(--line); font-size: 13.5px; color: var(--muted); box-shadow: 0 1px 2px rgb(0 0 0 / .04); }
+  .pill b { font-weight: 600; color: var(--accent); background: #efecff; padding: 3px 9px; border-radius: 999px; font-size: 12.5px; }
+  h1 { margin: 6px 0 0; font-size: 68px; line-height: 1.02; font-weight: 600; letter-spacing: -0.035em; }
+  h1 span { background: linear-gradient(100deg, #5b43e8 0%, #8b5cf6 45%, #e0679a 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  p.sub { margin: 0; font-size: 19px; line-height: 1.5; color: var(--muted); max-width: 760px; }
+  .window {
+    position: absolute; left: 50%; top: 372px; transform: translateX(-50%); width: 1180px; height: 738px;
+    border-radius: 16px; overflow: hidden; background: #0b0b0e;
+    box-shadow: 0 0 0 1px rgb(0 0 0 / .08), 0 30px 80px rgb(40 30 90 / .28), 0 8px 24px rgb(0 0 0 / .12);
+  }
+  .window img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
+  .fade { position: absolute; left: 0; right: 0; bottom: 0; height: 120px; background: linear-gradient(180deg, transparent, #fbfbfd 92%); }
+</style>
+</head>
+<body>
+  <div class="brand"><span class="mark"><svg viewBox="0 0 20 20" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="5" r="2"/><circle cx="5" cy="15" r="2"/><circle cx="15" cy="10" r="2"/><path d="M7 5h2.5a3 3 0 0 1 3 3v0M7 15h2.5a3 3 0 0 0 3-3v0"/></svg></span>reno</div>
+  <div class="top">
+    <span class="pill"><b>MIT</b>Local-first orchestration for Claude Code, Codex and Grok — on your Mac</span>
+    <h1>Your coding agents,<br><span>working as one team</span></h1>
+    <p class="sub">Reno routes work to the harness that does it best, keeps every agent on a shared board, checks the result, and only stops to ask you what matters.</p>
+  </div>
+  <div class="window"><img src="../home-dark.jpg" alt=""></div>
+  <div class="fade"></div>
+</body>
+</html>
