@@ -24,6 +24,9 @@ pub enum KernelError {
         /// Its status.
         status: RunStatus,
     },
+    /// The run's steering queue is full; try again once the executor has taken some.
+    #[error("run {0} has too many steering prompts queued")]
+    SteerQueueFull(RunId),
     /// The run ended before it took the decision.
     #[error("run {0} no longer accepts decisions")]
     RunEnded(RunId),

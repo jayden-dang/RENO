@@ -183,6 +183,12 @@ impl Shared {
         self.runs_dirty.notify_one();
     }
 
+    /// Wake `run_events` subscribers that wait for a queued run: its status changed without it
+    /// ever entering the live table (it was cancelled).
+    pub(crate) fn notify_status_changed(&self) {
+        self.live_changed.send_modify(|n| *n += 1);
+    }
+
     pub(crate) fn live_clear(&self) {
         self.live_lock().clear();
         self.live_changed.send_modify(|n| *n += 1);

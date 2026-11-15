@@ -156,6 +156,7 @@ impl Kernel {
                         .await
                     {
                         Ok(()) => {
+                            self.shared.notify_status_changed();
                             self.shared.mark_runs_dirty();
                             return Ok(RunStatus::Cancelled);
                         }

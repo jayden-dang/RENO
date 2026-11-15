@@ -2,7 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Behaviour tests for the kernel: paused tokio time, a tempdir store, `MockExecutor`. No
-//! network, no real harness, no wall clock.
+//! network, no real harness, and no assertion that depends on the wall clock. The one real-time
+//! wait is `Fx::idle`, which pauses a few real milliseconds for the store thread to settle; it
+//! bounds how long a test waits, never what it asserts.
 //!
 //! # Time
 //!
@@ -11,6 +13,7 @@
 //! test therefore runs a spinner task that keeps the runtime busy: time moves only when the test
 //! says so, in `until` (1 ms per probe) or `tokio::time::advance`.
 
+mod queue;
 mod recovery;
 mod runs;
 

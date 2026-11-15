@@ -191,8 +191,15 @@ async fn resolve(ctx: &mut Ctx) -> Result<Phase> {
             // The run has no supervisor yet. Wait until some run enters or leaves the live
             // table, then look again. The receiver was created before the first look, so a
             // change in between is not lost.
-            if ctx.changed.changed().await.is_err() {
-                return Ok(Phase::Finished);
+            // A queued run that is cancelled never goes live, so `cancel` rings the same bell;
+            // and a kernel that is shutting down will start nothing more.
+            tokio::select! {
+                changed = ctx.changed.changed() => {
+                    if changed.is_err() {
+                        return Ok(Phase::Finished);
+                    }
+                }
+                () = ctx.shared.root.cancelled() => return Ok(Phase::Finished),
             }
             continue;
         }

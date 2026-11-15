@@ -36,8 +36,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use reno_harness::exec::{Decision, ExecHandle};
-use reno_proto::{Approval, ApprovalId, ExecEvent, RunId, RunStatus, Seq, StopReason};
+use reno_harness::exec::{ControlsClosed, Decision, ExecHandle, SteerRejected};
+use reno_proto::{
+    Approval, ApprovalId, ApprovalSubject, ExecEvent, RunId, RunStatus, Seq, StopReason,
+};
 use reno_store::{JournalWriter, StoreError};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::time::{Sleep, sleep};
@@ -244,37 +246,36 @@ impl Supervisor {
     /// Handle one non-final event. Every event is journaled and broadcast; the few that also
     /// change the run's state do that first, so whoever sees the event sees the state.
     async fn event(&mut self, event: ExecEvent) {
-        match &event {
-            ExecEvent::NeedsApproval {
-                request_id,
-                subject,
-            } => {
-                let suffix = self.shared.mint.suffix(self.shared.db.now_ms());
-                match ApprovalId::from_suffix(&suffix) {
-                    Ok(id) => {
-                        let requested = self.shared.db.now_ms();
-                        self.shared.approvals.add(Approval {
-                            id: id.clone(),
-                            run_id: self.run.clone(),
-                            subject: subject.clone(),
-                            requested_at_ms: u64::try_from(requested).unwrap_or(0),
-                        });
-                        self.open_approvals.push((id, request_id.clone()));
-                        self.enter_wait(RunStatus::WaitingApproval).await;
-                    }
-                    Err(error) => self.fail(format!("cannot mint an approval id: {error}")),
-                }
-            }
-            ExecEvent::NeedsInput { request_id, .. } => {
-                self.open_inputs.insert(request_id.clone());
-                self.enter_wait(RunStatus::WaitingInput).await;
-            }
-            // Every other event only needs recording. A wildcard is right here because it
-            // changes nothing: the event is journaled and broadcast below like all the others,
-            // so a variant added later is carried through without a case of its own.
-            _ => {}
+        if let ExecEvent::NeedsApproval {
+            request_id,
+            subject,
+        } = &event
+        {
+            self.raise_approval(request_id, subject).await;
+        } else if let ExecEvent::NeedsInput { request_id, .. } = &event {
+            self.open_inputs.insert(request_id.clone());
+            self.enter_wait(RunStatus::WaitingInput).await;
         }
+        // Whatever the event is, it is recorded and broadcast.
         self.publish(&event);
+    }
+
+    async fn raise_approval(&mut self, request_id: &str, subject: &ApprovalSubject) {
+        let requested = self.shared.db.now_ms();
+        let suffix = self.shared.mint.suffix(requested);
+        match ApprovalId::from_suffix(&suffix) {
+            Ok(id) => {
+                self.shared.approvals.add(Approval {
+                    id: id.clone(),
+                    run_id: self.run.clone(),
+                    subject: subject.clone(),
+                    requested_at_ms: u64::try_from(requested).unwrap_or(0),
+                });
+                self.open_approvals.push((id, request_id.to_owned()));
+                self.enter_wait(RunStatus::WaitingApproval).await;
+            }
+            Err(error) => self.fail(format!("cannot mint an approval id: {error}")),
+        }
     }
 
     async fn transition(&mut self, to: RunStatus) -> bool {
@@ -333,11 +334,15 @@ impl Supervisor {
                 let _ = reply.send(outcome);
             }
             SupCmd::Steer { prompt, reply } => {
+                // Never wait here: the executor drains steering from inside the stream this task
+                // reads, so a full queue would park the supervisor behind its own executor.
                 let outcome = self
                     .handle
-                    .steer(prompt)
-                    .await
-                    .map_err(|_| KernelError::RunEnded(self.run.clone()));
+                    .try_steer(prompt)
+                    .map_err(|rejected| match rejected {
+                        SteerRejected::Full => KernelError::SteerQueueFull(self.run.clone()),
+                        SteerRejected::Closed => KernelError::RunEnded(self.run.clone()),
+                    });
                 let _ = reply.send(outcome);
             }
         }
@@ -352,10 +357,13 @@ impl Supervisor {
             return Err(KernelError::ApprovalNotFound(approval));
         };
         let request_id = self.open_approvals[at].1.clone();
-        self.handle
-            .decide(request_id, decision)
-            .await
-            .map_err(|_| KernelError::RunEnded(self.run.clone()))?;
+        // A full answer queue must not park the supervisor either: give up if the run is
+        // cancelled meanwhile.
+        let sent = tokio::select! {
+            sent = self.handle.decide(request_id, decision) => sent,
+            () = self.cancel.cancelled() => Err(ControlsClosed),
+        };
+        sent.map_err(|_| KernelError::RunEnded(self.run.clone()))?;
         self.open_approvals.remove(at);
         self.shared.approvals.remove(&approval);
         self.resolve_wait().await;
