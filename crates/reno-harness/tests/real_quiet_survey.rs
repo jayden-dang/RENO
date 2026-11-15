@@ -1,131 +1,83 @@
-//! Production-settings survey: real multi-tool turns must settle exactly
-//! once with no orphaned output. Silent gaps are measured for diagnostics;
-//! silence is never proof that an ACP prompt has completed.
+//! Production-settings survey: real multi-tool turns must settle exactly once with no orphaned
+//! output. Silent gaps are measured for diagnostics; silence is never proof that an ACP prompt
+//! has completed.
 //!
 //! SURVEY_RUNS=3 cargo test -p reno-harness --test real_quiet_survey -- --ignored --nocapture
-//! Uninstalled/unauthenticated agents are skipped.
+//! Uninstalled/unauthenticated agents are skipped. This is the only test that runs the real agent
+//! CLIs, and only when asked to.
+
+#![cfg(unix)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
-
-use reno_harness::upstream_proto::{
-    AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
-};
-use reno_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use reno_harness::AcpExecutor;
+use reno_harness::exec::{Decision, ExecControls, Executor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel, StopReason};
 
 const POST_DONE_WINDOW: Duration = Duration::from_secs(20);
 
-fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let token = CancellationToken::new();
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
-            let (tx, rx) = oneshot::channel();
-            let answers: Vec<UserInputAnswer> = questions
-                .iter()
-                .map(|q| UserInputAnswer {
-                    question_id: q.id.clone(),
-                    labels: vec!["Yes".into()],
-                })
-                .collect();
-            let _ = tx.send(answers);
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-        turn: Default::default(),
-    };
-    (controls, steer_tx, token)
-}
-
 struct ProbeOutcome {
-    dones: Vec<(DoneStatus, Option<String>)>,
+    dones: Vec<(StopReason, Option<String>)>,
     after_first_done: usize,
     finished: bool,
     max_gap: Duration,
     started_err: Option<String>,
 }
 
-async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
-    let (controls, steer_tx, _token) = controls();
-    let req = RunRequest {
-        mcp: None,
+async fn probe_once(executor: AcpExecutor) -> ProbeOutcome {
+    let (controls, handle) = ExecControls::new(8);
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: "Use your shell tool to run `echo probe-one`. After you see its output, \
                  run `echo probe-two` as a second separate command. After that, reply \
                  with exactly the word PROBE-DONE."
             .into(),
-        harness: None,
+        cwd: std::env::temp_dir(),
         model: None,
-        reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+        effort: None,
+        access: AccessMode::FullAccess,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
-        attachments: Vec::new(),
-        worktree: None,
         resume: None,
+        mcp: Vec::new(),
         env: Default::default(),
-        extra_mcp: Vec::new(),
+        output_schema: None,
     };
-    let mut stream = match harness.run(req, controls).await {
-        Ok(s) => s,
-        Err(e) => {
+    let mut stream = match executor.start(spec, controls).await {
+        Ok(stream) => stream,
+        Err(error) => {
             return ProbeOutcome {
                 dones: Vec::new(),
                 after_first_done: 0,
                 finished: false,
                 max_gap: Duration::ZERO,
-                started_err: Some(e.to_string()),
+                started_err: Some(error.to_string()),
             };
         }
     };
     let started = std::time::Instant::now();
-    let mut events: Vec<(Duration, AgentEvent)> = Vec::new();
-    let mut steer = Some(steer_tx);
+    let mut events: Vec<(Duration, ExecEvent)> = Vec::new();
     let mut first_done_at: Option<std::time::Instant> = None;
     loop {
         let budget = match first_done_at {
-            Some(at) => {
-                let left = POST_DONE_WINDOW.saturating_sub(at.elapsed());
-                if left.is_zero() && steer.is_some() {
-                    steer = None;
-                }
-                left.max(Duration::from_secs(10))
-            }
+            Some(at) => POST_DONE_WINDOW.saturating_sub(at.elapsed()),
             None => Duration::from_secs(120),
         };
         match tokio::time::timeout(budget, stream.next()).await {
-            Ok(Some(Ok(ev))) => {
-                if matches!(ev, AgentEvent::Done { .. }) && first_done_at.is_none() {
-                    first_done_at = Some(std::time::Instant::now());
+            Ok(Some(event)) => {
+                match &event {
+                    ExecEvent::Done { .. } if first_done_at.is_none() => {
+                        first_done_at = Some(std::time::Instant::now());
+                    }
+                    ExecEvent::NeedsApproval { request_id, .. } => {
+                        let _ = handle.decide(request_id.clone(), Decision::Allow).await;
+                    }
+                    _ => {}
                 }
-                events.push((started.elapsed(), ev));
+                events.push((started.elapsed(), event));
             }
-            Ok(Some(Err(e))) => {
-                events.push((
-                    started.elapsed(),
-                    AgentEvent::Done {
-                        status: DoneStatus::Errored,
-                        result: None,
-                        error: Some(e.to_string()),
-                        session_id: None,
-                    },
-                ));
-                break;
-            }
-            Ok(None) => break,
-            Err(_) => {
-                if steer.is_some() {
-                    steer = None;
-                } else {
-                    break;
-                }
-            }
+            Ok(None) | Err(_) => break,
         }
         if events.len() > 600 {
             break;
@@ -133,34 +85,30 @@ async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
     }
     let first_done_idx = events
         .iter()
-        .position(|(_, e)| matches!(e, AgentEvent::Done { .. }));
-    // Max silent gap while the turn is live: consecutive-event gaps from the
-    // first event through the first Done (post-Done observation excluded).
+        .position(|(_, e)| matches!(e, ExecEvent::Done { .. }));
+    // Max silent gap while the turn is live: consecutive-event gaps from the first event through
+    // the first Done (post-Done observation excluded).
     let live_end = first_done_idx.unwrap_or(events.len().saturating_sub(1));
     let max_gap = events[..=live_end.min(events.len().saturating_sub(1))]
         .windows(2)
         .map(|w| w[1].0 - w[0].0)
         .max()
         .unwrap_or(Duration::ZERO);
-    let after_first_done = first_done_idx
-        .map(|i| {
-            events[i + 1..]
-                .iter()
-                .filter(|(_, e)| {
-                    matches!(
-                        e,
-                        AgentEvent::TextDelta { .. }
-                            | AgentEvent::ToolCall { .. }
-                            | AgentEvent::ToolResult { .. }
-                    )
-                })
-                .count()
-        })
-        .unwrap_or(0);
+    let after_first_done = first_done_idx.map_or(0, |i| {
+        events[i + 1..]
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    ExecEvent::Text { .. } | ExecEvent::Tool { .. } | ExecEvent::ToolResult { .. }
+                )
+            })
+            .count()
+    });
     let text: String = events
         .iter()
         .filter_map(|(_, e)| match e {
-            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            ExecEvent::Text { text } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -168,7 +116,9 @@ async fn probe_once(harness: Box<dyn Harness>) -> ProbeOutcome {
         dones: events
             .iter()
             .filter_map(|(_, e)| match e {
-                AgentEvent::Done { status, error, .. } => Some((*status, error.clone())),
+                ExecEvent::Done {
+                    stop, diagnostic, ..
+                } => Some((*stop, diagnostic.clone())),
                 _ => None,
             })
             .collect(),
@@ -188,6 +138,7 @@ fn is_auth_or_missing(o: &ProbeOutcome) -> bool {
         .to_lowercase();
     msg.contains("auth")
         || msg.contains("login")
+        || msg.contains("signed in")
         || msg.contains("not installed")
         || msg.contains("not found")
         || msg.contains("no such file")
@@ -195,31 +146,31 @@ fn is_auth_or_missing(o: &ProbeOutcome) -> bool {
 
 #[tokio::test]
 #[ignore = "runs every installed+authenticated agent CLI; costs a few small prompts each"]
-async fn real_all_harnesses_quiet_survey() {
+async fn real_all_agents_quiet_survey() {
     let runs: usize = std::env::var("SURVEY_RUNS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
-    let agents: Vec<(&str, fn() -> Box<dyn Harness>)> = vec![
-        ("devin", || Box::new(AcpHarness::devin())),
-        ("grok", || Box::new(AcpHarness::grok())),
-        ("hermes", || Box::new(AcpHarness::hermes())),
+    let agents: Vec<(&str, fn() -> AcpExecutor)> = vec![
+        ("devin", AcpExecutor::devin),
+        ("grok", AcpExecutor::grok),
+        ("hermes", AcpExecutor::hermes),
     ];
     let mut failures: Vec<String> = Vec::new();
     for (name, ctor) in agents {
         for i in 1..=runs {
             let o = probe_once(ctor()).await;
             if is_auth_or_missing(&o) {
-                println!("[{name}] SKIP — not installed / not authenticated");
+                println!("[{name}] SKIP: not installed / not authenticated");
                 break;
             }
             let clean = o.dones.len() == 1
-                && o.dones[0].0 == DoneStatus::Completed
+                && o.dones[0].0 == StopReason::Completed
                 && o.after_first_done == 0
                 && o.finished;
             println!(
                 "[{name}] run {i}/{runs}: dones={:?} after_first_done={} finished={} \
-                 max_live_gap={:.3}s → {}",
+                 max_live_gap={:.3}s -> {}",
                 o.dones
                     .iter()
                     .map(|(s, _)| format!("{s:?}"))

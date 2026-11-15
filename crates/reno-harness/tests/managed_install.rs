@@ -1,7 +1,6 @@
-//! Real-world E2E for the managed adapter install: with no `grok`
-//! binary anywhere, `run()` must npm-install the pinned adapter into
-//! `$RENO_ADAPTERS_DIR`, spawn it via node, and reach SessionStarted (the
-//! full initialize → session/new handshake) — the path that `npx -y` at chat
+//! Real-world E2E for the managed adapter install: with no `grok` binary anywhere, `start()`
+//! must npm-install the pinned adapter into `$RENO_ADAPTERS_DIR`, spawn it via node, and reach
+//! `Started` (the full initialize then session/new handshake): the path that `npx -y` at run
 //! time would otherwise take.
 //!
 //! Ignored: needs network and npm. Run with
@@ -10,86 +9,68 @@
 //! Single-test binary: it mutates RENO_ADAPTERS_DIR process-wide.
 
 use futures::StreamExt;
-use reno_harness::upstream_proto::{AgentEvent, RunRequest};
-use reno_harness::{AcpHarness, Harness, RunControls};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use reno_harness::AcpExecutor;
+use reno_harness::exec::{ExecControls, Executor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel};
 
 #[tokio::test]
 #[ignore = "network + npm; installs the pinned Grok CLI for real"]
-async fn managed_install_reaches_session_started() {
+async fn managed_install_reaches_started() {
     let adapters = tempfile::tempdir().unwrap();
-    // SAFETY: single-test binary — nothing else reads env concurrently.
+    // SAFETY: single-test binary: nothing else reads env concurrently.
     unsafe {
         std::env::set_var("RENO_ADAPTERS_DIR", adapters.path());
         std::env::remove_var("GROK_EXECUTABLE");
     }
 
-    let harness = AcpHarness::grok();
-    let (_steer_tx, steering) = mpsc::channel(1);
-    let interrupt = CancellationToken::new();
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
-        steering,
-        interrupt: interrupt.clone(),
-        turn: Default::default(),
-    };
-    let request = RunRequest {
-        mcp: None,
+    let (controls, handle) = ExecControls::new(1);
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: "say the word ok and stop".into(),
-        harness: None,
+        cwd: std::env::temp_dir(),
         model: None,
-        reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: std::env::temp_dir().display().to_string(),
-        sandbox: reno_harness::upstream_proto::SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
-        attachments: Vec::new(),
-        worktree: None,
+        effort: None,
+        access: AccessMode::FullAccess,
+        sandbox: SandboxLevel::WorkspaceWrite,
         resume: None,
+        mcp: Vec::new(),
         env: Default::default(),
-        extra_mcp: Vec::new(),
+        output_schema: None,
     };
-
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        harness.run(request, controls),
+        AcpExecutor::grok().start(spec, controls),
     )
     .await
-    .expect("run() (including the npm install) finished in time")
-    .expect("run() resolved a launch");
+    .expect("start() (including the npm install) finished in time")
+    .expect("start() resolved a launch");
 
-    // The handshake proves the whole chain: managed install → node spawn →
-    // initialize → session/new. Interrupt as soon as the session opens so
-    // the test never burns a real turn.
+    // The handshake proves the whole chain: managed install, node spawn, initialize,
+    // session/new. Cancel as soon as the session opens so the test never burns a real turn.
     let mut started = false;
-    while let Some(ev) = tokio::time::timeout(std::time::Duration::from_secs(180), stream.next())
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(180), stream.next())
         .await
         .expect("stream made progress")
     {
-        match ev.expect("stream event") {
-            AgentEvent::SessionStarted { session_id, .. } => {
-                assert!(!session_id.is_empty(), "handshake produced a session id");
+        match event {
+            ExecEvent::Started { session, .. } => {
+                assert!(!session.0.is_empty(), "handshake produced a session id");
                 started = true;
-                interrupt.cancel();
+                handle.cancel();
             }
-            AgentEvent::Done { status, error, .. } => {
-                assert!(
-                    started,
-                    "run died before SessionStarted: {status:?} {error:?}"
-                );
+            ExecEvent::Done {
+                stop, diagnostic, ..
+            } => {
+                assert!(started, "run died before Started: {stop:?} {diagnostic:?}");
                 break;
             }
             _ => {}
         }
     }
-    assert!(started, "stream ended without SessionStarted");
+    assert!(started, "stream ended without Started");
 
-    // The install landed in the managed dir (not the user's npm state) and
-    // is marked complete, so the next launch skips npm entirely.
+    // The install landed in the managed dir (not the user's npm state) and is marked complete, so
+    // the next launch skips npm entirely.
     let root = adapters.path().join("xai-official__grok");
     let version_dir = std::fs::read_dir(&root)
         .expect("managed install dir exists")

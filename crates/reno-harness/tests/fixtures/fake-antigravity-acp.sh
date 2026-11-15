@@ -118,6 +118,15 @@ while read -r line; do
       emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
       continue
     fi
+    if has "$line" 'kinds'; then
+      fetch_pick=$(ask fetch ',"title":"Fetch example.com","rawInput":{"url":"https://example.com"}')
+      other_pick=$(ask other ',"title":"spawn_subagent"')
+      think_pick=$(ask think ',"title":"Thinking"')
+      delete_pick=$(ask delete ',"title":"Delete tmp","locations":[{"path":"/w/tmp.txt"}]')
+      emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"kinds:fetch=$fetch_pick;other=$other_pick;think=$think_pick;delete=$delete_pick;\"}}}}"
+      emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      exit 0
+    fi
     if has "$line" 'permissions'; then
       read_pick=$(ask read ',"title":"Read lib.rs","locations":[{"path":"/w/src/lib.rs"}]')
       edit_pick=$(ask edit ',"title":"Edit lib.rs","locations":[{"path":"/w/src/lib.rs"}]')

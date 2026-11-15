@@ -167,7 +167,7 @@ async fn live_registry_sign_ins_report_their_page() {
         let _ = std::fs::remove_file(&opened);
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = seen.clone();
-        let harness = reno_harness::AcpHarness::registry(agent, &entry.name);
+        let harness = reno_harness::AcpExecutor::registry(agent, &entry.name).unwrap();
         let options = reno_harness::acp::SignInOptions {
             browser: Some(browser.clone()),
             method: None,
@@ -175,7 +175,6 @@ async fn live_registry_sign_ins_report_their_page() {
                 ("HOME".into(), home.clone().into()),
                 ("RENO_LOGIN_URL_FILE".into(), opened.clone().into()),
             ],
-            url_filter: None,
         };
         let outcome = tokio::time::timeout(
             Duration::from_secs(25),

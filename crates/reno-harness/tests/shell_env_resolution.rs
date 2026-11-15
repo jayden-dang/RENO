@@ -9,7 +9,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use reno_harness::{AcpHarness, Harness as _};
+use reno_harness::{AcpExecutor, Harness as _};
 
 fn write_executable(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -69,11 +69,11 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         reno_harness::ClaudeExecutor::new().installed(),
         "claude resolves via login-shell PATH"
     );
-    let devin = AcpHarness::devin()
+    let devin = AcpExecutor::devin()
         .launch_program()
         .expect("devin resolves via login-shell PATH");
     assert_eq!(devin, shell_bin.join("devin"), "{devin:?}");
-    let hermes = AcpHarness::hermes()
+    let hermes = AcpExecutor::hermes()
         .launch_program()
         .expect("hermes resolves via login-shell PATH");
     assert_eq!(hermes, shell_bin.join("hermes"), "{hermes:?}");

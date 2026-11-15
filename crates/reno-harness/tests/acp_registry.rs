@@ -11,8 +11,11 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use reno_harness::upstream_proto::{HarnessId, RegistryAgent};
-use reno_harness::{AcpHarness, Harness, acp_registry as reg};
+use futures::StreamExt;
+use reno_harness::exec::{ExecControls, Executor};
+use reno_harness::upstream_proto::RegistryAgent;
+use reno_harness::{AcpExecutor, acp_registry as reg};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel, StopReason};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -149,17 +152,46 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
     let (_, _, env) = reg::launch(agent).unwrap();
     assert_eq!(env, vec![("FAKE_REGISTRY_ENV".to_owned(), "1".to_owned())]);
 
-    // The generic harness: the agent's own models, from its handshake.
-    let harness = AcpHarness::registry(agent, "Fake Agent");
-    assert_eq!(harness.id(), HarnessId::Registry(agent));
-    assert_eq!(harness.id().as_str(), "acp.fake-agent");
-    assert!(harness.installed());
-    let models = harness.models().await.expect("models from the agent");
-    let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, ["grok-4-fast", "grok-4.5"]);
+    // The generic executor, launched from the record: its id is the registry slug, and it runs.
+    let executor = AcpExecutor::registry(agent, "Fake Agent").unwrap();
+    assert_eq!(executor.descriptor().id.as_str(), "acp.fake-agent");
+    assert!(executor.installed());
+    let (controls, _handle) = ExecControls::new(8);
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
+        prompt: "scenario:happy".into(),
+        cwd: std::env::temp_dir(),
+        model: None,
+        effort: None,
+        access: AccessMode::Supervised,
+        sandbox: SandboxLevel::WorkspaceWrite,
+        resume: None,
+        mcp: Vec::new(),
+        env: Default::default(),
+        output_schema: None,
+    };
+    let events: Vec<ExecEvent> = executor
+        .start(spec, controls)
+        .await
+        .expect("run starts")
+        .collect()
+        .await;
+    assert!(
+        events.contains(&ExecEvent::Text {
+            text: "Hello".into()
+        }),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(ExecEvent::Done {
+            stop: StopReason::Completed,
+            ..
+        })
+    ));
 
     reg::remove(agent).unwrap();
     assert!(!reg::installed(agent));
-    assert!(!harness.installed());
+    assert!(!executor.installed());
     assert!(!root.path().join("fake-agent").exists());
 }

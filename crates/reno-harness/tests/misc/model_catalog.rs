@@ -1,15 +1,9 @@
 #![cfg(unix)]
-use reno_harness::{AcpHarness, CodexHarness, Harness};
+use reno_harness::{CodexHarness, Harness};
 use std::{path::Path, sync::Arc};
 
 fn harnesses(binary: &Path) -> Vec<Arc<dyn Harness>> {
-    vec![
-        Arc::new(CodexHarness::new().with_executable(binary)),
-        Arc::new(AcpHarness::grok().with_executable(binary)),
-        Arc::new(AcpHarness::hermes().with_executable(binary)),
-        Arc::new(AcpHarness::antigravity().with_executable(binary)),
-        Arc::new(AcpHarness::devin().with_executable(binary)),
-    ]
+    vec![Arc::new(CodexHarness::new().with_executable(binary))]
 }
 fn binary(root: &Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -143,13 +137,7 @@ fn auth_context_child() {
     };
     let root = std::path::PathBuf::from(root);
     let binary = binary(&root);
-    for (harness, auth) in harnesses(&binary).into_iter().zip([
-        ".codex/auth.json",
-        ".grok/auth.json",
-        ".hermes/auth.json",
-        ".gemini/antigravity-acp/oauth_creds.json",
-        ".local/share/devin/credentials.toml",
-    ]) {
+    for (harness, auth) in harnesses(&binary).into_iter().zip([".codex/auth.json"]) {
         let before = harness.model_context().unwrap().unwrap();
         let path = root.join(auth);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
