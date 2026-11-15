@@ -78,7 +78,7 @@ use crate::exec::{
     Decision, ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, InputAnswer, Open,
     OpenRequests, ProcessSink, Resolved, require_access,
 };
-use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
+use crate::jsonrpc::{Incoming, RpcClient, RpcTasks, transport_lost};
 use crate::process::owned::Child as OwnedChild;
 use crate::process::{Command, Stdio};
 use crate::{HarnessError, Signal, send_signal};
@@ -227,15 +227,19 @@ fn too_old_message(version: Option<&semver::Version>) -> Option<String> {
 ///
 /// | `AccessMode` | `approvalPolicy` | Sandbox before the spec's ceiling | Codex asks about | Reaches Reno as `NeedsApproval` | This driver answers itself |
 /// |---|---|---|---|---|---|
-/// | `FullAccess` | `never` | `danger-full-access` | nothing | nothing | every request that arrives anyway, when the sandbox is unrestricted; MCP tool approvals always |
-/// | `AutoAcceptEdits` | `untrusted` | `workspace-write` (network on) | everything but its known-safe reads, file changes included | commands, permission grants, MCP tool calls, and file changes that are not provably inside the working directory | file changes whose every path is inside the working directory |
+/// | `FullAccess` | `never` | `danger-full-access` | nothing | nothing | every command, file change and permission request that arrives anyway, when the sandbox is unrestricted; MCP tool approvals always |
+/// | `AutoAcceptEdits` | `untrusted` | `workspace-write` (network on) | everything but its known-safe reads, file changes included | commands, permission grants, MCP tool calls, and file changes that are not provably inside the working directory | file changes whose every path, symlinks followed, is inside the working directory |
 /// | `Supervised` | `untrusted` | `read-only` | everything but its known-safe reads | all of it | nothing |
 ///
 /// A run whose mode asks routes its approvals to the person explicitly (`approvalsReviewer:
 /// user`): a configured reviewer could otherwise hand them to an AI. Under `FullAccess` with a
 /// sandbox narrower than unrestricted, Codex never asks, so a request that arrives anyway asks
-/// to leave the sandbox the spec asked for: it is asked, not accepted. The table is applied by
-/// `wire::codex::permission`. An access mode is never widened mid-run.
+/// to leave the sandbox the spec asked for: it is asked, not accepted (its file changes inside
+/// the working directory excepted, as under `AutoAcceptEdits`). Whatever the mode, an approval
+/// that is neither a command, a file change, a permission grant nor an MCP tool call (another
+/// privileged elicitation, `browser_auth` for one) is asked: no mode answers it unseen. The
+/// table is applied by `wire::codex::permission`, and the symlinks by this module. An access
+/// mode is never widened mid-run.
 ///
 /// [`Self::with_access_modes`] narrows what an instance will honour; `start` refuses any other
 /// mode with [`ExecError::UnsupportedAccess`] before spawning (ARCH-15).
@@ -357,7 +361,7 @@ impl CodexExecutor {
             child.shutdown(self.kill_grace).await;
             return Err(HarnessError::Protocol("codex child has no stdio".into()));
         };
-        let (client, _incoming) = RpcClient::tracked(&self.tracker, stdin, stdout);
+        let (client, _incoming, rpc_tasks) = RpcClient::tracked(&self.tracker, stdin, stdout);
         let discovery = async {
             client
                 .request("initialize", initialize_params(false))
@@ -409,6 +413,7 @@ impl CodexExecutor {
         };
         let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
         child.shutdown(self.kill_grace).await;
+        rpc_tasks.abort();
         let models = match result {
             Ok(inner) => inner?,
             Err(_) => return Err(HarnessError::Protocol("model discovery timed out".into())),
@@ -640,9 +645,21 @@ struct AppServer {
     client: RpcClient,
     incoming: mpsc::Receiver<Incoming>,
     stderr_tail: crate::StderrTail,
-    /// Ends when the pipe closes, which a grandchild that escaped teardown can hold open
-    /// forever: the run aborts it, so `shutdown` is bounded.
+    /// The JSON-RPC writer and reader. Like the stderr reader they end when the child's pipes
+    /// close, which a grandchild that escaped teardown can hold open forever: the run aborts
+    /// them with [`Self::release`], so `shutdown` is bounded.
+    rpc_tasks: RpcTasks,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl AppServer {
+    /// Stop the tasks that read and write the child's pipes, once the child is reaped.
+    fn release(&mut self) {
+        self.rpc_tasks.abort();
+        if let Some(handle) = self.stderr_task.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Start one app-server for a run, wire its stdio up and report it for the orphan sweep.
@@ -694,12 +711,13 @@ async fn launch(
             tail.close();
         })
     });
-    let (client, incoming) = RpcClient::tracked(tracker, stdin, stdout);
+    let (client, incoming, rpc_tasks) = RpcClient::tracked(tracker, stdin, stdout);
     Ok(AppServer {
         child,
         client,
         incoming,
         stderr_tail,
+        rpc_tasks,
         stderr_task,
     })
 }
@@ -1060,6 +1078,40 @@ fn note_superseded(replaced: Option<Open<ApprovalPayload, InputPayload>>, reques
     }
 }
 
+/// Whether every path leads inside `cwd` once symlinks are followed. A path that does not exist
+/// yet (a new file, a new directory) is judged by its deepest ancestor that does, so a link
+/// above it is followed too; a `..` below that ancestor, or anything that cannot be resolved,
+/// is not inside (the change is asked about instead).
+async fn resolves_inside(paths: &[PathBuf], cwd: &Path) -> bool {
+    use std::path::Component;
+    let Ok(root) = tokio::fs::canonicalize(cwd).await else {
+        return false;
+    };
+    for path in paths {
+        let mut existing = path.as_path();
+        let real = loop {
+            match tokio::fs::canonicalize(existing).await {
+                Ok(real) => break real,
+                Err(_) => match existing.parent() {
+                    Some(parent) => existing = parent,
+                    None => return false,
+                },
+            }
+        };
+        let Ok(tail) = path.strip_prefix(existing) else {
+            return false;
+        };
+        if tail
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+            || !real.join(tail).starts_with(&root)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// The reply that refuses a request nobody can be asked about: after cancel, or past the cap.
 /// `None` for a method this driver does not serve (answered with an error instead).
 fn refusal(method: &str, params: &Value) -> Option<Value> {
@@ -1335,9 +1387,13 @@ impl Run {
             "item/fileChange/requestApproval" => {
                 let change =
                     permission::file_change(&params, self.norm.file_paths(item), &self.cwd);
+                // Lexically inside is not enough: a link inside the working directory can lead
+                // out of it, and what is accepted unseen must stay where the run was confined.
                 if self
                     .authority
                     .accepts_file_change(&change.subject.paths, change.grant_root)
+                    && (!self.authority.judges_file_changes_by_path()
+                        || resolves_inside(&change.subject.paths, &self.cwd).await)
                 {
                     return self.accept(&id, method, &params);
                 }
@@ -1518,9 +1574,7 @@ async fn end_early(
         })
         .await;
     app.child.shutdown(session.kill_grace).await;
-    if let Some(handle) = app.stderr_task.take() {
-        handle.abort();
-    }
+    app.release();
 }
 
 /// The handshake, interruptible, relaunching an app-server that died first. `Err` carries the
@@ -1558,9 +1612,7 @@ async fn handshake(session: &Session, app: &mut AppServer) -> Result<(), Option<
                 "app-server died before initialize; relaunching"
             );
             app.child.shutdown(session.kill_grace).await;
-            if let Some(handle) = app.stderr_task.take() {
-                handle.abort();
-            }
+            app.release();
             tokio::select! {
                 () = tokio::time::sleep(session.startup_retry_delays[attempt]) => {}
                 () = session.cancel.cancelled() => return Err(None),
@@ -1896,17 +1948,13 @@ async fn run_session(mut session: Session, mut app: AppServer) {
     if let Some(handle) = escalation {
         handle.abort();
     }
-    if let Some(handle) = app.stderr_task.take() {
-        handle.abort();
-    }
+    app.release();
 }
 
 /// Tear down a run whose consumer left before it began.
 async fn end_early_silent(session: &Session, app: &mut AppServer) {
     app.child.shutdown(session.kill_grace).await;
-    if let Some(handle) = app.stderr_task.take() {
-        handle.abort();
-    }
+    app.release();
 }
 
 #[cfg(test)]

@@ -65,9 +65,7 @@ if has "$line" '"method":"model/list"'; then
   exec sleep 30
 fi
 if has "$line" '"method":"thread/resume"'; then
-  if has "$line" '"threadId":"resume-with-child-v1"'; then
-    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\",\"turns\":[{\"items\":[{\"type\":\"collabAgentToolCall\",\"id\":\"spawn-alpha\",\"tool\":\"spawnAgent\",\"status\":\"completed\",\"receiverThreadIds\":[\"child-alpha\"]}]}]}}}"
-  elif has "$line" '"threadId":"resume-fail"'; then
+  if has "$line" '"threadId":"resume-fail"'; then
     # Missing rollout (live 0.164.0 wording): reject, expect the fresh-start
     # fallback.
     emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32600,\"message\":\"no rollout found for thread id resume-fail\"}}"
@@ -449,6 +447,26 @@ case "$turnline" in
   read -r a7 || exit 1
   { has "$a7" '"id":407' && has "$a7" '"permissions":{}'; } || { say "407 not refused: $a7"; exit 0; }
   say "all asked"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:edits-through-links*)
+  # Auto-accept edits, with symlinks: the test made `$cwd/real` (a directory) and `$cwd/link` (a
+  # symlink to a directory outside). A path is inside only if it still is once links are followed.
+  cwd=$(printf '%s' "$thread_line" | sed 's/.*"cwd":"\([^"]*\)".*/\1/')
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  n=0
+  for want_path in "accept|$cwd/real/a.rs" "decline|$cwd/link/b.rs" "decline|$cwd/link/../c.rs" \
+    "accept|$cwd/real/new/deep/d.rs" "decline|$cwd/missing/../e.rs"; do
+    want=${want_path%%|*}; path=${want_path#*|}; n=$((n + 1))
+    emit "{\"method\":\"item/started\",\"params\":{\"item\":{\"id\":\"f$n\",\"type\":\"fileChange\",\"changes\":[{\"path\":\"$path\",\"kind\":\"add\"}]}}}"
+    emit "{\"id\":$((500 + n)),\"method\":\"item/fileChange/requestApproval\",\"params\":{\"itemId\":\"f$n\",\"startedAtMs\":$n}}"
+    read -r reply || exit 1
+    { has "$reply" "\"id\":$((500 + n))" && has "$reply" "\"decision\":\"$want\""; } ||
+      { say "request $n ($path) not answered $want: $reply"; emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'; exit 0; }
+  done
+  say "links resolved"
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 

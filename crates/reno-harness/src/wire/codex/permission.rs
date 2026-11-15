@@ -111,8 +111,9 @@ pub(crate) fn asks_person(access: AccessMode) -> bool {
 /// full access *and* an unrestricted sandbox. Under full access with a narrower sandbox Codex
 /// never asks (`never`), so a request that arrives anyway asks to leave the sandbox the spec
 /// asked for: it is asked, not accepted. A file change inside the working directory needs a
-/// sandbox that can write there, and its paths are compared lexically (`..` is resolved, symlinks
-/// are not).
+/// sandbox that can write there, and its paths are compared lexically here (`..` is resolved,
+/// symlinks are not: the driver, which may touch the file system, follows them before it
+/// believes this).
 #[derive(Debug, Clone)]
 pub(crate) struct Authority {
     access: AccessMode,
@@ -145,8 +146,16 @@ impl Authority {
         self.access == AccessMode::FullAccess
     }
 
+    /// Whether a file change is accepted by where its paths lead rather than unseen. Those are
+    /// the ones the driver must resolve (symlinks) before it believes the lexical comparison in
+    /// [`Self::accepts_file_change`].
+    pub(crate) fn judges_file_changes_by_path(&self) -> bool {
+        !self.unconfined()
+    }
+
     /// `grant_root`: the request asks for write access to a whole root, never accepted unseen
-    /// unless the run is unconfined.
+    /// unless the run is unconfined. Paths are compared lexically; a driver that accepts on
+    /// this must also check [`Self::judges_file_changes_by_path`] and resolve the links.
     pub(crate) fn accepts_file_change(&self, paths: &[PathBuf], grant_root: bool) -> bool {
         if self.unconfined() {
             return true;

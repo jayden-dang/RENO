@@ -64,6 +64,19 @@ pub(crate) fn transport_lost(error: &HarnessError) -> bool {
         .is_some_and(|(_, reason)| reason.starts_with(EXITED) || reason.starts_with(STDIN_CLOSED))
 }
 
+/// The writer and reader tasks of one [`RpcClient`].
+pub(crate) struct RpcTasks([tokio::task::JoinHandle<()>; 2]);
+
+impl RpcTasks {
+    /// Stop both. Pending requests already failed when the pipes closed; an abort only ends
+    /// what a held-open pipe would keep alive.
+    pub(crate) fn abort(&self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RpcClient {
     next_id: Arc<AtomicI64>,
@@ -84,16 +97,19 @@ impl RpcClient {
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
-        Self::start(None, stdin, stdout, observer)
+        let (client, incoming, _tasks) = Self::start(None, stdin, stdout, observer);
+        (client, incoming)
     }
 
     /// [`Self::new`], with the writer and reader tasks on `tracker`, so the owner can wait for
-    /// them at shutdown (ARCH-11). They end when the child's pipes close.
+    /// them at shutdown (ARCH-11). They end when the child's pipes close, which a descendant
+    /// that escaped teardown can hold open forever: the owner aborts them through the returned
+    /// handles once the child is reaped.
     pub(crate) fn tracked(
         tracker: &TaskTracker,
         stdin: ChildStdin,
         stdout: ChildStdout,
-    ) -> (Self, mpsc::Receiver<Incoming>) {
+    ) -> (Self, mpsc::Receiver<Incoming>, RpcTasks) {
         Self::start(Some(tracker), stdin, stdout, None)
     }
 
@@ -102,7 +118,7 @@ impl RpcClient {
         stdin: ChildStdin,
         stdout: ChildStdout,
         observer: Option<StdoutObserver>,
-    ) -> (Self, mpsc::Receiver<Incoming>) {
+    ) -> (Self, mpsc::Receiver<Incoming>, RpcTasks) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
@@ -115,16 +131,10 @@ impl RpcClient {
             closed.clone(),
             observer,
         );
-        match tracker {
-            Some(tracker) => {
-                tracker.spawn(writer);
-                tracker.spawn(reader);
-            }
-            None => {
-                tokio::spawn(writer);
-                tokio::spawn(reader);
-            }
-        }
+        let tasks = match tracker {
+            Some(tracker) => RpcTasks([tracker.spawn(writer), tracker.spawn(reader)]),
+            None => RpcTasks([tokio::spawn(writer), tokio::spawn(reader)]),
+        };
         (
             Self {
                 next_id: Arc::new(AtomicI64::new(0)),
@@ -133,6 +143,7 @@ impl RpcClient {
                 closed,
             },
             incoming_rx,
+            tasks,
         )
     }
 

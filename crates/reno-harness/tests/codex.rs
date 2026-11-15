@@ -929,6 +929,37 @@ async fn auto_accept_edits_accepts_only_changes_inside_the_working_directory() {
     assert_eq!(result_of(&outcome.events), "all asked");
 }
 
+/// A file change counts as inside the working directory only once symlinks are followed: a link
+/// inside it that points out is outside, a `..` after a link climbs from the link's target, and
+/// a path that does not exist yet is judged by its deepest ancestor that does.
+#[tokio::test]
+async fn auto_accept_edits_follows_symlinks_before_accepting() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+    let mut spec = spec_with("scenario:edits-through-links", AccessMode::AutoAcceptEdits);
+    spec.cwd = dir.path().to_path_buf();
+    spec.sandbox = SandboxLevel::WorkspaceWrite;
+    let outcome = run_with(&executor(), spec, |_| Decision::Deny).await;
+    let asked: Vec<_> = outcome
+        .approvals
+        .iter()
+        .flat_map(|(_, s)| s.paths.clone())
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            dir.path().join("link/b.rs"),
+            dir.path().join("link/../c.rs"),
+            dir.path().join("missing/../e.rs"),
+        ],
+        "{:?}",
+        outcome.events
+    );
+    assert_eq!(result_of(&outcome.events), "links resolved");
+}
+
 #[tokio::test]
 async fn cancel_declines_every_open_request_before_interrupting() {
     let dir = tempfile::tempdir().unwrap();

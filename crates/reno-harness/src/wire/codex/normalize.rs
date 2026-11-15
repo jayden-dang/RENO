@@ -853,10 +853,18 @@ impl Normalizer {
                 } else if error.is_some() {
                     end(StopReason::Error, None, error)
                 } else {
+                    // A turn that did not fail but reported a final error: worth a line, not a
+                    // diagnostic (which is the detail of a failure).
+                    if let Some(notice) = notice {
+                        tracing::warn!(
+                            target: "reno_harness::codex",
+                            "turn completed after an error notice: {notice}"
+                        );
+                    }
                     end(
                         StopReason::Completed,
                         last.map(|m| m.trim().to_owned()),
-                        notice,
+                        None,
                     )
                 }
             }
@@ -1473,7 +1481,8 @@ mod tests {
         let next = n.finish_turn("turn/completed", &turn("completed"), false, 0);
         assert_eq!((next.usage, next.result), (None, None));
 
-        // A final error with a turn that did not fail rides the Completed Done as a notice.
+        // A final error with a turn that did not fail is logged: a Completed Done carries no
+        // failure detail.
         let mut n = Normalizer::new();
         n.error(
             &json!({"error": {"message": "late warning"}, "willRetry": false}),
@@ -1482,7 +1491,7 @@ mod tests {
         let end = n.finish_turn("turn/completed", &turn("completed"), false, 0);
         assert_eq!(
             (end.stop, end.diagnostic.as_deref()),
-            (StopReason::Completed, Some("late warning"))
+            (StopReason::Completed, None)
         );
 
         // A failed turn is an error with the turn's own text, else the held one.
