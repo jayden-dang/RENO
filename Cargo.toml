@@ -32,6 +32,11 @@ futures = "0.3"
 tracing = "0.1"
 rustix = { version = "1", features = ["process"] }
 tempfile = "3"
+proptest = "1"
+
+# SQLite: 0.41 because rusqlite_migration 2.7 requires rusqlite ^0.41 (links = "sqlite3").
+rusqlite = { version = "0.41", features = ["bundled"] }
+rusqlite_migration = "2.7"
 
 # GPUI: upstream Zed, pinned by git rev. The rev is `main` as of 2026-11-15.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }

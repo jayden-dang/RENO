@@ -1,0 +1,80 @@
+---
+source: crates/reno-store/src/migrations.rs
+expression: schema(&conn)
+---
+CREATE TABLE attempts (
+    run_id      TEXT NOT NULL REFERENCES runs (id),
+    n           INTEGER NOT NULL,
+    fence       INTEGER NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN (
+        'queued', 'leased', 'running', 'waiting_input', 'waiting_approval',
+        'evaluating', 'succeeded', 'failed', 'interrupted', 'cancelled')),
+    stop_reason TEXT,
+    diagnostic  TEXT,
+    PRIMARY KEY (run_id, n)
+) WITHOUT ROWID;
+
+CREATE TABLE definitions (
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    version    INTEGER NOT NULL,
+    hash       TEXT NOT NULL,
+    body       TEXT NOT NULL CHECK (json_valid(body)),
+    status     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, name, version)
+) WITHOUT ROWID;
+
+CREATE TABLE events (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    principal    TEXT,
+    data         TEXT NOT NULL CHECK (json_valid(data))
+);
+
+CREATE INDEX events_subject ON events (subject_type, subject_id, seq);
+
+CREATE TABLE runs (
+    id               TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks (id),
+    executor         TEXT NOT NULL,
+    model            TEXT,
+    status           TEXT NOT NULL DEFAULT 'queued' CHECK (status IN (
+        'queued', 'leased', 'running', 'waiting_input', 'waiting_approval',
+        'evaluating', 'succeeded', 'failed', 'interrupted', 'cancelled')),
+    lease_owner      TEXT,
+    lease_fence      INTEGER NOT NULL DEFAULT 0 CHECK (lease_fence >= 0),
+    lease_expires_at INTEGER,
+    session_ref      TEXT,
+    wake_at          INTEGER,
+    routing          TEXT CHECK (routing IS NULL OR json_valid(routing)),
+    pid              INTEGER,
+    pgid             INTEGER,
+    created_at       INTEGER NOT NULL,
+    started_at       INTEGER,
+    ended_at         INTEGER
+);
+
+CREATE INDEX runs_claimable ON runs (created_at) WHERE status IN ('queued', 'leased');
+
+CREATE INDEX runs_status ON runs (status);
+
+CREATE INDEX runs_task ON runs (task_id);
+
+CREATE TABLE sqlite_sequence(name,seq);
+
+CREATE TABLE tasks (
+    id          TEXT PRIMARY KEY,
+    flow_run_id TEXT,
+    node_id     TEXT,
+    bot_id      TEXT,
+    class       TEXT,
+    goal        TEXT NOT NULL,
+    spec        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(spec)),
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'cancelled')),
+    revision    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+)
