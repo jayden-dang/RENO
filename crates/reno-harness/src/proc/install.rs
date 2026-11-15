@@ -140,7 +140,7 @@ fn cli_and_dir(id: HarnessId) -> (&'static str, &'static str) {
 pub fn installed(id: HarnessId) -> bool {
     use HarnessId::*;
     match id {
-        ClaudeCode => crate::ClaudeHarness::new().installed(),
+        ClaudeCode => crate::ClaudeExecutor::new().installed(),
         Codex => crate::CodexHarness::new().installed(),
         Grok => crate::AcpHarness::grok().installed(),
         Hermes => crate::AcpHarness::hermes().installed(),

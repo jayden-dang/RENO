@@ -66,7 +66,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     // proving resolution consulted the login-shell snapshot.
     // Native drivers consult the same snapshot for the agent CLI itself.
     assert!(
-        reno_harness::ClaudeHarness::new().installed(),
+        reno_harness::ClaudeExecutor::new().installed(),
         "claude resolves via login-shell PATH"
     );
     let devin = AcpHarness::devin()

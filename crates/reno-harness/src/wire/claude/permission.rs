@@ -1,3 +1,212 @@
+//! Permission requests, as data: what a `can_use_tool` control request is about, which access
+//! mode lets it through unasked, and the answers the CLI reads back.
+//!
+//! Sans-IO (ARCH-6). Nothing here reads prose: an approval is a [`ApprovalSubject`] built from
+//! the tool's name and its JSON input, and a decision is an allow or deny control response.
+//!
+//! # Tool to action class
+//!
+//! | Claude tool | [`ActionClass`] | Subject carries |
+//! |---|---|---|
+//! | `Bash` | `Command` | `command` |
+//! | `Edit`, `Write`, `MultiEdit`, `NotebookEdit` | `Edit` | `paths` (`file_path`, `notebook_path`) |
+//! | `WebFetch`, `WebSearch` | `Network` | |
+//! | `mcp__<server>__<tool>` | `McpTool` | |
+//! | `Read`, `Glob`, `Grep` | `Read` | `paths` (`file_path`, `path`) |
+//! | anything else (`ExitPlanMode`, `TodoWrite`, `Task`, ...) | `Other` | |
+//!
+//! Every subject also carries the tool's own name and the request as the CLI sent it (`raw`).
+//!
+//! # What an access mode lets through
+//!
+//! See [`allowed_without_asking`] and [`permission_mode`]; the table lives on
+//! `ClaudeExecutor`, which applies them.
+
+use std::path::PathBuf;
+
+use reno_proto::{AccessMode, ActionClass, ApprovalSubject, Question};
+use serde_json::Value;
+
+use crate::exec::InputAnswer;
+
+/// Claude's file-changing tools.
+const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// The tool whose permission request is really a question to the person.
+pub(crate) const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
+/// The tool that asks to leave plan mode.
+pub(crate) const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+
+/// What a refused approval tells the agent.
+pub(crate) const DENIED: &str = "The user did not allow this.";
+
+/// What a declined `AskUserQuestion` tells the agent.
+pub(crate) const QUESTIONS_DISMISSED: &str = "The user dismissed the questions without answering.";
+
+/// The action class of a Claude tool.
+pub(crate) fn action_class(tool: &str) -> ActionClass {
+    match tool {
+        "Bash" => ActionClass::Command,
+        t if EDIT_TOOLS.contains(&t) => ActionClass::Edit,
+        "WebFetch" | "WebSearch" => ActionClass::Network,
+        t if t.starts_with("mcp__") => ActionClass::McpTool,
+        "Read" | "Glob" | "Grep" => ActionClass::Read,
+        _ => ActionClass::Other,
+    }
+}
+
+fn string_field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
+    input.get(key).and_then(Value::as_str)
+}
+
+/// The subject of a permission request: `tool` and `input` from the request, `raw` the request
+/// as the CLI sent it, kept for the audit record.
+pub(crate) fn subject(tool: &str, input: &Value, raw: &Value) -> ApprovalSubject {
+    let action = action_class(tool);
+    let command = (action == ActionClass::Command)
+        .then(|| string_field(input, "command").map(str::to_owned))
+        .flatten();
+    let paths = match action {
+        ActionClass::Edit | ActionClass::Read => ["file_path", "notebook_path", "path"]
+            .iter()
+            .filter_map(|key| string_field(input, key))
+            .map(PathBuf::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+    ApprovalSubject {
+        action,
+        tool: tool.to_owned(),
+        command,
+        paths,
+        raw: raw.clone(),
+    }
+}
+
+/// Whether `access` lets `tool` through without asking Reno.
+///
+/// Full access asks nothing; auto-accept-edits lets the edit tools through; supervised lets
+/// nothing through of what reaches here. (What the CLI itself allows in its permission mode,
+/// reading inside the working directory for one, never reaches Reno at all.)
+pub(crate) fn allowed_without_asking(access: AccessMode, tool: &str) -> bool {
+    match access {
+        AccessMode::FullAccess => true,
+        AccessMode::AutoAcceptEdits => EDIT_TOOLS.contains(&tool),
+        AccessMode::Supervised => false,
+    }
+}
+
+/// The CLI `--permission-mode` a run launches in. Full access is `default` too: the run is
+/// answered here instead (see [`allowed_without_asking`]), so no run is launched with a
+/// skip-permissions flag, which the CLI refuses as root outside a sandbox.
+pub(crate) fn permission_mode(access: AccessMode) -> &'static str {
+    match access {
+        AccessMode::AutoAcceptEdits => "acceptEdits",
+        AccessMode::Supervised | AccessMode::FullAccess => "default",
+    }
+}
+
+/// One question of an `AskUserQuestion` call, with what is needed to answer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Asked {
+    /// The question as the contract carries it.
+    pub question: Question,
+    /// The CLI's own text for it: the key its answer goes under.
+    pub key: String,
+}
+
+/// Parse `AskUserQuestion`'s input, tolerantly: `header` or `title`, `question` or `prompt`,
+/// options as strings or objects (their descriptions are dropped; the contract carries labels).
+/// Ids are `<request_id>:<index>`, so they are stable and unique within the run.
+pub(crate) fn parse_questions(request_id: &str, input: &Value) -> Vec<Asked> {
+    let Some(raw) = input.get("questions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    raw.iter()
+        .enumerate()
+        .map(|(at, q)| {
+            let field = |keys: [&str; 2]| keys.iter().find_map(|k| q.get(*k).and_then(Value::as_str));
+            let header = field(["header", "title"]).unwrap_or_default();
+            let text = field(["question", "prompt"]).unwrap_or_default();
+            Asked {
+                question: Question {
+                    id: format!("{request_id}:{at}"),
+                    prompt: if header.is_empty() {
+                        text.to_owned()
+                    } else {
+                        format!("{header}: {text}")
+                    },
+                    options: q
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|option| match option {
+                            Value::String(s) => s.clone(),
+                            other => other
+                                .get("label")
+                                .or_else(|| other.get("value"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                        })
+                        .collect(),
+                    multi_select: ["multiSelect", "multi_select"]
+                        .iter()
+                        .find_map(|k| q.get(*k).and_then(Value::as_bool))
+                        .unwrap_or(false),
+                },
+                key: text.to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// Merge the answers back into the tool input, keyed by question text (single select: a string,
+/// multi select: an array), as the tool expects. A question nobody answered is an empty pick.
+pub(crate) fn updated_input_with_answers(
+    input: &Value,
+    asked: &[Asked],
+    answers: &[InputAnswer],
+) -> Value {
+    let mut updated = match input {
+        Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    let mut by_question = serde_json::Map::new();
+    for a in asked {
+        let labels: Vec<String> = answers
+            .iter()
+            .find(|given| given.question_id == a.question.id)
+            .map(|given| given.labels.clone())
+            .unwrap_or_default();
+        let value = if a.question.multi_select {
+            Value::Array(labels.into_iter().map(Value::String).collect())
+        } else {
+            Value::String(labels.into_iter().next().unwrap_or_default())
+        };
+        by_question.insert(a.key.clone(), value);
+    }
+    updated.insert("answers".into(), Value::Object(by_question));
+    Value::Object(updated)
+}
+
+/// The control response that allows a tool call. `leave_plan_for` is set when the call is
+/// `ExitPlanMode`: approving the plan then continues in that permission mode.
+pub(crate) fn allow(updated_input: Value, leave_plan_for: Option<&str>) -> Value {
+    match leave_plan_for {
+        Some(mode) => super::wire::exit_plan_response(updated_input, mode),
+        None => super::wire::allow_response(updated_input),
+    }
+}
+
+/// The control response that refuses a tool call; the model reads `message`.
+pub(crate) fn deny(message: &str) -> Value {
+    super::wire::deny_response(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

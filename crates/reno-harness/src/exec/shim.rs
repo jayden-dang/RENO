@@ -191,13 +191,6 @@ impl HarnessExecutor {
         self
     }
 
-    /// Wait for every task the shim spawned. Call at shutdown, after the runs' streams ended or
-    /// were dropped; the tasks stop with their stream.
-    pub async fn shutdown(&self) {
-        self.tracker.close();
-        self.tracker.wait().await;
-    }
-
     fn supported_access(&self) -> Vec<AccessMode> {
         self.harness
             .access_modes()
@@ -270,6 +263,12 @@ impl Executor for HarnessExecutor {
                 ..ExecutorHealth::default()
             },
         }
+    }
+
+    /// Waits for every task the shim spawned; they stop with their run's stream.
+    async fn shutdown(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
     }
 
     async fn start(

@@ -1,51 +1,52 @@
-//! Claude's native history on disk: the spawns a resumed chat made, and whether there is a
-//! conversation to resume at all. The frame-level logic lives in
-//! `crate::wire::claude::normalize`; only the file reading is here.
+//! Claude's native history on disk: whether there is a conversation to resume at all.
 
 use serde_json::Value;
 
-use crate::wire::claude::normalize::{Normalizer, Transcript};
-
-/// Restore only spawn identity from Claude's native history. The CLI does
-/// not replay task_started when --resume starts a new process. Session ids
-/// are global; search project directories rather than duplicating the CLI's
-/// cwd encoding (including long-path hashing). Long sessions' histories run
-/// to hundreds of MB: the scan runs off the runtime and only parses lines
-/// that can name a spawn or its agent. The same scan says whether there is a
-/// conversation to resume at all.
-pub(crate) async fn for_resume(
-    config_root: &std::path::Path,
-    session_id: &str,
-) -> (Normalizer, Transcript) {
-    let config_root = config_root.to_owned();
-    let session_id = session_id.to_owned();
-    tokio::task::spawn_blocking(move || restore_spawns(&config_root, &session_id))
-        .await
-        .unwrap_or_else(|_| (Normalizer::new(), Transcript::Unknown))
+/// What `--resume <id>` would find in Claude's native history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Transcript {
+    /// A transcript with conversation in it.
+    Conversation,
+    /// A transcript read through to its end without a single user or assistant line. The CLI
+    /// refuses to resume it ("No conversation found") and exits.
+    Empty,
+    /// The history could not be looked at, or holds no file for the session: the CLI may keep it
+    /// under another config root (a wrapper setting its own `CLAUDE_CONFIG_DIR`). Leave it to
+    /// the CLI, whose "No conversation found" relaunches the run fresh when it truly is gone.
+    Unknown,
 }
 
-fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> (Normalizer, Transcript) {
+/// Look in Claude's history for the session. Session ids are global; project directories are
+/// searched rather than duplicating the CLI's cwd encoding (including long-path hashing). Long
+/// sessions' histories run to hundreds of MB: the scan runs off the runtime and only parses
+/// lines that can show a conversation.
+pub(super) async fn transcript(config_root: &std::path::Path, session_id: &str) -> Transcript {
+    let config_root = config_root.to_owned();
+    let session_id = session_id.to_owned();
+    tokio::task::spawn_blocking(move || scan(&config_root, &session_id))
+        .await
+        .unwrap_or(Transcript::Unknown)
+}
+
+fn scan(config_root: &std::path::Path, session_id: &str) -> Transcript {
     use std::io::BufRead as _;
-    let mut norm = Normalizer::new();
     if session_id.is_empty()
         || !session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
-        return (norm, Transcript::Unknown);
+        return Transcript::Unknown;
     }
     let Ok(projects) = std::fs::read_dir(config_root.join("projects")) else {
-        return (norm, Transcript::Unknown);
+        return Transcript::Unknown;
     };
     let Some(file) = projects.flatten().find_map(|project| {
         std::fs::File::open(project.path().join(format!("{session_id}.jsonl"))).ok()
     }) else {
-        return (norm, Transcript::Unknown);
+        return Transcript::Unknown;
     };
-    let mut transcript = Transcript::Empty;
-    // Only a transcript read whole, every line understood, is Empty: a
-    // read error or a line that might have been conversation leaves the
-    // call to the CLI.
+    // Only a transcript read whole, every line understood, is Empty: a read error or a line that
+    // might have been conversation leaves the call to the CLI.
     let mut doubtful = false;
     let mut reader = std::io::BufReader::with_capacity(1 << 16, file);
     let mut line = Vec::new();
@@ -64,35 +65,28 @@ fn restore_spawns(config_root: &std::path::Path, session_id: &str) -> (Normalize
             doubtful = true;
             continue;
         };
-        // Most of a transcript is bookkeeping (queue operations, request
-        // records, attachments); one user or assistant record is enough.
-        if transcript == Transcript::Empty
-            && (text.contains("\"type\":\"user\"") || text.contains("\"type\":\"assistant\""))
-        {
+        // Most of a transcript is bookkeeping (queue operations, request records,
+        // attachments); one user or assistant record is enough.
+        if text.contains("\"type\":\"user\"") || text.contains("\"type\":\"assistant\"") {
             match serde_json::from_str::<Value>(text) {
-                Ok(record) => {
+                Ok(record)
                     if matches!(
                         record.get("type").and_then(Value::as_str),
                         Some("user" | "assistant")
-                    ) {
-                        transcript = Transcript::Conversation;
-                    }
+                    ) =>
+                {
+                    return Transcript::Conversation;
                 }
+                Ok(_) => {}
                 Err(_) => doubtful = true,
             }
         }
-        if !(text.contains("\"Agent\"") || text.contains("\"Task\"") || text.contains("agentId")) {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<Value>(text) else {
-            continue;
-        };
-        norm.restore_spawn_record(&record);
     }
-    if doubtful && transcript == Transcript::Empty {
-        transcript = Transcript::Unknown;
+    if doubtful {
+        Transcript::Unknown
+    } else {
+        Transcript::Empty
     }
-    (norm, transcript)
 }
 
 #[cfg(test)]
@@ -106,31 +100,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_reads_spawns_and_reports_a_conversation() {
+    async fn a_transcript_with_a_conversation_resumes() {
         let root = tempfile::tempdir().unwrap();
         write(
             root.path(),
             "session-1",
             concat!(
                 "not json\n",
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"description":"scout"}}]}}"#,
-                "\n",
-                r#"{"type":"user","toolUseResult":{"agentId":"a1","status":"async_launched"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_spawn"}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
                 "\n{torn tail"
             )
             .as_bytes(),
         );
-        let (mut norm, transcript) = for_resume(root.path(), "session-1").await;
-        assert_eq!(transcript, Transcript::Conversation);
-        // The spawn survived the file scan: a later task start for it resolves.
-        let frame = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_spawn","status":"completed"}"#,
-        )
-        .unwrap();
-        assert!(!norm.normalize(frame, false).is_empty());
+        assert_eq!(
+            transcript(root.path(), "session-1").await,
+            Transcript::Conversation
+        );
         // Another config root may hold it: only the CLI can tell.
-        let (_, transcript) = for_resume(root.path(), "missing").await;
-        assert_eq!(transcript, Transcript::Unknown);
+        assert_eq!(
+            transcript(root.path(), "missing").await,
+            Transcript::Unknown
+        );
     }
 
     #[tokio::test]
@@ -148,9 +138,8 @@ mod tests {
             )
             .as_bytes(),
         );
-        assert_eq!(for_resume(root.path(), "bare").await.1, Transcript::Empty);
-        // A line that might have been conversation, cut short or not text:
-        // the CLI decides.
+        assert_eq!(transcript(root.path(), "bare").await, Transcript::Empty);
+        // A line that might have been conversation, cut short or not text: the CLI decides.
         for (name, body) in [
             (
                 "torn",
@@ -160,7 +149,7 @@ mod tests {
         ] {
             write(root.path(), name, body);
             assert_eq!(
-                for_resume(root.path(), name).await.1,
+                transcript(root.path(), name).await,
                 Transcript::Unknown,
                 "{name}"
             );
@@ -168,7 +157,12 @@ mod tests {
         // No history at all: nothing can be said either way.
         let nowhere = tempfile::tempdir().unwrap();
         assert_eq!(
-            for_resume(nowhere.path(), "bare").await.1,
+            transcript(nowhere.path(), "bare").await,
+            Transcript::Unknown
+        );
+        // A session id that is not a plain id is never joined into a path.
+        assert_eq!(
+            transcript(root.path(), "../bare").await,
             Transcript::Unknown
         );
     }

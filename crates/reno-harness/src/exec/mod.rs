@@ -1,10 +1,20 @@
 //! The kernel's port to harnesses (ARCH-7, ARCHITECTURE section 4.2).
 //!
-//! [`Executor`] is the one trait the kernel sees. Two things implement it today:
+//! [`Executor`] is the one trait the kernel sees. Three things implement it today:
 //!
-//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A, ARCHITECTURE section 2.1).
-//!   After stage B each driver implements [`Executor`] directly and the shim goes away.
+//! - [`crate::ClaudeExecutor`] is native (stage B, ARCHITECTURE sections 2.1 and 5.1): it
+//!   speaks Claude Code's wire directly and emits `ExecEvent`s, with structured approvals.
+//! - [`HarnessExecutor`] wraps an imported [`crate::Harness`] (stage A) and still serves Codex
+//!   and ACP until their drivers go native too. Then the shim goes away.
 //! - [`MockExecutor`] plays a scripted run for kernel tests and the CLI's `--executor mock`.
+//!
+//! # What a native driver plugs into
+//!
+//! Everything a driver shares is here, so Codex and ACP follow without changing the contract:
+//! [`Executor`], [`ExecControls`] (steering, cancel, answers, process records),
+//! [`require_access`] (fail closed before spawning, ARCH-15), and [`OpenRequests`], the table
+//! that keeps approvals and input requests apart, never lets a wrong-kind answer approve, and
+//! hands back every open request to be refused when the run ends.
 //!
 //! # The stream contract
 //!
@@ -39,9 +49,11 @@ use tokio_util::sync::CancellationToken;
 use crate::proc::ProcessRecord;
 
 mod mock;
+mod requests;
 mod shim;
 
 pub use mock::{MockExecutor, MockLog, MockStep};
+pub use requests::{Open, OpenRequests, Resolved};
 pub use shim::{DROPPED_AGENT_EVENTS, HarnessExecutor};
 
 /// A harness run, as the kernel sees it. Object safe: the kernel holds `Arc<dyn Executor>`.
@@ -64,6 +76,11 @@ pub trait Executor: Send + Sync {
         spec: ExecSpec,
         controls: ExecControls,
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError>;
+
+    /// Wait for the tasks this executor spawned (ARCH-11). Call at shutdown, after the runs'
+    /// streams ended or were dropped: each task stops with its stream. The default has nothing
+    /// to wait for.
+    async fn shutdown(&self) {}
 }
 
 /// What [`Executor::probe`] found.

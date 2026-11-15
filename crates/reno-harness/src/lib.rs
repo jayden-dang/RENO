@@ -1,7 +1,7 @@
 //! reno-harness: one interface over coding agents (plus a mock for tests).
 //!
 //! Native drivers speak each agent's own wire directly: Claude Code over
-//! stream-json ([`ClaudeHarness`]) and Codex over the app-server JSON-RPC
+//! stream-json ([`ClaudeExecutor`], native to the executor contract) and Codex over the app-server JSON-RPC
 //! ([`CodexHarness`]). The shared [`AcpHarness`] serves agents built ground-up
 //! on ACP: Devin (`devin acp`), Grok (`grok agent stdio`), Hermes
 //! (`hermes acp`), Antigravity and the ACP registry agents. Adapter-mediated
@@ -708,7 +708,7 @@ pub(crate) fn crash_message(
 }
 
 pub use acp::AcpHarness;
-pub use claude::ClaudeHarness;
+pub use claude::ClaudeExecutor;
 pub use codex::CodexHarness;
 
 // ---------------------------------------------------------------------------

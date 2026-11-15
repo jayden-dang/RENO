@@ -82,38 +82,7 @@ pub(crate) struct SystemFrame {
     #[serde(default)]
     pub model: String,
     #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default)]
-    pub cwd: String,
-    #[serde(default)]
     pub session_id: String,
-    /// `task_notification`: the spawning Agent tool's id, or the latest
-    /// SendMessage id after a resume. Stop notifications may omit it.
-    #[serde(default, alias = "toolUseId")]
-    pub tool_use_id: Option<String>,
-    /// `task_notification` terminal status (`completed`/`failed`/`killed`…).
-    #[serde(default)]
-    pub status: Option<String>,
-    /// `task_started` / `task_notification`: stable agent/task id
-    /// (`SendMessage`'s `to:` address), used to retain spawn identity.
-    #[serde(default, alias = "taskId")]
-    pub task_id: Option<String>,
-    /// `task_started`: present only for AGENT tasks (a subagent spawning),
-    /// absent on subagent-owned background shell tasks.
-    #[serde(default)]
-    pub subagent_type: Option<String>,
-    /// `task_started`: the task's one-line name, `/<skill>` for a forked
-    /// skill (live-verified 2.1.310).
-    #[serde(default)]
-    pub description: Option<String>,
-    /// `task_started`: the subagent's opening prompt, a forked skill's body.
-    /// A `Value`: a shape we don't expect must not cost the frame.
-    #[serde(default)]
-    pub prompt: Option<Value>,
-    /// `background_tasks_changed`: every background task the session holds
-    /// now (agents and shells) — the authoritative set, not a delta.
-    #[serde(default)]
-    pub tasks: Option<Vec<Value>>,
     /// `api_retry`: which retry this is, of how many, and the wait before it.
     #[serde(default)]
     pub attempt: Option<u64>,
@@ -126,13 +95,6 @@ pub(crate) struct SystemFrame {
     pub error_status: Option<u64>,
     #[serde(default)]
     pub error: Option<Value>,
-    /// `compact_boundary`: `{trigger, pre_tokens, post_tokens}`.
-    #[serde(default)]
-    pub compact_metadata: Option<Value>,
-    /// `init` and `status`: the permission mode the CLI is in now. A `status`
-    /// follows every change, ours or its own (leaving plan mode).
-    #[serde(default, rename = "permissionMode")]
-    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -173,24 +135,10 @@ pub(crate) struct MessageFrame {
     /// Terse assistant-level error code (`rate_limit`, `billing_error`, …).
     #[serde(default)]
     pub error: Option<String>,
-    /// Bookkeeping frame, not a person typing. Image scale notes ride this.
-    /// (`isMeta` in a saved transcript; the live stream spells its fields in
-    /// snake case.)
-    #[serde(default, rename = "isMeta", alias = "is_meta")]
-    pub is_meta: bool,
-    /// Structured tool outcome. An image result repeats its bytes here when
-    /// the content blocks do not. (`toolUseResult` in a saved transcript,
-    /// `tool_use_result` on the live stream.)
-    #[serde(default, rename = "toolUseResult", alias = "tool_use_result")]
-    pub tool_use_result: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct MessageBody {
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub usage: Option<Value>,
     /// Either a plain string or an array of content blocks.
     #[serde(default)]
     pub content: Value,
@@ -211,11 +159,6 @@ impl MessageBody {
 pub(crate) struct ContentBlock {
     #[serde(rename = "type", default)]
     pub kind: String,
-    #[serde(default)]
-    pub text: String,
-    /// A `thinking` block's (summarized) text.
-    #[serde(default)]
-    pub thinking: String,
     #[serde(default)]
     pub id: String,
     #[serde(default)]
@@ -269,8 +212,6 @@ impl RateLimitInfo {
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResultFrame {
-    #[serde(default, rename = "modelUsage")]
-    pub model_usage: std::collections::BTreeMap<String, Value>,
     #[serde(default)]
     pub subtype: String,
     #[serde(default)]
@@ -279,8 +220,6 @@ pub(crate) struct ResultFrame {
     pub errors: Vec<Value>,
     #[serde(default)]
     pub usage: UsageBody,
-    #[serde(default)]
-    pub session_id: Option<String>,
     /// Set on API failures the CLI still files under `subtype: "success"`
     /// (an invalid key, an overloaded or rate-limited API): the turn did no
     /// real work.
@@ -325,6 +264,9 @@ pub(crate) struct ControlRequestFrame {
     pub request_id: String,
     #[serde(default)]
     pub request: ControlRequestBody,
+    /// The `request` object exactly as the CLI sent it, kept for the audit record.
+    #[serde(skip)]
+    pub raw: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -333,12 +275,6 @@ pub(crate) struct ControlRequestBody {
     pub subtype: String,
     #[serde(default)]
     pub tool_name: String,
-    /// `can_use_tool`: the tool's name as shown to people (an MCP tool's
-    /// own), and what the model says the call is for.
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
     #[serde(default)]
     pub input: Value,
 }
@@ -428,7 +364,12 @@ fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
         "user" => Frame::User(serde_json::from_value(value)?),
         "rate_limit_event" => Frame::RateLimit(serde_json::from_value(value)?),
         "result" => Frame::Result(serde_json::from_value(value)?),
-        "control_request" => Frame::ControlRequest(serde_json::from_value(value)?),
+        "control_request" => {
+            let raw = value.get("request").cloned().unwrap_or(Value::Null);
+            let mut frame: ControlRequestFrame = serde_json::from_value(value)?;
+            frame.raw = raw;
+            Frame::ControlRequest(frame)
+        }
         "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
         "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
         _ => Frame::Other,
@@ -608,60 +549,6 @@ pub(crate) fn initialize_request_line(request_id: &str) -> String {
     .to_string()
 }
 
-/// Switch the live process's model (`None` = the user's default model).
-pub(crate) fn set_model_request_line(request_id: &str, model: Option<&str>) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "set_model", "model": model },
-    })
-    .to_string()
-}
-
-/// Replace the live process's flag-layer settings (effort, fast mode, …).
-pub(crate) fn apply_flag_settings_line(request_id: &str, settings: Value) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "apply_flag_settings", "settings": settings },
-    })
-    .to_string()
-}
-
-/// Switch the live process's permission mode. `bypassPermissions` only
-/// works on a process launched with one of the skip-permissions flags
-/// (verified live against 2.1.311).
-pub(crate) fn set_permission_mode_line(request_id: &str, mode: &str) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "set_permission_mode", "mode": mode },
-    })
-    .to_string()
-}
-
-/// Stop the in-flight turn only. `cancel_queued` drops steers the CLI has
-/// queued but not yet consumed: a stopped turn never continues into them.
-pub(crate) fn stop_turn_request_line(request_id: &str) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "interrupt", "cancel_queued": true },
-    })
-    .to_string()
-}
-
-/// Stop one background task (`stop_task`): the CLI kills it, then reports
-/// it `stopped` and the roster without it.
-pub(crate) fn stop_task_request_line(request_id: &str, task_id: &str) -> String {
-    json!({
-        "type": "control_request",
-        "request_id": request_id,
-        "request": { "subtype": "stop_task", "task_id": task_id },
-    })
-    .to_string()
-}
-
 /// Success reply to a CLI control request (`can_use_tool` allow/deny payloads).
 pub(crate) fn control_response_line(request_id: &str, response: Value) -> String {
     json!({
@@ -749,6 +636,21 @@ mod tests {
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());
+    }
+
+    #[test]
+    fn a_control_request_keeps_its_body_exactly_as_the_cli_sent_it() {
+        let line = r#"{"type":"control_request","request_id":"cr-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"some_new_field":[1,2]}}"#;
+        match parse_frame(line).expect("parses") {
+            Frame::ControlRequest(f) => {
+                assert_eq!(f.request_id, "cr-1");
+                assert_eq!(f.request.tool_name, "Bash");
+                // Fields this driver does not read are still in the audit copy.
+                assert_eq!(f.raw["some_new_field"], serde_json::json!([1, 2]));
+                assert_eq!(f.raw["input"]["command"], "ls");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
     }
 
     #[test]
