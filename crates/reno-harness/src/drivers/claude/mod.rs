@@ -2183,388 +2183,134 @@ fn updated_input_with_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reno_proto::{Effort, RunId, SandboxLevel};
     use serde_json::json;
 
-    #[test]
-    fn probe_timeout_says_what_the_cli_printed_without_its_secrets() {
-        let message = probe_timeout_message(Some(
-            "Invalid API key sk-ant-secret-value\nPlease run /login".into(),
-        ));
-        assert!(
-            message.starts_with("Claude initialize timed out after"),
-            "{message}"
-        );
-        assert!(message.contains("Please run /login"), "{message}");
-        assert!(!message.contains("secret-value"), "{message}");
-        assert_eq!(
-            probe_timeout_message(None),
-            format!(
-                "Claude initialize timed out after {}s",
-                PROBE_TIMEOUT.as_secs()
-            )
-        );
-    }
-
-    #[test]
-    fn parses_questions_tolerantly() {
-        let input = json!({
-            "questions": [
-                {
-                    "header": "Choice",
-                    "question": "Pick one",
-                    "options": ["A", {"label": "B", "description": "second"}],
-                    "multiSelect": false
-                },
-                { "title": "Alt", "prompt": "Pick many", "multi_select": true }
-            ]
-        });
-        let qs = parse_questions(&input);
-        assert_eq!(qs.len(), 2);
-        assert_eq!(qs[0].header, "Choice");
-        assert_eq!(qs[0].options, vec!["A".to_string(), "B".to_string()]);
-        assert!(!qs[0].multi_select);
-        assert_eq!(qs[1].header, "Alt");
-        assert_eq!(qs[1].question, "Pick many");
-        assert!(qs[1].multi_select);
-    }
-
-    #[test]
-    fn answers_key_by_question_text() {
-        let input =
-            json!({"questions": [{"header": "H", "question": "Pick one", "options": ["A", "B"]}]});
-        let qs = parse_questions(&input);
-        let answers = vec![UserInputAnswer {
-            question_id: qs[0].id.clone(),
-            labels: vec!["B".into()],
-        }];
-        let updated = updated_input_with_answers(&input, &qs, &answers);
-        assert_eq!(updated["answers"]["Pick one"], json!("B"));
-        // Original input is preserved alongside the answers.
-        assert!(updated["questions"].is_array());
-    }
-
-    #[test]
-    fn runs_ask_the_cli_to_forward_subagent_text() {
-        let request = RunRequest {
-            mcp: None,
-            prompt: "hi".into(),
-            harness: None,
+    fn spec(access: AccessMode) -> ExecSpec {
+        ExecSpec {
+            run_id: RunId::from_suffix("01HZX9").unwrap(),
+            prompt: "do it".into(),
+            cwd: PathBuf::from("/work"),
             model: None,
-            reasoning: None,
-            model_options: serde_json::Map::new(),
-            cwd: String::new(),
-            sandbox: crate::upstream_proto::SandboxLevel::WorkspaceWrite,
-            auto_approve: false,
-            access: Default::default(),
-            plan: false,
-            attachments: Vec::new(),
-            worktree: None,
-            resume: None,
-            env: Default::default(),
-            extra_mcp: Vec::new(),
-        };
-        let mut cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
-        let value = cmd
-            .as_std_mut()
-            .get_envs()
-            .find(|(key, _)| *key == "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT")
-            .and_then(|(_, value)| value.map(|v| v.to_os_string()));
-        assert_eq!(value.as_deref(), Some(std::ffi::OsStr::new("1")));
-    }
-
-    #[test]
-    fn a_chats_run_is_told_when_to_say_it_waits_and_nothing_else_is() {
-        let appended = |mcp: Option<McpServer>| {
-            let request = RunRequest {
-                mcp,
-                prompt: "hi".into(),
-                harness: None,
-                model: None,
-                reasoning: None,
-                model_options: serde_json::Map::new(),
-                cwd: String::new(),
-                sandbox: crate::upstream_proto::SandboxLevel::WorkspaceWrite,
-                auto_approve: false,
-                access: Default::default(),
-                plan: false,
-                attachments: Vec::new(),
-                worktree: None,
-                resume: None,
-                env: Default::default(),
-                extra_mcp: Vec::new(),
-            };
-            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), &request, false);
-            let args: Vec<String> = cmd
-                .as_std()
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
-            args.iter()
-                .position(|a| a == "--append-system-prompt")
-                .map(|i| args[i + 1].clone())
-        };
-        let server = |env: &[(&str, &str)]| McpServer {
-            name: "reno".into(),
-            command: "reno-engine".into(),
-            args: vec!["mcp".into()],
-            env: env
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect(),
-        };
-        let waits = (McpServer::WAITS_ON_BACKGROUND_ENV, "1");
-        assert_eq!(
-            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1"), waits]))).as_deref(),
-            Some(WAIT_ON_BACKGROUND_NOTE)
-        );
-        // The tool not offered (no chat's server, or not one that waits):
-        // nothing is said of it.
-        assert_eq!(
-            appended(Some(server(&[(McpServer::CHAT_ID_ENV, "c1")]))),
-            None
-        );
-        assert_eq!(appended(Some(server(&[waits]))), None);
-        assert_eq!(appended(Some(server(&[]))), None);
-        assert_eq!(appended(None), None);
-    }
-}
-
-#[cfg(test)]
-mod access_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn request(access: AccessMode, auto_approve: bool, plan: bool) -> RunRequest {
-        RunRequest {
-            mcp: None,
-            prompt: "hi".into(),
-            harness: None,
-            model: None,
-            reasoning: None,
-            model_options: serde_json::Map::new(),
-            cwd: "/work".into(),
-            sandbox: crate::upstream_proto::SandboxLevel::WorkspaceWrite,
-            auto_approve,
+            effort: None,
             access,
-            plan,
-            attachments: Vec::new(),
-            worktree: None,
+            sandbox: SandboxLevel::WorkspaceWrite,
             resume: None,
+            mcp: Vec::new(),
             env: Default::default(),
-            extra_mcp: Vec::new(),
+            output_schema: None,
         }
     }
 
-    /// The permission flags a request launches with.
-    fn permission_args(request: &RunRequest) -> Vec<String> {
-        let args = ClaudeHarness::launch_args(request);
-        let mut out = Vec::new();
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            if arg == "--permission-mode" {
-                out.push(arg);
-                out.extend(args.next());
-            } else if arg.contains("skip-permissions") {
-                out.push(arg);
-            }
+    fn server(name: &str, command: &str) -> McpServerSpec {
+        McpServerSpec {
+            name: name.into(),
+            command: command.into(),
+            args: vec!["mcp".into()],
+            env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
         }
-        out
+    }
+
+    fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+        let at = args.iter().position(|a| a == name)?;
+        args.get(at + 1).map(String::as_str)
     }
 
     #[test]
-    fn modes_launch_with_their_permission_mode() {
-        use AccessMode::*;
-        let cases: [(AccessMode, bool, bool, &[&str]); 8] = [
-            // Full access launches exactly as before modes.
-            (
-                FullAccess,
-                true,
-                false,
-                &[
-                    "--permission-mode",
-                    "bypassPermissions",
-                    "--dangerously-skip-permissions",
-                ],
-            ),
-            (FullAccess, false, false, &["--permission-mode", "default"]),
-            // `auto_approve` still means full access.
-            (
-                Supervised,
-                true,
-                false,
-                &[
-                    "--permission-mode",
-                    "bypassPermissions",
-                    "--dangerously-skip-permissions",
-                ],
-            ),
-            (
-                AutoAcceptEdits,
-                false,
-                false,
-                &["--permission-mode", "acceptEdits"],
-            ),
-            (Supervised, false, false, &["--permission-mode", "default"]),
-            // Plan mode wins; full access keeps the bypass for afterwards
-            // without the flag that would override plan mode.
-            (
-                FullAccess,
-                true,
-                true,
-                &[
-                    "--permission-mode",
-                    "plan",
-                    "--allow-dangerously-skip-permissions",
-                ],
-            ),
-            (AutoAcceptEdits, false, true, &["--permission-mode", "plan"]),
-            (Supervised, false, true, &["--permission-mode", "plan"]),
-        ];
-        for (access, auto_approve, plan, expected) in cases {
-            assert_eq!(
-                permission_args(&request(access, auto_approve, plan)),
-                expected,
-                "{access:?} auto_approve={auto_approve} plan={plan}"
+    fn every_run_speaks_stream_json_and_routes_permissions_to_stdio() {
+        let args = ClaudeExecutor::launch_args(&spec(AccessMode::Supervised));
+        assert_eq!(flag(&args, "--input-format"), Some("stream-json"));
+        assert_eq!(flag(&args, "--output-format"), Some("stream-json"));
+        assert_eq!(flag(&args, "--permission-prompt-tool"), Some("stdio"));
+        assert!(args.contains(&"--print".to_owned()));
+        assert!(args.contains(&"--verbose".to_owned()));
+    }
+
+    #[test]
+    fn access_modes_launch_with_their_permission_mode_and_never_a_skip_flag() {
+        for (access, mode) in [
+            (AccessMode::Supervised, "default"),
+            (AccessMode::AutoAcceptEdits, "acceptEdits"),
+            (AccessMode::FullAccess, "default"),
+        ] {
+            let args = ClaudeExecutor::launch_args(&spec(access));
+            assert_eq!(flag(&args, "--permission-mode"), Some(mode), "{access:?}");
+            assert!(
+                !args.iter().any(|a| a.contains("skip-permissions")),
+                "{access:?}: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn model_and_effort_come_from_the_spec() {
+        let none = ClaudeExecutor::launch_args(&spec(AccessMode::Supervised));
+        assert_eq!(flag(&none, "--model"), None);
+        assert_eq!(flag(&none, "--effort"), None);
+        let mut with = spec(AccessMode::Supervised);
+        with.model = Some("claude-opus-5-5".into());
+        with.effort = Some(Effort::High);
+        let args = ClaudeExecutor::launch_args(&with);
+        assert_eq!(flag(&args, "--model"), Some("claude-opus-5-5"));
+        assert_eq!(flag(&args, "--effort"), Some("high"));
+        with.effort = Some(Effort::Low);
         assert_eq!(
-            access_permission_mode(&request(AutoAcceptEdits, false, true)),
-            "acceptEdits"
+            flag(&ClaudeExecutor::launch_args(&with), "--effort"),
+            Some("low")
+        );
+        with.effort = Some(Effort::Medium);
+        assert_eq!(
+            flag(&ClaudeExecutor::launch_args(&with), "--effort"),
+            Some("medium")
         );
     }
 
     #[test]
-    fn mode_changes_reconfigure_the_live_process() {
-        use AccessMode::*;
-        let harness = ClaudeHarness::new();
-        let full = request(FullAccess, false, false);
-        let supervised = request(Supervised, false, false);
-        // Same flags, different answers: not the same runtime as is.
-        assert!(!harness.same_runtime(&full, &supervised));
-        assert!(harness.reconfigures_in_place(&full, &supervised));
-        let planning = request(Supervised, false, true);
-        assert!(!harness.same_runtime(&supervised, &planning));
-        assert!(harness.reconfigures_in_place(&planning, &supervised));
-        // A stricter CLI mode relaunches: a refused switch must not leave
-        // the next prompt running with less asked.
-        assert!(!harness.reconfigures_in_place(&supervised, &planning));
-        let auto_edits = request(AutoAcceptEdits, false, false);
-        assert!(harness.reconfigures_in_place(&supervised, &auto_edits));
-        assert!(!harness.reconfigures_in_place(&auto_edits, &supervised));
-        let auto_planning = request(FullAccess, true, true);
-        let auto = request(FullAccess, true, false);
-        assert!(harness.reconfigures_in_place(&auto_planning, &auto));
-        // Bypass is only reachable on a process launched for it.
-        assert!(!harness.reconfigures_in_place(&full, &auto));
-        // Under `auto_approve` the mode changes nothing.
-        assert!(harness.same_runtime(&auto, &request(Supervised, true, false)));
-        assert_eq!(harness.access_modes(), &AccessMode::ALL);
-        assert!(harness.supports_plan());
-    }
-
-    fn with_options(model: &str, options: Value) -> RunRequest {
-        let mut r = request(AccessMode::FullAccess, true, false);
-        r.model = Some(model.into());
-        r.model_options = options.as_object().cloned().unwrap_or_default();
-        r
-    }
-
-    #[test]
-    fn the_200k_choice_limits_the_window_through_the_cli() {
-        // Only an explicit 200K choice caps; unset keeps the CLI's window
-        // (1M on Opus 5.5), which is what its select now shows as default.
-        let chosen = with_options("claude-opus-5-5", json!({"contextWindow": "200k"}));
-        let unset = with_options("claude-opus-5-5", json!({}));
-        assert!(caps_context_at_200k(&chosen));
-        assert!(!caps_context_at_200k(&unset));
-        assert!(catalog::static_models().iter().any(|m| {
-            m.id == "claude-opus-5-5"
-                && m.options
-                    .iter()
-                    .any(|o| o.id == "contextWindow" && o.default_choice == "1m")
-        }));
-        // 1M keeps the `[1m]` id and never the limit.
-        let one_m = with_options("claude-opus-5-5", json!({"contextWindow": "1m"}));
-        assert!(!caps_context_at_200k(&one_m));
-        assert_eq!(model_arg(&one_m).as_deref(), Some("claude-opus-5-5[1m]"));
-        // A model without the option is left to the CLI.
-        assert!(!caps_context_at_200k(&with_options(
-            "claude-haiku-4-5",
-            json!({})
-        )));
-        // The limit is a launch environment variable, so a change relaunches.
-        let harness = ClaudeHarness::default();
-        assert!(!harness.same_runtime(&chosen, &one_m));
-        assert!(!harness.reconfigures_in_place(&chosen, &one_m));
-        assert!(!harness.reconfigures_in_place(&one_m, &chosen));
-        // Same `--model` and flags; only the 200K limit differs.
-        assert!(!harness.same_runtime(&chosen, &unset));
-        assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
-        // The command carries it.
-        let env_of = |r: &RunRequest| {
-            let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
-            cmd.as_std()
-                .get_envs()
-                .find(|(k, _)| *k == "CLAUDE_CODE_DISABLE_1M_CONTEXT")
-                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
-        };
-        assert_eq!(env_of(&chosen).as_deref(), Some("1"));
-        assert_eq!(env_of(&one_m), None);
-        assert_eq!(env_of(&unset), None);
-    }
-
-    #[test]
-    fn tool_calls_ask_what_the_mode_does_not_cover() {
-        use AccessMode::*;
-        let bash = json!({"command": "cargo test", "description": "Run tests"});
-        let edit = json!({"file_path": "/work/src/lib.rs", "old_string": "a"});
-        let notebook = json!({"notebook_path": "/work/a.ipynb"});
-        let ask = |tool: &str, input: &Value, access: AccessMode| {
-            approval_question(tool, None, None, input, access).map(|q| q.question)
-        };
-        for tool in ["Bash", "Edit", "WebFetch", "ExitPlanMode", "mcp__x__y"] {
-            assert_eq!(ask(tool, &bash, FullAccess), None, "{tool}");
-        }
-        for tool in EDIT_TOOLS {
-            assert_eq!(ask(tool, &edit, AutoAcceptEdits), None, "{tool}");
-        }
-        assert_eq!(
-            ask("Bash", &bash, AutoAcceptEdits).as_deref(),
-            Some("Claude wants to run `cargo test`. Allow it?")
-        );
-        assert_eq!(
-            ask("Write", &edit, Supervised).as_deref(),
-            Some("Claude wants to modify /work/src/lib.rs. Allow it?")
-        );
-        assert_eq!(
-            ask("NotebookEdit", &notebook, Supervised).as_deref(),
-            Some("Claude wants to modify /work/a.ipynb. Allow it?")
-        );
-        let mcp = approval_question(
-            "mcp__linear__search",
-            Some("search (linear)"),
-            Some("Find the bug"),
-            &json!({}),
-            Supervised,
+    fn mcp_config_arg_spells_the_servers_the_way_the_cli_reads_them() {
+        assert_eq!(mcp_servers_config_arg(&[]), None);
+        let both: Value = serde_json::from_str(
+            &mcp_servers_config_arg(&[
+                server("reno", "/opt/reno/reno"),
+                server("plugin-focus", "/data/plugins/focus/bin/server"),
+            ])
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(mcp.header, "Approve tool");
+        assert_eq!(both["mcpServers"]["reno"]["command"], "/opt/reno/reno");
+        assert_eq!(both["mcpServers"]["reno"]["args"], json!(["mcp"]));
+        assert_eq!(both["mcpServers"]["reno"]["env"]["RENO_RUN"], "r1");
         assert_eq!(
-            mcp.question,
-            "Claude wants to use search (linear) (Find the bug). Allow it?"
+            both["mcpServers"]["plugin-focus"]["command"],
+            "/data/plugins/focus/bin/server"
         );
-        assert_eq!(
-            ask("ExitPlanMode", &json!({"plan": "p"}), AutoAcceptEdits).as_deref(),
-            Some("Claude wants to start implementing its plan. Allow it?")
-        );
-        let plan = approval_question("ExitPlanMode", None, None, &json!({}), Supervised).unwrap();
-        assert_eq!(plan.options, vec![approval::ALLOW, approval::DENY]);
     }
-}
 
-#[cfg(test)]
-mod resolution_tests {
-    use super::*;
+    #[test]
+    fn reno_wins_a_name_clash_because_it_is_first() {
+        let parsed: Value = serde_json::from_str(
+            &mcp_servers_config_arg(&[server("reno", "/first"), server("reno", "/second")])
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["mcpServers"]["reno"]["command"], "/first");
+    }
+
+    #[test]
+    fn a_resumed_run_asks_the_cli_to_resume_the_session() {
+        let mut resumed = spec(AccessMode::Supervised);
+        resumed.resume = Some(reno_proto::SessionRef("sess-9".into()));
+        let command = ClaudeExecutor::build_command(std::path::Path::new("claude"), &resumed);
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--resume=sess-9".to_owned()), "{args:?}");
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work"))
+        );
+    }
 
     #[test]
     fn a_runs_own_config_dir_wins() {
@@ -2574,63 +2320,30 @@ mod resolution_tests {
         env.insert("CLAUDE_CONFIG_DIR".to_owned(), "/cfg".to_owned());
         assert_eq!(config_root(&env), PathBuf::from("/cfg"));
     }
-}
-
-#[cfg(test)]
-mod mcp_injection_tests {
-    use super::*;
 
     #[test]
-    fn mcp_config_arg_spells_the_server_the_way_the_cli_reads_it() {
-        let mcp = crate::upstream_proto::McpServer {
-            name: "reno".into(),
-            command: "/opt/reno/reno".into(),
-            args: vec!["mcp".into()],
-            env: [("RENO_CHAT_ID".to_owned(), "chat-1".to_owned())]
-                .into_iter()
-                .collect(),
-        };
-        let parsed: Value = serde_json::from_str(&mcp_config_arg(&mcp)).unwrap();
-        assert_eq!(parsed["mcpServers"]["reno"]["command"], "/opt/reno/reno");
+    fn the_descriptor_lists_only_what_the_instance_will_honour() {
+        let restricted =
+            ClaudeExecutor::new().with_access_modes(vec![AccessMode::Supervised]);
         assert_eq!(
-            parsed["mcpServers"]["reno"]["args"],
-            serde_json::json!(["mcp"])
+            restricted.descriptor().caps.access_modes,
+            vec![AccessMode::Supervised]
         );
-        assert_eq!(
-            parsed["mcpServers"]["reno"]["env"]["RENO_CHAT_ID"],
-            "chat-1"
-        );
+        // The versions are the driver's own, not whatever is installed.
+        let cli = ClaudeExecutor::new().descriptor().cli_verified;
+        assert_eq!(cli.min, MIN_CLI_VERSION);
+        assert_eq!(cli.verified, VERIFIED_CLI_VERSION);
+        assert!(semver::Version::parse(MIN_CLI_VERSION).unwrap()
+            <= semver::Version::parse(VERIFIED_CLI_VERSION).unwrap());
     }
+
     #[test]
-    fn mcp_servers_config_arg_adds_plugin_servers_beside_reno() {
-        let reno = crate::upstream_proto::McpServer {
-            name: "reno".into(),
-            command: "/opt/reno/reno".into(),
-            args: vec!["mcp".into()],
-            env: Default::default(),
-        };
-        let extra = crate::upstream_proto::McpServer {
-            name: "plugin-focus".into(),
-            command: "/data/plugins/.loaded/focus/0123/bin/server".into(),
-            args: vec!["--stdio".into()],
-            env: [("FOCUS".to_owned(), "1".to_owned())].into_iter().collect(),
-        };
-        assert_eq!(mcp_servers_config_arg(None, &[]), None);
-        let both: Value = serde_json::from_str(
-            &mcp_servers_config_arg(Some(&reno), std::slice::from_ref(&extra)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(both["mcpServers"]["reno"]["command"], "/opt/reno/reno");
-        let plugin = &both["mcpServers"]["plugin-focus"];
-        assert_eq!(
-            plugin["command"],
-            "/data/plugins/.loaded/focus/0123/bin/server"
-        );
-        assert_eq!(plugin["args"], serde_json::json!(["--stdio"]));
-        assert_eq!(plugin["env"]["FOCUS"], "1");
-        let only: Value =
-            serde_json::from_str(&mcp_servers_config_arg(None, &[extra]).unwrap()).unwrap();
-        assert!(only["mcpServers"].get("reno").is_none());
-        assert!(only["mcpServers"].get("plugin-focus").is_some());
+    fn a_cli_older_than_the_minimum_is_named_in_the_probe_detail() {
+        assert_eq!(too_old_message(Some("2.1.325")), None);
+        assert_eq!(too_old_message(Some(MIN_CLI_VERSION)), None);
+        assert_eq!(too_old_message(None), None);
+        assert_eq!(too_old_message(Some("not a version")), None);
+        let message = too_old_message(Some("2.1.100")).expect("too old");
+        assert!(message.contains("2.1.100") && message.contains(MIN_CLI_VERSION), "{message}");
     }
 }

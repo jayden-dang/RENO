@@ -163,17 +163,6 @@ fn auth_context_child() {
             "{auth}"
         );
     }
-    let claude = reno_harness::ClaudeHarness::new().with_executable(&binary);
-    let (harness, file) = (&claude as &dyn Harness, ".claude/settings.json");
-    let before = harness.model_context().unwrap().unwrap().hash;
-    let path = root.join(file);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, "configured-account").unwrap();
-    assert_ne!(
-        before,
-        harness.model_context().unwrap().unwrap().hash,
-        "{file}"
-    );
 }
 #[test]
 fn each_spec_hashes_its_auth_file_contents() {

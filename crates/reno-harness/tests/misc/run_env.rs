@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use reno_harness::upstream_proto::{RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion};
-use reno_harness::{CancellationToken, ClaudeHarness, CodexHarness, Harness, RunControls};
+use reno_harness::{CancellationToken, CodexHarness, Harness, RunControls};
 
 /// A stand-in agent CLI: records the env it was started with into its cwd
 /// (atomically, so the reader never sees a partial file) and exits.
@@ -97,11 +97,40 @@ async fn codex_child_receives_the_run_env() {
 
 #[tokio::test]
 async fn claude_child_receives_the_run_env() {
+    use reno_harness::ClaudeExecutor;
+    use reno_harness::exec::{ExecControls, Executor};
+    use reno_proto::{AccessMode, ExecSpec, RunId, SandboxLevel};
+
     let dir = tempfile::tempdir().unwrap();
-    let harness = ClaudeHarness::new()
+    let executor = ClaudeExecutor::new()
         .with_executable(env_dumper(dir.path()))
         .with_graces(Duration::from_millis(20), Duration::from_millis(100));
-    let env = recorded_env(&harness, dir.path()).await;
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
+        prompt: "hello".into(),
+        cwd: dir.path().to_path_buf(),
+        model: None,
+        effort: None,
+        access: AccessMode::FullAccess,
+        sandbox: SandboxLevel::WorkspaceWrite,
+        resume: None,
+        mcp: Vec::new(),
+        env: request(dir.path()).env,
+        output_schema: None,
+    };
+    let (controls, _handle) = ExecControls::new(1);
+    let run = executor.start(spec, controls).await;
+    let file = dir.path().join("env.txt");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !file.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent process was spawned");
+    drop(run);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let env = std::fs::read_to_string(file).unwrap();
     assert!(env.contains("ANTHROPIC_API_KEY=sk-ant-test"), "{env}");
     assert!(env.contains("GH_TOKEN=ghu_test"), "{env}");
 }

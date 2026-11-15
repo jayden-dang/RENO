@@ -3,8 +3,9 @@
 //! login: neither signalled nor sent EOF until the refresh lock is released.
 //! Its own test binary — it points the process at a temp config dir.
 use reno_harness::claude::refresh_lock;
-use reno_harness::upstream_proto::{RunRequest, SandboxLevel};
-use reno_harness::{CancellationToken, ClaudeHarness, Harness, RunControls};
+use reno_harness::exec::{ExecControls, Executor};
+use reno_harness::ClaudeExecutor;
+use reno_proto::{AccessMode, ExecSpec, RunId, SandboxLevel};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -16,55 +17,13 @@ case "$*" in
 esac
 trap 'echo term >> "$dir/events"; exit 0' TERM
 : > "$dir/ready"
-read line
-echo '{"type":"control_response","response":{"subtype":"success","request_id":"reno-command-probe","response":{"commands":[{"name":"review","description":"Review"}]}}}'
 while read line; do :; done
 echo eof >> "$dir/events"
 "#;
 
-#[tokio::test]
-async fn a_probe_is_retired_only_once_no_login_refresh_is_in_flight() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("claude-config");
-    std::fs::create_dir_all(&config).unwrap();
-    // SAFETY: the only test in this binary; set before any thread reads it.
-    unsafe { std::env::set_var("CLAUDE_SECURESTORAGE_CONFIG_DIR", &config) };
-    let script = dir.path().join("claude");
-    std::fs::write(&script, FAKE_CLAUDE).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let events = dir.path().join("events");
-
-    // Another Claude process is mid-refresh.
-    let [held, _] = refresh_lock::lock_paths(&config);
-    std::fs::create_dir(&held).unwrap();
-
-    let harness = ClaudeHarness::new().with_executable(&script);
-    let commands = tokio::time::timeout(Duration::from_secs(10), harness.commands())
-        .await
-        .expect("the probe answers without waiting for the refresh")
-        .unwrap();
-    assert_eq!(commands[0].name, "review");
-
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(
-        !events.exists(),
-        "probe torn down mid-refresh: {:?}",
-        std::fs::read_to_string(&events)
-    );
-
-    std::fs::remove_dir(&held).unwrap();
-    for _ in 0..100 {
-        if events.exists() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("probe never retired once the refresh was saved");
-}
-
-/// A run's teardown (here: its consumer hung up) waits out a refresh too,
-/// before the CLI gets EOF or a signal. The run names its config dir in its
-/// own environment, so it shares nothing with the probe test's.
+/// A run's teardown (here: its consumer hung up) waits out a refresh too, before the CLI gets
+/// EOF or a signal. The run names its config dir in its own environment, so it shares nothing
+/// with any other test's.
 #[tokio::test]
 async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
     let dir = tempfile::tempdir().unwrap();
@@ -77,43 +36,31 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
     let [held, _] = refresh_lock::lock_paths(&config);
     std::fs::create_dir(&held).unwrap();
 
-    let request = RunRequest {
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: "hello".into(),
-        harness: None,
+        cwd: dir.path().to_path_buf(),
         model: None,
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: dir.path().display().to_string(),
+        effort: None,
+        access: AccessMode::FullAccess,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
         resume: None,
-        attachments: Vec::new(),
-        worktree: None,
-        mcp: None,
+        mcp: Vec::new(),
         env: [(
             "CLAUDE_SECURESTORAGE_CONFIG_DIR".to_owned(),
             config.display().to_string(),
         )]
         .into(),
-        extra_mcp: Vec::new(),
+        output_schema: None,
     };
-    let (_steer, steering) = tokio::sync::mpsc::channel(1);
-    let controls = RunControls {
-        execution_lease: None,
-        steering,
-        interrupt: CancellationToken::new(),
-        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
-        turn: Default::default(),
-    };
-    let stream = ClaudeHarness::new()
+    let (controls, _handle) = ExecControls::new(1);
+    let stream = ClaudeExecutor::new()
         .with_executable(&script)
-        .run(request, controls)
+        .start(spec, controls)
         .await
         .unwrap();
-    // Hang up only once the CLI listens for SIGTERM: a signal that beats
-    // the trap (a loaded machine) would end it without a trace.
+    // Hang up only once the CLI listens for SIGTERM: a signal that beats the trap (a loaded
+    // machine) would end it without a trace.
     for _ in 0..200 {
         if dir.path().join("ready").exists() {
             break;

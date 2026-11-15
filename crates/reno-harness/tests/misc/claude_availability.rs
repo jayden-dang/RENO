@@ -4,17 +4,22 @@
 //! Child-process probes: resolution reads process env (PATH, the override), so
 //! each case re-runs this test binary with a controlled environment.
 
-use reno_harness::{ClaudeHarness, Harness};
+use reno_harness::exec::Executor;
+use reno_harness::ClaudeExecutor;
 
 #[test]
 fn availability_child() {
     let Ok(expected) = std::env::var("CLAUDE_AVAILABILITY_EXPECTED") else {
         return;
     };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     assert_eq!(
-        ClaudeHarness::new().installed(),
+        runtime.block_on(ClaudeExecutor::new().probe()).installed,
         expected == "true",
-        "installed() must agree with the launch resolver"
+        "probe() must agree with the launch resolver"
     );
 }
 
@@ -50,7 +55,7 @@ fn probe(path: &std::path::Path, override_path: Option<&std::path::Path>, expect
     );
 }
 
-/// `installed()` is true when Claude is reachable only through a valid
+/// `probe().installed` is true when Claude is reachable only through a valid
 /// override — the exact regression where the registry reported `false` while
 /// launches worked.
 #[test]

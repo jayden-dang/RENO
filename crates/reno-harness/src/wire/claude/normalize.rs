@@ -1542,1368 +1542,334 @@ impl Normalizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reno_proto::{SessionRef, StopReason, ToolCall};
     use serde_json::json;
 
-    #[test]
-    fn decodes_typed_tools() {
-        assert_eq!(
-            decode_tool_use("Bash", &json!({"command": "ls -la"})),
-            ToolCall::Exec {
-                command: "ls -la".into()
-            }
-        );
-        assert_eq!(
-            decode_tool_use(
-                "Edit",
-                &json!({"file_path": "/a", "old_string": "x", "new_string": "y"})
-            ),
-            ToolCall::EditFile {
-                path: "/a".into(),
-                old_string: Some("x".into()),
-                new_string: Some("y".into())
-            }
-        );
-        assert_eq!(
-            decode_tool_use(
-                "TodoWrite",
-                &json!({"todos": [{"content": "t", "status": "completed"}]})
-            ),
-            ToolCall::Todo {
-                items: vec![TodoItem::new("t", TodoStatus::Completed)]
-            }
-        );
-        // Claude's in-progress state survives; unknown/missing reads as pending.
-        assert_eq!(
-            decode_tool_use(
-                "TodoWrite",
-                &json!({"todos": [
-                    {"content": "a", "status": "completed"},
-                    {"content": "b", "status": "in_progress", "activeForm": "Doing b"},
-                    {"content": "c", "status": "pending"},
-                    {"content": "d"},
-                ]})
-            ),
-            ToolCall::Todo {
-                items: vec![
-                    TodoItem::new("a", TodoStatus::Completed),
-                    TodoItem::new("b", TodoStatus::InProgress),
-                    TodoItem::new("c", TodoStatus::Pending),
-                    TodoItem::new("d", TodoStatus::Pending),
-                ]
-            }
-        );
-        assert_eq!(
-            decode_tool_use("mcp__linear__search", &json!({"q": "bug"})),
-            ToolCall::Mcp {
-                server: "linear".into(),
-                tool: "search".into(),
-                input: Some(json!({"q": "bug"}))
-            }
-        );
-        assert!(matches!(
-            decode_tool_use("Mystery", &json!({})),
-            ToolCall::Unknown { .. }
-        ));
+    fn parse(raw: &str) -> Frame {
+        crate::wire::claude::wire::parse_frame(raw).expect("frame parses")
     }
 
-    fn normalize_one(raw: &str) -> Vec<AgentEvent> {
-        let frame = crate::wire::claude::wire::parse_frame(raw).expect("frame parses");
-        Normalizer::new().normalize(frame, false)
+    fn normalize_one(raw: &str) -> Vec<ExecEvent> {
+        Normalizer::new().normalize(parse(raw), false)
     }
 
-    #[test]
-    fn a_rejected_window_carried_by_overage_is_not_an_error() {
-        let blocked = normalize_one(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#,
-        );
-        assert!(matches!(blocked.as_slice(), [AgentEvent::Error { .. }]));
-        for overage in [
-            r#""overageStatus":"allowed""#,
-            r#""overageStatus":"allowed_warning""#,
-            r#""isUsingOverage":true"#,
-        ] {
-            let raw = format!(
-                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"five_hour",{overage}}}}}"#
-            );
-            assert!(normalize_one(&raw).is_empty(), "{overage}");
-        }
+    fn text(text: &str) -> ExecEvent {
+        ExecEvent::Text { text: text.into() }
     }
 
-    fn result_done(raw: &str) -> AgentEvent {
-        let events = normalize_one(raw);
-        assert_eq!(events.len(), 2, "usage + done");
-        events.into_iter().nth(1).expect("done event")
-    }
-
-    #[test]
-    fn stream_deltas_map_to_text_reasoning_and_heartbeats() {
-        // Real thinking text streams as a reasoning delta.
-        let ev = normalize_one(
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
-        );
-        assert_eq!(ev, vec![AgentEvent::ReasoningDelta { text: "hmm".into() }]);
-        // Redacted thinking (estimated_tokens only) yields the empty
-        // heartbeat shape the engine filters.
-        let ev = normalize_one(
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}}"#,
-        );
-        assert_eq!(
-            ev,
-            vec![AgentEvent::ReasoningDelta {
-                text: String::new()
-            }]
-        );
-        // A tool input being generated (input_json_delta) is a liveness
-        // heartbeat, not silence — minutes of a big Write must not read as
-        // a stalled run.
-        let ev = normalize_one(
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"file_"}}}"#,
-        );
-        assert_eq!(
-            ev,
-            vec![AgentEvent::ReasoningDelta {
-                text: String::new()
-            }]
-        );
-        // Signature deltas stay dropped.
-        let ev = normalize_one(
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
-        );
-        assert!(ev.is_empty());
-    }
-
-    #[test]
-    fn subagent_stream_deltas_arrive_tagged() {
-        let ev = normalize_one(
-            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub text"}}}"#,
-        );
-        assert_eq!(
-            ev,
-            vec![AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::TextDelta {
-                    text: "sub text".into()
-                }),
-            }]
-        );
-        // Subagent input_json heartbeats are dropped — the parent turn is
-        // already done under the eager-done policy, nothing to keep alive.
-        let ev = normalize_one(
-            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}}"#,
-        );
-        assert!(ev.is_empty());
-    }
-
-    #[test]
-    fn subagent_tool_calls_and_results_arrive_tagged_without_boundary_rotation() {
-        let mut norm = Normalizer::new();
-        let before = norm.assistant_message_id.clone();
-        let frame = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
-        )
-        .expect("parses");
-        let ev = norm.normalize(frame, false);
-        assert_eq!(
-            ev,
-            vec![AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::ToolCall {
-                    id: "t1".into(),
-                    call: ToolCall::Exec {
-                        command: "ls".into()
-                    },
-                }),
-            }]
-        );
-        // A subagent's assistant frame must NOT rotate the parent's message
-        // id (it would split the parent's contiguous text mid-stream).
-        assert_eq!(norm.assistant_message_id, before);
-
-        let frame = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}"#,
-        )
-        .expect("parses");
-        let ev = norm.normalize(frame, false);
-        assert_eq!(
-            ev,
-            vec![AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::ToolResult {
-                    id: "t1".into(),
-                    is_error: false,
-                    output: None,
-                    diff: None,
-                    preview_paths: Vec::new(),
-                    image_payloads: Vec::new(),
-                    // (A subagent's Bash too: no `Exit code` lead, it exited 0.)
-                    exit_code: Some(0),
-                }),
-            }]
-        );
-    }
-
-    #[test]
-    fn spawn_prompt_seeds_the_subagent_opening_user_message() {
-        // The wire never echoes a Task's prompt on the child feed, so the
-        // spawn itself seeds the subagent's opening user entry.
-        let ev = normalize_one(
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_sub","name":"Task","input":{"description":"probe","prompt":"scan the fold path"}}]}}"#,
-        );
-        assert!(matches!(
-            &ev[..],
-            [
-                AgentEvent::ToolCall { id, .. },
-                AgentEvent::Subagent { parent_tool_use_id, event },
-                AgentEvent::AssistantMessageCompleted { .. },
-            ] if id == "toolu_sub"
-                && parent_tool_use_id == "toolu_sub"
-                && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "scan the fold path")
-        ));
-        // No prompt → no synthetic opening; ordinary tools never spawn one.
-        for frame in [
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Task","input":{"description":"probe"}}]}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"ls","prompt":"red herring"}}]}}"#,
-        ] {
-            let ev = normalize_one(frame);
-            assert!(
-                !ev.iter().any(|e| matches!(e, AgentEvent::Subagent { .. })),
-                "{frame}: {ev:?}"
-            );
-        }
-    }
-
-    /// Killing a subagent puts `done{interrupted}` on the child feed and then
-    /// an interruption MARKER as a tagged user frame. Read as a steer, that
-    /// marker resurrects the spawn chip the `done` just settled — and nothing
-    /// ever settles it again, so the chip spins forever. It is CLI
-    /// bookkeeping, filtered like a `<system-reminder>`; a real steer on the
-    /// same frame shape still gets through.
-    #[test]
-    fn the_interruption_marker_is_not_a_steer() {
-        for marker in [
-            "[Request interrupted by user]",
-            "[Request interrupted by user for tool use]",
-        ] {
-            let frame = format!(
-                r#"{{"type":"user","parent_tool_use_id":"toolu_spawn","message":{{"content":[{{"type":"text","text":"{marker}"}}]}}}}"#
-            );
-            assert!(
-                !normalize_one(&frame)
-                    .iter()
-                    .any(|e| matches!(e, AgentEvent::Subagent { .. })),
-                "{marker} leaked as a steer"
-            );
-        }
-        // A genuine steer on the very same frame shape still arrives.
-        let real = r#"{"type":"user","parent_tool_use_id":"toolu_spawn","message":{"content":[{"type":"text","text":"Keep going."}]}}"#;
-        assert!(
-            normalize_one(real).iter().any(|e| matches!(
-                e,
-                AgentEvent::Subagent { parent_tool_use_id, event }
-                    if parent_tool_use_id == "toolu_spawn"
-                        && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
-            )),
-            "a real steer must still reach the subagent"
-        );
-    }
-
-    /// Only the CLI's own image notes are bookkeeping: a steer that merely
-    /// starts with `[Image: ` and ends with `]` still reaches the agent.
-    #[test]
-    fn only_the_clis_image_notes_are_synthetic() {
-        for note in [
-            "[Image: source: /tmp/shots/1.png]",
-            "[Image: source: /tmp/shots/1.png, original 10x10, displayed at 10x10.]",
-            "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]",
-            "  [Image: original 10x10, displayed at 10x10]  ",
-        ] {
-            assert!(super::is_synthetic_user_text(note), "{note}");
-        }
-        for steer in [
-            "[Image: original mockup attached]\nmatch it exactly [urgent]",
-            "[Image: original mockup attached]",
-            "[Image: original 10x10 please]",
-            "[Image: source: ]",
-            "[Image: source: a] and also [b]",
-            "[Image: sourced elsewhere]",
-            "[Image: original 10x10, displayed at big]",
-        ] {
-            assert!(!super::is_synthetic_user_text(steer), "{steer}");
-        }
-    }
-
-    /// A tool that returns an image puts the pixels on the result. The
-    /// following note about the displayed size is bookkeeping, not a steer,
-    /// on the main feed and on a subagent feed.
-    #[test]
-    fn image_tool_results_keep_bytes_and_the_scale_note_is_not_a_steer() {
-        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-        let scale = "[Image: original 1884x2066, displayed at 1824x2000. Multiply coordinates by 1.03 to map to original image.]";
-        let source = "[Image: source: /tmp/shots/1.png]";
-        let combined = "[Image: source: /tmp/shots/1.png, original 10x10, displayed at 10x10.]";
-
-        let mut norm = Normalizer::new();
-        let read = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_read","name":"Read","input":{"file_path":"/tmp/shots/1.png"}}]}}"#,
-        )
-        .expect("parses");
-        norm.normalize(read, false);
-        let result = crate::wire::claude::wire::parse_frame(&format!(
-            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_read","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{PNG}"}}}}]}}]}}}}"#,
-            PNG = PNG
-        ))
-        .expect("parses");
-        let ev = norm.normalize(result, false);
-        let AgentEvent::ToolResult {
-            id,
-            image_payloads,
-            preview_paths,
-            ..
-        } = &ev[0]
-        else {
-            panic!("expected a tool result, got {ev:?}");
-        };
-        assert_eq!(id, "toolu_read");
-        assert!(preview_paths.is_empty());
-        assert_eq!(image_payloads.len(), 1);
-        assert_eq!(image_payloads[0].name, "1.png");
-        assert_eq!(image_payloads[0].data_base64, PNG);
-        let journaled = serde_json::to_string(&ev[0]).unwrap();
-        assert!(
-            !journaled.contains(PNG),
-            "image bytes must not be serialized"
-        );
-        assert!(!journaled.contains("imagePayloads"));
-
-        // The same bytes on a subagent feed stay on the tool result.
-        let mut norm = Normalizer::new();
-        let read = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_use","id":"toolu_child","name":"Read","input":{"file_path":"/tmp/shots/00.png"}}]}}"#,
-        )
-        .expect("parses");
-        norm.normalize(read, false);
-        let result = crate::wire::claude::wire::parse_frame(&format!(
-            r#"{{"type":"user","parent_tool_use_id":"toolu_sub","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_child","content":[{{"type":"image","source":{{"type":"base64","data":"{PNG}"}}}}]}}]}}}}"#,
-            PNG = PNG
-        ))
-        .expect("parses");
-        let ev = norm.normalize(result, false);
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::Subagent { parent_tool_use_id, event }]
-                if parent_tool_use_id == "toolu_sub"
-                    && matches!(event.as_ref(), AgentEvent::ToolResult { image_payloads, .. } if image_payloads.len() == 1 && image_payloads[0].name == "00.png")
-        ));
-
-        for note in [scale, source, combined] {
-            let frame = format!(
-                r#"{{"type":"user","parent_tool_use_id":"toolu_sub","message":{{"content":[{{"type":"text","text":{text}}}]}}}}"#,
-                text = serde_json::to_string(note).unwrap()
-            );
-            assert!(
-                !normalize_one(&frame)
-                    .iter()
-                    .any(|event| matches!(event, AgentEvent::Subagent { .. })),
-                "{note} leaked as a steer"
-            );
-            let meta = format!(
-                r#"{{"type":"user","isMeta":true,"parent_tool_use_id":"toolu_sub","message":{{"content":{text}}}}}"#,
-                text = serde_json::to_string(note).unwrap()
-            );
-            assert!(
-                normalize_one(&meta).is_empty(),
-                "string meta note leaked: {note}"
-            );
-        }
-        // A meta frame cannot resurrect a settled chip, even with ordinary wording.
-        let meta_steer = r#"{"type":"user","isMeta":true,"parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"Keep going."}]}}"#;
-        assert!(normalize_one(meta_steer).is_empty());
-        // A real steer on the same frame shape still arrives.
-        let real = r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"Keep going."}]}}"#;
-        assert!(normalize_one(real).iter().any(|event| matches!(
-            event,
-            AgentEvent::Subagent { event: inner, .. }
-                if matches!(inner.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
-        )));
-
-        // Fallback when the content block has no image and the frame has one result.
-        let fallback = crate::wire::claude::wire::parse_frame(&format!(
-            r#"{{"type":"user","toolUseResult":{{"type":"image","file":{{"base64":"{PNG}","type":"image/png"}}}},"message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_fb","content":"ok"}}]}}}}"#,
-            PNG = PNG
-        ))
-        .expect("parses");
-        let ev = Normalizer::new().normalize(fallback, false);
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::ToolResult { image_payloads, .. }] if image_payloads.len() == 1 && image_payloads[0].name == "image.png"
-        ));
-        // A result that already has the image does not take the fallback as a second copy.
-        let both = crate::wire::claude::wire::parse_frame(&format!(
-            r#"{{"type":"user","toolUseResult":{{"type":"image","file":{{"base64":"{PNG}"}}}},"message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_both","content":[{{"type":"image","source":{{"type":"base64","data":"{PNG}"}}}}]}}]}}}}"#,
-            PNG = PNG
-        ))
-        .expect("parses");
-        let ev = Normalizer::new().normalize(both, false);
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::ToolResult { image_payloads, .. }] if image_payloads.len() == 1
-        ));
-
-        // Not an image, or too large to be one: no payload.
-        let junk = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_junk","content":[{"type":"image","source":{"type":"base64","data":"!!!!"}}]}]}}"#,
-        )
-        .expect("parses");
-        let ev = Normalizer::new().normalize(junk, false);
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::ToolResult { image_payloads, .. }] if image_payloads.is_empty()
-        ));
-        let mut huge = "A".repeat(crate::upstream_proto::IMAGE_MAX_BYTES.div_ceil(3) * 4 + 1);
-        assert!(compact_base64(&huge).is_none());
-        huge.clear();
-        assert_eq!(compact_base64("aGVs\nbG8=").as_deref(), Some("aGVsbG8="));
-    }
-
-    #[test]
-    fn send_message_steers_rekey_onto_the_spawn_feed() {
-        // Live 2.1.228: the steer NEVER echoes on the child feed; the only
-        // wire evidence is the parent's SendMessage call addressed to the
-        // agent id that task_started paired with the spawn tool id.
-        let mut norm = Normalizer::new();
-        let started = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_started","task_id":"a20b2336","tool_use_id":"toolu_spawn","subagent_type":"general-purpose","prompt":"p","description":"d"}"#,
-        )
-        .expect("parses");
-        assert!(norm.normalize(started, false).is_empty());
-        let send = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a20b2336","message":"Also read the rebuild.","summary":"s"}}]}}"#,
-        )
-        .expect("parses");
-        let ev = norm.normalize(send, false);
-        assert!(
-            ev.iter().any(|e| matches!(
-                e,
-                AgentEvent::Subagent { parent_tool_use_id, event }
-                    if parent_tool_use_id == "toolu_spawn"
-                        && matches!(event.as_ref(), AgentEvent::UserMessage { text } if text == "Also read the rebuild.")
-            )),
-            "{ev:?}"
-        );
-        // Unknown recipient (no task_started seen) or a subagent-owned shell
-        // task's task_started: no steer synthesized.
-        let mut norm = Normalizer::new();
-        let shell_task = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_started","task_id":"bg1","tool_use_id":"toolu_bash","task_type":"local_bash"}"#,
-        )
-        .expect("parses");
-        assert!(norm.normalize(shell_task, false).is_empty());
-        let send = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"SendMessage","input":{"to":"bg1","message":"x"}}]}}"#,
-        )
-        .expect("parses");
-        assert!(
-            !norm
-                .normalize(send, false)
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Subagent { .. }))
-        );
-    }
-
-    #[test]
-    fn tagged_user_text_becomes_a_subagent_steer() {
-        // A tagged user frame's TEXT block is the parent steering its
-        // subagent — forwarded as a tagged UserMessage so the subagent doc
-        // grows a user entry.
-        let ev = normalize_one(
-            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"Also check the rebuild path."}]}}"#,
-        );
-        assert_eq!(
-            ev,
-            vec![AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::UserMessage {
-                    text: "Also check the rebuild path.".into(),
-                }),
-            }]
-        );
-        // Synthetic harness injections are not conversation, and blank text
-        // is noise; an UNTAGGED user text frame is not a steer at all (the
-        // parent chat's user messages come from doc commands).
-        for frame in [
-            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"<system-reminder>tick</system-reminder>"}]}}"#,
-            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"   "}]}}"#,
-            r#"{"type":"user","message":{"content":[{"type":"text","text":"typed into the parent"}]}}"#,
-        ] {
-            assert_eq!(normalize_one(frame), Vec::new(), "frame: {frame}");
-        }
-        // Mixed frames keep both: the tool result AND the steer text.
-        let ev = normalize_one(
-            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false},{"type":"text","text":"Keep going."}]}}"#,
-        );
-        assert!(matches!(
-            &ev[..],
-            [
-                AgentEvent::Subagent { event: first, .. },
-                AgentEvent::Subagent { event: second, .. },
-            ] if matches!(first.as_ref(), AgentEvent::ToolResult { .. })
-                && matches!(second.as_ref(), AgentEvent::UserMessage { text } if text == "Keep going.")
-        ));
-    }
-
-    #[test]
-    fn task_notification_settles_the_subagent_with_a_tagged_done() {
-        // The wire's ONLY terminal signal for a background subagent
-        // (live-verified 2.1.228): an untagged system frame carrying the
-        // spawning tool's id. Shape from the captured fixture. The spawn's
-        // own tool_use frame always precedes it — that's what marks the id
-        // as an AGENT task (shell tasks share the subtype).
-        let spawn = |norm: &mut Normalizer| {
-            let frame = crate::wire::claude::wire::parse_frame(
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"probe"}}]}}"#,
-            )
-            .expect("parses");
-            norm.normalize(frame, false);
-        };
-        let notify = |norm: &mut Normalizer, raw: &str| {
-            let frame = crate::wire::claude::wire::parse_frame(raw).expect("parses");
-            norm.normalize(frame, false)
-        };
-        let mut norm = Normalizer::new();
-        spawn(&mut norm);
-        let ev = notify(
-            &mut norm,
-            r#"{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_agent","status":"completed","summary":"DONE."}"#,
-        );
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::Subagent { parent_tool_use_id, event }]
-                if parent_tool_use_id == "toolu_agent"
-                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
-        ));
-        let mut norm = Normalizer::new();
-        spawn(&mut norm);
-        let ev = notify(
-            &mut norm,
-            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"failed"}"#,
-        );
-        assert!(matches!(
-            &ev[..],
-            [AgentEvent::Subagent { event, .. }]
-                if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Errored, .. })
-        ));
-        // Non-terminal or id-less notifications close nothing.
-        let mut norm = Normalizer::new();
-        spawn(&mut norm);
-        assert!(notify(
-            &mut norm,
-            r#"{"type":"system","subtype":"task_notification","tool_use_id":"toolu_agent","status":"running"}"#,
-        )
-        .is_empty());
-        assert!(
-            normalize_one(
-                r#"{"type":"system","subtype":"task_notification","status":"completed"}"#,
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn resumed_task_notifications_settle_the_original_spawn() {
-        for notification in [
-            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
-            r#"{"type":"system","subtype":"task_notification","task_id":"a1","status":"stopped"}"#,
-        ] {
-            let mut norm = Normalizer::new();
-            for raw in [
-                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"Keep going."}}]}}"#,
-                r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
-            ] {
-                norm.normalize(crate::wire::claude::wire::parse_frame(raw).unwrap(), false);
-            }
-            let events = norm.normalize(
-                crate::wire::claude::wire::parse_frame(notification).unwrap(),
-                false,
-            );
-            let expected = if notification.contains("completed") {
-                DoneStatus::Completed
-            } else {
-                DoneStatus::Interrupted
-            };
-            assert_eq!(
-                events,
-                vec![tag(
-                    "toolu_spawn",
-                    AgentEvent::Done {
-                        status: expected,
-                        result: None,
-                        error: None,
-                        session_id: None,
-                    }
-                )]
-            );
-            // The next steer must still use the original transcript too.
-            let events = norm.normalize(crate::wire::claude::wire::parse_frame(
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send2","name":"SendMessage","input":{"to":"a1","message":"One more check."}}]}}"#,
-            ).unwrap(), false);
-            assert!(
-                events.iter().any(|e| matches!(e,
-                    AgentEvent::Subagent { parent_tool_use_id, event }
-                        if parent_tool_use_id == "toolu_spawn"
-                            && matches!(event.as_ref(), AgentEvent::UserMessage { .. })
-                )),
-                "{events:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn resumed_child_frames_use_the_original_transcript() {
-        let mut norm = Normalizer::new();
-        for raw in [
-            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_spawn","subagent_type":"general-purpose"}"#,
-            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
-        ] {
-            norm.normalize(crate::wire::claude::wire::parse_frame(raw).unwrap(), false);
-        }
-        for raw in [
-            r#"{"type":"stream_event","parent_tool_use_id":"toolu_send","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}"#,
-            r#"{"type":"assistant","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"text","text":"finished"}]}}"#,
-            r#"{"type":"user","parent_tool_use_id":"toolu_send","message":{"content":[{"type":"tool_result","tool_use_id":"child-tool"}]}}"#,
-        ] {
-            let events =
-                norm.normalize(crate::wire::claude::wire::parse_frame(raw).unwrap(), false);
-            assert!(!events.is_empty());
-            assert!(events.iter().all(|e| matches!(e,
-                AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == "toolu_spawn"
-            )), "{events:?}");
-        }
-    }
-
-    #[test]
-    fn resumed_session_restores_task_ids_from_the_native_transcript() {
-        let history = [
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_spawn","name":"Agent","input":{"description":"scout"}}]}}"#,
-            r#"{"type":"user","toolUseResult":{"agentId":"a1","status":"async_launched"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_spawn"}]}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"SendMessage","input":{"to":"a1","message":"continue"}}]}}"#,
-            r#"{"type":"user","toolUseResult":{"agentId":"a1"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_send"}]}}"#,
-            // A subagent's own nested spawn is not a chip on this chat.
-            r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"deeper"}}]}}"#,
-            r#"{"type":"user","isSidechain":true,"toolUseResult":{"agentId":"a2"},"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_nested"}]}}"#,
-        ];
-        let mut norm = Normalizer::new();
-        for line in history {
-            norm.restore_spawn_record(&serde_json::from_str(line).unwrap());
-        }
-        assert!(!norm.agent_spawn_tools.contains("toolu_nested"));
-        assert!(!norm.agent_tasks.contains_key("a2"));
-        // The revived process has no original spawn frame on its wire.
-        norm.normalize(crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_send","subagent_type":"general-purpose"}"#,
-        ).unwrap(), false);
-        let events = norm.normalize(crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_send","status":"completed"}"#,
-        ).unwrap(), false);
-        assert_eq!(
-            events,
-            vec![tag(
-                "toolu_spawn",
-                AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                }
-            )]
-        );
-        assert!(!norm.saw_init, "history must not consume the live init");
-    }
-
-    #[test]
-    fn a_forked_skill_becomes_a_spawn_when_its_task_starts() {
-        // Shapes from a live 2.1.310 capture. A `context: fork` skill runs as
-        // a subagent under its Skill call's id, and its `task_started` comes
-        // before any of that traffic. An inline skill starts no task and
-        // stays an ordinary tool.
-        let feed = |norm: &mut Normalizer, raw: &str| {
-            norm.normalize(
-                crate::wire::claude::wire::parse_frame(raw).expect("parses"),
-                false,
-            )
-        };
-        let skill_call = |id: &str, skill: &str| {
-            format!(
-                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"Skill","input":{{"skill":"{skill}"}}}}]}}}}"#
-            )
-        };
-        let task_started = |task: &str, tool: &str| {
-            format!(
-                r#"{{"type":"system","subtype":"task_started","task_id":"{task}","tool_use_id":"{tool}","subagent_type":"general-purpose","task_type":"local_agent","is_backgrounded":false}}"#
-            )
-        };
-        let skill_text = r#"{"type":"user","parent_tool_use_id":"toolu_skill","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /p/.claude/skills/fanout"}]}}"#;
-        let mut norm = Normalizer::new();
-        let events = feed(&mut norm, &skill_call("toolu_skill", "fanout"));
-        assert!(
-            matches!(&events[0], AgentEvent::ToolCall { id, call } if id == "toolu_skill" && !call.is_subagent_spawn()),
-            "{events:?}"
-        );
-        // Its task start turns the chip into a spawn, ahead of its traffic.
-        assert_eq!(
-            feed(&mut norm, &task_started("a1", "toolu_skill")),
-            [AgentEvent::ToolCall {
-                id: "toolu_skill".into(),
-                call: ToolCall::Unknown {
-                    name: "Agent: /fanout".into(),
-                    input: Some(json!({"skill": "fanout"})),
-                },
-            }]
-        );
-        let events = feed(&mut norm, skill_text);
-        assert!(
-            matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
-                if parent_tool_use_id == "toolu_skill"
-                    && matches!(event.as_ref(), AgentEvent::UserMessage { .. })),
-            "its traffic passes as is: {events:?}"
-        );
-        let events = feed(
-            &mut norm,
-            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_skill","status":"completed"}"#,
-        );
-        assert!(
-            matches!(&events[..], [AgentEvent::Subagent { parent_tool_use_id, event }]
-                if parent_tool_use_id == "toolu_skill"
-                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })),
-            "it settles like any spawn: {events:?}"
-        );
-        // An agent the skill spawns starts a task and sends traffic too, but
-        // its call is on the skill's own feed: nothing here is re-decoded.
-        assert!(feed(&mut norm, &task_started("a2", "toolu_nested")).is_empty());
-        assert!(matches!(
-            &feed(
-                &mut norm,
-                r#"{"type":"assistant","parent_tool_use_id":"toolu_nested","message":{"content":[{"type":"text","text":"alpha"}]}}"#,
-            )[..],
-            [AgentEvent::Subagent { parent_tool_use_id, .. }] if parent_tool_use_id == "toolu_nested"
-        ));
-        // An inline skill's result comes back untagged, with no task start:
-        // it stays a tool, and nothing waits on it any more.
-        feed(&mut norm, &skill_call("toolu_inline", "lint"));
-        feed(
-            &mut norm,
-            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_inline","content":"Launching skill: lint"}]}}"#,
-        );
-        assert!(norm.skill_calls.is_empty(), "{:?}", norm.skill_calls);
-        // So a late task start for it re-decodes nothing.
-        assert!(feed(&mut norm, &task_started("a3", "toolu_inline")).is_empty());
-    }
-
-    // `/fanout` typed as the prompt, in the shapes of a live 2.1.310 capture
-    // (`live-2.1.310-typed-forked-command.jsonl`): a task start with no tool
-    // id, its notification, then its held transcript, replayed under
-    // `forked-command-fanout`.
-    const TYPED_STARTED: &str = r#"{"type":"system","subtype":"task_started","task_id":"t1","description":"/fanout","subagent_type":"general-purpose","task_type":"local_agent","skip_transcript":true,"ambient":true,"prompt":"Fan out two agents.","is_backgrounded":false,"spawn_depth":1}"#;
-    const TYPED_NOTIFIED: &str = r#"{"type":"system","subtype":"task_notification","task_id":"t1","status":"completed","summary":"/fanout","skip_transcript":true,"ambient":true}"#;
-    const TYPED_ECHO: &str = r#"{"type":"user","parent_tool_use_id":"forked-command-fanout","message":{"role":"user","content":[{"type":"text","text":"Fan out two agents."}]}}"#;
-    const TYPED_CALL: &str = r#"{"type":"assistant","parent_tool_use_id":"forked-command-fanout","message":{"content":[{"type":"tool_use","id":"toolu_alpha","name":"Agent","input":{"description":"alpha","prompt":"Reply alpha."}}]}}"#;
-    const TYPED_RESULT: &str = r#"{"type":"user","parent_tool_use_id":"forked-command-fanout","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_alpha"}]}}"#;
-    const TURN_END: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"alpha bravo","session_id":"s1"}"#;
-    const TYPED_CHIP: &str = "forked-command-fanout-t1";
-
-    fn feed_one(norm: &mut Normalizer, raw: &str) -> Vec<AgentEvent> {
-        norm.normalize(
-            crate::wire::claude::wire::parse_frame(raw).expect("parses"),
-            false,
-        )
-    }
-
-    /// How many of `events` feed `parent`'s transcript.
-    fn routed_to(events: &[AgentEvent], parent: &str) -> usize {
-        events
-            .iter()
-            .filter(|e| {
-                matches!(e, AgentEvent::Subagent { parent_tool_use_id, .. } if parent_tool_use_id == parent)
-            })
-            .count()
-    }
-
-    fn typed_settled(status: DoneStatus) -> [AgentEvent; 2] {
-        [
-            tag(
-                TYPED_CHIP,
-                AgentEvent::Done {
-                    status,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                },
-            ),
-            empty_tool_result(TYPED_CHIP, status == DoneStatus::Errored),
-        ]
-    }
-
-    #[test]
-    fn a_typed_fork_is_a_spawn_chip_from_its_task_start() {
-        let mut norm = Normalizer::new();
-        let started = feed_one(&mut norm, TYPED_STARTED);
-        assert_eq!(
-            started,
-            [
-                AgentEvent::ToolCall {
-                    id: TYPED_CHIP.into(),
-                    call: ToolCall::Unknown {
-                        name: "Agent: /fanout".into(),
-                        input: Some(json!({"skill": "fanout"})),
-                    },
-                },
-                tag(
-                    TYPED_CHIP,
-                    AgentEvent::UserMessage {
-                        text: "Fan out two agents.".into()
-                    }
-                ),
-            ]
-        );
-        assert!(
-            matches!(&started[0], AgentEvent::ToolCall { call, .. } if call.is_subagent_spawn())
-        );
-        // A description of several words is named by its first. (Typed with
-        // arguments, 2.1.310 still describes the bare command: see
-        // `a_typed_forks_replayed_prompt_is_dropped_once`.)
-        let mut norm = Normalizer::new();
-        let started = feed_one(
-            &mut norm,
-            &TYPED_STARTED.replace(r#""/fanout""#, r#""/code-review low""#),
-        );
-        assert!(
-            matches!(&started[0], AgentEvent::ToolCall { id, call: ToolCall::Unknown { name, .. } }
-                if id == "forked-command-code-review-t1" && name == "Agent: /code-review"),
-            "{started:?}"
-        );
-        // An agent task without a tool id that names no command is not one.
-        let mut norm = Normalizer::new();
-        assert!(
-            feed_one(
-                &mut norm,
-                &TYPED_STARTED.replace(r#""/fanout""#, r#""Explore the repo""#)
-            )
-            .is_empty()
-        );
-        assert!(norm.typed_fork.is_none());
-    }
-
-    #[test]
-    fn a_typed_forks_replay_feeds_its_chip_under_any_forked_command_id() {
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        // Notified before its replay: settled here, its tab would drop the
-        // replay as stragglers.
-        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
-        for raw in [
-            TYPED_CALL.to_owned(),
-            // The name after the prefix "can differ from the one you typed".
-            TYPED_CALL.replace("forked-command-fanout", "forked-command-plugin-fanout"),
-            TYPED_RESULT.to_owned(),
-            r#"{"type":"stream_event","parent_tool_use_id":"forked-command-fanout","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"alpha"}}}"#.to_owned(),
-        ] {
-            let events = feed_one(&mut norm, &raw);
-            assert!(
-                !events.is_empty() && routed_to(&events, TYPED_CHIP) == events.len(),
-                "{raw}: {events:?}"
-            );
-        }
-        // An agent it starts keeps its own transcript.
-        let nested = feed_one(
-            &mut norm,
-            &TYPED_CALL.replace("forked-command-fanout", "toolu_alpha"),
-        );
-        assert_eq!(routed_to(&nested, "toolu_alpha"), 1, "{nested:?}");
-    }
-
-    #[test]
-    fn a_typed_forks_replayed_prompt_is_dropped_once() {
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        // A tool result first leaves the echo to come.
-        assert_eq!(routed_to(&feed_one(&mut norm, TYPED_RESULT), TYPED_CHIP), 1);
-        assert!(
-            feed_one(&mut norm, TYPED_ECHO).is_empty(),
-            "the replay echoes the prompt the tab opened with"
-        );
-        // The same words again are the fork's own conversation.
-        assert_eq!(
-            feed_one(&mut norm, TYPED_ECHO),
-            [tag(
-                TYPED_CHIP,
-                AgentEvent::UserMessage {
-                    text: "Fan out two agents.".into()
-                }
-            )]
-        );
-        // `/fanout two words` (live 2.1.310): the start describes the bare
-        // command, and its prompt and the echo both end with the arguments.
-        let with_args = |raw: &str| {
-            raw.replace(
-                "Fan out two agents.",
-                r"Fan out two agents.\n\n\nARGUMENTS: two words",
-            )
-        };
-        let mut norm = Normalizer::new();
-        let started = feed_one(&mut norm, &with_args(TYPED_STARTED));
-        assert_eq!(
-            started.get(1),
-            Some(&tag(
-                TYPED_CHIP,
-                AgentEvent::UserMessage {
-                    text: "Fan out two agents.\n\n\nARGUMENTS: two words".into()
-                }
-            )),
-            "{started:?}"
-        );
-        assert!(feed_one(&mut norm, &with_args(TYPED_ECHO)).is_empty());
-    }
-
-    #[test]
-    fn a_typed_fork_settles_once_just_before_its_turns_done() {
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        // Notified failed in a turn that completes: its own status wins.
-        assert!(feed_one(&mut norm, &TYPED_NOTIFIED.replace("completed", "failed")).is_empty());
-        feed_one(&mut norm, TYPED_CALL);
-        let end = feed_one(&mut norm, TURN_END);
-        let n = end.len();
-        assert!(n >= 3, "{end:?}");
-        assert_eq!(
-            end[n - 3..n - 1],
-            typed_settled(DoneStatus::Errored),
-            "{end:?}"
-        );
-        assert!(
-            matches!(
-                end[n - 1],
-                AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    ..
-                }
-            ),
-            "{end:?}"
-        );
-        assert_eq!(routed_to(&end, TYPED_CHIP), 1, "{end:?}");
-        // A late notification, and the next turn's end, settle nothing again.
-        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
-        assert!(!feed_one(&mut norm, TURN_END).iter().any(|e| matches!(
-            e,
-            AgentEvent::Subagent { .. } | AgentEvent::ToolResult { .. }
-        )));
-    }
-
-    #[test]
-    fn each_typed_run_of_a_command_is_its_own_chip() {
-        let mut norm = Normalizer::new();
-        for raw in [TYPED_STARTED, TYPED_NOTIFIED, TYPED_CALL, TURN_END] {
-            feed_one(&mut norm, raw);
-        }
-        // The CLI replays every run of the command under the same id.
-        let again = feed_one(
-            &mut norm,
-            &TYPED_STARTED.replace(r#""task_id":"t1""#, r#""task_id":"t2""#),
-        );
-        assert!(
-            matches!(&again[0], AgentEvent::ToolCall { id, .. } if id == "forked-command-fanout-t2"),
-            "{again:?}"
-        );
-        let call = feed_one(&mut norm, TYPED_CALL);
-        assert_eq!(routed_to(&call, "forked-command-fanout-t2"), 1, "{call:?}");
-    }
-
-    #[test]
-    fn a_second_typed_fork_settles_the_first() {
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        // No result between the two starts: the first must not run on.
-        let second = feed_one(
-            &mut norm,
-            &TYPED_STARTED.replace(r#""task_id":"t1""#, r#""task_id":"t2""#),
-        );
-        assert_eq!(
-            second[..2],
-            typed_settled(DoneStatus::Interrupted),
-            "{second:?}"
-        );
-        assert!(
-            matches!(&second[2], AgentEvent::ToolCall { id, .. } if id == "forked-command-fanout-t2"),
-            "{second:?}"
-        );
-        // The first's late notification finds no spawn.
-        assert!(feed_one(&mut norm, TYPED_NOTIFIED).is_empty());
-    }
-
-    #[test]
-    fn nothing_reaches_a_settled_typed_forks_chip() {
-        let mut norm = Normalizer::new();
-        for raw in [TYPED_STARTED, TYPED_NOTIFIED, TYPED_CALL, TURN_END] {
-            feed_one(&mut norm, raw);
-        }
-        // Late replay frames keep the CLI's own id, which no chip carries:
-        // they stay in the run journal. The echo routed to the chip would
-        // read as a steer, and reopen it.
-        for raw in [TYPED_ECHO, TYPED_CALL] {
-            let late = feed_one(&mut norm, raw);
-            assert!(
-                !late.is_empty() && routed_to(&late, "forked-command-fanout") == late.len(),
-                "{raw}: {late:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_interrupted_turn_settles_its_typed_fork_too() {
-        // Stopped before any notification: settled as the turn ended.
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        let end = norm.normalize(
-            crate::wire::claude::wire::parse_frame(TURN_END).unwrap(),
-            true,
-        );
-        let n = end.len();
-        assert_eq!(
-            end[n - 3..n - 1],
-            typed_settled(DoneStatus::Interrupted),
-            "{end:?}"
-        );
-        assert!(matches!(
-            end[n - 1],
-            AgentEvent::Done {
-                status: DoneStatus::Interrupted,
-                ..
-            }
-        ));
-        // A result line too torn to read still ends the turn, and its fork.
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, TYPED_STARTED);
-        let end = feed_one(
-            &mut norm,
-            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["#,
-        );
-        assert_eq!(end[..2], typed_settled(DoneStatus::Errored), "{end:?}");
-        assert!(matches!(
-            end[2..],
-            [AgentEvent::Done {
-                status: DoneStatus::Errored,
-                ..
-            }]
-        ));
-    }
-
-    // `/f-slow-steps` typed as the prompt (three 20 s steps, live 2.1.310):
-    // what stdout brought, and the fork's transcript as the CLI wrote it to
-    // disk meanwhile.
-    const SLOW: &str =
-        include_str!("../../../tests/fixtures/claude/live-2.1.310-typed-fork-slow-steps.jsonl");
-    const SLOW_ON_DISK: &str = include_str!(
-        "../../../tests/fixtures/claude/live-2.1.310-typed-fork-slow-steps-transcript.jsonl"
-    );
-    const SLOW_CHIP: &str = "forked-command-f-slow-steps-ae74593bb0c051579";
-    /// The slow fork's tab, past the prompt it opened with.
-    const SLOW_TAB: [&str; 9] = [
-        "thinking This is the f-slow-s",
-        "call qByz",
-        "result qByz",
-        "thinking Step 1 returned \"ste",
-        "call Y4gV",
-        "result Y4gV",
-        "call E8dg",
-        "result E8dg",
-        "text steps done",
-    ];
-
-    /// The slow fork started, and its transcript's records on disk.
-    fn slow_fork() -> (Normalizer, Vec<Value>) {
-        let mut norm = Normalizer::new();
-        feed_one(&mut norm, SLOW.lines().next().unwrap());
-        let records = SLOW_ON_DISK
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        (norm, records)
-    }
-
-    fn slow_replay() -> impl Iterator<Item = &'static str> {
-        SLOW.lines()
-            .filter(|line| line.contains(r#""parent_tool_use_id":"forked-command-"#))
-    }
-
-    /// What `events` add to the slow fork's tab.
-    fn slow_tab(events: &[AgentEvent]) -> Vec<String> {
-        events
-            .iter()
-            .map(|e| match e {
-                AgentEvent::Subagent {
-                    parent_tool_use_id,
-                    event,
-                } if parent_tool_use_id == SLOW_CHIP => match event.as_ref() {
-                    AgentEvent::ReasoningDelta { text } => format!("thinking {:.20}", text),
-                    AgentEvent::TextDelta { text } => format!("text {}", text.trim()),
-                    AgentEvent::ToolCall { id, .. } => format!("call {}", &id[id.len() - 4..]),
-                    AgentEvent::ToolResult { id, .. } => {
-                        format!("result {}", &id[id.len() - 4..])
-                    }
-                    other => format!("{other:?}"),
-                },
-                other => format!("{other:?}"),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_typed_forks_transcript_on_disk_shows_its_messages_and_results_only() {
-        let (mut norm, records) = slow_fork();
-        assert_eq!(
-            norm.fork_to_follow(),
-            Some((
-                SLOW_CHIP,
-                "133a2e35-c338-4601-8108-99dcb7d09af2",
-                "ae74593bb0c051579"
-            ))
-        );
-        // Its prompt (the tab opened with it), a date attachment and an API
-        // request record carrying message content show nothing.
-        let shown: Vec<AgentEvent> = records
-            .into_iter()
-            .flat_map(|r| norm.fork_record(r))
-            .collect();
-        assert_eq!(slow_tab(&shown), SLOW_TAB);
-        // Nor would user text: nothing steers a typed fork.
-        let text = json!({"type": "user", "uuid": "u9", "message": {"role": "user",
-            "content": [{"type": "text", "text": "Keep going."}]}});
-        assert!(norm.fork_record(text).is_empty());
-    }
-
-    #[test]
-    fn a_record_shows_once_whether_the_disk_or_the_replay_brings_it_first() {
-        // Read off disk first: the replay repeats it under its uuid.
-        let (mut norm, records) = slow_fork();
-        let mut shown: Vec<AgentEvent> = records
-            .into_iter()
-            .flat_map(|r| norm.fork_record(r))
-            .collect();
-        for frame in slow_replay() {
-            shown.extend(feed_one(&mut norm, frame));
-        }
-        assert_eq!(slow_tab(&shown), SLOW_TAB);
-        // The fork ends between two reads: what the replay brought first is
-        // not read again.
-        let (mut norm, records) = slow_fork();
-        let (before, after) = records.split_at(5);
-        let mut shown: Vec<AgentEvent> = before
-            .iter()
-            .flat_map(|r| norm.fork_record(r.clone()))
-            .collect();
-        for frame in slow_replay() {
-            shown.extend(feed_one(&mut norm, frame));
-        }
-        shown.extend(after.iter().flat_map(|r| norm.fork_record(r.clone())));
-        assert_eq!(slow_tab(&shown), SLOW_TAB);
-    }
-
-    #[test]
-    fn a_replay_that_repeats_nothing_read_off_disk_ends_the_reading() {
-        let next_fork = SLOW
-            .lines()
-            .next()
-            .unwrap()
-            .replace("ae74593bb0c051579", "a2");
-        let run = |uuids: &str| {
-            let (mut norm, records) = slow_fork();
-            records.into_iter().for_each(|r| {
-                norm.fork_record(r);
-            });
-            let replayed: Vec<AgentEvent> = slow_replay()
-                .flat_map(|f| feed_one(&mut norm, &f.replacen(r#""uuid":""#, uuids, 1)))
-                .collect();
-            feed_one(&mut norm, TURN_END);
-            feed_one(&mut norm, &next_fork);
-            (slow_tab(&replayed), norm.fork_to_follow().is_some())
-        };
-        // Repeated under the same uuids: nothing shows twice, and the next
-        // fork is read too.
-        assert_eq!(run(r#""uuid":""#), (Vec::<String>::new(), true));
-        // Under other uuids it all showed twice: the next fork fills from its
-        // replay alone.
-        assert_eq!(
-            run(r#""uuid":"x"#),
-            (SLOW_TAB.map(String::from).to_vec(), false)
-        );
-    }
-
-    #[test]
-    fn shell_task_notification_never_settles_a_subagent() {
-        // `Bash` with `run_in_background` settles through the SAME
-        // `task_notification` subtype, carrying the Bash call's own id.
-        // Tagging that Done bound a subagent ref onto an ordinary Run chip,
-        // which then rendered as a spawn chip opening an empty, never-created
-        // subagent doc.
-        let mut norm = Normalizer::new();
-        for raw in [
-            // The shell task's start is already unmapped (no subagent_type)…
-            r#"{"type":"system","subtype":"task_started","task_id":"bg1","tool_use_id":"toolu_bash","task_type":"local_bash"}"#,
-            // …and the Bash call itself must not mark the id as a spawn.
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"git clone …","run_in_background":true}}]}}"#,
-        ] {
-            let frame = crate::wire::claude::wire::parse_frame(raw).expect("parses");
-            norm.normalize(frame, false);
-        }
-        let done = crate::wire::claude::wire::parse_frame(
-            r#"{"type":"system","subtype":"task_notification","task_id":"bg1","tool_use_id":"toolu_bash","status":"completed"}"#,
-        )
-        .expect("parses");
-        assert!(norm.normalize(done, false).is_empty());
-    }
-
-    #[test]
-    fn subagent_assistant_blocks_emit_tagged_reasoning_text_and_calls() {
-        // No tagged partial deltas exist on the 2.1.x wire: a subagent's text
-        // and thinking arrive only as full blocks on its tagged assistant
-        // frames. Each ends on a blank line, so blocks that fold together
-        // stay apart; a signature-only thinking block carries nothing.
-        let ev = normalize_one(
-            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"thinking","thinking":"","signature":"sig"},{"type":"thinking","thinking":"Plan it. "},{"type":"thinking","thinking":"Then list."},{"type":"text","text":"working on it"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
-        );
-        let tagged = |event: AgentEvent| AgentEvent::Subagent {
-            parent_tool_use_id: "toolu_sub".into(),
-            event: Box::new(event),
-        };
-        assert_eq!(
-            ev,
-            [
-                tagged(AgentEvent::ReasoningDelta {
-                    text: "Plan it.\n\n".into()
-                }),
-                tagged(AgentEvent::ReasoningDelta {
-                    text: "Then list.\n\n".into()
-                }),
-                tagged(AgentEvent::TextDelta {
-                    text: "working on it\n\n".into()
-                }),
-                tagged(AgentEvent::ToolCall {
-                    id: "t1".into(),
-                    call: ToolCall::Exec {
-                        command: "ls".into()
-                    },
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn wake_turn_init_is_deduped_but_second_result_still_emits_done() {
-        // Live-verified 2.1.228 shape: background subagent → eager result,
-        // then a second init (same session id) + second result on completion.
-        let mut norm = Normalizer::new();
-        let init = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1"}"#;
-        let frame = crate::wire::claude::wire::parse_frame(init).unwrap();
-        assert_eq!(norm.normalize(frame, false).len(), 1, "first init");
-        let frame = crate::wire::claude::wire::parse_frame(init).unwrap();
-        assert!(
-            norm.normalize(frame, false).is_empty(),
-            "wake init deduped — SessionStarted is the fold's run boundary"
-        );
-        let result = r#"{"type":"result","subtype":"success","session_id":"s1"}"#;
-        let frame = crate::wire::claude::wire::parse_frame(result).unwrap();
-        let events = norm.normalize(frame, false);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    ..
-                })
-            ),
-            "wake turn settles with its own Done"
-        );
-    }
-
-    #[test]
-    fn ede_diagnostics_never_surface_as_errors() {
-        // The CLI's internal turn-accounting breadcrumbs must not become
-        // transcript error parts (they showed up as raw red boxes).
-        let done = result_done(
-            r#"{"type":"result","subtype":"error_during_execution","errors":["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"]}"#,
-        );
-        match done {
-            AgentEvent::Done { status, error, .. } => {
-                assert_eq!(status, DoneStatus::Errored);
-                assert_eq!(error, None, "diagnostic-only failure surfaces no text");
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn real_errors_survive_diagnostic_filtering() {
-        let done = result_done(
-            r#"{"type":"result","subtype":"error_during_execution","errors":["[ede_diagnostic] turn aborted (x) stop_reason=null","Something real broke"]}"#,
-        );
-        match done {
-            AgentEvent::Done { error, .. } => {
-                assert_eq!(error.as_deref(), Some("Something real broke"));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    fn done_of(events: &[AgentEvent]) -> (DoneStatus, Option<String>) {
+    fn done_of(events: &[ExecEvent]) -> (StopReason, Option<String>, Option<String>) {
         match events.last() {
-            Some(AgentEvent::Done { status, error, .. }) => (*status, error.clone()),
+            Some(ExecEvent::Done {
+                stop,
+                result,
+                diagnostic,
+            }) => (*stop, result.clone(), diagnostic.clone()),
             other => panic!("no done: {other:?}"),
         }
     }
 
     #[test]
-    fn api_failures_filed_as_success_end_errored() {
-        // Live 2.1.309 with an invalid key: the assistant frame carries the
-        // error code, and the result says `success` with `is_error`.
+    fn tool_calls_keep_the_harnesss_name_and_input() {
+        let events = normalize_one(
+            r#"{"type":"assistant","message":{"content":[
+                {"type":"text","text":"hi"},
+                {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls -la"}},
+                {"type":"tool_use","id":"t2","name":"mcp__linear__search","input":{"q":"bug"}},
+                {"type":"tool_use","id":"t3","name":"Mystery","input":null}]}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ExecEvent::Tool {
+                    id: "t1".into(),
+                    call: ToolCall {
+                        name: "Bash".into(),
+                        input: json!({"command": "ls -la"}),
+                    },
+                },
+                ExecEvent::Tool {
+                    id: "t2".into(),
+                    call: ToolCall {
+                        name: "mcp__linear__search".into(),
+                        input: json!({"q": "bug"}),
+                    },
+                },
+                ExecEvent::Tool {
+                    id: "t3".into(),
+                    call: ToolCall {
+                        name: "Mystery".into(),
+                        input: json!(null),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn session_start_is_deduped_and_a_wake_turn_still_settles_with_its_own_done() {
+        // Live-verified 2.1.228 shape: a background subagent gives an eager result, then a
+        // second init (same session id) and a second result on completion.
         let mut norm = Normalizer::new();
-        let assistant = norm.normalize(
-            crate::wire::claude::wire::parse_frame(
-                r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Invalid API key · Fix external API key"}]},"error":"authentication_failed","api_error_status":401}"#,
-            )
-            .unwrap(),
+        let init = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1"}"#;
+        assert_eq!(
+            norm.normalize(parse(init), false),
+            vec![ExecEvent::Started {
+                session: SessionRef("s1".into()),
+                model: "m".into(),
+            }]
+        );
+        assert!(norm.started());
+        assert!(
+            norm.normalize(parse(init), false).is_empty(),
+            "the wake init is deduped"
+        );
+        let events = norm.normalize(
+            parse(r#"{"type":"result","subtype":"success","session_id":"s1"}"#),
+            false,
+        );
+        assert_eq!(done_of(&events).0, StopReason::Completed);
+    }
+
+    #[test]
+    fn stream_deltas_map_to_text_and_reasoning_and_liveness_noise_is_dropped() {
+        assert_eq!(
+            normalize_one(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+            ),
+            vec![ExecEvent::Reasoning { text: "hmm".into() }]
+        );
+        assert_eq!(
+            normalize_one(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+            ),
+            vec![text("hi")]
+        );
+        // Redacted thinking, a tool input being generated and a signature carry nothing a run
+        // consumer reads.
+        for raw in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"file_"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}}"#,
+        ] {
+            assert!(normalize_one(raw).is_empty(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn subagent_frames_are_not_the_runs_own_feed() {
+        let mut norm = Normalizer::new();
+        for raw in [
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sub text"}}}"#,
+            r#"{"type":"stream_event","parent_tool_use_id":"toolu_sub","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"sub thought"}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"text","text":"sub"},{"type":"tool_use","id":"s1","name":"Bash","input":{"command":"echo sub"}}]},"error":"rate_limit"}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_sub","message":{"content":[{"type":"tool_result","tool_use_id":"s1","is_error":false}]}}"#,
+        ] {
+            assert!(norm.normalize(parse(raw), false).is_empty(), "{raw}");
+        }
+        // Not even a child's error code becomes the run's failure.
+        let done = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+        assert_eq!(
+            done_of(&done).2.as_deref(),
+            Some("The run ended with an error.")
+        );
+    }
+
+    #[test]
+    fn a_bash_result_carries_its_exit_code_and_last_output_line() {
+        let mut norm = Normalizer::new();
+        norm.normalize(
+            parse(
+                r#"{"type":"assistant","message":{"content":[
+                    {"type":"tool_use","id":"ok","name":"Bash","input":{"command":"true"}},
+                    {"type":"tool_use","id":"bad","name":"Bash","input":{"command":"false"}},
+                    {"type":"tool_use","id":"bg","name":"Bash","input":{"command":"sleep 9","run_in_background":true}},
+                    {"type":"tool_use","id":"rd","name":"Read","input":{"file_path":"/a"}}]}}"#,
+            ),
+            false,
+        );
+        let events = norm.normalize(
+            parse(
+                r#"{"type":"user","message":{"content":[
+                    {"type":"tool_result","tool_use_id":"ok","is_error":false,"content":"compiling\nall 3 tests passed\n"},
+                    {"type":"tool_result","tool_use_id":"bad","is_error":true,"content":"Exit code 2\nmake: *** [all] Error 1"},
+                    {"type":"tool_result","tool_use_id":"bg","is_error":false,"content":"Command running in background with ID: b1."},
+                    {"type":"tool_result","tool_use_id":"rd","is_error":false,"content":"file text"}]}}"#,
+            ),
             false,
         );
         assert_eq!(
-            assistant
-                .iter()
-                .filter(|e| matches!(e, AgentEvent::Error { .. }))
-                .count(),
-            1
+            events,
+            vec![
+                ExecEvent::ToolResult {
+                    id: "ok".into(),
+                    ok: true,
+                    summary: Some("exit code 0: all 3 tests passed".into()),
+                },
+                ExecEvent::ToolResult {
+                    id: "bad".into(),
+                    ok: false,
+                    summary: Some("exit code 2: make: *** [all] Error 1".into()),
+                },
+                ExecEvent::ToolResult {
+                    id: "bg".into(),
+                    ok: true,
+                    summary: Some("Command running in background with ID: b1.".into()),
+                },
+                ExecEvent::ToolResult {
+                    id: "rd".into(),
+                    ok: true,
+                    summary: None,
+                },
+            ]
         );
-        let invalid_key = r#"{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Fix external API key","terminal_reason":"api_error","api_error_status":401,"session_id":"s"}"#;
-        let done = norm.normalize(
-            crate::wire::claude::wire::parse_frame(invalid_key).unwrap(),
+    }
+
+    #[test]
+    fn a_summary_is_one_short_redacted_line() {
+        let mut norm = Normalizer::new();
+        norm.normalize(
+            parse(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"Bash","input":{"command":"x"}}]}}"#),
             false,
         );
-        // Errored, and the failure is not shown a second time.
-        assert_eq!(done_of(&done), (DoneStatus::Errored, None));
-        // Without the assistant's code, the result's own text is the error.
+        let long = "y".repeat(500);
+        let events = norm.normalize(
+            parse(&format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"b","is_error":false,"content":"{long}"}}]}}}}"#
+            )),
+            false,
+        );
+        match &events[..] {
+            [ExecEvent::ToolResult { summary: Some(s), .. }] => {
+                assert!(s.chars().count() < 260, "{} chars", s.chars().count());
+                assert!(s.ends_with('…'));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rejected_window_carried_by_overage_is_not_a_failure() {
+        let mut norm = Normalizer::new();
+        norm.normalize(
+            parse(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","overageStatus":"rejected"}}"#),
+            false,
+        );
+        let blocked = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+        assert_eq!(
+            done_of(&blocked).2.as_deref(),
+            Some("Claude 5-hour limit reached — the turn was blocked. Try again after it resets.")
+        );
+        for overage in [
+            r#""overageStatus":"allowed""#,
+            r#""overageStatus":"allowed_warning""#,
+            r#""isUsingOverage":true"#,
+        ] {
+            let mut norm = Normalizer::new();
+            let raw = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","rateLimitType":"five_hour",{overage}}}}}"#
+            );
+            assert!(norm.normalize(parse(&raw), false).is_empty(), "{overage}");
+            let done = norm.normalize(parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#), false);
+            assert_eq!(
+                done_of(&done).2.as_deref(),
+                Some("The run ended with an error."),
+                "{overage}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_result_is_usage_then_done() {
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":3,"output_tokens":4},"session_id":"s"}"#,
+        );
+        assert_eq!(
+            events,
+            vec![
+                ExecEvent::Usage {
+                    input_tokens: 3,
+                    output_tokens: 4
+                },
+                ExecEvent::Done {
+                    stop: StopReason::Completed,
+                    result: Some("ok".into()),
+                    diagnostic: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ede_diagnostics_never_surface_as_errors() {
+        // The CLI's internal turn-accounting breadcrumbs are not a failure's cause.
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"error_during_execution","errors":["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"]}"#,
+        );
+        assert_eq!(done_of(&events), (StopReason::Error, None, None));
+    }
+
+    #[test]
+    fn real_errors_survive_diagnostic_filtering() {
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"error_during_execution","errors":["[ede_diagnostic] turn aborted (x) stop_reason=null","Something real broke"]}"#,
+        );
+        assert_eq!(done_of(&events).2.as_deref(), Some("Something real broke"));
+    }
+
+    #[test]
+    fn known_failure_subtypes_keep_mapped_wording() {
+        for raw in [
+            r#"{"type":"result","subtype":"error_max_turns","errors":["[ede_diagnostic] turn aborted (max) stop_reason=null"]}"#,
+            r#"{"type":"result","subtype":"error_max_turns","errors":[]}"#,
+        ] {
+            assert_eq!(
+                done_of(&normalize_one(raw)).2.as_deref(),
+                Some("The run hit the maximum number of turns."),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_failures_filed_as_success_end_in_error() {
+        // Live 2.1.309 with an invalid key: the assistant frame carries the error code, and the
+        // result says `success` with `is_error`.
+        let mut norm = Normalizer::new();
+        norm.normalize(
+            parse(
+                r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Invalid API key · Fix external API key"}]},"error":"authentication_failed","api_error_status":401}"#,
+            ),
+            false,
+        );
+        let invalid_key = r#"{"type":"result","subtype":"success","is_error":true,"result":"Invalid API key · Fix external API key","terminal_reason":"api_error","api_error_status":401,"session_id":"s"}"#;
+        // The assistant's code already named the failure: it is the diagnostic, once.
+        assert_eq!(
+            done_of(&norm.normalize(parse(invalid_key), false)),
+            (
+                StopReason::Error,
+                None,
+                Some("Authentication failed — sign in to Claude again.".into())
+            )
+        );
+        // Without the assistant's code, the result's own text is the diagnostic.
         assert_eq!(
             done_of(&normalize_one(invalid_key)),
             (
-                DoneStatus::Errored,
+                StopReason::Error,
+                None,
                 Some("Invalid API key · Fix external API key".into())
             )
         );
 
-        let (status, error) = done_of(&normalize_one(
+        let (stop, _, error) = done_of(&normalize_one(
             r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 rate_limit_error (resets 3pm)","api_error_status":429}"#,
         ));
-        assert_eq!(status, DoneStatus::Errored);
+        assert_eq!(stop, StopReason::Error);
         let error = error.unwrap();
         assert!(error.starts_with("Claude rate limit reached"), "{error}");
         assert!(error.contains("resets 3pm"), "{error}");
 
-        let (_, error) = done_of(&normalize_one(
+        let (_, _, error) = done_of(&normalize_one(
             r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 529","api_error_status":529}"#,
         ));
         assert!(error.unwrap().contains("overloaded"));
@@ -2912,8 +1878,8 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long","terminal_reason":"prompt_too_long"}"#,
             r#"{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long"}"#,
         ] {
-            let (status, error) = done_of(&normalize_one(full));
-            assert_eq!(status, DoneStatus::Errored);
+            let (stop, _, error) = done_of(&normalize_one(full));
+            assert_eq!(stop, StopReason::Error);
             assert!(error.unwrap().contains("/compact"), "{full}");
         }
     }
@@ -2923,19 +1889,19 @@ mod tests {
         for (raw, expected) in [
             (
                 r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","terminal_reason":"completed"}"#,
-                DoneStatus::Completed,
+                StopReason::Completed,
             ),
             (
                 r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_streaming"}"#,
-                DoneStatus::Interrupted,
+                StopReason::Interrupted,
             ),
             (
                 r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","errors":[]}"#,
-                DoneStatus::Interrupted,
+                StopReason::Interrupted,
             ),
             (
                 r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"budget_exhausted"}"#,
-                DoneStatus::Errored,
+                StopReason::Error,
             ),
         ] {
             assert_eq!(done_of(&normalize_one(raw)).0, expected, "{raw}");
@@ -2943,133 +1909,67 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_result_ends_the_turn() {
-        let ok =
-            normalize_one(r#"{"type":"result","subtype":"success","usage":{"input_tokens":"x"}}"#);
-        assert_eq!(done_of(&ok), (DoneStatus::Completed, None));
+    fn an_interrupted_run_folds_its_result_into_interrupted() {
+        let mut norm = Normalizer::new();
+        let events = norm.normalize(
+            parse(r#"{"type":"result","subtype":"error_during_execution","errors":["boom"]}"#),
+            true,
+        );
+        assert_eq!(done_of(&events), (StopReason::Interrupted, None, None));
+    }
+
+    #[test]
+    fn an_unreadable_result_ends_the_run() {
+        let ok = normalize_one(r#"{"type":"result","subtype":"success","usage":{"input_tokens":"x"}}"#);
+        assert_eq!(done_of(&ok), (StopReason::Completed, None, None));
         let failed = normalize_one(
             r#"{"type":"result","subtype":"success","is_error":true,"usage":{"input_tokens":"x"}}"#,
         );
-        assert_eq!(done_of(&failed).0, DoneStatus::Errored);
-        assert!(done_of(&failed).1.is_some());
+        assert_eq!(done_of(&failed).0, StopReason::Error);
+        assert!(done_of(&failed).2.is_some());
     }
 
     #[test]
-    fn api_retries_keep_the_turn_alive_and_are_noticed_once() {
+    fn api_retries_and_compaction_say_nothing_to_the_consumer() {
         let mut norm = Normalizer::new();
-        let retry = |norm: &mut Normalizer, attempt: u32| {
-            norm.normalize(
-                crate::wire::claude::wire::parse_frame(&format!(
+        for attempt in 1..=4 {
+            let events = norm.normalize(
+                parse(&format!(
                     r#"{{"type":"system","subtype":"api_retry","attempt":{attempt},"max_retries":10,"retry_delay_ms":4000,"error_status":529,"error":"overloaded"}}"#
-                ))
-                .unwrap(),
+                )),
                 false,
-            )
-        };
-        let heartbeat = AgentEvent::ReasoningDelta {
-            text: String::new(),
-        };
-        assert_eq!(retry(&mut norm, 1), vec![heartbeat.clone()]);
-        assert_eq!(retry(&mut norm, 2), vec![heartbeat.clone()]);
-        let third = retry(&mut norm, 3);
-        assert!(matches!(
-            &third[..],
-            [AgentEvent::ReasoningDelta { .. }, AgentEvent::Error { message }]
-                if message.contains("overloaded") && message.contains("3 of 10")
-        ));
-        assert_eq!(retry(&mut norm, 4), vec![heartbeat.clone()]);
-        // The next turn may notice its own retries.
+            );
+            assert!(events.is_empty(), "attempt {attempt}");
+        }
+        for raw in [
+            r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":180000,"post_tokens":9000}}"#,
+            r#"{"type":"system","subtype":"informational","content":"x","level":"info"}"#,
+            r#"{"type":"system","subtype":"thinking_tokens","tokens":12}"#,
+        ] {
+            assert!(norm.normalize(parse(raw), false).is_empty(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_persistent_api_retry_is_the_diagnostic_if_the_turn_then_fails() {
+        let mut norm = Normalizer::new();
         norm.normalize(
-            crate::wire::claude::wire::parse_frame(r#"{"type":"result","subtype":"success"}"#)
-                .unwrap(),
+            parse(r#"{"type":"system","subtype":"api_retry","attempt":3,"max_retries":10,"retry_delay_ms":4000,"error_status":529,"error":"overloaded"}"#),
             false,
         );
-        assert_eq!(retry(&mut norm, 3).len(), 2);
+        let done = norm.normalize(
+            parse(r#"{"type":"result","subtype":"error_during_execution","errors":[]}"#),
+            false,
+        );
+        let diagnostic = done_of(&done).2.unwrap();
+        assert!(diagnostic.contains("overloaded") && diagnostic.contains("3 of 10"), "{diagnostic}");
     }
 
     #[test]
-    fn compaction_is_liveness_then_new_context_usage() {
-        assert_eq!(
-            normalize_one(r#"{"type":"system","subtype":"status","status":"compacting"}"#),
-            vec![AgentEvent::ReasoningDelta {
-                text: String::new()
-            }]
-        );
-        assert_eq!(
-            normalize_one(
-                r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":180000,"post_tokens":9000}}"#
-            ),
-            vec![AgentEvent::ContextUsage {
-                tokens: Some(9000),
-                window: None
-            }]
-        );
-        assert!(normalize_one(r#"{"type":"system","subtype":"compact_boundary"}"#).is_empty());
-        assert!(
-            normalize_one(
-                r#"{"type":"system","subtype":"informational","content":"x","level":"info"}"#
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn known_failure_subtypes_keep_mapped_wording() {
-        // A known run-failure subtype stays visible with human wording even
-        // when its errors array is all diagnostics (or empty).
-        let done = result_done(
-            r#"{"type":"result","subtype":"error_max_turns","errors":["[ede_diagnostic] turn aborted (max) stop_reason=null"]}"#,
-        );
-        match done {
-            AgentEvent::Done { error, .. } => {
-                assert_eq!(
-                    error.as_deref(),
-                    Some("The run hit the maximum number of turns.")
-                );
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-        let done = result_done(r#"{"type":"result","subtype":"error_max_turns","errors":[]}"#);
-        match done {
-            AgentEvent::Done { error, .. } => {
-                assert_eq!(
-                    error.as_deref(),
-                    Some("The run hit the maximum number of turns.")
-                );
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod context_tests {
-    use super::*;
-    #[test]
-    fn context_counts_cached_prompt_and_matches_primary_model() {
-        let mut normalizer = Normalizer::new();
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","message":{"model":"primary","content":[],"usage":{"input_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1800,"output_tokens":100}}}"#).unwrap(), false);
-        assert!(events.contains(&AgentEvent::ContextUsage {
-            tokens: Some(42000),
-            window: None
-        }));
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"assistant","parent_tool_use_id":"child","message":{"model":"child","content":[],"usage":{"input_tokens":999999}}}"#).unwrap(), false);
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::ContextUsage { .. }))
-        );
-        let events = normalizer.normalize(super::super::wire::parse_frame(r#"{"type":"result","subtype":"success","usage":{"input_tokens":999999},"modelUsage":{"primary":{"contextWindow":200000},"child":{"contextWindow":1000000}}}"#).unwrap(), false);
-        assert!(events.contains(&AgentEvent::ContextUsage {
-            tokens: None,
-            window: Some(200000)
-        }));
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ContextUsage {
-                tokens: Some(_),
-                ..
-            }
-        )));
+    fn the_summary_helper_leads_with_the_exit_code() {
+        assert_eq!(summarize(Some("a\nb\n"), Some(0)).as_deref(), Some("exit code 0: b"));
+        assert_eq!(summarize(None, Some(3)).as_deref(), Some("exit code 3"));
+        assert_eq!(summarize(Some("  \n"), None), None);
     }
 }
