@@ -394,15 +394,18 @@ async fn start_with_wake(files: Vec<DefFile>) -> (Fx, WakeSignal) {
 
 #[tokio::test(start_paused = true)]
 async fn a_cron_due_while_the_machine_slept_fires_on_the_wake_signal() {
-    let hourly = trigger("tick", "kind = \"every\"\nevery = \"1h\"", "go");
-    let (fx, wake) = start_with_wake(files(vec![hourly])).await;
+    // Due at 03:00 UTC; it is 22:13 UTC, 4 h 47 min away.
+    let when = "kind = \"cron\"\ncron = \"0 3 * * *\"\ntimezone = \"UTC\"";
+    let (fx, wake) = start_with_wake(files(vec![trigger("nightly", when, "go")])).await;
     until(async || caught_up(&fx).then_some(())).await;
 
-    // The machine sleeps: only the wall clock moves, the timer does not. Nothing fires by
-    // itself, however long we wait on the monotonic clock short of the deadline.
-    fx.clock.advance(3 * HOUR + 10 * MIN);
-    tokio::time::advance(Duration::from_secs(60)).await;
-    tokio::task::yield_now().await;
+    // The machine sleeps through the due time: the wall clock moves 6 h, the timer only 2 h. The
+    // old one-hour guard would have looked at the clock by now; nothing else does.
+    fx.clock.advance(6 * HOUR);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(30 * 60)).await;
+        tokio::task::yield_now().await;
+    }
     assert!(
         runs(&fx).await.is_empty(),
         "no periodic wake reads the clock"
@@ -412,8 +415,7 @@ async fn a_cron_due_while_the_machine_slept_fires_on_the_wake_signal() {
     wake.notify();
     until(async || (!runs(&fx).await.is_empty()).then_some(())).await;
     until(async || caught_up(&fx).then_some(())).await;
-    assert_eq!(runs(&fx).await.len(), 1, "three occurrences, one run");
-    assert_eq!(firings(&fx).await[0].missed, 3);
+    assert_eq!(runs(&fx).await.len(), 1, "one occurrence, one run");
 }
 
 #[tokio::test(start_paused = true)]

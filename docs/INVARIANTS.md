@@ -50,6 +50,7 @@ its ports:
 - `Executor` — harness runs;
 - `Workspace` — worktrees, check commands, git refs;
 - `Watch` — file and ref changes;
+- `WakeSignal` — the system woke from sleep (a handle the daemon raises; the kernel only listens);
 - `Definitions` — the definitions repository;
 - `Secrets` — the Keychain.
 
