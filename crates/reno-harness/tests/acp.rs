@@ -139,6 +139,22 @@ async fn drive_with(
     mut decide: impl FnMut(&ApprovalSubject) -> Decision,
     answer: Answerer,
 ) -> Outcome {
+    drive_deciding(live, |subject| (decide(subject), None), answer).await
+}
+
+/// [`drive`], with the message each decision comes with (a policy rule's deny message).
+async fn drive_with_messages(
+    live: &mut Live,
+    decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+) -> Outcome {
+    drive_deciding(live, decide, first_option).await
+}
+
+async fn drive_deciding(
+    live: &mut Live,
+    mut decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+    answer: Answerer,
+) -> Outcome {
     let mut outcome = Outcome::default();
     let run = async {
         while let Some(event) = live.stream.next().await {
@@ -148,8 +164,9 @@ async fn drive_with(
                     subject,
                 } => {
                     outcome.approvals.push(subject.clone());
+                    let (decision, message) = decide(subject);
                     live.handle
-                        .decide(request_id.clone(), decide(subject))
+                        .decide_with_message(request_id.clone(), decision, message)
                         .await
                         .unwrap();
                 }
@@ -520,6 +537,32 @@ async fn a_decision_selects_allow_once_or_reject_once_and_never_the_lasting_opti
         permission_of("execute", AccessMode::Supervised, Decision::Deny).await;
     assert_eq!(approvals.len(), 1);
     assert_eq!(denied, "no");
+}
+
+/// A refusal's reason rides in the response's `_meta.denyMessage` (ACP's permission response has
+/// no message field); an allow, a refusal without a reason and a blank one carry nothing.
+#[tokio::test]
+async fn a_policy_deny_message_rides_in_the_response_meta() {
+    async fn reason_for(decision: Decision, message: Option<&str>) -> Option<String> {
+        let mut live = start(
+            &registry(),
+            spec_with("scenario:permission execute", AccessMode::Supervised),
+        )
+        .await;
+        let outcome =
+            drive_with_messages(&mut live, |_| (decision, message.map(str::to_owned))).await;
+        assert_eq!(dones(&outcome.events), 1, "{:?}", outcome.events);
+        texts(&outcome.events)
+            .iter()
+            .find_map(|t| t.strip_prefix("reason:").map(str::to_owned))
+    }
+    assert_eq!(
+        reason_for(Decision::Deny, Some("denied by policy: no rm -rf")).await,
+        Some("denied by policy: no rm -rf".into())
+    );
+    assert_eq!(reason_for(Decision::Deny, None).await, None);
+    assert_eq!(reason_for(Decision::Deny, Some("  ")).await, None);
+    assert_eq!(reason_for(Decision::Allow, Some("ignored")).await, None);
 }
 
 /// Reading, searching and thinking are allowed in every mode (the access table on the type), and

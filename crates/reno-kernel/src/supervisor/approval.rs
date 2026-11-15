@@ -255,7 +255,11 @@ impl Supervisor {
             self.refuse_unrecorded(request_id, &why).await;
             return;
         }
-        self.answer(request_id, outcome).await;
+        // A refusal carries the rule's message to the harness as well as to the journal.
+        let for_harness = message
+            .clone()
+            .filter(|_| outcome == ApprovalOutcome::Denied);
+        self.answer(request_id, outcome, for_harness).await;
         self.publish(&ExecEvent::ApprovalResolved {
             request_id: request_id.to_owned(),
             decision: outcome,
@@ -269,7 +273,7 @@ impl Supervisor {
     /// audit.
     async fn refuse_unrecorded(&mut self, request_id: &str, why: &str) {
         tracing::error!(run = %self.run, request_id, %why, "approval not recorded; denying it");
-        self.answer(request_id, ApprovalOutcome::Denied).await;
+        self.answer(request_id, ApprovalOutcome::Denied, None).await;
         self.publish(&ExecEvent::ApprovalResolved {
             request_id: request_id.to_owned(),
             decision: ApprovalOutcome::Denied,
@@ -281,9 +285,14 @@ impl Supervisor {
 
     /// Tell the harness. Returns whether it was told: false when the run is being cancelled or
     /// its controls are closed. Never parks the supervisor behind a full answer queue.
-    async fn answer(&mut self, request_id: &str, outcome: ApprovalOutcome) -> bool {
+    async fn answer(
+        &mut self,
+        request_id: &str,
+        outcome: ApprovalOutcome,
+        message: Option<String>,
+    ) -> bool {
         let sent = tokio::select! {
-            sent = self.handle.decide(request_id.to_owned(), decision_of(outcome)) => sent,
+            sent = self.handle.decide_with_message(request_id.to_owned(), decision_of(outcome), message) => sent,
             () = self.cancel.cancelled() => Err(reno_harness::exec::ControlsClosed),
         };
         sent.is_ok()
@@ -316,7 +325,7 @@ impl Supervisor {
         }
         let open = self.open_approvals.remove(at);
         self.rearm();
-        let delivered = self.answer(&open.request_id, outcome).await;
+        let delivered = self.answer(&open.request_id, outcome, None).await;
         // State before visibility, as when raising: commit `running`, then drop it from the list.
         self.resolve_wait().await;
         self.refresh_view().await;
@@ -358,7 +367,8 @@ impl Supervisor {
                 tracing::error!(run = %self.run, approval = %open.id, %error, "could not record an expiry");
                 self.approvals_unrecorded = true;
             }
-            self.answer(&open.request_id, ApprovalOutcome::Denied).await;
+            self.answer(&open.request_id, ApprovalOutcome::Denied, None)
+                .await;
             self.publish(&ExecEvent::ApprovalResolved {
                 request_id: open.request_id,
                 decision: ApprovalOutcome::Denied,

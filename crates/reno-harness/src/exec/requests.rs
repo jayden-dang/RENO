@@ -31,8 +31,8 @@ pub enum Open<A, I> {
 /// What [`OpenRequests::resolve`] did with an answer.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Resolved<A, I> {
-    /// A decision closed an approval.
-    Decision(A, Decision),
+    /// A decision closed an approval, with the reason it came with, if any.
+    Decision(A, Decision, Option<String>),
     /// Answers closed an input request. An empty list declines it.
     Input(I, Vec<InputAnswer>),
     /// The request exists, but this answer is of the other kind. It stays open.
@@ -80,8 +80,8 @@ impl<A, I> OpenRequests<A, I> {
     pub fn resolve(&mut self, answer: ExecAnswer) -> Resolved<A, I> {
         let ExecAnswer { request_id, answer } = answer;
         match (self.open.remove(&request_id), answer) {
-            (Some(Open::Approval(payload)), Answer::Decision(decision)) => {
-                Resolved::Decision(payload, decision)
+            (Some(Open::Approval(payload)), Answer::Decision(decision, message)) => {
+                Resolved::Decision(payload, decision, message)
             }
             (Some(Open::Input(payload)), Answer::Input(answers)) => {
                 Resolved::Input(payload, answers)
@@ -135,8 +135,8 @@ mod tests {
         table.open_approval("a", "tool input");
         table.open_input("q", "questions");
         assert_eq!(
-            table.resolve(answer("a", Answer::Decision(Decision::Allow))),
-            Resolved::Decision("tool input", Decision::Allow)
+            table.resolve(answer("a", Answer::Decision(Decision::Allow, None))),
+            Resolved::Decision("tool input", Decision::Allow, None)
         );
         assert!(matches!(
             table.resolve(answer("q", input("B"))),
@@ -156,7 +156,7 @@ mod tests {
             Resolved::WrongKind
         );
         assert_eq!(
-            table.resolve(answer("q", Answer::Decision(Decision::Allow))),
+            table.resolve(answer("q", Answer::Decision(Decision::Allow, None))),
             Resolved::WrongKind
         );
         // Both are still open, and are handed back to be refused at the end.
@@ -170,16 +170,16 @@ mod tests {
     fn an_unknown_or_repeated_answer_is_reported() {
         let mut table: OpenRequests<(), ()> = OpenRequests::new();
         assert_eq!(
-            table.resolve(answer("nope", Answer::Decision(Decision::Deny))),
+            table.resolve(answer("nope", Answer::Decision(Decision::Deny, None))),
             Resolved::Unknown
         );
         table.open_approval("a", ());
         assert!(matches!(
-            table.resolve(answer("a", Answer::Decision(Decision::Deny))),
-            Resolved::Decision((), Decision::Deny)
+            table.resolve(answer("a", Answer::Decision(Decision::Deny, None))),
+            Resolved::Decision((), Decision::Deny, None)
         ));
         assert_eq!(
-            table.resolve(answer("a", Answer::Decision(Decision::Allow))),
+            table.resolve(answer("a", Answer::Decision(Decision::Allow, None))),
             Resolved::Unknown
         );
     }

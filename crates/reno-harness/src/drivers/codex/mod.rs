@@ -1510,9 +1510,21 @@ impl Run {
     fn answer(&mut self, answer: ExecAnswer) {
         let request_id = answer.request_id.clone();
         match self.requests.resolve(answer) {
-            Resolved::Decision(payload, decision) => self
-                .client
-                .respond(&payload.rpc_id, payload.reply(decision == Decision::Allow)),
+            Resolved::Decision(payload, decision, message) => {
+                // The app-server's approval reply is `{decision}` and nothing else: it has no
+                // field for a reason, so a policy rule's message cannot reach the model. It is
+                // logged so the refusal is explainable from the daemon's side.
+                if let Some(message) = message.as_deref().filter(|_| decision == Decision::Deny) {
+                    tracing::info!(
+                        target: "reno_harness::codex",
+                        request_id,
+                        message,
+                        "declined by policy; the app-server reply cannot carry the message"
+                    );
+                }
+                self.client
+                    .respond(&payload.rpc_id, payload.reply(decision == Decision::Allow));
+            }
             Resolved::Input(payload, given) => {
                 self.client.respond(&payload.rpc_id, payload.reply(&given))
             }

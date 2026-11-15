@@ -161,7 +161,7 @@ impl Rig {
             .answers
             .iter()
             .map(|a| match a.answer {
-                Answer::Decision(decision) => decision,
+                Answer::Decision(decision, _) => decision,
                 ref other => panic!("not a decision: {other:?}"),
             })
             .collect()
@@ -276,6 +276,15 @@ async fn a_deny_rule_refuses_at_once_with_its_message() {
     rig.fx.wait_status(&run, RunStatus::Succeeded).await;
 
     assert_eq!(rig.decisions(), [Decision::Deny]);
+    // The harness is told the rule's words as well as no: the journal's message and the
+    // executor's are the same text.
+    assert_eq!(
+        rig.mock.log().answers[0].answer,
+        Answer::Decision(
+            Decision::Deny,
+            Some("denied by policy: never reset hard".into())
+        )
+    );
     let journal = rig.fx.journal_with_done(&run).await;
     assert_eq!(
         resolved(&journal),
@@ -412,6 +421,11 @@ async fn a_human_can_deny() {
         .unwrap();
     rig.fx.wait_status(&run, RunStatus::Succeeded).await;
     assert_eq!(rig.decisions(), [Decision::Deny]);
+    // A person's no has no rule message to pass on.
+    assert_eq!(
+        rig.mock.log().answers[0].answer,
+        Answer::Decision(Decision::Deny, None)
+    );
     let history = rig.history(&run).await;
     assert_eq!(history[0].status, ApprovalStatus::Denied);
     assert_eq!(history[0].decided_by, Some(ResolvedBy::Human));

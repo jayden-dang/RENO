@@ -107,6 +107,14 @@ struct Outcome {
 /// Drive `live` to its end. Approvals go to `decide`; the last option of every question (or
 /// `"A"` for free text) answers `NeedsInput`.
 async fn drive(live: &mut Live, mut decide: impl FnMut(&ApprovalSubject) -> Decision) -> Outcome {
+    drive_with_messages(live, |subject| (decide(subject), None)).await
+}
+
+/// [`drive`], with the message each decision comes with (a policy rule's deny message).
+async fn drive_with_messages(
+    live: &mut Live,
+    mut decide: impl FnMut(&ApprovalSubject) -> (Decision, Option<String>),
+) -> Outcome {
     let mut outcome = Outcome::default();
     let run = async {
         while let Some(event) = live.stream.next().await {
@@ -118,8 +126,9 @@ async fn drive(live: &mut Live, mut decide: impl FnMut(&ApprovalSubject) -> Deci
                     outcome
                         .approvals
                         .push((request_id.clone(), subject.clone()));
+                    let (decision, message) = decide(subject);
                     live.handle
-                        .decide(request_id.clone(), decide(subject))
+                        .decide_with_message(request_id.clone(), decision, message)
                         .await
                         .unwrap();
                 }
@@ -683,6 +692,28 @@ async fn a_deny_round_trips_as_decline_and_never_as_a_session_grant() {
     .await;
     // An argv command is shown as one line.
     assert_eq!(outcome.approvals[0].1.command.as_deref(), Some("rm -rf /"));
+    assert_eq!(result_of(&outcome.events), "declined");
+}
+
+/// The app-server's approval reply is `{decision}` and has no field for a reason, so a policy
+/// rule's deny message cannot reach the model through Codex: the run is declined all the same,
+/// with the message only logged. This pins that a message neither changes the reply nor breaks
+/// the decline.
+#[tokio::test]
+async fn a_policy_deny_message_cannot_ride_the_decline_but_the_decline_holds() {
+    let mut live = start(
+        &executor(),
+        spec_with("scenario:decline", AccessMode::Supervised),
+    )
+    .await;
+    let outcome = drive_with_messages(&mut live, |_| {
+        (
+            Decision::Deny,
+            Some("denied by policy: no destructive commands".into()),
+        )
+    })
+    .await;
+    assert_eq!(outcome.approvals.len(), 1);
     assert_eq!(result_of(&outcome.events), "declined");
 }
 

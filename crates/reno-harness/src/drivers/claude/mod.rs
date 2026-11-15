@@ -833,7 +833,7 @@ fn apply_answer(
     let request_id = answer.request_id.clone();
     let after_plan = permission::permission_mode(access);
     match requests.resolve(answer) {
-        Resolved::Decision(open, crate::exec::Decision::Allow) => {
+        Resolved::Decision(open, crate::exec::Decision::Allow, _) => {
             let leave_plan = open.exit_plan.then_some(after_plan);
             respond(
                 stdin,
@@ -841,8 +841,11 @@ fn apply_answer(
                 permission::allow(open.input, leave_plan),
             );
         }
-        Resolved::Decision(_, crate::exec::Decision::Deny) => {
-            respond(stdin, &request_id, permission::deny(permission::DENIED));
+        Resolved::Decision(_, crate::exec::Decision::Deny, message) => {
+            // The model reads the permission response's message: a policy rule's own words
+            // reach it, so it does not retry a call policy will refuse again.
+            let message = permission::refusal_text(message.as_deref());
+            respond(stdin, &request_id, permission::deny(&message));
         }
         Resolved::Input(open, given) => {
             // No answers is the person closing the questions: a deny that says so, rather than

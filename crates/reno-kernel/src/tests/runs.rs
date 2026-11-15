@@ -299,7 +299,7 @@ async fn approval_flow(decision: ApprovalDecision, expect: Decision) {
     let answers = m.log().answers;
     assert_eq!(answers.len(), 1);
     assert_eq!(answers[0].request_id, "req1");
-    assert_eq!(answers[0].answer, Answer::Decision(expect));
+    assert_eq!(answers[0].answer, Answer::Decision(expect, None));
 
     let path: Vec<_> = fx
         .transitions(&run)

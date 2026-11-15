@@ -821,10 +821,12 @@ impl Pump {
     fn apply_answer(&mut self, answer: ExecAnswer) {
         let request_id = answer.request_id.clone();
         match self.requests.resolve(answer) {
-            Resolved::Decision(open, decision) => {
+            Resolved::Decision(open, decision, reason) => {
                 let allow = decision == crate::exec::Decision::Allow;
-                self.client
-                    .respond(&open.rpc_id, permission::outcome(&open.options, allow));
+                self.client.respond(
+                    &open.rpc_id,
+                    permission::outcome_with_reason(&open.options, allow, reason.as_deref()),
+                );
             }
             // No answers at all declines the question: nothing is selected.
             Resolved::Input(open, given) => {

@@ -146,8 +146,9 @@ pub struct InputAnswer {
 pub enum Answer {
     /// Answers to a `NeedsInput` request. An empty list declines it.
     Input(Vec<InputAnswer>),
-    /// The decision on a `NeedsApproval` request.
-    Decision(Decision),
+    /// The decision on a `NeedsApproval` request, with the reason a refusal carries (a policy
+    /// rule's deny message). Each driver passes the reason on where its wire has a place for it.
+    Decision(Decision, Option<String>),
 }
 
 /// An answer to a request the run raised, matched by `request_id`.
@@ -292,7 +293,19 @@ impl ExecHandle {
         request_id: impl Into<String>,
         decision: Decision,
     ) -> Result<(), ControlsClosed> {
-        self.send_answer(request_id.into(), Answer::Decision(decision))
+        self.decide_with_message(request_id, decision, None).await
+    }
+
+    /// [`Self::decide`], with the reason for the decision: the message of the policy rule that
+    /// denied it. The driver tells the agent where its wire allows (Claude's permission
+    /// response, ACP's `_meta`); Codex's approval reply has no field for it.
+    pub async fn decide_with_message(
+        &self,
+        request_id: impl Into<String>,
+        decision: Decision,
+        message: Option<String>,
+    ) -> Result<(), ControlsClosed> {
+        self.send_answer(request_id.into(), Answer::Decision(decision, message))
             .await
     }
 

@@ -36,8 +36,9 @@
 //!
 //! # Limits
 //!
-//! - A rule's deny message is stored in the journal's `ApprovalResolved`, but the harness is told
-//!   only no: the executor's `Decision` carries no text.
+//! - A rule's deny message is stored in the journal's `ApprovalResolved` and handed to the
+//!   executor with the refusal (`ExecHandle::decide_with_message`). What reaches the agent is
+//!   the driver's: Claude and ACP carry it, Codex's approval reply has no field for it.
 //! - A supervisor that panics leaves its run's approvals pending until the next start's recovery.
 //! - A run in `waiting_input` has no client path to an answer.
 //! - A run holds one process record; a second report replaces the first.
