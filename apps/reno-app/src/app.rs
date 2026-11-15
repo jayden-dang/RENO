@@ -184,22 +184,25 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Self {
         let home = cx.new(|cx| HomeScreen::new(store.clone(), cx));
-        let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.observe(&toasts, |_, _, cx| cx.notify()),
-            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| match event {
-                StoreEvent::Failed(message) => {
-                    toast::push(
-                        cx,
-                        toast::Tone::Error,
-                        "Something went wrong",
-                        message.clone(),
-                    );
-                }
-                StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
-            }),
-        ];
+        let subscriptions =
+            vec![
+                cx.observe(&store, |_, _, cx| cx.notify()),
+                cx.observe(&toasts, |_, _, cx| cx.notify()),
+                cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+                cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| {
+                    match event {
+                        StoreEvent::Failed(message) => {
+                            toast::push(
+                                cx,
+                                toast::Tone::Error,
+                                "Something went wrong",
+                                message.clone(),
+                            );
+                        }
+                        StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
+                    }
+                }),
+            ];
         Self {
             store,
             home,
@@ -374,9 +377,11 @@ impl RootView {
             .pl(px(84.0))
             .window_control_area(WindowControlArea::Drag)
             .child(
-                kit::icon_button(theme, "show-sidebar", Icon::Sidebar, 28.0).on_click(move |_, _, cx| {
-                    this.update(cx, |root, cx| root.toggle_sidebar(cx));
-                }),
+                kit::icon_button(theme, "show-sidebar", Icon::Sidebar, 28.0).on_click(
+                    move |_, _, cx| {
+                        this.update(cx, |root, cx| root.toggle_sidebar(cx));
+                    },
+                ),
             )
     }
 }

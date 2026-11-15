@@ -24,8 +24,6 @@ pub(crate) enum Tone {
     NotYet,
     /// Something failed.
     Error,
-    /// Something happened.
-    Info,
 }
 
 #[derive(Clone, Debug)]
@@ -126,32 +124,15 @@ impl Render for Toasts {
             .gap(px(8.0));
         stack.children(self.items.iter().map(|toast| {
             let id = toast.id;
-            let body = match toast.tone {
-                Tone::Info => div()
-                    .rounded(px(12.0))
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .bg(theme.surface)
-                    .border_1()
-                    .border_color(theme.hairline)
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(toast.label),
-                    )
-                    .child(div().text_color(theme.muted).child(toast.message.clone())),
-                // The chip's wash is translucent; an opaque base keeps the toast readable over
-                // whatever it covers.
-                tone => div().rounded(px(12.0)).bg(theme.surface).child(notice_chip(
-                    &theme,
-                    tone == Tone::NotYet,
-                    toast.label,
-                    toast.message.clone(),
-                    NoticeChipIcon::Plain,
-                )),
-            };
+            // The chip's wash is translucent; an opaque base keeps the toast readable over
+            // whatever it covers.
+            let body = div().rounded(px(12.0)).bg(theme.surface).child(notice_chip(
+                &theme,
+                toast.tone == Tone::NotYet,
+                toast.label,
+                toast.message.clone(),
+                NoticeChipIcon::Plain,
+            ));
             motion::fade_in(
                 SharedString::from(format!("toast-{id}")),
                 body.id(SharedString::from(format!("toast-body-{id}")))

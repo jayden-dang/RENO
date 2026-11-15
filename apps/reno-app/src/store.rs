@@ -33,8 +33,8 @@ use gpui::{Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
 use reno_client::fake::FakeDaemon;
 use reno_client::{
-    Changed, Client, ClientError, ConnectionStatus, Mirror, MirrorConfig, State, Transcript, Update,
-    Updates,
+    Changed, Client, ClientError, ConnectionStatus, Mirror, MirrorConfig, State, Transcript,
+    Update, Updates,
 };
 use reno_proto::{ApprovalDecision, ApprovalId, RunId, TaskRunParams};
 

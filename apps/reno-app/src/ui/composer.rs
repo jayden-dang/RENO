@@ -983,10 +983,11 @@ impl Render for Composer {
                     .gap(px(8.0))
                     .px(px(18.0))
                     .pb(px(14.0))
-                    .child(kit::icon_chip(&theme, Icon::Cpu, model).when(
-                        !executor.is_empty(),
-                        |c| c.child(kit::exec_glyph(&theme, executor, 13.0)),
-                    ))
+                    .child(
+                        kit::chip(&theme, "")
+                            .child(kit::exec_glyph(&theme, executor, 13.0))
+                            .child(model),
+                    )
                     .child(div().flex_1())
                     .child(send)
             }

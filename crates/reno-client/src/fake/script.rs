@@ -43,7 +43,8 @@ impl Script {
 
     async fn say(&self, text: &str) -> bool {
         self.step(|w, run| {
-            w.push(run, data::text(text));
+            // Each message is a paragraph, so consecutive ones read as separate paragraphs.
+            w.push(run, data::text(&format!("{text}\n\n")));
             true
         })
         .await

@@ -19,9 +19,7 @@
 //! - `Usage` and `Started` feed [`Facts`] for the details pane and make no row.
 //! - `Done` is the last row; anything after it is ignored.
 
-use reno_proto::{
-    Approval, ApprovalSubject, ExecEvent, Question, Seq, StopReason,
-};
+use reno_proto::{Approval, ApprovalSubject, ExecEvent, Question, Seq, StopReason};
 
 use crate::summary;
 
@@ -68,11 +66,7 @@ pub(crate) struct ToolEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
     /// A user bubble, right-aligned. `steer` marks a message sent mid-run.
-    User {
-        key: Key,
-        text: String,
-        steer: bool,
-    },
+    User { key: Key, text: String, steer: bool },
     /// Assistant prose, rendered as streaming markdown.
     Prose { key: Key, text: String },
     /// Reasoning, collapsed by default.
@@ -207,13 +201,18 @@ pub(crate) fn build_rows(
                     Outcome::Failed(summary.clone())
                 };
                 // The call may sit in an earlier group (an approval card came between).
-                let target = built.rows.iter().enumerate().rev().find_map(|(r, row)| match row {
-                    Row::Tools { calls, .. } => calls
-                        .iter()
-                        .rposition(|c| &c.id == id && c.outcome == Outcome::Pending)
-                        .map(|c| (r, c)),
-                    _ => None,
-                });
+                let target = built
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(r, row)| match row {
+                        Row::Tools { calls, .. } => calls
+                            .iter()
+                            .rposition(|c| &c.id == id && c.outcome == Outcome::Pending)
+                            .map(|c| (r, c)),
+                        _ => None,
+                    });
                 if let Some((r, c)) = target {
                     if let Row::Tools { calls, .. } = &mut built.rows[r] {
                         calls[c].outcome = outcome;
@@ -445,7 +444,10 @@ mod tests {
             }]
         );
         // Growing the stream keeps the key.
-        let more = build(vec![text("Hel"), text("lo "), text("**there**"), text("!")], &[]);
+        let more = build(
+            vec![text("Hel"), text("lo "), text("**there**"), text("!")],
+            &[],
+        );
         assert_eq!(more.rows[0].key(), Key(1));
     }
 
@@ -453,7 +455,9 @@ mod tests {
     fn reasoning_is_its_own_row_and_text_after_it_starts_a_new_one() {
         let built = build(
             vec![
-                ExecEvent::Reasoning { text: "think".into() },
+                ExecEvent::Reasoning {
+                    text: "think".into(),
+                },
                 ExecEvent::Reasoning { text: "ing".into() },
                 text("answer"),
             ],
@@ -520,7 +524,10 @@ mod tests {
             entry(ToolKind::Command),
             entry(ToolKind::Other),
         ];
-        assert_eq!(group_title(&mixed), "Edited 2 files, ran 1 command, used 1 tool");
+        assert_eq!(
+            group_title(&mixed),
+            "Edited 2 files, ran 1 command, used 1 tool"
+        );
         assert_eq!(group_title(&mixed[3..]), "Used 1 tool");
         assert_eq!(tool_kind("apply_patch"), ToolKind::Edit);
         assert_eq!(tool_kind("Bash"), ToolKind::Command);
@@ -529,7 +536,10 @@ mod tests {
             tool_label("web_fetch", &json!({ "url": "https://x.test" })),
             "GET https://x.test"
         );
-        assert_eq!(tool_label("edit", &json!({ "file_path": "a.rs" })), "edit a.rs");
+        assert_eq!(
+            tool_label("edit", &json!({ "file_path": "a.rs" })),
+            "edit a.rs"
+        );
         assert_eq!(tool_label("mystery", &json!(null)), "mystery");
     }
 
@@ -589,7 +599,12 @@ mod tests {
             resolved.rows.last(),
             Some(Row::Asked { line, .. }) if line == "Asked to approve git push"
         ));
-        assert!(!resolved.rows.iter().any(|r| matches!(r, Row::Approval { .. })));
+        assert!(
+            !resolved
+                .rows
+                .iter()
+                .any(|r| matches!(r, Row::Approval { .. }))
+        );
 
         // An approval for another action does not make this one a card.
         let other = build(events(), &[approval("rm -rf /")]);
@@ -685,9 +700,23 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["user", "reasoning", "prose", "tools", "question", "asked", "done"]
+            [
+                "user",
+                "reasoning",
+                "prose",
+                "tools",
+                "question",
+                "asked",
+                "done"
+            ]
         );
         assert_eq!(built.facts.model.as_deref(), Some("m"));
-        assert_eq!(built.facts.usage, Some(Usage { input: 1, output: 2 }));
+        assert_eq!(
+            built.facts.usage,
+            Some(Usage {
+                input: 1,
+                output: 2
+            })
+        );
     }
 }

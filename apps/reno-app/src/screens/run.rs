@@ -75,6 +75,7 @@ impl RunScreen {
         &self.run
     }
 
+    #[cfg(test)]
     pub(crate) fn steer_input(&self) -> &Entity<Composer> {
         &self.steer
     }
@@ -123,7 +124,11 @@ impl RunScreen {
                 .transcript(&self.run)
                 .map_or(&[][..], |t| t.events.as_slice());
             let pending: Vec<Approval> = state.approvals_for(&self.run).cloned().collect();
-            let prompt = state.run(&self.run).map(|r| r.title.as_str());
+            // The protocol carries only the first line of the prompt, as the title; a title in the
+            // "bot . repo: what" shape shows its "what".
+            let prompt = state
+                .run(&self.run)
+                .map(|r| summary::parse_title(&r.title).what);
             transcript::build_rows(prompt, events, &pending)
         };
         self.apply(built);
@@ -222,7 +227,9 @@ impl RunScreen {
                     .child(what),
             )
             .when_some(status, |h, status| {
-                h.child(status_pill(theme, status).id(SharedString::from(format!("status-{run_id}"))))
+                h.child(
+                    status_pill(theme, status).id(SharedString::from(format!("status-{run_id}"))),
+                )
             })
             .child(div().flex_1())
             .when(live, |h| h.child(stop))
@@ -269,7 +276,11 @@ impl RunScreen {
         div()
             .w_full()
             .when(ix == 0, |d| d.pt(px(22.0)))
-            .pb(px(if ix + 1 == self.rows.len() { 26.0 } else { 16.0 }))
+            .pb(px(if ix + 1 == self.rows.len() {
+                26.0
+            } else {
+                16.0
+            }))
             .child(body)
             .into_any_element()
     }
@@ -281,8 +292,13 @@ impl RunScreen {
             .flex_col()
             .gap(px(6.0))
             .child(
-                disclosure(theme, SharedString::from(format!("reasoning-{}", key.0)), open, "Reasoning".to_owned())
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
+                disclosure(
+                    theme,
+                    SharedString::from(format!("reasoning-{}", key.0)),
+                    open,
+                    "Reasoning".to_owned(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
             )
             .when(open, |d| {
                 d.child(
@@ -297,15 +313,26 @@ impl RunScreen {
             .into_any_element()
     }
 
-    fn tools(&self, theme: &Theme, key: Key, calls: &[ToolEntry], cx: &mut Context<Self>) -> AnyElement {
+    fn tools(
+        &self,
+        theme: &Theme,
+        key: Key,
+        calls: &[ToolEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let open = self.open.contains(&key);
         div()
             .flex()
             .flex_col()
             .gap(px(6.0))
             .child(
-                disclosure(theme, SharedString::from(format!("tools-{}", key.0)), open, transcript::group_title(calls))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
+                disclosure(
+                    theme,
+                    SharedString::from(format!("tools-{}", key.0)),
+                    open,
+                    transcript::group_title(calls),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
             )
             .when(open, |d| {
                 d.child(
@@ -323,7 +350,13 @@ impl RunScreen {
             .into_any_element()
     }
 
-    fn approval_card(&self, theme: &Theme, key: Key, approval: &Approval, cx: &mut Context<Self>) -> AnyElement {
+    fn approval_card(
+        &self,
+        theme: &Theme,
+        key: Key,
+        approval: &Approval,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let store = self.store.read(cx);
         let state = store.state();
         let busy = store.is_deciding(&approval.id);
@@ -413,7 +446,11 @@ impl RunScreen {
                             .flex()
                             .gap(px(5.0))
                             .text_size(px(14.0))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(bot.to_owned()))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(bot.to_owned()),
+                            )
                             .child(
                                 div()
                                     .text_color(theme.muted)
@@ -432,7 +469,7 @@ impl RunScreen {
                                     .px(px(14.0))
                                     .py(px(9.0))
                                     .rounded(px(10.0))
-                                    .bg(theme.canvas)
+                                    .bg(theme.shell)
                                     .font_family(MONO)
                                     .text_size(px(13.0))
                                     .child(command),
@@ -508,7 +545,11 @@ impl RunScreen {
         };
         let parts = summary::parse_title(&run.title);
         let model = self.facts.model.clone().or_else(|| run.model.clone());
-        let end = if run.status.is_terminal() { run.updated_at_ms } else { now };
+        let end = if run.status.is_terminal() {
+            run.updated_at_ms
+        } else {
+            now
+        };
 
         pane = pane
             .child(kv(
@@ -518,7 +559,11 @@ impl RunScreen {
                     .items_center()
                     .gap(px(7.0))
                     .child(kit::dot(kit::status_color(theme, run.status), 7.0))
-                    .child(div().text_color(kit::status_color(theme, run.status)).child(summary::status_label(run.status)))
+                    .child(
+                        div()
+                            .text_color(kit::status_color(theme, run.status))
+                            .child(summary::status_label(run.status)),
+                    )
                     .into_any_element(),
             ))
             .when_some(parts.bot, |p, bot| p.child(kv("Bot", text(bot.to_owned()))))
@@ -533,7 +578,9 @@ impl RunScreen {
                     .into_any_element(),
             ))
             .when_some(model, |p, model| p.child(kv("Model", text(model))))
-            .when_some(parts.repo, |p, repo| p.child(kv("Repository", text(repo.to_owned()))))
+            .when_some(parts.repo, |p, repo| {
+                p.child(kv("Repository", text(repo.to_owned())))
+            })
             .child(kv(
                 "Started",
                 text(format!(
@@ -557,7 +604,10 @@ impl RunScreen {
                         )),
                 )
                 .into_any_element(),
-            None => div().text_color(theme.faint).child("none yet").into_any_element(),
+            None => div()
+                .text_color(theme.faint)
+                .child("none yet")
+                .into_any_element(),
         };
         pane.child(div().h(px(14.0)))
             .child(section("USAGE"))
@@ -570,7 +620,7 @@ fn group_digits(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -622,7 +672,12 @@ fn user_bubble(theme: &Theme, text: &str, steer: bool) -> AnyElement {
 }
 
 /// The clickable head of a collapsible row: a chevron and a label.
-fn disclosure(theme: &Theme, id: SharedString, open: bool, label: String) -> gpui::Stateful<gpui::Div> {
+fn disclosure(
+    theme: &Theme,
+    id: SharedString,
+    open: bool,
+    label: String,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
@@ -647,7 +702,10 @@ fn tool_line(theme: &Theme, call: &ToolEntry) -> impl IntoElement {
     let (summary_text, color) = match &call.outcome {
         Outcome::Pending => ("running".to_owned(), theme.faint),
         Outcome::Ok(s) => (s.clone().unwrap_or_else(|| "ok".to_owned()), theme.muted),
-        Outcome::Failed(s) => (s.clone().unwrap_or_else(|| "failed".to_owned()), theme.danger),
+        Outcome::Failed(s) => (
+            s.clone().unwrap_or_else(|| "failed".to_owned()),
+            theme.danger,
+        ),
     };
     div()
         .flex()
@@ -696,7 +754,11 @@ fn question_card(theme: &Theme, questions: &[reno_proto::Question]) -> AnyElemen
                         .items_center()
                         .gap(px(8.0))
                         .child(icon(Icon::Question, 15.0, theme.warning))
-                        .child(div().font_weight(FontWeight::MEDIUM).child(q.prompt.clone())),
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(q.prompt.clone()),
+                        ),
                 )
                 .child(
                     div()
@@ -729,7 +791,12 @@ fn event_line(theme: &Theme, glyph: Icon, tone: gpui::Hsla, text: &str) -> AnyEl
 }
 
 /// The closing status line.
-fn done_line(theme: &Theme, stop: StopReason, result: Option<&str>, diagnostic: Option<&str>) -> AnyElement {
+fn done_line(
+    theme: &Theme,
+    stop: StopReason,
+    result: Option<&str>,
+    diagnostic: Option<&str>,
+) -> AnyElement {
     let (glyph, tone, head) = match stop {
         StopReason::Completed => (Icon::Check, theme.success, "Finished"),
         StopReason::Interrupted => (Icon::Stop, theme.faint, "Stopped"),
@@ -744,7 +811,12 @@ fn done_line(theme: &Theme, stop: StopReason, result: Option<&str>, diagnostic: 
         .gap(px(9.0))
         .text_size(px(14.0))
         .child(div().pt(px(2.0)).child(icon(glyph, 15.0, tone)))
-        .child(div().text_color(tone).font_weight(FontWeight::MEDIUM).child(head))
+        .child(
+            div()
+                .text_color(tone)
+                .font_weight(FontWeight::MEDIUM)
+                .child(head),
+        )
         .when_some(detail, |d, text| {
             d.child(
                 div()

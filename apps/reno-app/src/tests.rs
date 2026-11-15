@@ -56,8 +56,9 @@ fn window<'a>(
 ) -> (Entity<RootView>, &'a mut VisualTestContext) {
     let toasts = cx.update(toast::install);
     let store = store.clone();
-    let (root, vcx) = cx
-        .add_window_view(move |window, cx| RootView::new(store, toasts, Some(appearance), window, cx));
+    let (root, vcx) = cx.add_window_view(move |window, cx| {
+        RootView::new(store, toasts, Some(appearance), window, cx)
+    });
     // Tall enough that the whole sidebar is inside its scroll area and clickable.
     vcx.simulate_resize(size(px(1280.0), px(960.0)));
     (root, vcx)
@@ -280,10 +281,7 @@ fn run_id(name: &str) -> RunId {
 }
 
 /// Waits (in real time, the fake daemon is on tokio) for `done` and redraws each time.
-fn wait_drawn(
-    vcx: &mut VisualTestContext,
-    mut done: impl FnMut(&mut VisualTestContext) -> bool,
-) {
+fn wait_drawn(vcx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
     vcx.executor().allow_parking();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -291,7 +289,10 @@ fn wait_drawn(
         if done(vcx) {
             return;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for the screen");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the screen"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -322,16 +323,14 @@ fn run_status(vcx: &VisualTestContext, store: &Entity<Store>, run: &RunId) -> Op
 }
 
 /// Sends `prompt` from Home and returns the opened run's id once the Run screen shows.
-fn send_from_home(
-    vcx: &mut VisualTestContext,
-    root: &Entity<RootView>,
-    prompt: &str,
-) -> RunId {
+fn send_from_home(vcx: &mut VisualTestContext, root: &Entity<RootView>, prompt: &str) -> RunId {
     let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
     composer.update_in(vcx, |c, window, cx| c.fill(prompt, window, cx));
     draw(vcx);
     click(vcx, "send");
-    wait_drawn(vcx, |vcx| root.read_with(vcx, |r, _| r.run_screen().is_some()));
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     screen.read_with(vcx, |s, _| s.run_id().clone())
 }
@@ -344,7 +343,8 @@ fn clicking_approve_on_the_home_card_approves(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "approve-appr_keeperpush");
     assert!(
-        store.read_with(vcx, |s, _| s.is_deciding(&"appr_keeperpush".parse().unwrap()))
+        store.read_with(vcx, |s, _| s
+            .is_deciding(&"appr_keeperpush".parse().unwrap()))
             || approvals(vcx, &store) == 1,
         "the click reached the store"
     );
@@ -383,7 +383,11 @@ fn clicking_the_class_chips_selects_a_class(cx: &mut TestAppContext) {
         ("class-implement", Class::Implement),
     ] {
         click(vcx, selector);
-        assert_eq!(composer.read_with(vcx, |c, _| c.class()), class, "{selector}");
+        assert_eq!(
+            composer.read_with(vcx, |c, _| c.class()),
+            class,
+            "{selector}"
+        );
         draw(vcx);
     }
 }
@@ -422,7 +426,10 @@ fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
     click(vcx, "recent-run_keeper1");
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
-    assert_eq!(screen.read_with(vcx, |s, _| s.run_id().clone()), run_id("keeper1"));
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.run_id().clone()),
+        run_id("keeper1")
+    );
     draw(vcx);
 
     // A nav row that has a screen goes there; "+" does too.
@@ -499,7 +506,10 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     let Row::Prose { text, .. } = &rows[1] else {
         panic!("expected prose");
     };
-    assert_eq!(text, "I will start by looking at the repository layout.");
+    assert_eq!(
+        text.trim_end(),
+        "I will start by looking at the repository layout."
+    );
     assert_eq!(run_status(vcx, &store, &run), Some(RunStatus::Succeeded));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let usage = screen.read_with(vcx, |s, _| s.facts().usage).unwrap();
@@ -604,8 +614,11 @@ fn steering_appends_the_message_and_a_reply(cx: &mut TestAppContext) {
 
     wait_drawn(vcx, |vcx| {
         let rows = rows_of(vcx, &root);
-        rows.iter().any(|r| matches!(r, Row::User { steer: true, .. }))
-            && rows.iter().any(|r| matches!(r, Row::Prose { text, .. } if text.contains("Understood")))
+        rows.iter()
+            .any(|r| matches!(r, Row::User { steer: true, .. }))
+            && rows
+                .iter()
+                .any(|r| matches!(r, Row::Prose { text, .. } if text.contains("Understood")))
     });
     let rows = rows_of(vcx, &root);
     let steer_at = rows
@@ -645,7 +658,11 @@ fn a_finished_run_cannot_be_steered(cx: &mut TestAppContext) {
         "the draft stays"
     );
     let rows = rows_of(vcx, &root);
-    assert!(!rows.iter().any(|r| matches!(r, Row::User { steer: true, .. })));
+    assert!(
+        !rows
+            .iter()
+            .any(|r| matches!(r, Row::User { steer: true, .. }))
+    );
 }
 
 #[gpui::test]

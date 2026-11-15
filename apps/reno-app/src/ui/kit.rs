@@ -32,7 +32,9 @@ pub(crate) fn chip(theme: &Theme, label: impl Into<SharedString>) -> Div {
 
 /// A [`chip`] that starts with a muted icon.
 pub(crate) fn icon_chip(theme: &Theme, glyph: Icon, label: impl Into<SharedString>) -> Div {
-    chip(theme, "").child(icon(glyph, 13.0, theme.muted)).child(label.into())
+    chip(theme, "")
+        .child(icon(glyph, 13.0, theme.muted))
+        .child(label.into())
 }
 
 /// A small tinted label: the age chip, the "network" chip.
