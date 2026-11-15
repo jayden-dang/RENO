@@ -1,9 +1,8 @@
-//! The silent-npm-failure condition, reproduced: npm dying silently with an
-//! errno-encoded exit (254 = ENOENT) during the adapter
-//! fallback. A bare `npx -y` path surfaced this as "harness protocol error:
-//! initialize: app-server exited before responding; Codex exited unexpectedly
-//! (exit code 254)" with nothing actionable. The managed install must instead
-//! fail the run with the decoded errno and a recovery hint.
+//! The silent-npm-failure condition, reproduced: npm dying silently with an errno-encoded exit
+//! (254 = ENOENT) during the adapter fallback. A bare `npx -y` path surfaced this as "harness
+//! protocol error: initialize: app-server exited before responding; ... (exit code 254)" with
+//! nothing actionable. The managed install must instead fail the run with the decoded errno and a
+//! recovery hint: a failed run (`Done { Error }`), not an executor that is ineligible.
 //!
 //! Single-test binary: it mutates PATH/SHELL/RENO_* env process-wide.
 
@@ -11,10 +10,10 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use reno_harness::upstream_proto::{RunRequest, SandboxLevel};
-use reno_harness::{AcpHarness, Harness, HarnessError, RunControls};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use futures::StreamExt;
+use reno_harness::AcpExecutor;
+use reno_harness::exec::{ExecControls, Executor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel, StopReason};
 
 #[tokio::test]
 async fn silent_npm_enoent_death_surfaces_decoded_error() {
@@ -26,7 +25,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
     std::fs::write(&npm, "#!/bin/sh\nexit 254\n").unwrap();
     std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // SAFETY: single-test binary — nothing else reads env concurrently.
+    // SAFETY: single-test binary: nothing else reads env concurrently.
     unsafe {
         std::env::set_var("RENO_ADAPTERS_DIR", dir.path().join("adapters"));
         std::env::set_var("RENO_NO_LOGIN_SHELL", "1");
@@ -35,40 +34,32 @@ async fn silent_npm_enoent_death_surfaces_decoded_error() {
         std::env::remove_var("GROK_EXECUTABLE");
     }
 
-    let harness = AcpHarness::grok();
-    let (_steer_tx, steering) = mpsc::channel(1);
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(|_| tokio::sync::oneshot::channel().1),
-        steering,
-        interrupt: CancellationToken::new(),
-        turn: Default::default(),
-    };
-    let request = RunRequest {
-        mcp: None,
+    let (controls, _handle) = ExecControls::new(1);
+    let spec = ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: "hi".into(),
-        harness: None,
-        model: None,
-        reasoning: None,
-        model_options: serde_json::Map::new(),
         cwd: "/tmp".into(),
+        model: None,
+        effort: None,
+        access: AccessMode::FullAccess,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
-        attachments: Vec::new(),
-        worktree: None,
         resume: None,
+        mcp: Vec::new(),
         env: Default::default(),
-        extra_mcp: Vec::new(),
+        output_schema: None,
     };
-
-    let err = match harness.run(request, controls).await {
-        Err(e) => e,
-        Ok(_) => panic!("run() must fail when the adapter install fails"),
-    };
-    let HarnessError::Install(message) = &err else {
-        panic!("expected an Install error, got: {err}");
+    let stream = AcpExecutor::grok()
+        .start(spec, controls)
+        .await
+        .expect("a failed install is a failed run, not an ineligible executor");
+    let events: Vec<ExecEvent> = stream.collect().await;
+    let Some(ExecEvent::Done {
+        stop: StopReason::Error,
+        diagnostic: Some(message),
+        ..
+    }) = events.last()
+    else {
+        panic!("expected an error Done, got: {events:?}");
     };
     assert!(message.contains("exit code 254"), "{message}");
     assert!(message.contains("ENOENT"), "{message}");

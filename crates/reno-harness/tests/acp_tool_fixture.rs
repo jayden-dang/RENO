@@ -1,18 +1,17 @@
-//! `tests/fixtures/fake-acp-tool.py`: a fake ACP agent whose turn starts the
-//! MCP servers it was handed in `session/new` and calls one tool. Checked
-//! here against a tiny stub MCP server, with Reno's own server in `mcp` and
-//! a plugin's in `extra_mcp`.
+//! `tests/fixtures/fake-acp-tool.py`: a fake ACP agent whose turn starts the MCP servers it was
+//! handed in `session/new` and calls one tool. Checked here against a tiny stub MCP server, with
+//! Reno's own server first in `ExecSpec::mcp` and a plugin's after it.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
-
-use reno_harness::upstream_proto::{AgentEvent, DoneStatus, McpServer, RunRequest, SandboxLevel};
-use reno_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use reno_harness::AcpExecutor;
+use reno_harness::exec::{ExecControls, Executor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, McpServerSpec, RunId, SandboxLevel, StopReason};
 
 /// A stdio MCP server offering the one tool named by `$STUB_TOOL`. Its call
 /// result echoes the arguments and the server's `$STUB_LABEL`; a call with
@@ -61,8 +60,8 @@ fn stub(dir: &Path) -> PathBuf {
     path
 }
 
-fn server(name: &str, command: &Path, tool: &str) -> McpServer {
-    McpServer {
+fn server(name: &str, command: &Path, tool: &str) -> McpServerSpec {
+    McpServerSpec {
         name: name.into(),
         command: command.display().to_string(),
         args: vec![],
@@ -75,59 +74,39 @@ fn server(name: &str, command: &Path, tool: &str) -> McpServer {
     }
 }
 
-fn request(prompt: &str, cwd: &Path, env: &[(&str, &str)]) -> RunRequest {
-    RunRequest {
+fn spec(prompt: &str, cwd: &Path, env: &[(&str, &str)], mcp: Vec<McpServerSpec>) -> ExecSpec {
+    ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: prompt.into(),
-        harness: None,
+        cwd: cwd.to_path_buf(),
         model: None,
-        reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: cwd.display().to_string(),
+        effort: None,
+        access: AccessMode::FullAccess,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
         resume: None,
-        attachments: Vec::new(),
-        worktree: None,
-        mcp: None,
-        extra_mcp: Vec::new(),
+        mcp,
         env: env
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
+        output_schema: None,
     }
 }
 
-fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let token = CancellationToken::new();
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(move |_questions| {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(Vec::new());
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-        turn: Default::default(),
-    };
-    (controls, steer_tx, token)
-}
-
 /// The turn's reply text, once it completes.
-async fn reply(req: RunRequest) -> String {
-    let (controls, _steer, _token) = controls();
-    let harness = AcpHarness::grok().with_executable(fixture_path());
-    let mut stream = harness.run(req, controls).await.expect("run starts");
+async fn reply(spec: ExecSpec) -> String {
+    let (controls, _handle) = ExecControls::new(8);
+    let executor = AcpExecutor::grok().with_executable(fixture_path());
+    let mut stream = executor.start(spec, controls).await.expect("run starts");
     let mut text = String::new();
     tokio::time::timeout(Duration::from_secs(20), async {
         while let Some(event) = stream.next().await {
-            match event.expect("stream event") {
-                AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
-                AgentEvent::Done { status, error, .. } => {
-                    assert_eq!(status, DoneStatus::Completed, "{error:?}");
+            match event {
+                ExecEvent::Text { text: delta } => text.push_str(&delta),
+                ExecEvent::Done {
+                    stop, diagnostic, ..
+                } => {
+                    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
                     return;
                 }
                 _ => {}
@@ -144,18 +123,20 @@ async fn reply(req: RunRequest) -> String {
 async fn calls_the_named_tool_on_the_server_that_lists_it() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub(dir.path());
-    let mut req = request(
+    // Reno's own server does not list the tool; the plugin's does.
+    let spec = spec(
         "hello",
         dir.path(),
         &[
             ("FAKE_ACP_CALL_TOOL", "focus__count_words"),
             ("FAKE_ACP_CALL_ARGS", r#"{"text":"a b c"}"#),
         ],
+        vec![
+            server("reno", &stub, "whoami"),
+            server("plugin-focus", &stub, "focus__count_words"),
+        ],
     );
-    // Reno's own server does not list it; the plugin's does.
-    req.mcp = Some(server("reno", &stub, "whoami"));
-    req.extra_mcp = vec![server("plugin-focus", &stub, "focus__count_words")];
-    let text = reply(req).await;
+    let text = reply(spec).await;
     let result: serde_json::Value = serde_json::from_str(&text).expect(&text);
     assert_eq!(result["isError"], false);
     assert_eq!(result["structuredContent"]["label"], "plugin-focus");
@@ -169,21 +150,25 @@ async fn calls_the_named_tool_on_the_server_that_lists_it() {
 async fn a_prompt_can_name_the_tool_and_a_pinned_server() {
     let dir = tempfile::tempdir().unwrap();
     let stub = stub(dir.path());
-    let mut req = request(
+    let spec_for = |prompt: &str, env: &[(&str, &str)]| {
+        spec(
+            prompt,
+            dir.path(),
+            env,
+            vec![server("reno", &stub, "whoami")],
+        )
+    };
+    let text = reply(spec_for(
         r#"call-tool whoami {"fail": true}"#,
-        dir.path(),
         &[("FAKE_ACP_MCP_SERVER", "reno")],
-    );
-    req.mcp = Some(server("reno", &stub, "whoami"));
-    let text = reply(req).await;
+    ))
+    .await;
     let result: serde_json::Value = serde_json::from_str(&text).expect(&text);
     assert_eq!(result["isError"], true);
     assert_eq!(result["structuredContent"]["label"], "reno");
 
-    let mut missing = request("call-tool nope", dir.path(), &[]);
-    missing.mcp = Some(server("reno", &stub, "whoami"));
     assert_eq!(
-        reply(missing).await,
+        reply(spec_for("call-tool nope", &[])).await,
         "fake-acp-tool: no MCP server lists nope"
     );
 }

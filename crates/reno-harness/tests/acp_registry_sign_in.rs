@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use reno_harness::acp::{NEEDS_TERMINAL, SignInOptions, SignInProgress};
 use reno_harness::upstream_proto::RegistryAgent;
-use reno_harness::{AcpHarness, acp_registry as reg};
+use reno_harness::{AcpExecutor, acp_registry as reg};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn fixture() -> PathBuf {
@@ -92,7 +92,7 @@ async fn sign_in(
     }
     let agent = RegistryAgent::new(&format!("fake-{mode}")).unwrap();
     assert!(reg::installed(agent));
-    let harness = AcpHarness::registry(agent, &format!("Fake {mode}"));
+    let harness = AcpExecutor::registry(agent, &format!("Fake {mode}")).unwrap();
     let options = SignInOptions {
         browser: Some(browser),
         method: None,
@@ -100,7 +100,6 @@ async fn sign_in(
             ("RENO_LOGIN_URL_FILE".into(), url_file.clone().into()),
             ("HOME".into(), scratch.clone().into()),
         ],
-        url_filter: None,
     };
     // The page, once recorded, to whoever answers it.
     let watch = url_file.clone();
@@ -248,12 +247,13 @@ async fn a_page_opened_with_the_systems_opener_is_recorded_and_its_callback_fini
     );
 }
 
-fn harness(mode: &str) -> AcpHarness {
+fn harness(mode: &str) -> AcpExecutor {
     agents();
-    AcpHarness::registry(
+    AcpExecutor::registry(
         RegistryAgent::new(&format!("fake-{mode}")).unwrap(),
         &format!("Fake {mode}"),
     )
+    .unwrap()
 }
 
 #[tokio::test]

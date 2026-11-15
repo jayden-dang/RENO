@@ -1,241 +1,156 @@
-//! Regression tests: quiet output never relinquishes a pending prompt.
-//! The retired env knob stays set so reintroducing its old behavior fails fast.
+//! Regression tests: quiet output never relinquishes a pending prompt. An agent that goes silent
+//! after text, thoughts or tools is still working on its turn; only its `session/prompt`
+//! response (or a cancel) ends it, and steering prompts queued meanwhile continue the same run.
+//!
+//! Against `tests/fixtures/acp-lifecycle.py`, an agent that rejects overlapping prompts the way a
+//! real one does while it awaits its model.
 
 #![cfg(unix)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::sync::Once;
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use futures::stream::BoxStream;
+use reno_harness::AcpExecutor;
+use reno_harness::exec::{ExecControls, ExecHandle, Executor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel, StopReason};
 
-use reno_harness::upstream_proto::{
-    AgentEvent, DoneStatus, RunRequest, SandboxLevel, UserInputAnswer, UserInputQuestion,
-};
-use reno_harness::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
-
+/// How long silence lasts before the test acts, in milliseconds.
 const QUIET_MS: u64 = 1200;
-
-fn init_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: set before any harness runs in this test process; all
-        // tests in this binary share the one value.
-        unsafe { std::env::set_var("RENO_ACP_QUIET_SETTLE_MS", QUIET_MS.to_string()) };
-    });
-}
 
 fn fixture_path() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("acp-lifecycle.py");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-    }
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
     path
 }
 
-fn request(prompt: &str) -> RunRequest {
-    RunRequest {
-        mcp: None,
+fn executor() -> AcpExecutor {
+    AcpExecutor::grok().with_executable(fixture_path())
+}
+
+fn spec(prompt: &str) -> ExecSpec {
+    ExecSpec {
+        run_id: RunId::from_suffix("01HZX9").unwrap(),
         prompt: prompt.into(),
-        harness: None,
+        cwd: PathBuf::from("/tmp"),
         model: Some("grok-4.5".into()),
-        reasoning: None,
-        model_options: serde_json::Map::new(),
-        cwd: "/tmp".into(),
+        effort: None,
+        access: AccessMode::FullAccess,
         sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: true,
-        access: Default::default(),
-        plan: false,
-        attachments: Vec::new(),
-        worktree: None,
         resume: None,
+        mcp: Vec::new(),
         env: Default::default(),
-        extra_mcp: Vec::new(),
+        output_schema: None,
     }
 }
 
-fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
-    let (steer_tx, steer_rx) = mpsc::channel(8);
-    let token = CancellationToken::new();
-    let controls = RunControls {
-        execution_lease: None,
-        request_input: Box::new(move |questions: Vec<UserInputQuestion>| {
-            let (tx, rx) = oneshot::channel();
-            let answers: Vec<UserInputAnswer> = questions
-                .iter()
-                .map(|q| UserInputAnswer {
-                    question_id: q.id.clone(),
-                    labels: vec!["Yes".into()],
-                })
-                .collect();
-            let _ = tx.send(answers);
-            rx
-        }),
-        steering: steer_rx,
-        interrupt: token.clone(),
-        turn: Default::default(),
-    };
-    (controls, steer_tx, token)
+async fn start(prompt: &str) -> (BoxStream<'static, ExecEvent>, ExecHandle) {
+    let (controls, handle) = ExecControls::new(8);
+    let stream = executor().start(spec(prompt), controls).await.unwrap();
+    (stream, handle)
 }
 
-async fn collect_until_done(
-    stream: &mut futures::stream::BoxStream<
-        'static,
-        Result<AgentEvent, reno_harness::HarnessError>,
-    >,
-) -> Vec<AgentEvent> {
+fn text(s: &str) -> ExecEvent {
+    ExecEvent::Text { text: s.into() }
+}
+
+async fn collect_to_end(stream: &mut BoxStream<'static, ExecEvent>) -> Vec<ExecEvent> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut events = Vec::new();
         while let Some(event) = stream.next().await {
-            let event = event.expect("stream event");
-            let done = matches!(event, AgentEvent::Done { .. });
             events.push(event);
-            if done {
-                break;
-            }
         }
         events
     })
     .await
-    .expect("turn must settle")
+    .expect("the run must settle")
 }
 
-fn assert_done(events: &[AgentEvent], expected: DoneStatus) {
-    let dones: Vec<_> = events
+fn dones(events: &[ExecEvent]) -> Vec<(StopReason, Option<&str>)> {
+    events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Done { status, error, .. } => Some((*status, error.as_deref())),
+            ExecEvent::Done {
+                stop, diagnostic, ..
+            } => Some((*stop, diagnostic.as_deref())),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+fn assert_one_done(events: &[ExecEvent], expected: StopReason) {
+    let dones = dones(events);
     assert_eq!(dones.len(), 1, "{events:?}");
     assert_eq!(dones[0].0, expected, "{events:?}");
-    if expected != DoneStatus::Errored {
+    if expected != StopReason::Error {
         assert_eq!(dones[0].1, None);
     }
 }
 
+/// The agent goes quiet after `scenario`'s opening; two follow-ups queue while the first prompt is
+/// outstanding.
 async fn delayed_turn(scenario: &str) {
-    init_env();
-    let harness = AcpHarness::grok().with_executable(fixture_path());
-    assert!(harness.authoritative_prompt_end());
-    let (controls, steer, token) = controls();
-    let mut stream = harness.run(request(scenario), controls).await.unwrap();
-    let mut early = Vec::new();
-    // Observe the scenario before steering. Grok re-sends a prompt cancelled
-    // before any progress, so queuing immediately after run() races that path
-    // instead of exercising the intended text/tool/usage/reasoning state.
+    let (mut stream, handle) = start(scenario).await;
+    let mut events = Vec::new();
+    // Observe the scenario before steering. Grok re-sends a prompt cancelled before any progress,
+    // so queuing immediately after the start races that path instead of exercising the intended
+    // text/tool/reasoning state.
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let event = stream
-                .next()
-                .await
-                .expect("scenario event")
-                .expect("stream event");
+            let event = stream.next().await.expect("scenario event");
             let ready = match scenario {
-                "open-tool" => matches!(&event, AgentEvent::ToolCall { id, .. } if id == "3"),
-                "tools" => matches!(&event, AgentEvent::ToolResult { id, .. } if id == "3"),
-                "usage" => matches!(&event, AgentEvent::ContextUsage { .. }),
-                "reasoning" => matches!(&event, AgentEvent::ReasoningDelta { .. }),
-                "text" => matches!(&event, AgentEvent::TextDelta { text } if text == "working"),
+                "open-tool" => matches!(&event, ExecEvent::Tool { id, .. } if id == "3"),
+                "tools" => matches!(&event, ExecEvent::ToolResult { id, .. } if id == "3"),
+                "reasoning" => matches!(&event, ExecEvent::Reasoning { .. }),
+                "usage" | "text" => event == text("working"),
                 _ => panic!("unknown scenario: {scenario}"),
             };
             assert!(
-                !matches!(event, AgentEvent::Done { .. }),
+                !matches!(event, ExecEvent::Done { .. }),
                 "premature Done: {event:?}"
             );
-            early.push(event);
+            events.push(event);
             if ready {
                 break;
             }
         }
     })
     .await
-    .expect("scenario must start before steering");
-    // Queue multiple follow-ups while the first prompt remains outstanding.
-    steer
-        .send(SteerMessage {
-            message_id: None,
-            prompt: "second".into(),
-            attachments: Vec::new(),
-            config: None,
-        })
-        .await
+    .expect("the scenario must start before steering");
+    // Queue two follow-ups while the first prompt remains outstanding.
+    handle.try_steer("second").unwrap();
+    handle.try_steer("third").unwrap();
+    events.extend(collect_to_end(&mut stream).await);
+
+    // Each steer reached the agent exactly once, together, as one prompt that continued the run.
+    let together = events
+        .iter()
+        .filter(|e| **e == text("second\n\nthird"))
+        .count();
+    assert_eq!(together, 1, "{events:?}");
+    let finished = events.iter().position(|e| *e == text("finished"));
+    let continued = events
+        .iter()
+        .position(|e| *e == text("second\n\nthird"))
         .unwrap();
-    steer
-        .send(SteerMessage {
-            message_id: None,
-            prompt: "third".into(),
-            attachments: Vec::new(),
-            config: None,
-        })
-        .await
-        .unwrap();
-    let mut first = early;
-    first.extend(collect_until_done(&mut stream).await);
-    assert_done(&first, DoneStatus::Completed);
-    let finished = |events: &[AgentEvent]| {
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "finished"))
-    };
-    let steered = |events: &[AgentEvent]| {
-        events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::Steered { .. }))
-            .count()
-    };
-    let together = |events: &[AgentEvent]| {
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second\n\nthird"))
-    };
     if scenario == "open-tool" {
-        // A running tool is never preempted: the prompt keeps its outcome,
-        // then both steers continue together as the next prompt.
-        assert!(finished(&first), "premature Done: {first:?}");
-        let next = collect_until_done(&mut stream).await;
-        assert_done(&next, DoneStatus::Completed);
-        assert_eq!(steered(&next), 2, "{next:?}");
-        assert!(together(&next), "{next:?}");
+        // A running tool is never preempted: the prompt keeps its outcome, then both steers
+        // continue together as the next prompt.
+        assert!(finished.is_some_and(|f| f < continued), "{events:?}");
     } else {
-        // Silence is not completion, but steers preempt the generation
-        // immediately and continue the same run together — one Done.
-        assert!(!finished(&first), "steers must preempt: {first:?}");
-        assert_eq!(steered(&first), 2, "{first:?}");
-        assert!(together(&first), "{first:?}");
+        // Silence is not completion, but steers preempt the generation immediately and continue
+        // the same run together.
+        assert_eq!(finished, None, "steers must preempt: {events:?}");
     }
-    // A fresh user message after completion also reuses the same session.
-    steer
-        .send(SteerMessage {
-            message_id: None,
-            prompt: "fourth".into(),
-            attachments: Vec::new(),
-            config: None,
-        })
-        .await
-        .unwrap();
-    let fourth = collect_until_done(&mut stream).await;
-    assert_done(&fourth, DoneStatus::Completed);
-    assert!(
-        fourth
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { text } if text == "fourth"))
-    );
-    drop(steer);
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), stream.next())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    drop(token);
+    // One run, one Done, and it comes last.
+    assert_one_done(&events, StopReason::Completed);
+    assert!(matches!(events.last(), Some(ExecEvent::Done { .. })));
 }
 
 #[tokio::test]
@@ -260,15 +175,9 @@ async fn open_tools_then_silence_preserves_prompt() {
 }
 
 async fn cancel_quiet(scenario: &str) {
-    init_env();
-    let (controls, steer, token) = controls();
-    let mut stream = AcpHarness::grok()
-        .with_executable(fixture_path())
-        .run(request(scenario), controls)
-        .await
-        .unwrap();
-    while let Some(e) = stream.next().await {
-        if matches!(e.unwrap(), AgentEvent::ToolResult { id, .. } if id == "3") {
+    let (mut stream, handle) = start(scenario).await;
+    while let Some(event) = stream.next().await {
+        if matches!(event, ExecEvent::ToolResult { id, .. } if id == "3") {
             break;
         }
     }
@@ -278,29 +187,11 @@ async fn cancel_quiet(scenario: &str) {
             .is_err(),
         "silence must not emit Done"
     );
-    steer
-        .send(SteerMessage {
-            message_id: None,
-            prompt: "must not run".into(),
-            attachments: Vec::new(),
-            config: None,
-        })
-        .await
-        .unwrap();
-    token.cancel();
-    let events = collect_until_done(&mut stream).await;
-    assert_done(&events, DoneStatus::Interrupted);
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TextDelta { .. }))
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), stream.next())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    handle.try_steer("must not run").unwrap();
+    handle.cancel();
+    let events = collect_to_end(&mut stream).await;
+    assert_one_done(&events, StopReason::Interrupted);
+    assert!(!events.iter().any(|e| matches!(e, ExecEvent::Text { .. })));
 }
 
 #[tokio::test]
@@ -314,33 +205,16 @@ async fn unresponsive_quiet_turn_is_killed_on_cancel() {
 
 #[tokio::test]
 async fn missing_response_at_eof_is_error_not_success() {
-    init_env();
-    let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::grok()
-        .with_executable(fixture_path())
-        .run(request("eof"), controls)
-        .await
-        .unwrap();
-    assert_done(&collect_until_done(&mut stream).await, DoneStatus::Errored);
+    let (mut stream, _handle) = start("eof").await;
+    assert_one_done(&collect_to_end(&mut stream).await, StopReason::Error);
 }
 
 #[tokio::test]
 async fn protocol_error_keeps_code_and_agent_detail() {
-    let (controls, _steer, _token) = controls();
-    let mut stream = AcpHarness::grok()
-        .with_executable(fixture_path())
-        .run(request("error"), controls)
-        .await
-        .unwrap();
-    let events = collect_until_done(&mut stream).await;
-    assert_done(&events, DoneStatus::Errored);
-    let error = events
-        .iter()
-        .find_map(|e| match e {
-            AgentEvent::Done { error, .. } => error.as_deref(),
-            _ => None,
-        })
-        .unwrap();
+    let (mut stream, _handle) = start("error").await;
+    let events = collect_to_end(&mut stream).await;
+    assert_one_done(&events, StopReason::Error);
+    let diagnostic = dones(&events)[0].1.unwrap();
     for expected in [
         "session/prompt",
         "Invalid request",
@@ -348,6 +222,6 @@ async fn protocol_error_keeps_code_and_agent_detail() {
         "A prompt is already running",
         "retryable",
     ] {
-        assert!(error.contains(expected), "{error}");
+        assert!(diagnostic.contains(expected), "{diagnostic}");
     }
 }

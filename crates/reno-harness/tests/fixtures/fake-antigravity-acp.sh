@@ -6,7 +6,8 @@
 # session/new for a cwd containing "needs-login", and an `authenticate` that
 # prints its sign-in url to stderr like the real browser flow. the prompt
 # reply echoes every config option reno set. a cwd containing "yolo-current"
-# opens the session in yolo, one containing "reject-mode" refuses mode sets,
+# opens the session in yolo, one containing "no-asking-mode" opens in yolo with no mode that
+# asks to leave it for, one containing "reject-mode" refuses mode sets,
 # and a "permissions" prompt asks to read, edit and run before replying with
 # the option reno picked for each.
 
@@ -65,6 +66,10 @@ while read -r line; do
     if has "$line" 'yolo-current'; then
       CURRENT=$(printf '%s' "$OPTIONS" | sed 's/"currentValue":"default"/"currentValue":"yolo"/')
     fi
+    if has "$line" 'no-asking-mode'; then
+      # Opens in yolo and offers no mode that asks.
+      CURRENT=$(printf '%s' "$OPTIONS" | sed 's/{"value":"default","name":"Default"},//; s/"currentValue":"default"/"currentValue":"yolo"/')
+    fi
     if has "$line" 'needs-login' && [ "$AUTHED" -eq 0 ]; then
       emit "{\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}"
     else
@@ -117,6 +122,15 @@ while read -r line; do
     if [ "$EMPTY" -eq 1 ]; then
       emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
       continue
+    fi
+    if has "$line" 'kinds'; then
+      fetch_pick=$(ask fetch ',"title":"Fetch example.com","rawInput":{"url":"https://example.com"}')
+      other_pick=$(ask other ',"title":"spawn_subagent"')
+      think_pick=$(ask think ',"title":"Thinking"')
+      delete_pick=$(ask delete ',"title":"Delete tmp","locations":[{"path":"/w/tmp.txt"}]')
+      emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"agy-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"kinds:fetch=$fetch_pick;other=$other_pick;think=$think_pick;delete=$delete_pick;\"}}}}"
+      emit "{\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      exit 0
     fi
     if has "$line" 'permissions'; then
       read_pick=$(ask read ',"title":"Read lib.rs","locations":[{"path":"/w/src/lib.rs"}]')

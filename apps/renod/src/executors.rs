@@ -7,13 +7,21 @@
 //! - `claude-code` is the native [`ClaudeExecutor`] and `codex` still runs through the stage A
 //!   [`HarnessExecutor`] shim (until its driver goes native, T1.0b); both are registered when
 //!   their CLIs are found. Nothing here starts them.
+//! - The agents built on ACP are native [`AcpExecutor`]s, one per agent, each under its own id:
+//!   `acp.grok`, `acp.devin`, `acp.hermes`, `acp.fx`, `acp.antigravity`, and `acp.<registry id>`
+//!   for each agent added from the ACP registry. They are registered when found, like the
+//!   others. A registry agent never replaces an executor that is already registered: the
+//!   registry lists agents Reno drives itself (`devin`, ...), and its record must not take over
+//!   their id.
 
 use std::sync::Arc;
 
+use reno_harness::acp_registry::Record;
 use reno_harness::exec::{Executor, HarnessExecutor, MockExecutor, MockStep};
-use reno_harness::{ClaudeExecutor, CodexHarness};
+use reno_harness::upstream_proto::RegistryAgent;
+use reno_harness::{AcpExecutor, ClaudeExecutor, CodexHarness};
 use reno_kernel::ExecutorRegistry;
-use reno_proto::{ActionClass, ExecEvent, IdError, StopReason, ToolCall};
+use reno_proto::{ActionClass, ExecEvent, ExecutorId, IdError, StopReason, ToolCall};
 use serde_json::json;
 
 /// The id of the always-present mock executor.
@@ -104,10 +112,25 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
     if !harnesses {
         return Ok(set);
     }
-    let candidates: [Arc<dyn Executor>; 2] = [
+    let mut candidates: Vec<Arc<dyn Executor>> = vec![
         Arc::new(ClaudeExecutor::new()),
         Arc::new(HarnessExecutor::new(CodexHarness::new(), CODEX_ID.parse()?)),
+        Arc::new(AcpExecutor::grok()),
+        Arc::new(AcpExecutor::devin()),
+        Arc::new(AcpExecutor::hermes()),
+        Arc::new(AcpExecutor::fx()),
+        Arc::new(AcpExecutor::antigravity()),
     ];
+    let taken: Vec<ExecutorId> = candidates
+        .iter()
+        .map(|executor| executor.descriptor().id)
+        .chain([MOCK_ID.parse()?])
+        .collect();
+    candidates.extend(
+        registry_executors(reno_harness::acp_registry::records(), &taken)
+            .into_iter()
+            .map(|executor| Arc::new(executor) as Arc<dyn Executor>),
+    );
     for executor in candidates {
         let id = executor.descriptor().id;
         let health = executor.probe().await;
@@ -130,6 +153,41 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
     Ok(set)
 }
 
+/// One executor for each registry agent this device has added, except those whose id is already
+/// `taken` (the executors Reno drives itself, `mock`): a registry record must never replace an
+/// executor that is registered under the same id.
+fn registry_executors(records: Vec<Record>, taken: &[ExecutorId]) -> Vec<AcpExecutor> {
+    records
+        .into_iter()
+        .filter_map(|record| {
+            // The registry also lists agents Reno drives itself (`claude-acp`, `codex-acp`,
+            // `devin`, ...): they are never added from it, so a record for one is not an agent
+            // of its own.
+            if reno_harness::acp_registry::built_in(&record.id).is_some() {
+                tracing::warn!(agent = %record.id, "the registry id of an executor Reno drives itself; skipped");
+                return None;
+            }
+            let Some(agent) = RegistryAgent::new(&record.id) else {
+                tracing::warn!(agent = %record.id, "not a registry agent id; skipped");
+                return None;
+            };
+            let executor = match AcpExecutor::registry(agent, &record.name) {
+                Ok(executor) => executor,
+                Err(error) => {
+                    tracing::warn!(agent = %record.id, %error, "no executor id for the agent; skipped");
+                    return None;
+                }
+            };
+            let id = executor.descriptor().id;
+            if taken.contains(&id) {
+                tracing::warn!(agent = %record.id, executor = %id, "an executor already has this id; the registry agent is skipped");
+                return None;
+            }
+            Some(executor)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use reno_proto::ExecutorId;
@@ -149,6 +207,60 @@ mod tests {
         let ids: Vec<_> = set.registry.ids().map(ExecutorId::as_str).collect();
         assert_eq!(ids, [MOCK_ID]);
         assert!(set.harnesses.is_empty());
+    }
+
+    fn record(id: &str) -> Record {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "version": "1.0.0", "kind": "binary", "program": "/bin/true",
+        }))
+        .expect("a record")
+    }
+
+    #[test]
+    fn built_in_acp_ids_are_valid_and_distinct() {
+        let ids: Vec<ExecutorId> = [
+            AcpExecutor::grok(),
+            AcpExecutor::devin(),
+            AcpExecutor::hermes(),
+            AcpExecutor::fx(),
+            AcpExecutor::antigravity(),
+        ]
+        .iter()
+        .map(|executor| executor.descriptor().id)
+        .collect();
+        let names: Vec<&str> = ids.iter().map(ExecutorId::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "acp.grok",
+                "acp.devin",
+                "acp.hermes",
+                "acp.fx",
+                "acp.antigravity"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_registry_agent_never_replaces_an_executor_with_its_id() {
+        let taken: Vec<ExecutorId> = ["mock", "claude-code", "acp.grok", "acp.devin"]
+            .iter()
+            .map(|id| id.parse().expect("id"))
+            .collect();
+        let executors = registry_executors(
+            vec![
+                record("grok"),
+                record("devin"),
+                record("gemini"),
+                record("own.mine"),
+            ],
+            &taken,
+        );
+        let ids: Vec<String> = executors
+            .iter()
+            .map(|executor| executor.descriptor().id.to_string())
+            .collect();
+        assert_eq!(ids, ["acp.gemini", "acp.own.mine"]);
     }
 
     #[test]

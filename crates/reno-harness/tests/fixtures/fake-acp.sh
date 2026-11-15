@@ -15,12 +15,6 @@ update() { # $1 = update json object body
   emit "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"$SID\",\"update\":$1}}"
 }
 
-xnotify() { # $1 = update json object body — grok's extension channel (the
-  # subagent lifecycle rides _x.ai/session_notification, NOT session/update;
-  # same {sessionId, update} envelope. Verified live, 1.0.4.)
-  emit "{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":$1}}"
-}
-
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
@@ -198,24 +192,6 @@ case "$promptline" in
   exec sleep 60
   ;;
 
-*scenario:subagent*)
-  # Grok's background subagent lifecycle (wire shapes captured live, 1.0.4):
-  # spawn tool_call tagged _meta["x.ai/tool"], completion echoing the minted
-  # subagent_id in its output text, then the subagent_spawned/finished
-  # extension updates. The transcript itself never rides the wire — the test
-  # seeds/app ends a chat_history.jsonl under the harness's sessions root
-  # and the tail turns it into tagged events during the sleep window.
-  update '{"sessionUpdate":"tool_call","toolCallId":"sp1","title":"spawn_subagent","rawInput":{"description":"Count files","prompt":"Count the files.","subagent_type":"explore"},"_meta":{"x.ai/tool":{"version":1,"name":"spawn_subagent","kind":"task","namespace":"grok_build","label":"Subagent","read_only":false},"subagentBackground":true}}'
-  update '{"sessionUpdate":"tool_call_update","toolCallId":"sp1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"Subagent started in background.\nsubagent_id: sub-1\ntype: explore"}}],"rawOutput":{"type":"Text","text":"Subagent started in background.\nsubagent_id: sub-1\ntype: explore"}}'
-  xnotify "{\"sessionUpdate\":\"subagent_spawned\",\"subagent_id\":\"sub-1\",\"parent_session_id\":\"$SID\",\"child_session_id\":\"sub-1\",\"subagent_type\":\"explore\",\"description\":\"Count files\"}"
-  # A NESTED spawned update (another parent session) must not bind here.
-  xnotify '{"sessionUpdate":"subagent_spawned","subagent_id":"sub-nested","parent_session_id":"sub-1","child_session_id":"sub-nested","subagent_type":"explore","description":"Count files"}'
-  sleep 1.4
-  xnotify '{"sessionUpdate":"subagent_finished","subagent_id":"sub-1","child_session_id":"sub-1","status":"completed","tool_calls":1,"turns":1,"output":"two files","will_wake":false}'
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  ;;
-
 *scenario:detached*)
   # A command the agent starts in its own session (Devin does): not in the
   # agent's process group, so a group kill alone leaves it running.
@@ -223,40 +199,6 @@ case "$promptline" in
   python3 -c "import os,time; os.setsid(); open('$pidfile','w').write(str(os.getpid())); time.sleep(60)" &
   while [ ! -s "$pidfile" ]; do sleep 0.05; done
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"started"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  cat >/dev/null
-  ;;
-
-*scenario:reconfigure*)
-  # Model switches: one sent between turns, one sent mid-turn. Each set must
-  # reach the session before the prompt it was sent with.
-  next_turn() { # reads 0..n sets then the prompt; leaves them in SETS / pid
-    SETS=""
-    read -r promptline || exit 1
-    while has "$promptline" '"method":"session/set_config_option"'; do
-      emit "{\"id\":$(rid "$promptline"),\"result\":{}}"
-      SETS="$SETS $promptline"
-      read -r promptline || exit 1
-    done
-    has "$promptline" '"method":"session/prompt"' || exit 1
-    pid=$(rid "$promptline")
-  }
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"turn1"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  next_turn
-  if has "$SETS" '"value":"grok-4-fast"'; then
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"on fast"}}'
-  else
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"switch missing"}}'
-  fi
-  sleep 0.5
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  next_turn
-  if has "$SETS" '"value":"grok-4.5"'; then
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"back on 4.5"}}'
-  else
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"switch missing"}}'
-  fi
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   cat >/dev/null
   ;;
@@ -304,12 +246,39 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:permission-hold*)
+  # An approval left open when the run is cancelled, and one that arrives after the cancel.
+  # ACP has the client answer every pending permission request `cancelled` when it cancels
+  # the prompt; a request raised after the cancel is cancelled at once. The reply says what
+  # the agent was told.
+  emit "{\"id\":91,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"h1\",\"kind\":\"execute\",\"rawInput\":{\"command\":\"make\"}},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+  read -r first || exit 1
+  read -r second || exit 1
+  has "$first$second" '"method":"session/cancel"' || exit 1
+  open=other
+  has "$first$second" '"id":91' && has "$first$second" '"outcome":"cancelled"' && open=cancelled
+  emit "{\"id\":92,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"h2\",\"kind\":\"execute\",\"rawInput\":{\"command\":\"late\"}},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"}]}}"
+  read -r late || exit 1
+  late_outcome=other
+  has "$late" '"id":92' && has "$late" '"outcome":"cancelled"' && late_outcome=cancelled
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"open:$open;late:$late_outcome\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  ;;
+
 *scenario:permission*)
-  emit "{\"id\":77,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"t1\"},\"options\":[{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+  # One tool permission, of the kind named after the scenario (`scenario:permission fetch`;
+  # `execute` when none is given). Every option kind is offered, `allow_always` first: the
+  # reply says which option the client selected.
+  kind=$(printf '%s' "$promptline" | sed -n 's/.*scenario:permission \([a-z_]*\).*/\1/p')
+  [ -n "$kind" ] || kind=execute
+  emit "{\"id\":77,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"t1\",\"kind\":\"$kind\",\"title\":\"A $kind call\",\"rawInput\":{\"command\":\"rm -rf build\"},\"locations\":[{\"path\":\"/w/a.rs\"},{\"path\":\"/w/b.rs\",\"line\":3}]},\"options\":[{\"optionId\":\"always\",\"name\":\"Always allow\",\"kind\":\"allow_always\"},{\"optionId\":\"once\",\"name\":\"Allow once\",\"kind\":\"allow_once\"},{\"optionId\":\"never\",\"name\":\"Never allow\",\"kind\":\"reject_always\"},{\"optionId\":\"no\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
   read -r ans || exit 1
-  { has "$ans" '"id":77' && has "$ans" '"outcome":"selected"' && has "$ans" '"optionId":"always"'; } ||
-    { emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"; exit 0; }
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"approved"}}'
+  has "$ans" '"id":77' || exit 1
+  case "$ans" in
+    *'"optionId":"'*) picked=$(printf '%s' "$ans" | sed 's/.*"optionId":"\([^"]*\)".*/\1/') ;;
+    *) picked=cancelled ;;
+  esac
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"picked:$picked\"}}"
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
@@ -327,32 +296,6 @@ case "$promptline" in
     emit "{\"id\":$sid,\"error\":{\"code\":-32600,\"message\":\"bad steer\"}}"
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   fi
-  ;;
-
-*scenario:stop-steer*)
-  # "Send now" with a steer still in flight: the steering request is
-  # unanswered when the turn stop's session/cancel arrives, and answers
-  # promptRequired before the cancelled prompt settles. The cancelled steer
-  # must never run.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
-  read -r steerline || exit 1
-  has "$steerline" '"method":"_session/steering"' || exit 1
-  sid=$(rid "$steerline")
-  read -r cancel || exit 1
-  has "$cancel" '"method":"session/cancel"' || exit 1
-  emit "{\"id\":$sid,\"result\":{\"outcome\":\"promptRequired\"}}"
-  sleep 0.2
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
-  read -r next || exit 1
-  has "$next" '"method":"session/prompt"' || exit 1
-  nid=$(rid "$next")
-  if has "$next" 'cancelled steer'; then
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"REPLAYED"}}'
-  else
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh"}}'
-  fi
-  emit "{\"id\":$nid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  cat >/dev/null
   ;;
 
 *scenario:steer-race*)
@@ -410,83 +353,6 @@ case "$promptline" in
   fi
   ;;
 
-*scenario:cost-starve*)
-  # The dropped-reply turn end, no steer involved: the turn's terminal
-  # cost frame arrives but the prompt response never does. The harness
-  # (claude spec) must settle the turn ~1s after the cost frame instead of
-  # stranding Working. Script exits shortly after so the stream ends.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
-  update '{"sessionUpdate":"usage_update","used":22457,"size":1000000,"cost":{"amount":0.01,"currency":"USD"}}'
-  # No response to $pid, ever.
-  sleep 6
-  exit 0
-  ;;
-
-*scenario:busy-steer*)
-  # Prevention: the turn settles, then the agent SELF-CONTINUES (a turn no
-  # prompt started, visible as an open tool call). A steer arriving now
-  # must NOT become a session/prompt (the adapter drops that reply — the
-  # verified starve): the harness cancels the unowned turn first, then
-  # prompts after the flush window.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  update '{"sessionUpdate":"tool_call","toolCallId":"sc-1","title":"self-continued work","kind":"execute","status":"pending","rawInput":{"command":"make"}}'
-  read -r cancelline || exit 1
-  has "$cancelline" '"method":"session/cancel"' || exit 1
-  update '{"sessionUpdate":"tool_call_update","toolCallId":"sc-1","status":"completed","content":[]}'
-  read -r followline || exit 1
-  fid=$(rid "$followline")
-  if has "$followline" '"method":"session/prompt"' && has "$followline" 'what about now'; then
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh answer"}}'
-    emit "{\"id\":$fid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  else
-    emit "{\"id\":$fid,\"result\":{\"stopReason\":\"refusal\"}}"
-  fi
-  ;;
-
-*scenario:native-busy-steer*)
-  # Claude's native path: steer into a self-continued turn must arrive as a
-  # plain session/prompt (NO cancel — the CLI folds it into the running
-  # turn natively). The adapter drops that prompt's reply; the harness must
-  # settle off the turn-end cost frame instead.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  update '{"sessionUpdate":"tool_call","toolCallId":"sc-2","title":"self-continued work","kind":"execute","status":"pending","rawInput":{"command":"make"}}'
-  read -r followline || exit 1
-  if has "$followline" '"method":"session/cancel"'; then
-    # Cancelling would kill the agent's in-flight work: fail loudly.
-    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"CANCELLED-NATIVE-WORK"}}'
-    exit 1
-  fi
-  fid=$(rid "$followline")
-  { has "$followline" '"method":"session/prompt"' && has "$followline" 'what about now'; } || exit 1
-  # The merged turn finishes: tool resolves, folded reply streams, the
-  # terminal cost frame arrives — and the prompt response NEVER does.
-  update '{"sessionUpdate":"tool_call_update","toolCallId":"sc-2","status":"completed","content":[]}'
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"merged reply"}}'
-  update '{"sessionUpdate":"usage_update","used":30000,"size":1000000,"cost":{"amount":0.02,"currency":"USD"}}'
-  sleep 6
-  exit 0
-  ;;
-
-*scenario:steer-cost-noise*)
-  # The injection cost frame: claude-agent-acp stamps a
-  # cost-bearing usage_update for the injected message itself, MID-turn,
-  # identical in shape to the terminal one. The harness (claude spec) must
-  # not settle off it — the turn continues and ends via its real response:
-  # exactly one Done, all text intact.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
-  read -r steerline || exit 1
-  sid=$(rid "$steerline")
-  has "$steerline" '"method":"_session/steering"' || exit 1
-  emit "{\"id\":$sid,\"result\":{\"outcome\":\"injected\"}}"
-  update '{"sessionUpdate":"usage_update","used":21429,"size":200000,"cost":{"amount":0.0006,"currency":"USD"},"_meta":{"_claude/origin":{"kind":"human"}}}'
-  sleep 3
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"steered tail"}}'
-  update '{"sessionUpdate":"usage_update","used":21884,"size":200000,"cost":{"amount":0.02,"currency":"USD"},"_meta":{"_claude/origin":{"kind":"human"}}}'
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
-  ;;
-
 *scenario:interrupt*)
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
   read -r intline || exit 1
@@ -495,20 +361,6 @@ case "$promptline" in
   else
     emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   fi
-  ;;
-
-*scenario:stop-in-place*)
-  # A turn stop: session/cancel settles the prompt `cancelled`; the agent
-  # and its session take the next session/prompt.
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
-  read -r intline || exit 1
-  has "$intline" '"method":"session/cancel"' || exit 8
-  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
-  read -r nextline || exit 1
-  has "$nextline" '"method":"session/prompt"' || exit 9
-  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}'
-  emit "{\"id\":$(rid "$nextline"),\"result\":{\"stopReason\":\"end_turn\"}}"
-  cat >/dev/null
   ;;
 
 *scenario:wedge*)
