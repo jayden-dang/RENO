@@ -1,11 +1,15 @@
 //! The fake daemon's state: runs with their journals, and pending approvals. Plain data and
 //! synchronous methods; no I/O, no clock (time is a logical counter), no async.
 
+use std::sync::Arc;
+
+use reno_proto::defs::{DefKind, DefRecord, DefsSnapshot};
 use reno_proto::{
     Approval, ApprovalId, ExecEvent, ExecutorId, IdError, RunId, RunStatus, RunSummary, Seq,
     StopReason, TaskId,
 };
-use tokio::sync::watch;
+use reno_proto::{ApprovalDecision, ApprovalRecord, ApprovalStatus, ResolvedBy, TriggerInfo};
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::data::{self, Seed};
@@ -21,6 +25,8 @@ pub(super) struct RunRecord {
     pub(super) journal_tx: watch::Sender<usize>,
     /// Cancelled when the run is cancelled or the daemon shuts down.
     pub(super) cancel: CancellationToken,
+    /// Notified by `run.steer`; a `/long` script waits on it.
+    pub(super) steered: Arc<Notify>,
 }
 
 impl RunRecord {
@@ -49,6 +55,10 @@ pub(super) struct World {
     next_id: u64,
     now_ms: u64,
     started_ms: u64,
+    pub(super) triggers: Vec<TriggerInfo>,
+    pub(super) defs: DefsSnapshot,
+    records: Vec<DefRecord>,
+    history: Vec<ApprovalRecord>,
 }
 
 impl World {
@@ -61,6 +71,7 @@ impl World {
                 summary: r.summary,
                 journal: r.journal,
                 cancel: root.child_token(),
+                steered: Arc::new(Notify::new()),
             })
             .collect();
         Self {
@@ -69,6 +80,10 @@ impl World {
             next_id: 1,
             now_ms: data::NOW_MS,
             started_ms: data::NOW_MS,
+            triggers: seed.extras.triggers,
+            defs: seed.extras.defs,
+            records: seed.extras.records,
+            history: seed.extras.history,
         }
     }
 
@@ -144,6 +159,7 @@ impl World {
             journal: vec![],
             journal_tx: watch::channel(0).0,
             cancel: root.child_token(),
+            steered: Arc::new(Notify::new()),
         });
         Ok(run_id)
     }
@@ -220,10 +236,120 @@ impl World {
         Ok(approval)
     }
 
-    /// Removes and returns a pending approval.
-    pub(super) fn take_approval(&mut self, id: &ApprovalId) -> Option<Approval> {
+    /// Removes a pending approval and records how it was decided.
+    pub(super) fn take_approval(
+        &mut self,
+        id: &ApprovalId,
+        decision: ApprovalDecision,
+    ) -> Option<Approval> {
         let at = self.approvals.iter().position(|a| &a.id == id)?;
-        Some(self.approvals.remove(at))
+        let approval = self.approvals.remove(at);
+        let now = self.tick();
+        self.history.push(ApprovalRecord {
+            id: approval.id.clone(),
+            run_id: approval.run_id.clone(),
+            request_id: format!("req-{}", approval.id),
+            subject: approval.subject.clone(),
+            status: match decision {
+                ApprovalDecision::ApproveOnce => ApprovalStatus::Approved,
+                ApprovalDecision::Deny => ApprovalStatus::Denied,
+            },
+            decided_by: Some(ResolvedBy::Human),
+            created_at_ms: approval.requested_at_ms,
+            decided_at_ms: Some(now),
+            expires_at_ms: approval.requested_at_ms + 30 * 60_000,
+        });
+        Some(approval)
+    }
+
+    /// Decided approvals, newest decision first, optionally of one run.
+    pub(super) fn history(&self, run: Option<&RunId>, limit: usize) -> Vec<ApprovalRecord> {
+        let mut all: Vec<ApprovalRecord> = self
+            .history
+            .iter()
+            .filter(|r| run.is_none_or(|run| &r.run_id == run))
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| {
+            b.decided_at_ms
+                .cmp(&a.decided_at_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        all.truncate(limit);
+        all
+    }
+
+    /// One stored version of a definition; the newest when `version` is `None`.
+    pub(super) fn def_record(
+        &self,
+        kind: DefKind,
+        name: &str,
+        version: Option<u32>,
+    ) -> Option<DefRecord> {
+        self.records
+            .iter()
+            .find(|r| r.kind == kind && r.name == name && version.is_none_or(|v| v == r.version))
+            .cloned()
+    }
+
+    /// Fires a trigger. `Err` carries the reason it cannot fire.
+    pub(super) fn fire_trigger(
+        &mut self,
+        name: &str,
+        root: &CancellationToken,
+    ) -> Result<(reno_proto::FiringOutcome, RunId, String, u64), &'static str> {
+        use reno_proto::FiringOutcome;
+        let at = self
+            .triggers
+            .iter()
+            .position(|t| t.name == name)
+            .ok_or("no such trigger")?;
+        let status = self.triggers[at].status;
+        if matches!(
+            status,
+            reno_proto::TriggerStatus::Disabled
+                | reno_proto::TriggerStatus::Done
+                | reno_proto::TriggerStatus::Failed
+        ) {
+            return Err("the trigger cannot fire in its state");
+        }
+        let scheduled = self.tick();
+        if let Some(last) = self.triggers[at].last_run_id.clone()
+            && self
+                .run(&last)
+                .is_some_and(|r| !r.summary.status.is_terminal())
+        {
+            self.triggers[at].last_fired_at_ms = Some(scheduled);
+            return Ok((FiringOutcome::Coalesced, last, String::new(), scheduled));
+        }
+        let (bot, prompt) = super::extras::trigger_target(name).unwrap_or(("keeper", name));
+        let params = reno_proto::TaskRunParams {
+            prompt: prompt.to_owned(),
+            executor: "claude-code".parse().ok(),
+            bot: None,
+            cwd: None,
+            model: None,
+        };
+        let executor = params.executor.clone().ok_or("no executor")?;
+        let run_id = self
+            .create_run(&params, executor, root)
+            .map_err(|_| "could not create the run")?;
+        if let Some(run) = self.run_mut(&run_id) {
+            run.summary.bot = Some(reno_proto::defs::BotPin {
+                name: bot.to_owned(),
+                version: 1,
+            });
+            run.summary.title = format!("{bot} \u{b7} atlas-api: {name} fired");
+        }
+        let trigger = &mut self.triggers[at];
+        trigger.last_fired_at_ms = Some(scheduled);
+        trigger.last_run_id = Some(run_id.clone());
+        trigger.failures = 0;
+        if trigger.status == reno_proto::TriggerStatus::BackedOff {
+            trigger.status = reno_proto::TriggerStatus::Scheduled;
+            trigger.backoff_until_ms = None;
+        }
+        Ok((FiringOutcome::Fired, run_id, prompt.to_owned(), scheduled))
     }
 
     /// Cancels a run by walking the lifecycle diagram to `cancelled`, closing its journal.

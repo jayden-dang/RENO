@@ -135,6 +135,19 @@ async fn work(script: &Script, prompt: &str) -> bool {
     }
     match scenario {
         Scenario::Plain => script.succeed("The task is complete.").await,
+        Scenario::Long => {
+            let steered = script
+                .shared
+                .read(|w| w.run(&script.run).map(|r| Arc::clone(&r.steered)));
+            let Some(steered) = steered else {
+                return false;
+            };
+            // Live until the run is cancelled (which stops the script) or steered.
+            tokio::select! {
+                () = script.token.cancelled() => false,
+                () = steered.notified() => script.succeed("The long job is complete.").await,
+            }
+        }
         Scenario::Burst(n) => {
             let burst = script.apply(|w, run| {
                 for i in 0..n {
@@ -221,7 +234,15 @@ pub(super) async fn reply_to_steer(shared: Arc<Shared>, run: RunId) {
     let Some(script) = Script::new(shared, run) else {
         return;
     };
-    let _ = script
+    let replied = script
         .say("Understood. I will take that into account.")
         .await;
+    // A `/long` run waits for its steer to be answered, then finishes.
+    if replied
+        && let Some(steered) = script
+            .shared
+            .read(|w| w.run(&script.run).map(|r| Arc::clone(&r.steered)))
+    {
+        steered.notify_one();
+    }
 }

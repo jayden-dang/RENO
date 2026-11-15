@@ -38,14 +38,17 @@
 //! waits.
 
 pub mod data;
+mod extras;
 mod script;
 mod world;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{Stream, stream};
+use reno_proto::defs::{DefKind, DefValidateResult, DefsSnapshot};
 use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideResult, ApprovalList, ApprovalListResult,
     ApprovalsSnapshot, ApprovalsWatch, DaemonHello, DaemonShutdown, DaemonShutdownResult,
@@ -74,6 +77,11 @@ pub struct FakeConfig {
     /// The protocol version `daemon.hello` answers with. Default [`PROTOCOL_VERSION`]; set it
     /// to anything else to see a client report `Incompatible`.
     pub protocol_version: u32,
+    /// Features the daemon does not negotiate even when the client offers them, for example
+    /// [`reno_proto::FEATURE_DEFS`]. Default none.
+    pub without_features: Vec<String>,
+    /// Start with no runs, approvals, triggers, definitions or history. Default false.
+    pub empty: bool,
 }
 
 impl Default for FakeConfig {
@@ -83,6 +91,8 @@ impl Default for FakeConfig {
             server: ServerConfig::default(),
             pipe_buffer: 64 * 1024,
             protocol_version: PROTOCOL_VERSION,
+            without_features: Vec::new(),
+            empty: false,
         }
     }
 }
@@ -92,6 +102,12 @@ pub(crate) struct Shared {
     world: Mutex<World>,
     runs_tx: watch::Sender<Vec<RunSummary>>,
     approvals_tx: watch::Sender<Vec<Approval>>,
+    triggers_tx: watch::Sender<Vec<reno_proto::TriggerInfo>>,
+    defs_tx: watch::Sender<DefsSnapshot>,
+    /// Errors a method answers with, until cleared.
+    injected: Mutex<HashMap<String, ErrorObject>>,
+    /// One token per open connection, so a test can cut them all.
+    connections: Mutex<Vec<CancellationToken>>,
     config: FakeConfig,
     tracker: TaskTracker,
     cancel: CancellationToken,
@@ -129,6 +145,22 @@ impl Shared {
             }
             changed
         });
+        let triggers = world.triggers.clone();
+        self.triggers_tx.send_if_modified(|current| {
+            let changed = *current != triggers;
+            if changed {
+                *current = triggers;
+            }
+            changed
+        });
+        let defs = world.defs.clone();
+        self.defs_tx.send_if_modified(|current| {
+            let changed = *current != defs;
+            if changed {
+                *current = defs;
+            }
+            changed
+        });
         result
     }
 }
@@ -163,14 +195,24 @@ impl FakeDaemon {
     /// Starts a fake daemon with no client. Connect with [`FakeDaemon::connect`].
     pub fn start(config: FakeConfig) -> Result<Self, ClientError> {
         let cancel = CancellationToken::new();
-        let seed = data::seed().map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let seed = if config.empty {
+            data::empty_seed()
+        } else {
+            data::seed().map_err(|e| ClientError::Protocol(e.to_string()))?
+        };
         let world = World::from_seed(seed, &cancel);
         let (runs_tx, _) = watch::channel(world.summaries());
         let (approvals_tx, _) = watch::channel(world.pending());
+        let (triggers_tx, _) = watch::channel(world.triggers.clone());
+        let (defs_tx, _) = watch::channel(world.defs.clone());
         let shared = Arc::new(Shared {
             world: Mutex::new(world),
             runs_tx,
             approvals_tx,
+            triggers_tx,
+            defs_tx,
+            injected: Mutex::new(HashMap::new()),
+            connections: Mutex::new(Vec::new()),
             tracker: TaskTracker::new(),
             cancel,
             event_subscriptions: AtomicUsize::new(0),
@@ -182,12 +224,60 @@ impl FakeDaemon {
 
     /// Opens a new connection to this daemon and performs the handshake.
     pub async fn connect(&self) -> Result<Client, ClientError> {
-        let rpc = connect_in_memory_with_buffer(
-            &self.server,
-            self.shared.cancel.child_token(),
-            self.shared.config.pipe_buffer,
-        );
+        let token = self.shared.cancel.child_token();
+        self.shared
+            .connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(token.clone());
+        let rpc =
+            connect_in_memory_with_buffer(&self.server, token, self.shared.config.pipe_buffer);
         Client::connect(rpc).await
+    }
+
+    /// Cuts every open connection, as if the daemon had died. The daemon keeps its state and
+    /// accepts new connections, like a daemon that was restarted with its data intact.
+    pub fn sever(&self) {
+        let tokens: Vec<_> = self
+            .shared
+            .connections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        for token in tokens {
+            token.cancel();
+        }
+    }
+
+    /// Replaces the triggers and publishes them to `triggers.watch`.
+    pub fn set_triggers(&self, triggers: Vec<reno_proto::TriggerInfo>) {
+        self.shared.with(|w| w.triggers = triggers);
+    }
+
+    /// Replaces the definitions snapshot (and its file problems) and publishes it to
+    /// `defs.watch`.
+    pub fn set_defs(&self, defs: DefsSnapshot) {
+        self.shared.with(|w| w.defs = defs);
+    }
+
+    /// Makes every call of `method` (for example `trigger.fire`) answer with `error`, until
+    /// [`FakeDaemon::clear_failures`].
+    pub fn fail(&self, method: &str, error: ErrorObject) {
+        self.shared
+            .injected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(method.to_owned(), error);
+    }
+
+    /// Removes every injected error.
+    pub fn clear_failures(&self) {
+        self.shared
+            .injected
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// Queue statistics of the RPC server.
@@ -218,6 +308,19 @@ impl FakeDaemon {
 impl Drop for FakeDaemon {
     fn drop(&mut self) {
         self.shared.cancel.cancel();
+    }
+}
+
+/// The injected error of `method`, if a test set one.
+fn injected(shared: &Shared, method: &str) -> Result<(), ErrorObject> {
+    match shared
+        .injected
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(method)
+    {
+        Some(error) => Err(error.clone()),
+        None => Ok(()),
     }
 }
 
@@ -289,10 +392,9 @@ fn router(shared: &Arc<Shared>) -> Router {
     let hello = move |p: reno_proto::HelloParams, _| {
         let s = Arc::clone(&s);
         async move {
-            // The fake serves no definitions, so it does not claim the feature.
             let features = FEATURES
                 .iter()
-                .filter(|f| **f != reno_proto::FEATURE_DEFS)
+                .filter(|f| !s.config.without_features.iter().any(|w| w == **f))
                 .filter(|f| p.features.iter().any(|c| c == *f))
                 .map(|f| (*f).to_owned())
                 .collect();
@@ -361,6 +463,7 @@ fn router(shared: &Arc<Shared>) -> Router {
     let run_list = move |p: reno_proto::RunListParams, _| {
         let s = Arc::clone(&s);
         async move {
+            injected(&s, "run.list")?;
             let mut runs = s.read(World::summaries);
             if let Some(only) = &p.status {
                 runs.retain(|r| only.contains(&r.status));
@@ -428,8 +531,9 @@ fn router(shared: &Arc<Shared>) -> Router {
     let approval_decide = move |p: reno_proto::ApprovalDecideParams, _| {
         let s = Arc::clone(&s);
         async move {
+            injected(&s, "approval.decide")?;
             let approval = s
-                .with(|w| w.take_approval(&p.approval_id))
+                .with(|w| w.take_approval(&p.approval_id, p.decision))
                 .ok_or_else(|| not_found("approval"))?;
             s.tracker
                 .spawn(script::resume(Arc::clone(&s), approval.run_id, p.decision));
@@ -481,6 +585,111 @@ fn router(shared: &Arc<Shared>) -> Router {
         }
     };
 
+    let s = Arc::clone(shared);
+    let approval_history = move |p: reno_proto::ApprovalHistoryParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "approval.history")?;
+            let limit = p
+                .limit
+                .unwrap_or(reno_proto::APPROVAL_HISTORY_DEFAULT_LIMIT)
+                .clamp(1, reno_proto::APPROVAL_HISTORY_MAX_LIMIT);
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            Ok(reno_proto::ApprovalHistoryResult {
+                approvals: s.read(|w| w.history(p.run.as_ref(), limit)),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let trigger_list = move |_: NoParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "trigger.list")?;
+            Ok(reno_proto::TriggerListResult {
+                triggers: s.read(|w| w.triggers.clone()),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let trigger_fire = move |p: reno_proto::TriggerFireParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "trigger.fire")?;
+            if s.read(|w| !w.triggers.iter().any(|t| t.name == p.name)) {
+                return Err(not_found("trigger"));
+            }
+            let (outcome, run_id, prompt, scheduled_at_ms) = s
+                .with(|w| w.fire_trigger(&p.name, &s.cancel))
+                .map_err(|why| ErrorObject::new(ErrorCode::Conflict, why))?;
+            if outcome == reno_proto::FiringOutcome::Fired {
+                s.tracker
+                    .spawn(script::run_new(Arc::clone(&s), run_id.clone(), prompt));
+            }
+            Ok(reno_proto::TriggerFireResult {
+                outcome,
+                run_id: Some(run_id),
+                scheduled_at_ms,
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let triggers_watch = move |_: reno_proto::TriggersWatchParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            Ok(latest(
+                s.triggers_tx.subscribe(),
+                |all: &Vec<reno_proto::TriggerInfo>| reno_proto::TriggersSnapshot {
+                    triggers: all.clone(),
+                },
+            ))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let def_list = move |p: reno_proto::defs::DefListParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "def.list")?;
+            let mut snapshot = s.read(|w| w.defs.clone());
+            if let Some(kind) = p.kind {
+                snapshot.defs.retain(|d| d.kind == kind);
+            }
+            Ok(snapshot)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let def_get = move |p: reno_proto::defs::DefGetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "def.get")?;
+            s.read(|w| w.def_record(p.kind, &p.name, p.version))
+                .ok_or_else(|| not_found("definition"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let def_validate = move |p: reno_proto::defs::DefValidateParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "def.validate")?;
+            Ok(validate(p.kind, &p.name, &p.body))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let defs_watch = move |_: reno_proto::defs::DefsWatchParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            Ok(latest(s.defs_tx.subscribe(), |all: &DefsSnapshot| {
+                all.clone()
+            }))
+        }
+    };
+
     Router::new()
         .method::<DaemonHello, _, _>(hello)
         .method::<DaemonStatus, _, _>(status)
@@ -496,5 +705,52 @@ fn router(shared: &Arc<Shared>) -> Router {
         .subscription::<RunEvents, _, _, _>(run_events)
         .subscription::<RunsWatch, _, _, _>(runs_watch)
         .subscription::<ApprovalsWatch, _, _, _>(approvals_watch)
+        .method::<reno_proto::ApprovalHistory, _, _>(approval_history)
+        .method::<reno_proto::TriggerList, _, _>(trigger_list)
+        .method::<reno_proto::TriggerFire, _, _>(trigger_fire)
+        .subscription::<reno_proto::TriggersWatch, _, _, _>(triggers_watch)
+        .method::<reno_proto::DefList, _, _>(def_list)
+        .method::<reno_proto::DefGet, _, _>(def_get)
+        .method::<reno_proto::DefValidate, _, _>(def_validate)
+        .subscription::<reno_proto::DefsWatch, _, _, _>(defs_watch)
         .notification::<SubGap, _, _>(|_: SubGapParams, _| async {})
+}
+
+/// A simplified `def.validate`: the body must be an object named like the file, and a bot needs
+/// an executor. The real daemon checks far more; this is enough to show both outcomes.
+fn validate(kind: DefKind, name: &str, body: &serde_json::Value) -> DefValidateResult {
+    let file = kind.path_for(name);
+    let mut errors = Vec::new();
+    if !body.is_object() {
+        errors.push(reno_proto::defs::DefError::new(
+            &file,
+            "",
+            "a definition must be a table",
+        ));
+    } else {
+        if kind != DefKind::Policy && body.get("name").and_then(|n| n.as_str()) != Some(name) {
+            errors.push(reno_proto::defs::DefError::new(
+                &file,
+                "name",
+                "must equal the file name",
+            ));
+        }
+        let has_executor = body
+            .get("executors")
+            .and_then(|e| e.as_array())
+            .is_some_and(|e| !e.is_empty());
+        if kind == DefKind::Bot && !has_executor {
+            errors.push(reno_proto::defs::DefError::new(
+                &file,
+                "executors",
+                "at least one executor is required",
+            ));
+        }
+    }
+    let valid = errors.is_empty();
+    DefValidateResult {
+        valid,
+        errors,
+        hash: valid.then(|| format!("{:064x}", body.to_string().len())),
+    }
 }

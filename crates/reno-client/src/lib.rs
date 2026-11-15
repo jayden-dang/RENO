@@ -26,6 +26,9 @@ pub mod fake;
 
 pub use client::Client;
 pub use error::ClientError;
-pub use mirror::{Mirror, MirrorConfig, UPDATE_CAPACITY, Updates};
+pub use mirror::{Backoff, Connector, Mirror, MirrorConfig, UPDATE_CAPACITY, Updates};
 pub use paths::{default_data_dir, default_defs_dir, default_socket_path};
-pub use state::{Changed, ConnectionStatus, DaemonInfo, State, Transcript, Update};
+pub use state::{
+    Changed, ConnectionStatus, DaemonInfo, Feed, FeedState, Offline, OfflineKind, RunPage, State,
+    Transcript, Update, filter_key,
+};

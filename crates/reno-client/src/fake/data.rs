@@ -7,6 +7,7 @@
 //! Times are logical: [`NOW_MS`] is "now" in the demo, and every offset is a constant. Nothing
 //! here reads a clock.
 
+use reno_proto::defs::BotPin;
 use reno_proto::{
     ActionClass, Approval, ApprovalId, ApprovalSubject, ExecEvent, IdError, RunId, RunStatus,
     RunSummary, SessionRef, StopReason, TaskId, ToolCall,
@@ -41,6 +42,7 @@ pub(super) struct SeedRun {
 pub(super) struct Seed {
     pub(super) runs: Vec<SeedRun>,
     pub(super) approvals: Vec<Approval>,
+    pub(super) extras: super::extras::Extras,
 }
 
 type Ids<T> = Result<T, IdError>;
@@ -66,7 +68,10 @@ fn summary(
         prompt: None,
         model: Some(MODEL.to_owned()),
         stop_reason: stop,
-        bot: None,
+        bot: title.split_once(" \u{b7} ").map(|(bot, _)| BotPin {
+            name: bot.to_owned(),
+            version: 1,
+        }),
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
     })
@@ -159,6 +164,15 @@ fn approvals() -> Ids<Vec<Approval>> {
             2 * HOUR,
         )?,
     ])
+}
+
+/// An empty world: no runs, no approvals, no triggers, no definitions, no history.
+pub(super) fn empty_seed() -> Seed {
+    Seed {
+        runs: vec![],
+        approvals: vec![],
+        extras: super::extras::Extras::default(),
+    }
 }
 
 /// The demo world at startup.
@@ -276,6 +290,7 @@ pub(super) fn seed() -> Ids<Seed> {
     Ok(Seed {
         runs,
         approvals: approvals()?,
+        extras: super::extras::seed()?,
     })
 }
 
@@ -291,11 +306,17 @@ pub(super) enum Scenario {
     HoldFetch,
     /// Emit this many text events with no delay between them, then succeed. Prompt: `/burst N`.
     Burst(u32),
+    /// Work, then stay live until the run is cancelled or steered; a steer ends it in success.
+    /// Prompt: `/long`. For tests that need a run that is still going when they act on it.
+    Long,
 }
 
 impl Scenario {
     pub(super) fn of(prompt: &str) -> Self {
         let lower = prompt.to_lowercase();
+        if lower.starts_with("/long") {
+            return Self::Long;
+        }
         if let Some(n) = lower.strip_prefix("/burst ") {
             return Self::Burst(n.trim().parse().unwrap_or(100));
         }

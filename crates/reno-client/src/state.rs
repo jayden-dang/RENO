@@ -20,7 +20,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reno_proto::{Approval, DaemonStatusInfo, ExecEvent, HelloResult, RunId, RunSummary, Seq};
+use reno_proto::defs::{DefKind, DefRecord, DefValidateResult, DefsSnapshot};
+use reno_proto::{
+    Approval, ApprovalRecord, DaemonStatusInfo, ExecEvent, HelloResult, RunId, RunStatus,
+    RunSummary, Seq, TriggerInfo,
+};
 
 /// The state of the connection to the daemon.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -30,8 +34,83 @@ pub enum ConnectionStatus {
     Connecting,
     /// The handshake succeeded and the connection is up.
     Connected,
-    /// The connection closed. Reconnecting is out of scope for Phase 0; this is final.
+    /// There is no connection. [`State::offline`] says why. A [`Mirror`](crate::Mirror) started
+    /// with [`Mirror::supervise`](crate::Mirror::supervise) keeps retrying with a capped backoff
+    /// and moves to [`Connecting`](Self::Connecting) for each attempt.
     Disconnected,
+}
+
+/// Why there is no connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OfflineKind {
+    /// Nothing listens on the daemon's socket.
+    NotRunning,
+    /// The daemon speaks a protocol this client cannot use.
+    Incompatible,
+    /// A connection that was up closed.
+    Lost,
+    /// Anything else.
+    Other,
+}
+
+/// What the app knows about being offline. Cleared when the connection is up again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offline {
+    /// The cause, for choosing words.
+    pub kind: OfflineKind,
+    /// The error, for showing.
+    pub detail: String,
+    /// Failed attempts in a row since the last connection that lasted; 0 right after a loss.
+    pub attempt: u32,
+}
+
+/// One source the mirror keeps current. Each has its own [`FeedState`], so a screen can say
+/// "loading", "empty", "unavailable" and "failed" apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Feed {
+    /// `runs.watch`.
+    Runs,
+    /// `approvals.watch`.
+    Approvals,
+    /// `triggers.watch`.
+    Triggers,
+    /// `defs.watch`.
+    Defs,
+    /// `approval.history`, fetched on demand.
+    ApprovalHistory,
+}
+
+/// Where one [`Feed`] stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FeedState {
+    /// Nothing has arrived yet. The initial state, and the state after a request starts.
+    #[default]
+    Loading,
+    /// A snapshot arrived (it may be empty).
+    Live,
+    /// The daemon did not negotiate the feature behind it.
+    Unavailable,
+    /// The last attempt failed, with the reason.
+    Failed(String),
+}
+
+/// Whether a filtered run list has more pages on the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunPage {
+    /// No page was fetched for this filter.
+    NotLoaded,
+    /// Pass this as `before` to fetch the next page.
+    More(RunId),
+    /// Every page was fetched.
+    Done,
+}
+
+/// The canonical key of a status filter: sorted, no repeats. Empty means all runs.
+pub fn filter_key(statuses: &[RunStatus]) -> Vec<RunStatus> {
+    let mut key = statuses.to_vec();
+    key.sort();
+    key.dedup();
+    key
 }
 
 /// What the app knows about the daemon it is connected to.
@@ -83,6 +162,37 @@ pub enum Update {
     },
     /// The whole pending approval list (`approvals.watch`).
     Approvals(Vec<Approval>),
+    /// Every trigger and its state (`triggers.watch`).
+    Triggers(Vec<TriggerInfo>),
+    /// The definitions in force and the file problems (`defs.watch`).
+    Defs(DefsSnapshot),
+    /// Decided approvals, newest decision first (`approval.history`).
+    ApprovalHistory(Vec<ApprovalRecord>),
+    /// One page of `run.list` for the filter `filter` (see [`filter_key`]). The runs are added to
+    /// the paged set; `next` is the cursor for the following page, `None` on the last.
+    RunsPage {
+        /// The filter the page was fetched with.
+        filter: Vec<RunStatus>,
+        /// The page.
+        runs: Vec<RunSummary>,
+        /// The cursor for the next page.
+        next: Option<RunId>,
+    },
+    /// One stored version of a definition with its body (`def.get`).
+    DefRecord(DefRecord),
+    /// The outcome of `def.validate` for a definition.
+    Validation {
+        /// The kind.
+        kind: DefKind,
+        /// The name.
+        name: String,
+        /// The outcome.
+        result: DefValidateResult,
+    },
+    /// There is no connection (and why). Implies [`ConnectionStatus::Disconnected`].
+    Offline(Offline),
+    /// One feed changed state: it failed, is unavailable, or started loading.
+    Feed(Feed, FeedState),
 }
 
 /// What an [`Update`] changed. Empty means nothing did.
@@ -94,6 +204,9 @@ pub enum Update {
 /// - `runs`: the run list changed (a run was added, removed, or its summary differs), which is
 ///   what a list view shows;
 /// - `approvals`: the pending approval list changed;
+/// - `triggers`, `defs`, `history`: the trigger list, the definitions, the approval history
+///   changed;
+/// - `feeds`: some [`Feed`] changed state;
 /// - [`Changed::run`]: this run's summary or transcript changed, which is what a run page shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changed {
@@ -105,13 +218,29 @@ pub struct Changed {
     pub runs: bool,
     /// The pending approvals changed.
     pub approvals: bool,
+    /// The triggers changed.
+    pub triggers: bool,
+    /// The definitions, their file problems, their stored bodies or validations changed.
+    pub defs: bool,
+    /// The approval history changed.
+    pub history: bool,
+    /// A [`Feed`] changed state.
+    pub feeds: bool,
     touched: BTreeSet<RunId>,
 }
 
 impl Changed {
     /// Whether nothing changed.
     pub fn is_empty(&self) -> bool {
-        !(self.connection || self.daemon || self.runs || self.approvals) && self.touched.is_empty()
+        !(self.connection
+            || self.daemon
+            || self.runs
+            || self.approvals
+            || self.triggers
+            || self.defs
+            || self.history
+            || self.feeds)
+            && self.touched.is_empty()
     }
 
     /// Whether this run's summary or transcript changed.
@@ -130,6 +259,10 @@ impl Changed {
         self.daemon |= other.daemon;
         self.runs |= other.runs;
         self.approvals |= other.approvals;
+        self.triggers |= other.triggers;
+        self.defs |= other.defs;
+        self.history |= other.history;
+        self.feeds |= other.feeds;
         self.touched.extend(other.touched);
     }
 }
@@ -142,6 +275,16 @@ pub struct State {
     runs: BTreeMap<RunId, RunSummary>,
     transcripts: BTreeMap<RunId, Transcript>,
     approvals: Vec<Approval>,
+    /// Runs known from `run.list` pages and `run.get`, outside the `runs.watch` window.
+    fetched: BTreeMap<RunId, RunSummary>,
+    pages: BTreeMap<Vec<RunStatus>, Option<RunId>>,
+    triggers: Vec<TriggerInfo>,
+    defs: DefsSnapshot,
+    def_records: BTreeMap<(DefKind, String, u32), DefRecord>,
+    validations: BTreeMap<(DefKind, String), DefValidateResult>,
+    history: Vec<ApprovalRecord>,
+    offline: Option<Offline>,
+    feeds: BTreeMap<Feed, FeedState>,
 }
 
 impl State {
@@ -160,6 +303,9 @@ impl State {
                     self.connection = status;
                     changed.connection = true;
                 }
+                if status == ConnectionStatus::Connected && self.offline.take().is_some() {
+                    changed.connection = true;
+                }
             }
             Update::Daemon(info) => {
                 if self.daemon.as_ref() != Some(&info) {
@@ -168,7 +314,13 @@ impl State {
                 }
             }
             Update::Runs(list) => self.replace_runs(list, &mut changed),
-            Update::RunUpserted(summary) => self.upsert_run(summary, &mut changed),
+            Update::RunUpserted(summary) => {
+                if self.runs.contains_key(&summary.run_id) {
+                    self.upsert_run(summary, &mut changed);
+                } else {
+                    self.add_fetched(summary, &mut changed);
+                }
+            }
             Update::RunEvent { run, seq, event } => {
                 let transcript = self.transcripts.entry(run.clone()).or_default();
                 if transcript.highest.is_none_or(|highest| seq > highest) {
@@ -183,12 +335,94 @@ impl State {
                     self.approvals = list;
                     changed.approvals = true;
                 }
+                self.set_feed(Feed::Approvals, FeedState::Live, &mut changed);
             }
+            Update::Triggers(mut list) => {
+                list.sort_by(|a, b| a.name.cmp(&b.name));
+                if self.triggers != list {
+                    self.triggers = list;
+                    changed.triggers = true;
+                }
+                self.set_feed(Feed::Triggers, FeedState::Live, &mut changed);
+            }
+            Update::Defs(mut snapshot) => {
+                snapshot
+                    .defs
+                    .sort_by(|a, b| (a.kind, &a.name).cmp(&(b.kind, &b.name)));
+                if self.defs != snapshot {
+                    self.defs = snapshot;
+                    changed.defs = true;
+                }
+                self.set_feed(Feed::Defs, FeedState::Live, &mut changed);
+            }
+            Update::ApprovalHistory(list) => {
+                if self.history != list {
+                    self.history = list;
+                    changed.history = true;
+                }
+                self.set_feed(Feed::ApprovalHistory, FeedState::Live, &mut changed);
+            }
+            Update::RunsPage { filter, runs, next } => {
+                let key = filter_key(&filter);
+                for summary in runs {
+                    self.add_fetched(summary, &mut changed);
+                }
+                if self.pages.get(&key) != Some(&next) {
+                    self.pages.insert(key, next);
+                    changed.runs = true;
+                }
+            }
+            Update::DefRecord(record) => {
+                let key = (record.kind, record.name.clone(), record.version);
+                if self.def_records.get(&key) != Some(&record) {
+                    self.def_records.insert(key, record);
+                    changed.defs = true;
+                }
+            }
+            Update::Validation { kind, name, result } => {
+                let key = (kind, name);
+                if self.validations.get(&key) != Some(&result) {
+                    self.validations.insert(key, result);
+                    changed.defs = true;
+                }
+            }
+            Update::Offline(offline) => {
+                if self.connection != ConnectionStatus::Disconnected {
+                    self.connection = ConnectionStatus::Disconnected;
+                    changed.connection = true;
+                }
+                if self.offline.as_ref() != Some(&offline) {
+                    self.offline = Some(offline);
+                    changed.connection = true;
+                }
+            }
+            Update::Feed(feed, state) => self.set_feed(feed, state, &mut changed),
         }
         changed
     }
 
+    fn set_feed(&mut self, feed: Feed, state: FeedState, changed: &mut Changed) {
+        if self.feed(feed) != state {
+            self.feeds.insert(feed, state);
+            changed.feeds = true;
+        }
+    }
+
+    /// Adds a run known from outside the watch window. A run the window holds is left to it.
+    fn add_fetched(&mut self, summary: RunSummary, changed: &mut Changed) {
+        if self.runs.contains_key(&summary.run_id) {
+            return;
+        }
+        if self.fetched.get(&summary.run_id) != Some(&summary) {
+            changed.runs = true;
+            changed.touched.insert(summary.run_id.clone());
+            self.fetched.insert(summary.run_id.clone(), summary);
+        }
+    }
+
+    /// Upserts into the window. A fetched copy of the same run is dropped: the window is newer.
     fn upsert_run(&mut self, summary: RunSummary, changed: &mut Changed) {
+        self.fetched.remove(&summary.run_id);
         if self.runs.get(&summary.run_id) != Some(&summary) {
             changed.runs = true;
             changed.touched.insert(summary.run_id.clone());
@@ -212,6 +446,7 @@ impl State {
         for summary in list {
             self.upsert_run(summary, changed);
         }
+        self.set_feed(Feed::Runs, FeedState::Live, changed);
     }
 
     /// The connection status.
@@ -224,9 +459,70 @@ impl State {
         self.daemon.as_ref()
     }
 
-    /// One run's summary.
+    /// One run's summary, from the watch window or from what was fetched.
     pub fn run(&self, id: &RunId) -> Option<&RunSummary> {
-        self.runs.get(id)
+        self.runs.get(id).or_else(|| self.fetched.get(id))
+    }
+
+    /// The window plus the runs fetched by page or by id, newest first, narrowed to `statuses`
+    /// (all when empty).
+    pub fn all_runs(&self, statuses: &[RunStatus]) -> Vec<&RunSummary> {
+        let mut runs: Vec<&RunSummary> = self
+            .runs
+            .values()
+            .chain(self.fetched.values())
+            .filter(|r| statuses.is_empty() || statuses.contains(&r.status))
+            .collect();
+        runs.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.run_id.cmp(&b.run_id))
+        });
+        runs
+    }
+
+    /// Whether the daemon has more pages of runs for this filter.
+    pub fn run_page(&self, statuses: &[RunStatus]) -> RunPage {
+        match self.pages.get(&filter_key(statuses)) {
+            None => RunPage::NotLoaded,
+            Some(Some(next)) => RunPage::More(next.clone()),
+            Some(None) => RunPage::Done,
+        }
+    }
+
+    /// Every trigger, by name.
+    pub fn triggers(&self) -> &[TriggerInfo] {
+        &self.triggers
+    }
+
+    /// The definitions in force and the file problems.
+    pub fn defs(&self) -> &DefsSnapshot {
+        &self.defs
+    }
+
+    /// A stored version of a definition, once fetched.
+    pub fn def_record(&self, kind: DefKind, name: &str, version: u32) -> Option<&DefRecord> {
+        self.def_records.get(&(kind, name.to_owned(), version))
+    }
+
+    /// The last `def.validate` outcome for a definition.
+    pub fn validation(&self, kind: DefKind, name: &str) -> Option<&DefValidateResult> {
+        self.validations.get(&(kind, name.to_owned()))
+    }
+
+    /// Decided approvals, newest decision first.
+    pub fn approval_history(&self) -> &[ApprovalRecord] {
+        &self.history
+    }
+
+    /// Why there is no connection; `None` while connected or before the first attempt ends.
+    pub fn offline(&self) -> Option<&Offline> {
+        self.offline.as_ref()
+    }
+
+    /// Where one feed stands.
+    pub fn feed(&self, feed: Feed) -> FeedState {
+        self.feeds.get(&feed).cloned().unwrap_or_default()
     }
 
     /// Every known run, in a stable order: newest first, then by id.
@@ -479,6 +775,181 @@ mod tests {
         assert!(s.apply(Update::Daemon(info.clone())).daemon);
         assert!(s.apply(Update::Daemon(info.clone())).is_empty());
         assert_eq!(s.daemon(), Some(&info));
+    }
+
+    #[test]
+    fn feeds_start_loading_and_a_snapshot_makes_them_live() {
+        let mut s = State::new();
+        for feed in [Feed::Runs, Feed::Approvals, Feed::Triggers, Feed::Defs] {
+            assert_eq!(s.feed(feed), FeedState::Loading);
+        }
+        let c = s.apply(Update::Triggers(vec![]));
+        assert!(
+            c.feeds && !c.triggers,
+            "an empty list changes the feed state only"
+        );
+        assert_eq!(s.feed(Feed::Triggers), FeedState::Live);
+        assert!(s.apply(Update::Triggers(vec![])).is_empty());
+        let c = s.apply(Update::Feed(Feed::Defs, FeedState::Failed("boom".into())));
+        assert!(c.feeds);
+        assert_eq!(s.feed(Feed::Defs), FeedState::Failed("boom".into()));
+        let c = s.apply(Update::Defs(DefsSnapshot::default()));
+        assert!(c.feeds && !c.defs);
+        assert_eq!(s.feed(Feed::Defs), FeedState::Live);
+        s.apply(Update::Feed(Feed::Approvals, FeedState::Unavailable));
+        assert_eq!(s.feed(Feed::Approvals), FeedState::Unavailable);
+    }
+
+    #[test]
+    fn offline_sets_disconnected_and_connected_clears_it() {
+        let mut s = State::new();
+        let offline = Offline {
+            kind: OfflineKind::NotRunning,
+            detail: "no daemon".into(),
+            attempt: 2,
+        };
+        let c = s.apply(Update::Offline(offline.clone()));
+        assert!(c.connection);
+        assert_eq!(s.connection(), ConnectionStatus::Disconnected);
+        assert_eq!(s.offline(), Some(&offline));
+        assert!(s.apply(Update::Offline(offline.clone())).is_empty());
+        // A retry in progress keeps the reason on screen.
+        s.apply(Update::Connection(ConnectionStatus::Connecting));
+        assert_eq!(s.offline(), Some(&offline));
+        let c = s.apply(Update::Connection(ConnectionStatus::Connected));
+        assert!(c.connection);
+        assert!(s.offline().is_none());
+    }
+
+    #[test]
+    fn triggers_and_defs_are_sorted_and_idempotent() {
+        use reno_proto::defs::DefSummary;
+        let trigger = |name: &str| TriggerInfo {
+            name: name.into(),
+            kind: "manual".into(),
+            bot: "keeper".into(),
+            version: 1,
+            status: reno_proto::TriggerStatus::Manual,
+            next_due_at_ms: None,
+            last_fired_at_ms: None,
+            last_run_id: None,
+            failures: 0,
+            backoff_until_ms: None,
+            error: None,
+        };
+        let mut s = State::new();
+        let c = s.apply(Update::Triggers(vec![trigger("b"), trigger("a")]));
+        assert!(c.triggers);
+        assert_eq!(s.triggers()[0].name, "a");
+        let same = s.apply(Update::Triggers(vec![trigger("a"), trigger("b")]));
+        assert!(same.is_empty());
+        let def = |kind, name: &str| DefSummary {
+            kind,
+            name: name.into(),
+            version: 1,
+            hash: "0".repeat(64),
+            created_at_ms: 1,
+        };
+        let snapshot = DefsSnapshot {
+            defs: vec![
+                def(DefKind::Trigger, "t"),
+                def(DefKind::Bot, "z"),
+                def(DefKind::Bot, "a"),
+            ],
+            errors: vec![],
+        };
+        assert!(s.apply(Update::Defs(snapshot.clone())).defs);
+        let names: Vec<_> = s.defs().defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["a", "z", "t"]);
+        assert!(s.apply(Update::Defs(snapshot)).is_empty());
+    }
+
+    #[test]
+    fn fetched_runs_join_the_merged_list_but_not_the_window() {
+        let mut s = State::new();
+        s.apply(Update::Runs(vec![summary("w", RunStatus::Running, 30)]));
+        let c = s.apply(Update::RunsPage {
+            filter: vec![RunStatus::Failed, RunStatus::Failed],
+            runs: vec![
+                summary("w", RunStatus::Failed, 30),
+                summary("old", RunStatus::Failed, 5),
+            ],
+            next: Some(run_id("old")),
+        });
+        assert!(c.runs);
+        // The window's copy wins, and the window itself is untouched.
+        assert_eq!(s.runs().len(), 1);
+        assert_eq!(s.run(&run_id("w")).unwrap().status, RunStatus::Running);
+        let all: Vec<_> = s
+            .all_runs(&[])
+            .iter()
+            .map(|r| r.run_id.to_string())
+            .collect();
+        assert_eq!(all, ["run_w", "run_old"]);
+        assert_eq!(s.all_runs(&[RunStatus::Failed]).len(), 1);
+        assert_eq!(
+            s.run_page(&[RunStatus::Failed]),
+            RunPage::More(run_id("old"))
+        );
+        assert_eq!(s.run_page(&[]), RunPage::NotLoaded);
+        // The same page again changes nothing.
+        let again = s.apply(Update::RunsPage {
+            filter: vec![RunStatus::Failed],
+            runs: vec![summary("old", RunStatus::Failed, 5)],
+            next: Some(run_id("old")),
+        });
+        assert!(again.is_empty());
+        // A fetched run that enters the window moves there.
+        s.apply(Update::Runs(vec![
+            summary("w", RunStatus::Running, 30),
+            summary("old", RunStatus::Succeeded, 5),
+        ]));
+        assert_eq!(s.runs().len(), 2);
+        assert_eq!(s.all_runs(&[]).len(), 2);
+        // `run.get` of a run outside the window is kept as fetched.
+        s.apply(Update::RunUpserted(summary("far", RunStatus::Failed, 1)));
+        assert!(s.run(&run_id("far")).is_some());
+        assert_eq!(s.runs().len(), 2);
+    }
+
+    #[test]
+    fn definition_records_and_validations_are_cached() {
+        let mut s = State::new();
+        let record = DefRecord {
+            kind: DefKind::Bot,
+            name: "keeper".into(),
+            version: 1,
+            hash: "0".repeat(64),
+            body: serde_json::json!({"access": "supervised"}),
+            created_at_ms: 1,
+            latest: true,
+        };
+        assert!(s.apply(Update::DefRecord(record.clone())).defs);
+        assert!(s.apply(Update::DefRecord(record.clone())).is_empty());
+        assert_eq!(s.def_record(DefKind::Bot, "keeper", 1), Some(&record));
+        assert!(s.def_record(DefKind::Bot, "keeper", 2).is_none());
+        let result = DefValidateResult {
+            valid: true,
+            errors: vec![],
+            hash: None,
+        };
+        let update = || Update::Validation {
+            kind: DefKind::Bot,
+            name: "keeper".into(),
+            result: result.clone(),
+        };
+        assert!(s.apply(update()).defs);
+        assert!(s.apply(update()).is_empty());
+        assert_eq!(s.validation(DefKind::Bot, "keeper"), Some(&result));
+    }
+
+    #[test]
+    fn history_replaces_and_marks_its_feed() {
+        let mut s = State::new();
+        assert_eq!(s.feed(Feed::ApprovalHistory), FeedState::Loading);
+        let c = s.apply(Update::ApprovalHistory(vec![]));
+        assert!(c.feeds && !c.history);
+        assert_eq!(s.feed(Feed::ApprovalHistory), FeedState::Live);
     }
 
     #[test]
