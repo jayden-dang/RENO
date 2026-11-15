@@ -222,7 +222,8 @@ pub struct RunCancelResult {
 pub struct RunEventsParams {
     /// The run to follow.
     pub run_id: RunId,
-    /// Resume after this sequence number; start from the beginning when absent.
+    /// First sequence number to deliver, **inclusive** — the value a `sub.gap` names as
+    /// `resumeFrom`. Start from the beginning when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_seq: Option<Seq>,
 }
@@ -246,7 +247,8 @@ pub struct RunsWatchParams {
     pub status: Option<Vec<RunStatus>>,
 }
 
-/// One item of the `runs.watch` subscription: the whole current list (latest value wins).
+/// One item of the `runs.watch` subscription: the whole current list (latest value wins). The
+/// first item is always the current list, sent immediately on subscribe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunsSnapshot {

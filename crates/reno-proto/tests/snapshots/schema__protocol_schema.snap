@@ -1449,7 +1449,7 @@ expression: protocol_schema()
                 "type": "null"
               }
             ],
-            "description": "Resume after this sequence number; start from the beginning when absent."
+            "description": "First sequence number to deliver, **inclusive** — the value a `sub.gap` names as\n`resumeFrom`. Start from the beginning when absent."
           },
           "runId": {
             "$ref": "#/$defs/RunId",
@@ -1637,7 +1637,7 @@ expression: protocol_schema()
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One item of the `runs.watch` subscription: the whole current list (latest value wins).",
+        "description": "One item of the `runs.watch` subscription: the whole current list (latest value wins). The\nfirst item is always the current list, sent immediately on subscribe.",
         "properties": {
           "runs": {
             "description": "Current runs, newest first.",
