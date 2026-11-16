@@ -426,12 +426,17 @@ impl Drop for Daemon {
 }
 
 fn reno_command(bins: &Bins, dir: &Path) -> Command {
+    // Runs work where `reno` is started. A write run outside a git repository is refused
+    // (worktree isolation), except in the daemon's own scratch directory, which it works in in
+    // place: so the bench starts `reno` there.
+    let scratch = dir.join("workspace");
+    let _ = std::fs::create_dir_all(&scratch);
     let mut command = Command::new(&bins.reno);
     command
         .env("RENO_DATA_DIR", dir)
         .env("RENO_SOCKET", socket(dir))
         .env("RENO_DEFS_DIR", dir.join("defs"))
-        .current_dir(dir)
+        .current_dir(scratch)
         .stdin(Stdio::null());
     command
 }
