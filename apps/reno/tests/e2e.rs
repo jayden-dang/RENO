@@ -88,6 +88,8 @@ impl World {
             // `reno daemon start` passes its environment on to `renod`: never probe a real
             // harness CLI from a test.
             .env("RENO_NO_HARNESSES", "1")
+            // Secrets live in the daemon's memory, never the real Keychain.
+            .env("RENO_MEMORY_SECRETS", "1")
             .current_dir(self.data_dir.join("workspace"))
             .stdin(Stdio::null());
         if self.hold_mock {
@@ -1092,5 +1094,72 @@ fn run_show_explains_which_executor_was_chosen_and_why() {
         text(&missing.stderr).contains("not found"),
         "{}",
         text(&missing.stderr)
+    );
+}
+
+#[test]
+fn secrets_are_set_from_stdin_listed_by_name_and_deleted() {
+    use std::io::Write;
+
+    const VALUE: &str = "ghp_exampleExampleExample1234";
+    let world = World::new();
+    world.start_daemon();
+
+    let set = |value: &str| {
+        let mut child = world
+            .command(&["secret", "set", "GITHUB_TOKEN", "--from-stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run reno");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(value.as_bytes())
+            .unwrap();
+        child.wait_with_output().expect("reno finished")
+    };
+    let first = set(&format!("{VALUE}\n"));
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    assert_eq!(text(&first.stdout).trim(), "stored GITHUB_TOKEN");
+    let second = set(&format!("{VALUE}\n"));
+    assert_eq!(text(&second.stdout).trim(), "replaced GITHUB_TOKEN");
+    for out in [&first, &second] {
+        assert!(!text(&out.stdout).contains(VALUE) && !text(&out.stderr).contains(VALUE));
+    }
+
+    let listed = world.reno(&["secret", "list"]);
+    assert!(listed.status.success(), "{}", text(&listed.stderr));
+    assert_eq!(text(&listed.stdout).trim(), "GITHUB_TOKEN  set");
+    let json = world.json(&["secret", "list"]);
+    assert_eq!(
+        json["secrets"],
+        serde_json::json!([{"name": "GITHUB_TOKEN", "set": true}])
+    );
+    assert!(!json.to_string().contains(VALUE));
+
+    // Without --from-stdin a value is read only from a terminal; a pipe is refused.
+    let refused = world.reno(&["secret", "set", "OTHER_TOKEN"]);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused.stderr).contains("--from-stdin"),
+        "{}",
+        text(&refused.stderr)
+    );
+    // An empty value and a bad name store nothing.
+    assert!(!set("\n").status.success());
+    let bad = world.reno(&["secret", "set", "lower", "--from-stdin"]);
+    assert!(!bad.status.success());
+    assert!(text(&bad.stderr).contains("not a valid secret name"));
+
+    let deleted = world.reno(&["secret", "delete", "GITHUB_TOKEN"]);
+    assert_eq!(text(&deleted.stdout).trim(), "deleted GITHUB_TOKEN");
+    let again = world.reno(&["secret", "delete", "GITHUB_TOKEN"]);
+    assert_eq!(text(&again.stdout).trim(), "GITHUB_TOKEN was not set");
+    assert_eq!(
+        world.json(&["secret", "list"])["secrets"],
+        serde_json::json!([])
     );
 }

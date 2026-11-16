@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use super::defs::{FakePort, file, setup};
 use super::{Fx, START_MS, id, mock, registry, until};
 use crate::Clock as _;
+use crate::Secrets as _;
 use crate::{
     ExecutorRegistry, KernelConfig, KernelError, WakeSignal, Watch, WatchSpec, WatchStream,
 };
@@ -617,6 +618,58 @@ async fn failing_to_start_backs_off_5_10_20_minutes_with_one_notification_then_r
             .count(),
         1
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missing_secret_backs_a_trigger_off_like_a_signed_out_account_until_it_is_set() {
+    let secrets = Arc::new(crate::FakeSecrets::new());
+    let port = FakePort::with(vec![
+        file(
+            DefKind::Bot,
+            "keeper",
+            "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"mock\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
+        ),
+        trigger("tick", "kind = \"every\"\nevery = \"1m\"", "go"),
+    ]);
+    let m = mock([]);
+    let fx = Fx::with_definitions_at(
+        START_MS,
+        KernelConfig::default(),
+        registry(std::slice::from_ref(&m)),
+        setup(&port).with_secrets(secrets.clone()),
+    )
+    .await;
+
+    step(&fx, MIN).await;
+    until(async || info(&fx, "tick").failures.eq(&1).then_some(())).await;
+    assert_eq!(info(&fx, "tick").status, TriggerStatus::BackedOff);
+    assert_eq!(
+        info(&fx, "tick")
+            .backoff_until_ms
+            .map(|ms| i64::try_from(ms).unwrap()),
+        Some(START_MS + MIN + 5 * MIN),
+        "5 minutes, the first step of the same ladder"
+    );
+    assert_eq!(firings(&fx).await[0].outcome, FiringOutcome::BackedOff);
+    assert!(m.log().specs.is_empty(), "nothing was started");
+
+    // A person sets the secret; when the backoff ends the next run starts and the episode ends.
+    secrets
+        .set(
+            "GITHUB_TOKEN",
+            crate::SecretValue::new("ghp_exampleExample1234"),
+        )
+        .await
+        .unwrap();
+    let until_ms = info(&fx, "tick")
+        .backoff_until_ms
+        .map(|ms| i64::try_from(ms).unwrap())
+        .unwrap();
+    fx.clock.set(until_ms);
+    tokio::time::advance(Duration::from_millis(u64::try_from(5 * MIN).unwrap())).await;
+    until(async || info(&fx, "tick").failures.eq(&0).then_some(())).await;
+    assert_eq!(info(&fx, "tick").status, TriggerStatus::Scheduled);
+    assert_eq!(m.log().specs.len(), 1);
 }
 
 /// An executor whose probe says it is signed out, and whose `start` must never be reached.

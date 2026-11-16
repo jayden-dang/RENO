@@ -22,6 +22,10 @@ const HOUR: u64 = 60 * MINUTE;
 /// The bots of the demo team.
 pub const BOTS: [&str; 5] = ["keeper", "scout", "builder", "reviewer", "architect"];
 
+/// The secrets some demo bots ask for, as `(bot, secret)`. None is set until `secret.set`.
+pub(super) const BOT_SECRETS: [(&str, &str); 2] =
+    [("builder", "GITHUB_TOKEN"), ("keeper", "GITHUB_TOKEN")];
+
 /// The executors the router takes when the task names neither an executor nor a bot.
 pub(super) const DEFAULT_EXECUTORS: [&str; 2] = ["claude-code", "codex"];
 

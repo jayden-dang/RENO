@@ -36,6 +36,9 @@ use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
 };
 use crate::run::{NotResumed, RunStatus, StopDetail, StopReason};
+use crate::secrets::{
+    SecretDeleteParams, SecretDeleteResult, SecretListResult, SecretSetParams, SecretSetResult,
+};
 use crate::triggers::{
     TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
 };
@@ -103,6 +106,9 @@ pub const FEATURE_ATTACHMENTS: &str = "attachments";
 /// refused with the `BudgetExceeded` error code.
 pub const FEATURE_BUDGET: &str = "budget";
 
+/// Feature: `secret.list`, `secret.set` and `secret.delete` exist, and a bot's `secrets` reach
+/// its runs as environment variables.
+pub const FEATURE_SECRETS: &str = "secrets";
 /// Feature: `run.resume` exists, journals may carry `ExecEvent::Resumed`, and a run that was
 /// interrupted may be resumed by the daemon itself.
 pub const FEATURE_RUN_RESUME: &str = "run.resume";
@@ -131,6 +137,7 @@ pub const FEATURES: &[&str] = &[
     crate::agent::FEATURE_AGENT,
     FEATURE_RUN_RESUME,
     FEATURE_STOP_DETAIL,
+    FEATURE_SECRETS,
 ];
 
 /// A request with a single reply.
@@ -759,6 +766,20 @@ method!(
     WorkspaceClean, "workspace.clean", WorkspaceCleanParams => WorkspaceCleanResult
 );
 method!(
+    /// `secret.list`: the names of the secrets in the Keychain and of those bots ask for, and
+    /// whether each is set. Never a value. Needs feature `secrets`.
+    SecretList, "secret.list", NoParams => SecretListResult
+);
+method!(
+    /// `secret.set`: stores a value under a name, straight into the Keychain. The one place a
+    /// value crosses the wire, and only toward the daemon. Needs feature `secrets`.
+    SecretSet, "secret.set", SecretSetParams => SecretSetResult
+);
+method!(
+    /// `secret.delete`: removes a secret from the Keychain. Needs feature `secrets`.
+    SecretDelete, "secret.delete", SecretDeleteParams => SecretDeleteResult
+);
+method!(
     /// `executor.list`: every executor with its descriptor and last health. Needs feature
     /// `executors`.
     ExecutorList, "executor.list", NoParams => ExecutorListResult
@@ -888,6 +909,9 @@ pub fn protocol_schema() -> Value {
             method_entry::<WorkspaceList>(),
             method_entry::<WorkspaceGet>(),
             method_entry::<WorkspaceClean>(),
+            method_entry::<SecretList>(),
+            method_entry::<SecretSet>(),
+            method_entry::<SecretDelete>(),
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),

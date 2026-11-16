@@ -90,6 +90,9 @@ pub(crate) struct RunInfo {
     /// The daily token ceiling of the run's bot; the supervisor stops the run when its bot's
     /// tokens for the day reach it.
     pub(crate) token_ceiling: Option<u64>,
+    /// The values of the run's secrets, when it has any: everything the executor yields passes
+    /// through it before it is journaled, broadcast or stored.
+    pub(crate) redactor: Option<Arc<reno_harness::ValueRedactor>>,
     /// Set when this attempt continues a session: the attempt that ended and the session. The
     /// supervisor journals it as a `Resumed` before anything else.
     pub(crate) resumed: Option<(u32, reno_proto::SessionRef)>,
@@ -184,6 +187,12 @@ impl Supervisor {
         slot: Slot,
     ) -> Self {
         let records = Records::take(&handle);
+        let stream = match info.redactor.clone() {
+            Some(redactor) => stream
+                .map(move |event| redactor.redact_event(event))
+                .boxed(),
+            None => stream,
+        };
         Self {
             shared,
             run,

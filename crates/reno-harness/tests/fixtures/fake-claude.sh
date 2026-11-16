@@ -64,6 +64,17 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"done!","errors":[],"usage":{"input_tokens":10,"output_tokens":20},"session_id":"sess-1","total_cost_usd":0.01}'
   ;;
 
+*scenario:env*)
+  # Prints the environment the child was given to the file the run's own env names, so a test
+  # can read what reached it (tests/child_env.rs).
+  env | sort > "$RENO_FAKE_ENV_OUT"
+  # The arguments, one per line: the `--mcp-config` JSON names the env of the MCP servers the
+  # real CLI would start, which is how Reno's own server gets its variables.
+  printf '%s\n' "$@" > "$RENO_FAKE_ENV_OUT.args"
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-env"}'
+  emit '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-env"}'
+  ;;
+
 *scenario:wake*)
   # Eager-done + wake, the live-verified 2.1.228 background-subagent shape:
   # the parent turn settles with result #1 while the subagent still runs;

@@ -14,6 +14,8 @@
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
+//! - [`secrets`]: the `Secrets` port over the macOS Keychain, behind a `Keychain` trait with an
+//!   in-memory fake.
 //! - [`link`]: the `RunLink` port: each run's token file and the `reno mcp` server that reads it.
 //! - [`worktrees`]: the `Workspace` port over git worktrees in `<data-dir>/worktrees/`.
 //! - `handlers`: methods and subscriptions to kernel calls.
@@ -36,6 +38,7 @@ pub mod lock;
 pub mod logging;
 pub mod paths;
 pub mod power;
+pub mod secrets;
 pub mod worktrees;
 
 pub use daemon::{

@@ -4,7 +4,7 @@
 //! are not a contract. Both error enums are `non_exhaustive`, so an unknown variant becomes
 //! `Internal`, never a panic and never an unmapped code.
 
-use reno_kernel::{KernelError, WorkspaceError};
+use reno_kernel::{KernelError, SecretsError, WorkspaceError};
 use reno_proto::{ErrorCode, ErrorObject};
 use reno_store::StoreError;
 
@@ -120,6 +120,25 @@ pub fn install_error(error: &InstallError) -> ErrorObject {
     let code = install_code_of(error);
     if code == ErrorCode::Internal {
         tracing::error!(%error, "internal error while installing an executor");
+    }
+    ErrorObject::new(code, error.to_string())
+}
+
+/// The code a secret-store error crosses the socket with.
+pub fn secrets_code_of(error: &SecretsError) -> ErrorCode {
+    match error {
+        SecretsError::InvalidName { .. } | SecretsError::InvalidValue => ErrorCode::InvalidParams,
+        SecretsError::Unavailable(_) => ErrorCode::Unavailable,
+        SecretsError::Failed(_) => ErrorCode::Internal,
+    }
+}
+
+/// The error object for a secret-store error. No variant carries a value, so the message is safe
+/// to send and to log.
+pub fn secrets_error(error: &SecretsError) -> ErrorObject {
+    let code = secrets_code_of(error);
+    if code == ErrorCode::Internal {
+        tracing::error!(%error, "the secret store failed while serving a request");
     }
     ErrorObject::new(code, error.to_string())
 }
@@ -339,6 +358,29 @@ mod tests {
         for (error, code) in cases {
             assert_eq!(install_code_of(&error), code, "{error}");
             assert_eq!(install_error(&error).code, code, "{error}");
+        }
+    }
+
+    #[test]
+    fn every_secrets_error_has_its_code() {
+        let cases: Vec<(SecretsError, ErrorCode)> = vec![
+            (
+                SecretsError::InvalidName {
+                    name: "x".into(),
+                    reason: reno_proto::SecretNameError::Malformed,
+                },
+                ErrorCode::InvalidParams,
+            ),
+            (SecretsError::InvalidValue, ErrorCode::InvalidParams),
+            (
+                SecretsError::Unavailable("locked".into()),
+                ErrorCode::Unavailable,
+            ),
+            (SecretsError::Failed("x".into()), ErrorCode::Internal),
+        ];
+        for (error, code) in cases {
+            assert_eq!(secrets_code_of(&error), code, "{error}");
+            assert_eq!(secrets_error(&error).code, code, "{error}");
         }
     }
 

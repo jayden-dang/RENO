@@ -175,19 +175,22 @@ impl Kernel {
         // Without a port the kernel still validates bodies, against the executors it has.
         let watch_port = definitions.as_ref().and_then(|setup| setup.watch.clone());
         let wake = definitions.as_ref().and_then(|setup| setup.wake.clone());
+        let secrets = definitions.as_ref().and_then(|setup| setup.secrets.clone());
         let has_definitions = definitions.is_some();
         let context = match &definitions {
             Some(setup) => setup.context.clone(),
             None => ValidationContext::with_builtin(executors.ids().cloned()),
         };
-        let shared = Arc::new(Shared::new(
+        let mut shared = Shared::new(
             Db::new(store, clock),
             executors,
             config,
             context,
             workspace,
             link,
-        ));
+        );
+        shared.secrets = secrets;
+        let shared = Arc::new(shared);
         recovery::recover(&shared).await?;
         workspaces::sweep(&shared).await?;
         shared.load_executor_health().await?;

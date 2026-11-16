@@ -23,6 +23,7 @@ mod recovery;
 mod resume;
 mod routing;
 mod runs;
+mod secrets;
 mod triggers;
 mod workspaces;
 

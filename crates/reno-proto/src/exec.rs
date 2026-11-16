@@ -83,7 +83,9 @@ pub struct McpServerSpec {
 }
 
 /// Everything an executor needs to start one run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// `env` can hold a bot's secrets, so `Debug` shows its names and never its values.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecSpec {
     /// The run this execution belongs to.
@@ -119,6 +121,30 @@ pub struct ExecSpec {
     /// JSON Schema the final result must satisfy, when the executor supports structured output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for ExecSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: BTreeMap<&str, &str> = self
+            .env
+            .keys()
+            .map(|key| (key.as_str(), "[redacted]"))
+            .collect();
+        f.debug_struct("ExecSpec")
+            .field("run_id", &self.run_id)
+            .field("prompt", &self.prompt)
+            .field("cwd", &self.cwd)
+            .field("model", &self.model)
+            .field("instructions", &self.instructions)
+            .field("effort", &self.effort)
+            .field("access", &self.access)
+            .field("sandbox", &self.sandbox)
+            .field("resume", &self.resume)
+            .field("mcp", &self.mcp)
+            .field("env", &env)
+            .field("output_schema", &self.output_schema)
+            .finish()
+    }
 }
 
 /// A tool invocation as far as Reno needs to know it.

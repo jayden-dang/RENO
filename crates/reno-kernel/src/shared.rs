@@ -30,6 +30,7 @@ use crate::ids::IdMint;
 use crate::link::RunLink;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
+use crate::secrets::Secrets;
 use crate::workspace::Workspace;
 
 /// Commands a run supervisor accepts. Bounded (`COMMAND_QUEUE`); the sender waits for room, and
@@ -194,6 +195,8 @@ pub(crate) struct Shared {
     pub(crate) mint: IdMint,
     /// Where write runs work; `None` runs everything in place.
     pub(crate) workspace: Option<Arc<dyn Workspace>>,
+    /// Where a bot's secrets come from; `None` when the daemon has no secret store.
+    pub(crate) secrets: Option<Arc<dyn Secrets>>,
     /// How a run's own `reno mcp` reaches the daemon; `None` injects nothing.
     pub(crate) link: Option<Arc<dyn RunLink>>,
     /// The scheduler's inbox. Senders wait when it is full; the scheduler never waits on them.
@@ -245,6 +248,7 @@ impl Shared {
             defs_ctx,
             mint: IdMint::default(),
             workspace,
+            secrets: None,
             link,
             sched_tx,
             sched_rx: Mutex::new(Some(sched_rx)),

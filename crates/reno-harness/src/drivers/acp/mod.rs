@@ -352,6 +352,7 @@ impl AcpExecutor {
         spec: &ExecSpec,
     ) -> Result<(), HarnessError> {
         let launcher = self.launcher();
+        crate::child_env::restrict(cmd, crate::child_env::for_harness(self.spec.id));
         child::configure(cmd);
         crate::compose_child_path(cmd, exe);
         launcher.configure_environment(cmd, exe);
@@ -413,7 +414,7 @@ impl AcpExecutor {
         if let Some(record) = child.record() {
             let _ = processes.report(record).await;
         }
-        let stderr_tail = crate::StderrTail::default();
+        let stderr_tail = crate::StderrTail::for_run(&spec.env);
         let sign_in_prompted = CancellationToken::new();
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
@@ -422,7 +423,7 @@ impl AcpExecutor {
             self.tracker.spawn(async move {
                 let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "reno_harness::acp", "stderr: {line}");
+                    tracing::debug!(target: "reno_harness::acp", "stderr: {}", tail.scrub(&line));
                     tail.push(&line);
                     if is_sign_in_prompt(harness, &line) {
                         prompted.cancel();

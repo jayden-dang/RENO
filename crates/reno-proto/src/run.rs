@@ -109,6 +109,9 @@ pub enum StartRefusal {
     /// The run's workspace could not be prepared: a write run with no git repository to isolate
     /// it in, or git failing.
     WorkspaceRefused,
+    /// A secret the run's bot lists is not set, or the secret store cannot be read (a locked
+    /// Keychain). A person has to act: `reno secret set <NAME>`.
+    SecretMissing,
     /// Anything else that stopped the start: an unknown executor, an unreadable bot definition,
     /// a task with no working directory, a spec the executor rejected.
     Invalid,

@@ -96,7 +96,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nresume = \"auto\"                        # optional: \"auto\" (default) or \"never\"\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
+      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nsecrets = [\"GITHUB_TOKEN\"]             # optional: Keychain secrets its runs get as env vars\nresume = \"auto\"                        # optional: \"auto\" (default) or \"never\"\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
       "properties": {
         "access": {
           "$ref": "#/$defs/AccessMode",
@@ -138,6 +138,13 @@ expression: protocol_schema()
           "$ref": "#/$defs/SandboxLevel",
           "default": "unrestricted",
           "description": "The sandbox ceiling a run asks its harness to enforce. Defaults to `unrestricted`: no\nceiling beyond `access`, so every listed executor is eligible. `workspace_write` or\n`read_only` makes only executors that enforce that level eligible."
+        },
+        "secrets": {
+          "description": "Names of the secrets this bot's runs receive, each as an environment variable of the same\nname (`GITHUB_TOKEN`). The values live in the Keychain (`reno secret set`), never in this\nfile. A run whose secret is not set does not start. Left out, the run gets none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "team": {
           "description": "The team the bot belongs to, if any. Teams arrive with T2.4, so only the name's shape is\nchecked.",
@@ -637,7 +644,8 @@ expression: protocol_schema()
     "budget",
     "agent",
     "run.resume",
-    "run.stop_detail"
+    "run.stop_detail",
+    "secrets"
   ],
   "methods": [
     {
@@ -1686,6 +1694,11 @@ expression: protocol_schema()
               {
                 "const": "workspace_refused",
                 "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
                 "type": "string"
               },
               {
@@ -3714,6 +3727,11 @@ expression: protocol_schema()
               {
                 "const": "workspace_refused",
                 "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
                 "type": "string"
               },
               {
@@ -5758,6 +5776,131 @@ expression: protocol_schema()
           "items"
         ],
         "title": "WorkspaceCleanResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "secret.list",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Empty params: serialises as `{}`.",
+        "title": "NoParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "SecretInfo": {
+            "description": "One secret `secret.list` knows of.",
+            "properties": {
+              "name": {
+                "description": "The secret's name.",
+                "type": "string"
+              },
+              "set": {
+                "description": "Whether the Keychain holds a value for it. A name that a bot asks for and nobody has set\nis listed with `false`.",
+                "type": "boolean"
+              },
+              "usedBy": {
+                "description": "The bots whose definitions ask for it, sorted.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "name",
+              "set"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `secret.list`: names and whether each is set, never a value.",
+        "properties": {
+          "secrets": {
+            "description": "Every secret in the Keychain or asked for by a bot, sorted by name.",
+            "items": {
+              "$ref": "#/$defs/SecretInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "secrets"
+        ],
+        "title": "SecretListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "secret.set",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `secret.set`. The value is stored straight into the Keychain; it never appears in a\nlog, an error or this type's `Debug`.",
+        "properties": {
+          "name": {
+            "description": "The secret's name.",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "title": "SecretSetParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `secret.set`.",
+        "properties": {
+          "replaced": {
+            "description": "The secret already had a value, which is now replaced.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "replaced"
+        ],
+        "title": "SecretSetResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "secret.delete",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `secret.delete`.",
+        "properties": {
+          "name": {
+            "description": "The secret's name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "SecretDeleteParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `secret.delete`.",
+        "properties": {
+          "deleted": {
+            "description": "The Keychain had it. Deleting a name that is not there is not an error.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "SecretDeleteResult",
         "type": "object"
       }
     },
@@ -8605,6 +8748,11 @@ expression: protocol_schema()
                 "type": "string"
               },
               {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
+                "type": "string"
+              },
+              {
                 "const": "invalid",
                 "description": "Anything else that stopped the start: an unknown executor, an unreadable bot definition,\na task with no working directory, a spec the executor rejected.",
                 "type": "string"
@@ -9319,6 +9467,11 @@ expression: protocol_schema()
               {
                 "const": "workspace_refused",
                 "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
                 "type": "string"
               },
               {

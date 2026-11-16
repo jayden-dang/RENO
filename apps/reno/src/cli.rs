@@ -53,6 +53,10 @@ pub(crate) enum Command {
     /// each, and ask it to look again.
     #[command(subcommand)]
     Executor(ExecutorCommand),
+    /// List, set and delete the secrets bots may ask for. Values live in the macOS Keychain,
+    /// never in a definition file, and are never shown.
+    #[command(subcommand)]
+    Secret(SecretCommand),
     /// The kill switch: stop new runs from starting, for everything or one bot. Triggers are
     /// held and catch up on `reno resume`. Persists across daemon restarts.
     Pause(Pause),
@@ -255,6 +259,36 @@ pub(crate) struct ExecutorInstall {
 pub(crate) struct ExecutorRefresh {
     /// The executor, as `reno executor list` shows it [default: all of them].
     pub(crate) id: Option<ExecutorId>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SecretCommand {
+    /// List the secrets that are set and those a bot asks for, and which bots ask. Never prints
+    /// a value.
+    List,
+    /// Store a secret in the Keychain. The value is read from a prompt that does not echo, or
+    /// from standard input with --from-stdin; it is never an argument, so it stays out of the
+    /// shell history and the process list.
+    Set(SecretSet),
+    /// Remove a secret from the Keychain.
+    Delete(SecretDelete),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretSet {
+    /// The secret's name: upper-case letters, digits and `_`, starting with a letter, such as
+    /// GITHUB_TOKEN. A bot lists the names it wants in `secrets`.
+    pub(crate) name: String,
+    /// Read the value from standard input (all of it, less one final newline) instead of
+    /// prompting.
+    #[arg(long)]
+    pub(crate) from_stdin: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SecretDelete {
+    /// The secret's name.
+    pub(crate) name: String,
 }
 
 #[derive(Debug, Subcommand)]

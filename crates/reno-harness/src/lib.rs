@@ -35,6 +35,7 @@ pub enum HarnessError {
 
 pub mod acp_registry;
 mod agent_id;
+pub mod child_env;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
 pub use drivers::{acp, claude, codex};
@@ -52,6 +53,7 @@ pub use proc::{
 };
 pub(crate) use proc::{adapter_install, code_signature, executable};
 pub use proc::{archive_install, process, shell_env};
+pub use redact::{MIN_SECRET_VALUE_LEN, ValueRedactor};
 pub(crate) mod wire;
 
 /// Compose the child's PATH: the resolved executable's directory first, then
@@ -150,9 +152,30 @@ fn apply_login_shell_env(cmd: &mut std::process::Command) {
 pub(crate) struct StderrTail(
     std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     std::sync::Arc<tokio::sync::Notify>,
+    /// The run's own secret values, which never reach the tail or a log line.
+    std::sync::Arc<ValueRedactor>,
 );
 
 impl StderrTail {
+    /// A tail for the run whose environment is `env`: the values of what the host put there
+    /// (a bot's secrets; not Reno's own `RENO_*` variables) are redacted from every line.
+    pub(crate) fn for_run(env: &std::collections::BTreeMap<String, String>) -> Self {
+        let secrets = env
+            .iter()
+            .filter(|(name, _)| !name.starts_with("RENO_"))
+            .map(|(name, value)| (name.as_str(), value.as_str()));
+        Self(
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(ValueRedactor::new(secrets)),
+        )
+    }
+
+    /// `line` with the run's secret values replaced: what to log and what to keep.
+    pub(crate) fn scrub<'a>(&self, line: &'a str) -> std::borrow::Cow<'a, str> {
+        self.2.redact_str(line)
+    }
+
     pub(crate) fn close(&self) {
         self.1.notify_one();
     }
@@ -170,6 +193,8 @@ impl StderrTail {
         if line.is_empty() {
             return;
         }
+        let line = self.scrub(line);
+        let line = line.as_ref();
         let mut tail = self
             .0
             .lock()
@@ -441,5 +466,28 @@ mod stderr_tests {
         let snapshot = tail.snapshot().unwrap();
         assert!(snapshot.len() <= 1400);
         assert!(snapshot.ends_with("last stderr line"));
+    }
+
+    #[test]
+    fn a_runs_secret_values_never_reach_its_stderr_tail_or_its_log_line() {
+        let env = [
+            (
+                "GITHUB_TOKEN".to_owned(),
+                "ghp_exampleExample1234".to_owned(),
+            ),
+            ("RENO_RUN_ID".to_owned(), "run_01HZX9".to_owned()),
+        ]
+        .into();
+        let tail = super::StderrTail::for_run(&env);
+        tail.push("fatal: auth failed for ghp_exampleExample1234 on run_01HZX9");
+        let snapshot = tail.snapshot().unwrap();
+        assert_eq!(
+            snapshot,
+            "fatal: auth failed for [secret:GITHUB_TOKEN] on run_01HZX9"
+        );
+        assert_eq!(
+            tail.scrub("again ghp_exampleExample1234"),
+            "again [secret:GITHUB_TOKEN]"
+        );
     }
 }

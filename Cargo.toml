@@ -67,6 +67,9 @@ gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d
 # Allocator (T0.11). The v2 line, as ARCHITECTURE 17.8 names it; optional in renod and reno-app.
 mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 
+# Secrets (T1.13): the macOS Keychain, behind renod's `Keychain` trait. MIT OR Apache-2.0.
+security-framework = { version = "3", default-features = false }
+
 # Harness layer (imported).
 async-trait = "0.1"
 bzip2 = "0.6"

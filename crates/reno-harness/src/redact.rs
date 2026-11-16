@@ -7,6 +7,9 @@
 //! request failed: 503") and replaces the rest. (Harness crash diagnostics use the narrower
 //! credential-marker redaction in the crate root.)
 
+mod values;
+pub use values::{MIN_LEN as MIN_SECRET_VALUE_LEN, ValueRedactor};
+
 /// `text` with terminal escapes stripped and every secret-shaped token
 /// replaced:
 /// - url query strings and fragments (`?state=…`, `#code=…`) and userinfo;

@@ -16,6 +16,7 @@ mod follow;
 mod mcp;
 mod policy;
 mod render;
+mod secret;
 
 use std::io;
 use std::process::ExitCode;
@@ -65,6 +66,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Workspace(command) => commands::workspace(env, command).await,
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
+        Command::Secret(command) => secret::run(env, command).await,
         Command::Policy(command) => policy::run(env, command),
         // Served before `Env` exists, in `run`.
         Command::Mcp(_) => Err(anyhow::anyhow!(

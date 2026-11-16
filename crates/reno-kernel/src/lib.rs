@@ -28,6 +28,9 @@
 //! - `wake`: the wake port: the daemon tells the scheduler that the system woke.
 //! - `workspace`, `workspaces`: the `Workspace` port (git worktrees for write runs), its fake, and
 //!   what the kernel does with it: placement, release at a run's end, clean, start-up sweep.
+//! - `secrets`: the `Secrets` port (Keychain-backed named secrets), its fake, and `SecretValue`.
+//!   The dispatcher resolves a bot's `secrets` into the run's environment and refuses a run whose
+//!   secret is not set; the supervisor redacts the values from everything the run produces.
 //! - `supervisor`: one task per live run; owns its stream, journal, subscribers and heartbeat.
 //! - `events`: `run_events`, journal replay joined to the live tail.
 //! - `recovery`: what start-up repairs.
@@ -81,6 +84,7 @@ mod resume;
 mod router;
 mod schedule;
 mod scheduler;
+mod secrets;
 mod shared;
 mod supervisor;
 mod wake;
@@ -97,6 +101,7 @@ pub use kernel::{Kernel, ShutdownReport, TaskRequest};
 pub use link::{FakeRunLink, IssuedLink, LinkError, RunLink};
 pub use registry::ExecutorRegistry;
 pub use router::{BotPreference, Candidate, RouteRequest, fall_back, ineligibility, route};
+pub use secrets::{FakeSecrets, SecretValue, Secrets, SecretsError, check_name, check_secret};
 pub use wake::WakeSignal;
 pub use watch::{Watch, WatchSpec, WatchStream};
 pub use workspace::{
