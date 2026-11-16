@@ -44,6 +44,7 @@ async fn managed_install_reaches_started() {
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     };
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(600),

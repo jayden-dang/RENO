@@ -26,6 +26,9 @@ use crate::health::{
     ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatchParams,
 };
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
+use crate::routing::{
+    RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
+};
 use crate::run::{RunStatus, StopReason};
 use crate::triggers::{
     TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
@@ -79,6 +82,10 @@ pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `daemon.shutdown` exists.
 pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 
+/// Feature: `route.preview` and `run.routing` exist, and `task.run` answers with its routing
+/// decision and accepts `inPlace`.
+pub const FEATURE_ROUTING: &str = "routing";
+
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EVENTS_RESUME,
@@ -92,6 +99,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_TRIGGERS,
     FEATURE_WORKSPACES,
     FEATURE_EXECUTORS,
+    FEATURE_ROUTING,
 ];
 
 /// A request with a single reply.
@@ -231,6 +239,12 @@ pub struct TaskRunParams {
     /// Model override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Let a write run work directly in `cwd` when it is not a git repository, as a bot's
+    /// `inPlaceWrites` does. Without it such a run is refused, because there is no worktree to
+    /// isolate it in. A git repository is never written in place, whatever this says. Needs
+    /// feature `routing`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
 }
 
 /// Result of `task.run`.
@@ -239,6 +253,9 @@ pub struct TaskRunParams {
 pub struct TaskRunResult {
     /// The new run.
     pub run_id: RunId,
+    /// Where the router sent it and why. Absent from daemons that predate routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDecision>,
 }
 
 /// Params of `run.get`.
@@ -531,6 +548,16 @@ method!(
     RunGet, "run.get", RunGetParams => RunSummary
 );
 method!(
+    /// `run.routing`: the routing decision stored for a run, with its fallback steps. Needs
+    /// feature `routing`.
+    RunRouting, "run.routing", RunRoutingParams => RunRoutingResult
+);
+method!(
+    /// `route.preview`: the decision a task would get now, without creating anything. Needs
+    /// feature `routing`.
+    RoutePreview, "route.preview", RoutePreviewParams => RoutePreviewResult
+);
+method!(
     /// `run.list`: runs, optionally filtered by status.
     RunList, "run.list", RunListParams => RunListResult
 );
@@ -680,6 +707,8 @@ pub fn protocol_schema() -> Value {
             method_entry::<DaemonShutdown>(),
             method_entry::<TaskRun>(),
             method_entry::<RunGet>(),
+            method_entry::<RunRouting>(),
+            method_entry::<RoutePreview>(),
             method_entry::<RunList>(),
             method_entry::<RunCancel>(),
             method_entry::<RunSteer>(),

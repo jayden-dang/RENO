@@ -610,7 +610,8 @@ expression: protocol_schema()
     "defs",
     "triggers",
     "workspaces",
-    "executors"
+    "executors",
+    "routing"
   ],
   "methods": [
     {
@@ -801,6 +802,10 @@ expression: protocol_schema()
             ],
             "description": "Executor to run it on. May be left out when `bot` is given: the daemon then takes the\nfirst executor in the bot's list that it has."
           },
+          "inPlace": {
+            "description": "Let a write run work directly in `cwd` when it is not a git repository, as a bot's\n`inPlaceWrites` does. Without it such a run is refused, because there is no worktree to\nisolate it in. A git repository is never written in place, whatever this says. Needs\nfeature `routing`.",
+            "type": "boolean"
+          },
           "model": {
             "description": "Model override.",
             "type": [
@@ -821,14 +826,418 @@ expression: protocol_schema()
       },
       "result": {
         "$defs": {
+          "AccessMode": {
+            "description": "How much a harness may do without asking. Never run with more than requested (ARCH-15).",
+            "oneOf": [
+              {
+                "const": "supervised",
+                "description": "Every consequential action needs approval.",
+                "type": "string"
+              },
+              {
+                "const": "auto_accept_edits",
+                "description": "File edits proceed; commands and network still ask.",
+                "type": "string"
+              },
+              {
+                "const": "full_access",
+                "description": "The harness asks nothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "FallbackStep": {
+            "description": "One step of the fallback walk: the executor that would not start, and what came next.",
+            "properties": {
+              "atMs": {
+                "description": "When, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor that would not start."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The next candidate tried; absent when there was none left."
+              }
+            },
+            "required": [
+              "from",
+              "reason",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RejectReason": {
+            "description": "Why an executor was not chosen. The first six are the stage 1 filter; the last two are what\nthe dispatcher found when it tried.",
+            "oneOf": [
+              {
+                "description": "The harness is not installed, or cannot be launched.",
+                "properties": {
+                  "detail": {
+                    "description": "What the last probe said, for a person.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "not_installed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The installed version is older than the adapter supports.",
+                "properties": {
+                  "found": {
+                    "description": "The version found, when it could be read.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "min": {
+                    "description": "The oldest supported version.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "too_old",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "min"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness has no login.",
+                "properties": {
+                  "hint": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "signed_out",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not offer the access mode the task asks for. A task is never run with\na different one.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor offers.",
+                    "items": {
+                      "$ref": "#/$defs/AccessMode"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/AccessMode",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "access_not_offered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not enforce the sandbox level the task asks for.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor enforces.",
+                    "items": {
+                      "$ref": "#/$defs/SandboxLevel"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/SandboxLevel",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "sandbox_not_enforced",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task leaves this executor out: the task pins another executor, its bot does not list\nthis one, or the request excludes it.",
+                "properties": {
+                  "type": {
+                    "const": "excluded",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Which of those.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "why"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon has no executor with this id.",
+                "properties": {
+                  "type": {
+                    "const": "not_registered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor was chosen and then would not start, for an account or install reason. Added\nby the fallback walk.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal, for a person.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartFailureKind",
+                    "description": "What the dispatcher found."
+                  },
+                  "type": {
+                    "const": "start_failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Rejection": {
+            "description": "An executor that was dropped, and why.",
+            "properties": {
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "executor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "RoutingDecision": {
+            "description": "Where a task goes and why.",
+            "properties": {
+              "atMs": {
+                "description": "When the decision was made, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "chosen": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The executor the run starts on. Absent when no executor is eligible: the run then fails\nwith `NoEligibleExecutor`."
+              },
+              "fallbacks": {
+                "description": "The fallback walk, in order. Empty when the first choice started.",
+                "items": {
+                  "$ref": "#/$defs/FallbackStep"
+                },
+                "type": "array"
+              },
+              "ranked": {
+                "default": [],
+                "description": "The candidates that passed the filter, best first. `chosen` is the first of them until a\nfallback moves on.",
+                "items": {
+                  "$ref": "#/$defs/ExecutorId"
+                },
+                "type": "array"
+              },
+              "rejected": {
+                "default": [],
+                "description": "The candidates the filter dropped, and the executors the fallback walk gave up on.",
+                "items": {
+                  "$ref": "#/$defs/Rejection"
+                },
+                "type": "array"
+              },
+              "ruleMatched": {
+                "$ref": "#/$defs/RuleMatched",
+                "description": "The rule that ordered `ranked`."
+              }
+            },
+            "required": [
+              "ruleMatched",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RuleMatched": {
+            "description": "The stage 2 rule that ordered the candidates. The first rule that matches wins.",
+            "oneOf": [
+              {
+                "description": "The task named its executor.",
+                "properties": {
+                  "type": {
+                    "const": "explicit_executor",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task's bot lists its executors in order of preference.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_preference",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "No rule applied: the eligible executors in id order.",
+                "properties": {
+                  "type": {
+                    "const": "default",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
             "type": "string"
+          },
+          "SandboxLevel": {
+            "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "No writes.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_write",
+                "description": "Writes confined to the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "unrestricted",
+                "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
+                "type": "string"
+              }
+            ]
+          },
+          "StartFailureKind": {
+            "description": "The reasons a start can fail that make the dispatcher try the next candidate. A failure after\nthe executor started is not one of them.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "Not installed.",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "Signed out.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "Not eligible for the task: too old, or an access mode or sandbox it does not offer.",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Result of `task.run`.",
         "properties": {
+          "routing": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RoutingDecision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the router sent it and why. Absent from daemons that predate routing."
+          },
           "runId": {
             "$ref": "#/$defs/RunId",
             "description": "The new run."
@@ -1073,6 +1482,938 @@ expression: protocol_schema()
           "updatedAtMs"
         ],
         "title": "RunSummary",
+        "type": "object"
+      }
+    },
+    {
+      "name": "run.routing",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.routing`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunRoutingParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AccessMode": {
+            "description": "How much a harness may do without asking. Never run with more than requested (ARCH-15).",
+            "oneOf": [
+              {
+                "const": "supervised",
+                "description": "Every consequential action needs approval.",
+                "type": "string"
+              },
+              {
+                "const": "auto_accept_edits",
+                "description": "File edits proceed; commands and network still ask.",
+                "type": "string"
+              },
+              {
+                "const": "full_access",
+                "description": "The harness asks nothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "FallbackStep": {
+            "description": "One step of the fallback walk: the executor that would not start, and what came next.",
+            "properties": {
+              "atMs": {
+                "description": "When, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor that would not start."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The next candidate tried; absent when there was none left."
+              }
+            },
+            "required": [
+              "from",
+              "reason",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RejectReason": {
+            "description": "Why an executor was not chosen. The first six are the stage 1 filter; the last two are what\nthe dispatcher found when it tried.",
+            "oneOf": [
+              {
+                "description": "The harness is not installed, or cannot be launched.",
+                "properties": {
+                  "detail": {
+                    "description": "What the last probe said, for a person.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "not_installed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The installed version is older than the adapter supports.",
+                "properties": {
+                  "found": {
+                    "description": "The version found, when it could be read.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "min": {
+                    "description": "The oldest supported version.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "too_old",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "min"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness has no login.",
+                "properties": {
+                  "hint": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "signed_out",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not offer the access mode the task asks for. A task is never run with\na different one.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor offers.",
+                    "items": {
+                      "$ref": "#/$defs/AccessMode"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/AccessMode",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "access_not_offered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not enforce the sandbox level the task asks for.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor enforces.",
+                    "items": {
+                      "$ref": "#/$defs/SandboxLevel"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/SandboxLevel",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "sandbox_not_enforced",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task leaves this executor out: the task pins another executor, its bot does not list\nthis one, or the request excludes it.",
+                "properties": {
+                  "type": {
+                    "const": "excluded",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Which of those.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "why"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon has no executor with this id.",
+                "properties": {
+                  "type": {
+                    "const": "not_registered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor was chosen and then would not start, for an account or install reason. Added\nby the fallback walk.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal, for a person.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartFailureKind",
+                    "description": "What the dispatcher found."
+                  },
+                  "type": {
+                    "const": "start_failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Rejection": {
+            "description": "An executor that was dropped, and why.",
+            "properties": {
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "executor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "RoutingDecision": {
+            "description": "Where a task goes and why.",
+            "properties": {
+              "atMs": {
+                "description": "When the decision was made, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "chosen": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The executor the run starts on. Absent when no executor is eligible: the run then fails\nwith `NoEligibleExecutor`."
+              },
+              "fallbacks": {
+                "description": "The fallback walk, in order. Empty when the first choice started.",
+                "items": {
+                  "$ref": "#/$defs/FallbackStep"
+                },
+                "type": "array"
+              },
+              "ranked": {
+                "default": [],
+                "description": "The candidates that passed the filter, best first. `chosen` is the first of them until a\nfallback moves on.",
+                "items": {
+                  "$ref": "#/$defs/ExecutorId"
+                },
+                "type": "array"
+              },
+              "rejected": {
+                "default": [],
+                "description": "The candidates the filter dropped, and the executors the fallback walk gave up on.",
+                "items": {
+                  "$ref": "#/$defs/Rejection"
+                },
+                "type": "array"
+              },
+              "ruleMatched": {
+                "$ref": "#/$defs/RuleMatched",
+                "description": "The rule that ordered `ranked`."
+              }
+            },
+            "required": [
+              "ruleMatched",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RuleMatched": {
+            "description": "The stage 2 rule that ordered the candidates. The first rule that matches wins.",
+            "oneOf": [
+              {
+                "description": "The task named its executor.",
+                "properties": {
+                  "type": {
+                    "const": "explicit_executor",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task's bot lists its executors in order of preference.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_preference",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "No rule applied: the eligible executors in id order.",
+                "properties": {
+                  "type": {
+                    "const": "default",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "SandboxLevel": {
+            "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "No writes.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_write",
+                "description": "Writes confined to the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "unrestricted",
+                "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
+                "type": "string"
+              }
+            ]
+          },
+          "StartFailureKind": {
+            "description": "The reasons a start can fail that make the dispatcher try the next candidate. A failure after\nthe executor started is not one of them.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "Not installed.",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "Signed out.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "Not eligible for the task: too old, or an access mode or sandbox it does not offer.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.routing`.",
+        "properties": {
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RoutingDecision"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its routing decision, with every fallback step so far. Absent for a run made before\nrouting existed."
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunRoutingResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "route.preview",
+      "params": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "TaskRunParams": {
+            "description": "Params of `task.run`.",
+            "properties": {
+              "bot": {
+                "description": "The bot to run it as. The run is pinned to the version of the bot's definition that is\ncurrent when the task is submitted. Needs feature `defs`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cwd": {
+                "description": "Working directory; the daemon's default when absent.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "executor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Executor to run it on. May be left out when `bot` is given: the daemon then takes the\nfirst executor in the bot's list that it has."
+              },
+              "inPlace": {
+                "description": "Let a write run work directly in `cwd` when it is not a git repository, as a bot's\n`inPlaceWrites` does. Without it such a run is refused, because there is no worktree to\nisolate it in. A git repository is never written in place, whatever this says. Needs\nfeature `routing`.",
+                "type": "boolean"
+              },
+              "model": {
+                "description": "Model override.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prompt": {
+                "description": "The task prompt.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `route.preview`: the decision a task would get, without starting anything.",
+        "properties": {
+          "task": {
+            "$ref": "#/$defs/TaskRunParams",
+            "description": "The task, as `task.run` takes it. Nothing is created."
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "RoutePreviewParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AccessMode": {
+            "description": "How much a harness may do without asking. Never run with more than requested (ARCH-15).",
+            "oneOf": [
+              {
+                "const": "supervised",
+                "description": "Every consequential action needs approval.",
+                "type": "string"
+              },
+              {
+                "const": "auto_accept_edits",
+                "description": "File edits proceed; commands and network still ask.",
+                "type": "string"
+              },
+              {
+                "const": "full_access",
+                "description": "The harness asks nothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "FallbackStep": {
+            "description": "One step of the fallback walk: the executor that would not start, and what came next.",
+            "properties": {
+              "atMs": {
+                "description": "When, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor that would not start."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              },
+              "to": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The next candidate tried; absent when there was none left."
+              }
+            },
+            "required": [
+              "from",
+              "reason",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RejectReason": {
+            "description": "Why an executor was not chosen. The first six are the stage 1 filter; the last two are what\nthe dispatcher found when it tried.",
+            "oneOf": [
+              {
+                "description": "The harness is not installed, or cannot be launched.",
+                "properties": {
+                  "detail": {
+                    "description": "What the last probe said, for a person.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "not_installed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The installed version is older than the adapter supports.",
+                "properties": {
+                  "found": {
+                    "description": "The version found, when it could be read.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "min": {
+                    "description": "The oldest supported version.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "too_old",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "min"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness has no login.",
+                "properties": {
+                  "hint": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "signed_out",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not offer the access mode the task asks for. A task is never run with\na different one.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor offers.",
+                    "items": {
+                      "$ref": "#/$defs/AccessMode"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/AccessMode",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "access_not_offered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor does not enforce the sandbox level the task asks for.",
+                "properties": {
+                  "offered": {
+                    "description": "What the executor enforces.",
+                    "items": {
+                      "$ref": "#/$defs/SandboxLevel"
+                    },
+                    "type": "array"
+                  },
+                  "requested": {
+                    "$ref": "#/$defs/SandboxLevel",
+                    "description": "What the task asked for."
+                  },
+                  "type": {
+                    "const": "sandbox_not_enforced",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requested",
+                  "offered"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task leaves this executor out: the task pins another executor, its bot does not list\nthis one, or the request excludes it.",
+                "properties": {
+                  "type": {
+                    "const": "excluded",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Which of those.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "why"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon has no executor with this id.",
+                "properties": {
+                  "type": {
+                    "const": "not_registered",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor was chosen and then would not start, for an account or install reason. Added\nby the fallback walk.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal, for a person.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartFailureKind",
+                    "description": "What the dispatcher found."
+                  },
+                  "type": {
+                    "const": "start_failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Rejection": {
+            "description": "An executor that was dropped, and why.",
+            "properties": {
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor."
+              },
+              "reason": {
+                "$ref": "#/$defs/RejectReason",
+                "description": "Why."
+              }
+            },
+            "required": [
+              "executor",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "RoutingDecision": {
+            "description": "Where a task goes and why.",
+            "properties": {
+              "atMs": {
+                "description": "When the decision was made, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "chosen": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The executor the run starts on. Absent when no executor is eligible: the run then fails\nwith `NoEligibleExecutor`."
+              },
+              "fallbacks": {
+                "description": "The fallback walk, in order. Empty when the first choice started.",
+                "items": {
+                  "$ref": "#/$defs/FallbackStep"
+                },
+                "type": "array"
+              },
+              "ranked": {
+                "default": [],
+                "description": "The candidates that passed the filter, best first. `chosen` is the first of them until a\nfallback moves on.",
+                "items": {
+                  "$ref": "#/$defs/ExecutorId"
+                },
+                "type": "array"
+              },
+              "rejected": {
+                "default": [],
+                "description": "The candidates the filter dropped, and the executors the fallback walk gave up on.",
+                "items": {
+                  "$ref": "#/$defs/Rejection"
+                },
+                "type": "array"
+              },
+              "ruleMatched": {
+                "$ref": "#/$defs/RuleMatched",
+                "description": "The rule that ordered `ranked`."
+              }
+            },
+            "required": [
+              "ruleMatched",
+              "atMs"
+            ],
+            "type": "object"
+          },
+          "RuleMatched": {
+            "description": "The stage 2 rule that ordered the candidates. The first rule that matches wins.",
+            "oneOf": [
+              {
+                "description": "The task named its executor.",
+                "properties": {
+                  "type": {
+                    "const": "explicit_executor",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The task's bot lists its executors in order of preference.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_preference",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "No rule applied: the eligible executors in id order.",
+                "properties": {
+                  "type": {
+                    "const": "default",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "SandboxLevel": {
+            "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "No writes.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_write",
+                "description": "Writes confined to the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "unrestricted",
+                "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
+                "type": "string"
+              }
+            ]
+          },
+          "StartFailureKind": {
+            "description": "The reasons a start can fail that make the dispatcher try the next candidate. A failure after\nthe executor started is not one of them.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "Not installed.",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "Signed out.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "Not eligible for the task: too old, or an access mode or sandbox it does not offer.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `route.preview`.",
+        "properties": {
+          "decision": {
+            "$ref": "#/$defs/RoutingDecision",
+            "description": "What the router decides now."
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "RoutePreviewResult",
         "type": "object"
       }
     },

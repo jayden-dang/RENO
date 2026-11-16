@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -248,6 +248,17 @@ CREATE TABLE executor_health (
 ) WITHOUT ROWID;
 ";
 
+/// Migration 9 (T1.5, routing): the routing decision of each run as the wire type's JSON: the
+/// executor the router chose, the ones it passed over and why, and the fallback steps. One row per
+/// run, written with the run and replaced when a fallback moves it to another executor.
+const V9: &str = "
+CREATE TABLE run_routing (
+    run_id     TEXT PRIMARY KEY REFERENCES runs (id),
+    decision   TEXT NOT NULL CHECK (json_valid(decision)),
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -259,6 +270,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V6),
         M::up(V7),
         M::up(V8),
+        M::up(V9),
     ])
 }
 
@@ -307,7 +319,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema

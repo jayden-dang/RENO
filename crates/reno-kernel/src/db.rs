@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId,
-    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, ResolvedBy, RoutingDecision, RunId,
+    RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, Claim, DefinitionRecord, ExpireScope, Expired, FireResult, Journals, NewApproval,
@@ -70,29 +70,35 @@ impl Db {
         self.store.create_task(task, self.now_ms()).await
     }
 
-    pub(crate) async fn enqueue_run(
+    pub(crate) async fn enqueue_routed_run(
         &self,
         task: &TaskId,
         run: &RunId,
         executor: &ExecutorId,
+        bot: Option<&BotPin>,
+        decision: &RoutingDecision,
     ) -> Result<()> {
         self.wrote();
         self.store
-            .enqueue_run(task, run, executor, self.now_ms())
+            .enqueue_routed_run(task, run, executor, bot, decision, self.now_ms())
             .await
     }
 
-    pub(crate) async fn enqueue_pinned_run(
+    pub(crate) async fn reroute_run(
         &self,
-        task: &TaskId,
         run: &RunId,
+        fence: u64,
         executor: &ExecutorId,
-        bot: &BotPin,
+        decision: &RoutingDecision,
     ) -> Result<()> {
         self.wrote();
         self.store
-            .enqueue_pinned_run(task, run, executor, bot, self.now_ms())
+            .reroute_run(run, fence, executor, decision, self.now_ms())
             .await
+    }
+
+    pub(crate) async fn run_routing(&self, run: &RunId) -> Result<Option<RoutingDecision>> {
+        self.store.run_routing(run).await
     }
 
     pub(crate) async fn apply_definitions(

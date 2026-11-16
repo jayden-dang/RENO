@@ -95,6 +95,11 @@ pub struct ExecSpec {
     /// Model override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Standing instructions for the run, from the bot it runs as. Each driver applies them the
+    /// way its harness allows: as an appended system prompt, as developer instructions, or in
+    /// front of the first prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Reasoning effort override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,

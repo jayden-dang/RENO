@@ -18,6 +18,7 @@
 //! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
 //! - `triggers`: the scheduler's state and firings, fired atomically with the run they start.
 //! - `executor_health`: the latest probe of each executor.
+//! - `routing`: the routing decision of each run, replaced by a fenced fallback.
 //! - `workspaces`: the worktree of each write run, recorded before it is made.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
@@ -36,6 +37,7 @@ pub mod events;
 mod executor_health;
 pub mod journal;
 mod migrations;
+mod routing;
 pub mod runs;
 pub mod triggers;
 mod workspaces;
@@ -57,6 +59,8 @@ mod approval_tests;
 mod definition_tests;
 #[cfg(test)]
 mod executor_health_tests;
+#[cfg(test)]
+mod routing_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

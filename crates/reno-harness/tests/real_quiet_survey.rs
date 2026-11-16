@@ -43,6 +43,7 @@ async fn probe_once(executor: AcpExecutor) -> ProbeOutcome {
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     };
     let mut stream = match executor.start(spec, controls).await {
         Ok(stream) => stream,

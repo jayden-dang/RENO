@@ -19,7 +19,7 @@
 //!   the lifecycle rule.
 
 use reno_proto::defs::{BotPin, DefKind};
-use reno_proto::{ExecutorId, RunId, RunStatus, TaskId};
+use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
@@ -236,7 +236,7 @@ fn load(conn: &Connection, run: &RunId) -> Result<Option<RunRecord>> {
 }
 
 /// Loads a run and checks the fence: the common prologue of every fenced write.
-fn load_fenced(conn: &Connection, run: &RunId, fence: u64) -> Result<RunRecord> {
+pub(crate) fn load_fenced(conn: &Connection, run: &RunId, fence: u64) -> Result<RunRecord> {
     let rec = load(conn, run)?.ok_or_else(|| StoreError::NotFound {
         kind: "run",
         id: run.to_string(),
@@ -284,6 +284,7 @@ pub(crate) fn tx_enqueue_run(
     run: &RunId,
     executor: &ExecutorId,
     bot: Option<&BotPin>,
+    routing: Option<&RoutingDecision>,
     now: i64,
 ) -> Result<()> {
     let task_exists = conn
@@ -335,7 +336,11 @@ pub(crate) fn tx_enqueue_run(
         ("run", run.as_str()),
         None,
         &json!({ "task": task, "executor": executor, "bot": bot }),
-    )
+    )?;
+    match routing {
+        Some(decision) => crate::routing::tx_put_routing(conn, run, executor, decision, now),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn tx_claim_next(
@@ -570,7 +575,7 @@ impl Store {
     ) -> Result<()> {
         let (task, run, executor) = (task.clone(), run.clone(), executor.clone());
         self.write(Durability::Normal, move |c| {
-            tx_enqueue_run(c, &task, &run, &executor, None, now)
+            tx_enqueue_run(c, &task, &run, &executor, None, None, now)
         })
         .await
     }
@@ -588,7 +593,7 @@ impl Store {
     ) -> Result<()> {
         let (task, run, executor, bot) = (task.clone(), run.clone(), executor.clone(), bot.clone());
         self.write(Durability::Normal, move |c| {
-            tx_enqueue_run(c, &task, &run, &executor, Some(&bot), now)
+            tx_enqueue_run(c, &task, &run, &executor, Some(&bot), None, now)
         })
         .await
     }

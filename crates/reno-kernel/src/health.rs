@@ -31,13 +31,11 @@ use std::time::Duration;
 
 use futures::future::join_all;
 use reno_proto::{
-    ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, Ineligible, ModelCatalog,
-    NotInstalledReason,
+    ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog, NotInstalledReason,
 };
 use tokio::sync::{Semaphore, watch};
 
 use crate::error::{KernelError, Result};
-use crate::scheduler::StartFailure;
 use crate::shared::Shared;
 
 /// Probes that may run at once.
@@ -307,19 +305,8 @@ impl Shared {
         Some(stored)
     }
 
-    /// Whether `id` may be chosen for a run according to the health this process has found.
-    pub(crate) fn executor_is_healthy(&self, id: &ExecutorId) -> bool {
-        self.health
-            .live(id)
-            .is_none_or(|health| health.ineligible().is_none())
-    }
-}
-
-/// How an [`Ineligible`] finding is accounted when a run is refused for it.
-pub(crate) fn start_failure(why: &Ineligible) -> StartFailure {
-    match why {
-        Ineligible::NotInstalled(_) => StartFailure::NotInstalled,
-        Ineligible::SignedOut(_) => StartFailure::NotSignedIn,
-        Ineligible::TooOld { .. } => StartFailure::NoEligibleExecutor,
+    /// The health a probe of this process found for `id`, or `None` when it has not probed it.
+    pub(crate) fn live_health(&self, id: &ExecutorId) -> Option<ExecutorHealth> {
+        self.health.live(id)
     }
 }

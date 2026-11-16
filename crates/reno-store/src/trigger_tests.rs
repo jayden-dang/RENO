@@ -58,6 +58,7 @@ fn firing(trigger: &str, n: usize, scheduled_at: i64) -> NewFiring {
                 name: "keeper".into(),
                 version: 1,
             },
+            routing: None,
         },
     }
 }

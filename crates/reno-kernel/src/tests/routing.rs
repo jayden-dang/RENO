@@ -1,0 +1,456 @@
+#![cfg(test)]
+
+//! Routing (T1.5): the router's decision is stored with the run and shown, a run whose chosen
+//! executor will not start falls back to the next candidate, a Supervised task never reaches a
+//! full-access-only executor, a bot's instructions reach the executor, and a bot-less task
+//! writes in place only when it opts in.
+//!
+//! Fake executors only: nothing here spawns a real harness.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
+use reno_proto::defs::DefKind;
+use reno_proto::{
+    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, InstallStatus, ModelCatalog,
+    RejectReason, RoutingDecision, RuleMatched, RunId, RunStatus, SignedIn, StartFailureKind,
+    StopReason, VersionGate,
+};
+
+use super::defs::{FakePort, file, setup};
+use super::*;
+use crate::{FakeWorkspace, TaskRequest};
+
+/// An executor with a settable health, an optional refusal to start, and a count of starts.
+#[derive(Clone)]
+struct Fake {
+    inner: MockExecutor,
+    health: Arc<Mutex<HealthProbe>>,
+    refuse: Arc<Mutex<Option<Refusal>>>,
+    starts: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+enum Refusal {
+    NotSignedIn,
+    NotInstalled,
+}
+
+fn healthy() -> HealthProbe {
+    HealthProbe {
+        installed: InstallStatus::Installed {
+            path: "/bin/fake".into(),
+            version: Some("1.0.0".into()),
+        },
+        version_gate: VersionGate::Ok,
+        signed_in: SignedIn::Yes { account: None },
+        models: ModelCatalog::curated(vec![]),
+    }
+}
+
+fn signed_out() -> HealthProbe {
+    HealthProbe {
+        signed_in: SignedIn::No {
+            hint: "run `claude login`".into(),
+        },
+        ..healthy()
+    }
+}
+
+impl Fake {
+    fn new(name: &str) -> Self {
+        Self {
+            inner: MockExecutor::new(id(name)).with_steps([MockStep::text("hi")]),
+            health: Arc::new(Mutex::new(healthy())),
+            refuse: Arc::default(),
+            starts: Arc::default(),
+        }
+    }
+
+    fn access(mut self, modes: &[AccessMode]) -> Self {
+        let mut descriptor = self.inner.descriptor();
+        descriptor.caps.access_modes = modes.to_vec();
+        self.inner = self.inner.with_descriptor(descriptor);
+        self
+    }
+
+    fn says(self, health: HealthProbe) -> Self {
+        *self.health.lock().unwrap() = health;
+        self
+    }
+
+    fn refusing(self, refusal: Refusal) -> Self {
+        *self.refuse.lock().unwrap() = Some(refusal);
+        self
+    }
+
+    fn starts(&self) -> usize {
+        self.starts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Executor for Fake {
+    fn descriptor(&self) -> ExecutorDescriptor {
+        self.inner.descriptor()
+    }
+
+    async fn probe(&self) -> HealthProbe {
+        self.health.lock().unwrap().clone()
+    }
+
+    async fn start(
+        &self,
+        spec: ExecSpec,
+        controls: ExecControls,
+    ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        let refusal = *self.refuse.lock().unwrap();
+        match refusal {
+            Some(Refusal::NotSignedIn) => Err(ExecError::NotSignedIn("run `claude login`".into())),
+            Some(Refusal::NotInstalled) => Err(ExecError::NotInstalled("install it".into())),
+            None => self.inner.start(spec, controls).await,
+        }
+    }
+}
+
+fn registry_of(fakes: &[&Fake]) -> ExecutorRegistry {
+    fakes
+        .iter()
+        .fold(ExecutorRegistry::new(), |registry, fake| {
+            registry.with(Arc::new((*fake).clone()))
+        })
+}
+
+fn bot_text(name: &str, executors: &[&str], extra: &str) -> String {
+    let list: Vec<String> = executors.iter().map(|e| format!("\"{e}\"")).collect();
+    format!(
+        "name = \"{name}\"\ninstructions = \"Be terse.\"\nexecutors = [{}]\n{extra}",
+        list.join(", ")
+    )
+}
+
+async fn fx_with_bot(fakes: &[&Fake], bot: &str, executors: &[&str], extra: &str) -> Fx {
+    let port = FakePort::with(vec![file(
+        DefKind::Bot,
+        bot,
+        &bot_text(bot, executors, extra),
+    )]);
+    Fx::with_definitions(config(2), registry_of(fakes), setup(&port)).await
+}
+
+async fn diagnostic_of(fx: &Fx, run: &RunId) -> String {
+    match fx.journal_with_done(run).await.last().unwrap().1.clone() {
+        ExecEvent::Done { diagnostic, .. } => diagnostic.unwrap_or_default(),
+        other => panic!("not a Done: {other:?}"),
+    }
+}
+
+async fn routing_of(fx: &Fx, run: &RunId) -> RoutingDecision {
+    fx.kernel
+        .run_routing(run)
+        .await
+        .unwrap()
+        .expect("a decision")
+}
+
+/// ROADMAP T1.5, acceptance 1, as the board knows it: with Claude Code signed out, a task
+/// routed to it goes to Codex, and the stored decision says why.
+#[tokio::test(start_paused = true)]
+async fn with_claude_code_signed_out_a_routed_task_goes_to_codex_and_the_decision_explains_why() {
+    let claude = Fake::new("claude-code").says(signed_out());
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(&[&claude, &codex], "keeper", &["claude-code", "codex"], "").await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    assert_eq!(fx.kernel.get_run(&run).await.unwrap().executor, id("codex"));
+    assert_eq!((claude.starts(), codex.starts()), (0, 1));
+    let decision = routing_of(&fx, &run).await;
+    assert_eq!(decision.chosen, Some(id("codex")));
+    assert_eq!(decision.ranked, [id("codex")]);
+    assert_eq!(
+        decision.rule_matched,
+        RuleMatched::BotPreference {
+            bot: "keeper".into()
+        }
+    );
+    assert_eq!(decision.rejected.len(), 1);
+    assert_eq!(decision.rejected[0].executor, id("claude-code"));
+    assert_eq!(
+        decision.rejected[0].reason,
+        RejectReason::SignedOut {
+            hint: "run `claude login`".into()
+        }
+    );
+    assert!(decision.explain().contains("not claude-code: signed out"));
+}
+
+/// The same acceptance when the board did not know yet: Claude Code is chosen, will not start
+/// because it is signed out, and the run falls back to Codex within the same attempt.
+#[tokio::test(start_paused = true)]
+async fn a_chosen_executor_that_will_not_start_signed_out_falls_back_and_the_walk_is_recorded() {
+    let claude = Fake::new("claude-code").refusing(Refusal::NotSignedIn);
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(&[&claude, &codex], "keeper", &["claude-code", "codex"], "").await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    let at_submit = routing_of(&fx, &run).await;
+    assert_eq!(at_submit.chosen, Some(id("claude-code")));
+    assert!(at_submit.fallbacks.is_empty());
+
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!((claude.starts(), codex.starts()), (1, 1));
+    assert_eq!(fx.kernel.get_run(&run).await.unwrap().executor, id("codex"));
+    let decision = routing_of(&fx, &run).await;
+    assert_eq!(decision.chosen, Some(id("codex")));
+    assert_eq!(decision.ranked, [id("codex")]);
+    assert_eq!(decision.fallbacks.len(), 1);
+    assert_eq!(decision.fallbacks[0].from, id("claude-code"));
+    assert_eq!(decision.fallbacks[0].to, Some(id("codex")));
+    assert_eq!(
+        decision.fallbacks[0].reason,
+        RejectReason::SignedOut {
+            hint: "run `claude login`".into()
+        }
+    );
+    assert!(matches!(
+        decision.rejected.as_slice(),
+        [reno_proto::Rejection {
+            reason: RejectReason::StartFailed {
+                failure: StartFailureKind::NotSignedIn,
+                ..
+            },
+            ..
+        }]
+    ));
+    // The change is an event, so a client can show it.
+    let routed = fx
+        .store
+        .events_since(reno_proto::Seq(0), 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "run.routed")
+        .count();
+    assert_eq!(routed, 2, "once when queued, once for the fallback");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_walk_is_bounded_by_the_candidates_and_ends_with_no_eligible_executor() {
+    let a = Fake::new("a-first").refusing(Refusal::NotSignedIn);
+    let b = Fake::new("b-second").refusing(Refusal::NotInstalled);
+    let c = Fake::new("c-third").refusing(Refusal::NotSignedIn);
+    let fx = Fx::new(config(1), registry_of(&[&a, &b, &c])).await;
+
+    let (run, decision) = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
+        .await
+        .unwrap();
+    assert_eq!(decision.rule_matched, RuleMatched::Default);
+    assert_eq!(
+        decision.ranked,
+        [id("a-first"), id("b-second"), id("c-third")]
+    );
+    fx.wait_status(&run, RunStatus::Failed).await;
+
+    assert_eq!((a.starts(), b.starts(), c.starts()), (1, 1, 1));
+    let why = diagnostic_of(&fx, &run).await;
+    assert!(why.starts_with("NoEligibleExecutor:"), "{why}");
+    let stored = routing_of(&fx, &run).await;
+    assert_eq!(stored.chosen, None);
+    assert!(stored.ranked.is_empty());
+    assert_eq!(stored.fallbacks.len(), 3);
+    assert_eq!(stored.fallbacks[2].to, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_after_the_executor_started_is_not_a_fallback_case() {
+    let first = Fake::new("a-first");
+    let first = Fake {
+        inner: first
+            .inner
+            .with_steps([MockStep::text("working"), MockStep::done(StopReason::Error)]),
+        ..first
+    };
+    let second = Fake::new("b-second");
+    let fx = Fx::new(config(1), registry_of(&[&first, &second])).await;
+
+    let run = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
+        .await
+        .unwrap()
+        .0;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    assert_eq!((first.starts(), second.starts()), (1, 0));
+    let decision = routing_of(&fx, &run).await;
+    assert!(decision.fallbacks.is_empty());
+    assert_eq!(decision.chosen, Some(id("a-first")));
+}
+
+/// ROADMAP T1.5, acceptance 2: a Supervised task is never routed to a full-access-only
+/// executor, and with no eligible executor it fails with `NoEligibleExecutor`.
+#[tokio::test(start_paused = true)]
+async fn a_supervised_task_never_reaches_a_full_access_only_executor() {
+    let yolo = Fake::new("yolo").access(&[AccessMode::FullAccess]);
+    let fx = Fx::new(config(1), registry_of(&[&yolo])).await;
+
+    // The router refuses it, by name or by default.
+    for request in [
+        TaskRequest::new("go", PathBuf::from("/work")),
+        TaskRequest::new("go", PathBuf::from("/work")).executor(id("yolo")),
+    ] {
+        let preview = fx.kernel.preview_route(&request).unwrap();
+        assert_eq!(preview.chosen, None);
+        assert_eq!(
+            preview.rejected[0].reason,
+            RejectReason::AccessNotOffered {
+                requested: AccessMode::Supervised,
+                offered: vec![AccessMode::FullAccess]
+            }
+        );
+    }
+
+    let (run, decision) = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
+        .await
+        .unwrap();
+    assert_eq!(decision.chosen, None);
+    fx.wait_status(&run, RunStatus::Failed).await;
+    let why = diagnostic_of(&fx, &run).await;
+    assert!(why.starts_with("NoEligibleExecutor:"), "{why}");
+    assert!(why.contains("Supervised"), "{why}");
+    assert_eq!(yolo.starts(), 0, "nothing was spawned");
+
+    // A full-access executor beside it changes nothing for a Supervised task: it goes to the
+    // one that offers Supervised.
+    let safe = Fake::new("safe");
+    let fx = Fx::new(config(1), registry_of(&[&yolo, &safe])).await;
+    let (run, decision) = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
+        .await
+        .unwrap();
+    assert_eq!(decision.chosen, Some(id("safe")));
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!((yolo.starts(), safe.starts()), (0, 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_executor_named_by_the_task_is_the_only_candidate_and_no_fallback_beyond_it() {
+    let claude = Fake::new("claude-code").refusing(Refusal::NotSignedIn);
+    let codex = Fake::new("codex");
+    let fx = Fx::new(config(1), registry_of(&[&claude, &codex])).await;
+
+    let (run, decision) = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")).executor(id("claude-code")))
+        .await
+        .unwrap();
+    assert_eq!(decision.rule_matched, RuleMatched::ExplicitExecutor);
+    assert_eq!(decision.ranked, [id("claude-code")]);
+    fx.wait_status(&run, RunStatus::Failed).await;
+    assert_eq!(codex.starts(), 0);
+    assert!(
+        diagnostic_of(&fx, &run).await.contains("signed in"),
+        "the executor's own refusal is the diagnostic"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_preview_decides_like_a_submit_and_creates_nothing() {
+    let claude = Fake::new("claude-code").says(signed_out());
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(&[&claude, &codex], "keeper", &["claude-code", "codex"], "").await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+
+    let request = TaskRequest::new("go", PathBuf::from("/work")).bot("keeper");
+    let preview = fx.kernel.preview_route(&request).unwrap();
+    assert_eq!(fx.kernel.count_runs(&RunStatus::ALL).await.unwrap(), 0);
+    let (_, submitted) = fx.kernel.submit_task(request).await.unwrap();
+    assert_eq!(preview, submitted);
+    assert_eq!(preview.chosen, Some(id("codex")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_pinned_bot_versions_instructions_reach_the_executor() {
+    let codex = Fake::new("codex");
+    let fx = fx_with_bot(&[&codex], "keeper", &["codex"], "").await;
+    let plain = fx
+        .kernel
+        .submit("go", id("codex"), PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    let bot_run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&plain, RunStatus::Succeeded).await;
+    fx.wait_status(&bot_run, RunStatus::Succeeded).await;
+
+    let specs = codex.inner.log().specs;
+    let by_run = |run: &RunId| specs.iter().find(|s| &s.run_id == run).unwrap();
+    assert_eq!(by_run(&bot_run).instructions.as_deref(), Some("Be terse."));
+    assert_eq!(by_run(&plain).instructions, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bot_less_task_writes_in_place_only_when_it_opts_in_and_never_in_a_repository() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let m = mock([]);
+    let fx = Fx::with_workspace(
+        config(2),
+        registry(std::slice::from_ref(&m)),
+        None,
+        ws.clone(),
+    )
+    .await;
+    let go = |cwd: &'static str, in_place: bool| {
+        let kernel = fx.kernel.clone();
+        async move {
+            kernel
+                .submit_task(
+                    TaskRequest::new("go", PathBuf::from(cwd))
+                        .executor(id("mock"))
+                        .in_place(in_place),
+                )
+                .await
+                .unwrap()
+                .0
+        }
+    };
+
+    // Refused with no opt-in, and the diagnostic says how to opt in.
+    let refused = go("/plain", false).await;
+    fx.wait_status(&refused, RunStatus::Failed).await;
+    let why = diagnostic_of(&fx, &refused).await;
+    assert!(why.contains("WorkspaceRefused"), "{why}");
+
+    // Opted in: works where it is.
+    let opted = go("/plain", true).await;
+    fx.wait_status(&opted, RunStatus::Succeeded).await;
+    assert_eq!(m.log().specs[0].cwd, PathBuf::from("/plain"));
+
+    // Opting in never lets a repository be written in place.
+    let in_repo = go("/repo", true).await;
+    fx.wait_status(&in_repo, RunStatus::Succeeded).await;
+    assert_ne!(m.log().specs[1].cwd, PathBuf::from("/repo"));
+}
