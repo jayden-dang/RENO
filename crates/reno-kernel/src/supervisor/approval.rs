@@ -63,6 +63,11 @@
 //! (ARCH-10). Deadlines are `tokio::time` instants taken from a `Sleep`, so paused time drives
 //! them in tests; the wall-clock `expires_at` that is stored comes from the `Clock` port.
 //!
+//! An approval's limit is wall-clock time (`expires_at`), but the timer is monotonic and stops
+//! while a Mac sleeps. When the system wakes ([`WakeSignal`](crate::WakeSignal)) the supervisor
+//! reads the clock and expires, at once and through the same path as the timer (record, answer,
+//! journal), every approval whose `expires_at` has passed.
+//!
 //! # Where an approval ends
 //!
 //! Besides a decision and a deadline, an open approval is closed `expired` when its run ends, and
@@ -94,8 +99,11 @@ pub(super) struct Open {
     subject: ApprovalSubject,
     /// The harness's id, which the answer is sent against.
     request_id: String,
-    /// When it expires, in `tokio::time`.
+    /// When it expires, in `tokio::time`: the timer that normally closes it.
     deadline: Instant,
+    /// When it expires on the wall clock, as stored. The timer stops while the machine sleeps,
+    /// so a wake-up closes the approval by this one.
+    expires_at: i64,
 }
 
 /// What the policy and the run's history say to do with a request.
@@ -355,6 +363,7 @@ impl Supervisor {
             subject: subject.clone(),
             request_id: request_id.to_owned(),
             deadline,
+            expires_at,
         });
         self.rearm();
         self.refresh_view().await;
@@ -601,9 +610,25 @@ impl Supervisor {
         let Some(fired) = self.expiry.as_ref().map(|timer| timer.deadline()) else {
             return;
         };
+        self.expire_where(|open| open.deadline <= fired).await;
+    }
+
+    /// The system woke, and the timer did not run while it slept: deny every open approval whose
+    /// wall-clock `expires_at` has passed on the clock now, exactly as the timer would have.
+    pub(super) async fn expire_past_wall_clock(&mut self) {
+        let now = self.shared.db.now_ms();
+        self.expire_where(|open| open.expires_at <= now).await;
+    }
+
+    /// Deny, as expired, every open approval `is_due` picks, and re-arm the timer for the rest.
+    async fn expire_where(&mut self, is_due: impl Fn(&Open) -> bool) {
         let (due, rest): (Vec<Open>, Vec<Open>) = std::mem::take(&mut self.open_approvals)
             .into_iter()
-            .partition(|open| open.deadline <= fired);
+            .partition(is_due);
+        if due.is_empty() {
+            self.open_approvals = rest;
+            return;
+        }
         self.open_approvals = rest;
         self.rearm();
         for open in due {

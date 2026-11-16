@@ -55,14 +55,22 @@ use crate::scheduler::{SchedCmd, StartFailure};
 use crate::secrets::{SecretValue, SecretsError};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot, StopCause};
 use crate::supervisor::{RunInfo, Supervisor};
+use crate::wake::{WakeSignal, system_woke};
 use crate::workspaces;
 
 pub(crate) async fn run(shared: Arc<Shared>) {
+    // Subscribed before the first look, so a wake during a look is not lost.
+    let mut woke = shared.system_wake.as_ref().map(WakeSignal::subscribe);
+    // Whether this round claims. A wake that finds no wall-clock deadline pending has nothing to
+    // look at again, and writes nothing.
+    let mut look = true;
     loop {
         if shared.root.is_cancelled() {
             break;
         }
-        let wait = match fill(&shared).await {
+        let claimed = if look { fill(&shared).await } else { Ok(()) };
+        look = true;
+        let wait = match claimed {
             Ok(()) => next_deadline(&shared).await,
             Err(error) => {
                 tracing::error!(%error, "dispatcher could not claim; retrying");
@@ -72,8 +80,26 @@ pub(crate) async fn run(shared: Arc<Shared>) {
         tokio::select! {
             biased;
             () = shared.root.cancelled() => break,
+            () = system_woke(&mut woke) => {
+                renew_leases(&shared).await;
+                // What this dispatcher waits for by the clock (a lease, midnight) may be due.
+                look = wait.is_some();
+            }
             () = shared.wake.notified() => {}
             () = sleep_for(&shared, wait) => {}
+        }
+    }
+}
+
+/// The system woke: a lease is a wall-clock deadline and the heartbeat that extends it a
+/// monotonic timer, so every live run's lease may have run out on the clock while it slept. They
+/// are renewed before the next look at the queue, which would otherwise take a live run whose
+/// lease only looks expired. A run whose lease really was taken finds out at its next heartbeat.
+async fn renew_leases(shared: &Shared) {
+    let lease_ms = shared.config.lease_ms();
+    for (run, fence) in shared.live_fences() {
+        if let Err(error) = shared.db.heartbeat(&run, fence, lease_ms).await {
+            tracing::warn!(%run, %error, "could not renew the run's lease after the wake");
         }
     }
 }
@@ -617,6 +643,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
             cause: cause.clone(),
             cmd: cmd_tx,
             bot: row.bot.as_ref().map(|pin| pin.name.clone()),
+            fence,
         },
     );
     if let Err(error) = shared

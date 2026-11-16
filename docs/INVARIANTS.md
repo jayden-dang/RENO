@@ -75,9 +75,21 @@ a live run's heartbeat, a checkpoint after the last write. Changes to files and 
 as events.
 
 The one thing a deadline cannot see is the Mac sleeping: the monotonic timer stops, the wall clock
-does not. The daemon turns the system's wake notification into a signal the scheduler hears
-(`WakeSignal`), and the scheduler then reads the clock again. There is no periodic wake: an idle
-scheduler arms no timer, and a busy one arms one, for its earliest deadline.
+does not. The daemon turns the system's wake notification into a signal (`WakeSignal`) that the
+scheduler, the dispatcher and every run's supervisor hear, and each then reads the clock again.
+There is no periodic wake: an idle scheduler arms no timer, and a busy one arms one, for its
+earliest deadline.
+
+One rule says which clock a deadline is on. **Wall clock** (re-read on wake): trigger due times and
+retry times, approval expiry (`expires_at`), standing-rule expiry, run leases, the budget day. On
+wake a pending approval past its `expires_at` expires at once through the same path as its timer,
+every live run's lease is renewed before the queue is looked at again, and the scheduler fires
+what came due. A run token's `expires_at` is a wall-clock safety net (the greater of four times
+the run's wall-time budget and 24 hours); the token's real bound is the run being live and not
+revoked. **Awake time** (the monotonic timer, deliberately): a run's `max_wall_time` budget, the
+cancel grace and the heartbeat period. A sleeping Mac does no work, so a run is not charged for
+the hours it slept; a run's screen therefore shows time awake, which can be less than the time
+since it started.
 
 **ARCH-11 — Every queue is bounded, and every task is owned.** Each channel has a capacity. Each
 spawned task belongs to a task tracker and a cancellation token, so shutdown waits for it.

@@ -44,3 +44,15 @@ impl WakeSignal {
         self.tx.subscribe()
     }
 }
+
+/// Pending until the system wakes; for ever when there is no signal (or its notifier is gone).
+/// Cancel-safe, so it can sit in a `select!`.
+pub(crate) async fn system_woke(woke: &mut Option<watch::Receiver<u64>>) {
+    if let Some(rx) = woke.as_mut()
+        && rx.changed().await.is_ok()
+    {
+        return;
+    }
+    *woke = None;
+    std::future::pending().await
+}
