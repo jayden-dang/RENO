@@ -440,6 +440,22 @@ mod tests {
     }
 
     #[test]
+    fn a_glob_allows_a_newline_inside_quotes_only() {
+        let m = RuleMatcher {
+            action: ActionClass::Command,
+            tool: "bash".to_owned(),
+            command: Some(CommandPattern::Glob {
+                pattern: "git commit *".to_owned(),
+            }),
+            paths: vec![],
+        };
+        let ok = cmd("git commit -m \"a\n\nCo-Authored-By: x\" -- Cargo.lock");
+        assert!(holds(&m, StandingEffect::Allow, &ok));
+        assert!(!holds(&m, StandingEffect::Allow, &cmd("git commit -m a\nrm x")));
+        assert!(!holds(&m, StandingEffect::Allow, &cmd("git commit -m \"a\nb")));
+    }
+
+    #[test]
     fn action_and_tool_must_be_equal() {
         let m = derived(&cmd("ls"));
         assert!(!holds(
