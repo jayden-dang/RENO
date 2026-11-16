@@ -409,7 +409,7 @@ daemon_test! {
         let client = within(Client::connect_unix(&paths.socket)).await.unwrap();
         let journal: Vec<_> =
             within(client.run_events(held.clone(), None).take(4).collect::<Vec<_>>()).await;
-        let resumed = journal.into_iter().map(|i| i.unwrap().event).last().unwrap();
+        let resumed = journal.into_iter().map(|i| i.unwrap().event).next_back().unwrap();
         assert!(matches!(resumed, ExecEvent::Resumed { from_attempt: 1, .. }), "{resumed:?}");
         assert_eq!(within(client.get_run(&held)).await.unwrap().attempt, 2);
         again.request_shutdown();

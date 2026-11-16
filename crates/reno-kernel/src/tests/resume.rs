@@ -271,7 +271,7 @@ async fn a_resumed_run_that_works_in_a_worktree_gets_the_same_worktree_back() {
         dir,
         store,
         config(1),
-        registry(&[after.clone()]),
+        registry(std::slice::from_ref(&after)),
         None,
         ws.clone(),
     )
@@ -312,7 +312,7 @@ async fn a_bot_that_says_auto_or_nothing_has_its_runs_resumed() {
         dir,
         store,
         config(1),
-        registry(&[after.clone()]),
+        registry(std::slice::from_ref(&after)),
         setup(&port),
     )
     .await;
@@ -395,7 +395,7 @@ async fn a_run_a_budget_stopped_is_not_resumed() {
         dir,
         store,
         config(1),
-        registry(&[after.clone()]),
+        registry(std::slice::from_ref(&after)),
         setup(&port),
     )
     .await;
@@ -425,7 +425,7 @@ async fn a_run_whose_attempts_are_used_stays_interrupted_with_the_reason() {
         max_attempts: 4,
         ..config(1)
     };
-    let fx = Fx::over(dir, store, config, registry(&[after.clone()])).await;
+    let fx = Fx::over(dir, store, config, registry(std::slice::from_ref(&after))).await;
     fx.wait_status(&run, RunStatus::Succeeded).await;
     assert_eq!(fx.kernel.get_run(&run).await.unwrap().attempt, 4);
 }
@@ -506,7 +506,7 @@ async fn a_bot_that_says_never_keeps_its_runs_interrupted() {
         dir,
         store,
         config(1),
-        registry(&[after.clone()]),
+        registry(std::slice::from_ref(&after)),
         setup(&port),
     )
     .await;
@@ -563,7 +563,7 @@ async fn a_run_judged_once_is_not_judged_again_at_every_start() {
 #[tokio::test(start_paused = true)]
 async fn a_person_resumes_a_cancelled_run_with_a_prompt_of_their_own() {
     let first = long_run();
-    let fx = Fx::new(config(1), registry(&[first.clone()])).await;
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&first))).await;
     // The same executor serves the second attempt: swap its script by using a second mock id.
     let run = fx.submit("work").await;
     until(async || session_of(&fx, &run).await).await;
@@ -612,7 +612,7 @@ async fn a_person_resumes_a_failed_run_that_has_a_session() {
             reason: None,
         }),
     ]);
-    let fx = Fx::new(config(1), registry(&[failing.clone()])).await;
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&failing))).await;
     let run = fx.submit("work").await;
     fx.wait_status(&run, RunStatus::Failed).await;
     fx.journal_with_done(&run).await;
