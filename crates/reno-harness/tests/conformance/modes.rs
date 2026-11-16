@@ -432,3 +432,29 @@ async fn the_report_serialises_every_case_with_its_status_and_reason() {
     assert!(lifecycle["reason"].is_null());
     assert!(json["unknownFrames"].as_object().unwrap().is_empty());
 }
+
+/// The record the nightly job reads has exactly the keys of the shared fixture, which
+/// `cargo xtask conformance-live` parses in its own tests.
+#[tokio::test]
+async fn the_live_record_has_the_keys_the_nightly_job_reads() {
+    use reno_harness::conformance::LiveMeta;
+    let report = run(ModeFake::new(false, false), false).await;
+    let record = report.to_live_json(&LiveMeta {
+        model: "m".into(),
+        cli_version: Some("1.0.0".into()),
+        cli_min: "0.1.0".into(),
+        cli_verified: "1.0.0".into(),
+        version_gate: "ok".into(),
+        estimated_runs: 3,
+    });
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/conformance-report.json")).unwrap();
+    let keys = |v: &serde_json::Value| -> Vec<String> {
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let expected = &fixture["targets"][0];
+    assert_eq!(keys(&record), keys(expected));
+    assert_eq!(keys(&record["cases"][0]), keys(&expected["cases"][0]));
+}

@@ -206,6 +206,14 @@ struct WrittenComparison<'a> {
     version_bumps: Vec<String>,
 }
 
+/// Today's date on this machine, from `date`, so a run at 03:17 local time is that day's.
+fn local_date() -> Option<String> {
+    let out = Command::new("date").arg("+%Y-%m-%d").output().ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let text = text.trim();
+    report_date(&format!("{text}.json")).map(|_| text.to_owned())
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -254,13 +262,24 @@ fn report(options: &Options) -> Result<bool, String> {
             report?
         }
     };
+    if now.targets.is_empty() {
+        return Err("the report has no targets: the live test ran nothing, or wrote a shape this tool does not read".into());
+    }
+    for target in &now.targets {
+        if target.unavailable.is_none() && target.cases.is_empty() {
+            return Err(format!(
+                "{}: the report says the CLI ran but lists no cases",
+                target.target
+            ));
+        }
+    }
     let generated = now_ms();
     now.schema = now.schema.max(1);
     now.generated_at_ms = generated;
     now.date = options
         .date
         .clone()
-        .unwrap_or_else(|| civil_date(generated));
+        .unwrap_or_else(|| local_date().unwrap_or_else(|| civil_date(generated)));
 
     let names: Vec<String> = fs::read_dir(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -324,6 +343,58 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_shared_fixture_parses_into_every_field_the_job_reads() {
+        let text = include_str!("../../crates/reno-harness/tests/fixtures/conformance-report.json");
+        let fixture: serde_json::Value = serde_json::from_str(text).unwrap();
+        let report: Report = serde_json::from_str(text).unwrap();
+        // Nothing the harness writes is dropped on the way in: the first target round-trips.
+        assert_eq!(
+            serde_json::to_value(&report.targets[0]).unwrap(),
+            fixture["targets"][0]
+        );
+        assert_eq!(
+            report.targets[1].unavailable.as_deref(),
+            Some("not signed in: run `claude login`")
+        );
+        assert_eq!(report.targets[0].cases.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_report_is_an_error_not_a_green_night() {
+        let dir = std::env::temp_dir().join(format!("reno-xtask-empty-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let run = |json: &str| {
+            let input = dir.join("in.json");
+            fs::write(&input, json).unwrap();
+            report(&Options {
+                clis: "auto".into(),
+                data_dir: Some(dir.clone()),
+                date: Some("2026-11-17".into()),
+                from_json: Some(input),
+                print_plist: false,
+                hour: 3,
+                minute: 17,
+            })
+        };
+        assert!(run(r#"{"schema":1,"targets":[]}"#).is_err());
+        assert!(run(r#"{"schema":1,"targets":[{"target":"codex","cases":[]}]}"#).is_err());
+        assert!(run(r#"{"schema":1,"targets":[{"target":"codex","unavailable":"x"}]}"#).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn both_drivers_keep_the_constant_a_bump_names() {
+        for target in ["claude-code", "codex"] {
+            let file = crate::conformance::driver_file(target).unwrap();
+            let text = fs::read_to_string(workspace_root().join(file)).unwrap();
+            assert!(
+                text.contains("pub const VERIFIED_CLI_VERSION: &str = \""),
+                "{file}"
+            );
+        }
     }
 
     #[test]

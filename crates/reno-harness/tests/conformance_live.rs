@@ -57,8 +57,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reno_harness::conformance::{
-    ApprovalAnswer, ApprovalPlan, CaseId, Expect, Limits, ModeRun, Plan, Profile, Proof, Scenario,
-    Status, Target, TargetReport, render_table, run_suite,
+    ApprovalAnswer, ApprovalPlan, CaseId, DENY_MESSAGE, Expect, Limits, LiveMeta, ModeRun, Plan,
+    Profile, Proof, Scenario, Status, Target, TargetReport, render_table, run_suite,
 };
 use reno_harness::exec::Executor;
 use reno_harness::{ClaudeExecutor, CodexExecutor};
@@ -172,7 +172,7 @@ struct Shape {
     sandboxes: bool,
 }
 
-fn live_plan(shape: &Shape, repo: &Path, outside: &Outside) -> Plan {
+fn live_plan(shape: &Shape, repo: &Path, outside_file: &Path) -> Plan {
     let sleeper = |secs: u32| {
         format!("Use your shell tool to run `sleep {secs}`, then reply with exactly the word PONG.")
     };
@@ -227,6 +227,12 @@ fn live_plan(shape: &Shape, repo: &Path, outside: &Outside) -> Plan {
             .fresh(READ_ONLY_FILE),
             answer: ApprovalAnswer::Deny,
             expect: vec![
+                // The model must have tried: an empty directory after a refusal to try proves
+                // nothing about the sandbox.
+                Expect::Tool {
+                    name: String::new(),
+                    class: ActionClass::Command,
+                },
                 Expect::PathAbsent(READ_ONLY_FILE.into()),
                 Expect::FileContains {
                     path: "README.md".into(),
@@ -234,7 +240,6 @@ fn live_plan(shape: &Shape, repo: &Path, outside: &Outside) -> Plan {
                 },
             ],
         });
-        let outside_file = outside.file();
         mode_runs.push(ModeRun {
             proves: Proof::Sandbox(SandboxLevel::WorkspaceWrite),
             scenario: Scenario::new(format!(
@@ -248,6 +253,10 @@ fn live_plan(shape: &Shape, repo: &Path, outside: &Outside) -> Plan {
             .fresh(outside_file.display().to_string()),
             answer: ApprovalAnswer::Deny,
             expect: vec![
+                Expect::Tool {
+                    name: String::new(),
+                    class: ActionClass::Command,
+                },
                 Expect::FileContains {
                     path: INSIDE_FILE.into(),
                     text: "inside".into(),
@@ -269,15 +278,17 @@ fn live_plan(shape: &Shape, repo: &Path, outside: &Outside) -> Plan {
         ),
         approval: Some(ApprovalPlan {
             scenario: Scenario::new(format!(
-                "Use your shell tool to run `touch {APPROVAL_FILE}`, then reply with exactly the word PONG."
+                "Use your shell tool to run `touch {APPROVAL_FILE}`, then reply with exactly the word PONG. \
+                 If the command is refused, quote the reason you were given word for word in your reply."
             ))
             .access(AccessMode::Supervised)
             .fresh(APPROVAL_FILE)
             .expect(Expect::ApprovalClass(ActionClass::Command)),
             on_allow: vec![Expect::PathExists(APPROVAL_FILE.into())],
             on_deny: vec![Expect::PathAbsent(APPROVAL_FILE.into())],
-            // The model's reaction to a reason is its own: nothing here proves it arrived.
-            on_deny_message: Vec::new(),
+            // Only Claude's wire carries the reason (the case is skipped on Codex): the model is
+            // asked to quote it back. A paraphrase fails the case, which is the point of asking.
+            on_deny_message: vec![Expect::TextContains(DENY_MESSAGE.into())],
         }),
         input: shape.asks_questions.then(|| {
             Scenario::new(
@@ -334,10 +345,6 @@ fn live_target(name: &str, executor: Arc<dyn Executor>, cwd: &Path, plan: Plan) 
         Limits::live(),
     )
     .with_plan(plan)
-    .waive(
-        CaseId::DenyMessage,
-        "the model's reaction to a reason is not assertable",
-    )
     .waive(CaseId::Crash, "a real CLI is not made to crash on purpose")
     .waive(
         CaseId::UnknownFrames,
@@ -347,7 +354,8 @@ fn live_target(name: &str, executor: Arc<dyn Executor>, cwd: &Path, plan: Plan) 
     if name == "codex" {
         target = target.waive(
             CaseId::Input,
-            "request_user_input is experimental and not offered to a model by default",
+            "request_user_input is offered to a model only in Codex's plan collaboration mode, \
+             which ExecSpec cannot request: nothing a caller can send makes it ask",
         );
     }
     target
@@ -387,7 +395,7 @@ fn gate_name(probe: &HealthProbe) -> &'static str {
     }
 }
 
-/// The JSON record of one target the nightly job reads.
+/// The nightly job's record of one target.
 fn target_json(
     report: &TargetReport,
     executor: &dyn Executor,
@@ -395,15 +403,15 @@ fn target_json(
     model: &str,
     estimated_runs: usize,
 ) -> serde_json::Value {
-    let descriptor = executor.descriptor();
-    let mut value = report.to_json();
-    value["model"] = json!(model);
-    value["cliVersion"] = json!(probe.installed.version());
-    value["cliMin"] = json!(descriptor.cli_verified.min);
-    value["cliVerified"] = json!(descriptor.cli_verified.verified);
-    value["versionGate"] = json!(gate_name(probe));
-    value["estimatedRuns"] = json!(estimated_runs);
-    value
+    let verified = executor.descriptor().cli_verified;
+    report.to_live_json(&LiveMeta {
+        model: model.to_owned(),
+        cli_version: probe.installed.version().map(str::to_owned),
+        cli_min: verified.min,
+        cli_verified: verified.verified,
+        version_gate: gate_name(probe).to_owned(),
+        estimated_runs,
+    })
 }
 
 #[tokio::test]
@@ -450,7 +458,7 @@ async fn the_real_clis_pass_the_suite() {
             asks_questions: name == "claude-code",
             sandboxes: name == "codex",
         };
-        let plan = with_model(live_plan(&shape, repo.path(), &outside), &model);
+        let plan = with_model(live_plan(&shape, repo.path(), &outside.file()), &model);
         let estimated = plan.estimated_runs();
         println!(
             "{name}: model {model}, about {estimated} model runs, scratch repo {}",
@@ -495,6 +503,84 @@ async fn the_real_clis_pass_the_suite() {
         println!(
             "{}: {unverified} case(s) waived (unverified)",
             report.target
+        );
+    }
+}
+
+/// No model, no CLI: the plans and waivers the live run would use, checked in plain `cargo test`.
+mod plans {
+    use super::*;
+
+    fn plan_for(name: &str) -> (Plan, Target) {
+        let shape = Shape {
+            asks_questions: name == "claude-code",
+            sandboxes: name == "codex",
+        };
+        let plan = live_plan(
+            &shape,
+            Path::new("/scratch"),
+            Path::new("/outside/file.txt"),
+        );
+        let executor: Arc<dyn Executor> = if name == "claude-code" {
+            Arc::new(ClaudeExecutor::new())
+        } else {
+            Arc::new(CodexExecutor::new())
+        };
+        let target = live_target(name, executor, Path::new("/scratch"), plan.clone());
+        (plan, target)
+    }
+
+    #[test]
+    fn every_mode_run_runs_in_the_mode_it_proves_and_asserts_something() {
+        for name in ["claude-code", "codex"] {
+            let (plan, _) = plan_for(name);
+            for run in &plan.mode_runs {
+                match run.proves {
+                    Proof::Access(mode) => assert_eq!(run.scenario.access, mode, "{name}"),
+                    Proof::Sandbox(level) => assert_eq!(run.scenario.sandbox, level, "{name}"),
+                }
+                assert!(!run.expect.is_empty(), "{name} {:?}", run.proves);
+            }
+        }
+    }
+
+    #[test]
+    fn the_estimates_and_the_sandbox_runs_are_what_the_docs_say() {
+        let (claude, _) = plan_for("claude-code");
+        let (codex, _) = plan_for("codex");
+        assert_eq!(claude.estimated_runs(), 12);
+        assert_eq!(codex.estimated_runs(), 13);
+        let sandboxes = |plan: &Plan| {
+            plan.mode_runs
+                .iter()
+                .filter(|m| matches!(m.proves, Proof::Sandbox(_)))
+                .count()
+        };
+        assert_eq!(
+            sandboxes(&claude),
+            0,
+            "Claude declares no sandbox below Unrestricted"
+        );
+        assert_eq!(sandboxes(&codex), 2);
+    }
+
+    #[test]
+    fn only_what_cannot_be_driven_is_waived() {
+        let waived = |name: &str| -> Vec<CaseId> {
+            plan_for(name)
+                .1
+                .waived_cases()
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect()
+        };
+        assert_eq!(
+            waived("claude-code"),
+            [CaseId::Crash, CaseId::UnknownFrames]
+        );
+        assert_eq!(
+            waived("codex"),
+            [CaseId::Input, CaseId::Crash, CaseId::UnknownFrames]
         );
     }
 }

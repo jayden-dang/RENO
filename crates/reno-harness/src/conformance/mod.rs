@@ -44,7 +44,7 @@ mod drive;
 mod report;
 
 pub use cases::run_suite;
-pub use report::{CaseResult, Status, TargetReport, render_table};
+pub use report::{CaseResult, LiveMeta, Status, TargetReport, render_table};
 
 /// The reason every denial in the suite carries.
 pub const DENY_MESSAGE: &str = "conformance: denied on purpose";
@@ -584,6 +584,11 @@ impl Target {
     pub fn waive(mut self, case: CaseId, why: impl Into<String>) -> Self {
         self.waived.insert(case, why.into());
         self
+    }
+
+    /// The cases waived on this target, with why.
+    pub fn waived_cases(&self) -> Vec<(CaseId, &str)> {
+        self.waived.iter().map(|(c, w)| (*c, w.as_str())).collect()
     }
 
     pub(crate) fn waiver(&self, case: CaseId) -> Option<&str> {

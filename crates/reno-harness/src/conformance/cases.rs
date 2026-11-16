@@ -123,7 +123,13 @@ impl Cx<'_> {
         if let Some(why) = self.skip_reason(case) {
             return Status::Skip(why.to_owned());
         }
-        let bound = self.target.limits.case;
+        // Each mode run of a case is bounded by the case limit on its own (see `mode_run`), so
+        // the case that holds them gets room for all of them.
+        let runs = match case {
+            CaseId::AccessModes | CaseId::SandboxLevels => self.target.plan.mode_runs.len(),
+            _ => 0,
+        };
+        let bound = self.target.limits.case * u32::try_from(1 + runs).unwrap_or(u32::MAX);
         let ran = tokio::time::timeout(bound, self.dispatch(case)).await;
         match ran {
             Err(_) => Status::Fail(format!("did not finish within {bound:?}")),
@@ -581,13 +587,22 @@ impl Cx<'_> {
             ApprovalAnswer::Allow => Decision::Allow,
             ApprovalAnswer::Deny => Decision::Deny,
         };
-        let log = self
-            .run_completed(scenario, Behaviour::Decide(decision, None))
-            .await
-            .map_err(|f| match f {
-                Failure::Broken(why) => Failure::Broken(format!("{:?} run: {why}", run.proves)),
-                other => other,
-            })?;
+        let case_bound = self.target.limits.case;
+        let log = tokio::time::timeout(
+            case_bound,
+            self.run_completed(scenario, Behaviour::Decide(decision, None)),
+        )
+        .await
+        .map_err(|_| {
+            Failure::Broken(format!(
+                "{:?} run did not finish within {case_bound:?}",
+                run.proves
+            ))
+        })?
+        .map_err(|f| match f {
+            Failure::Broken(why) => Failure::Broken(format!("{:?} run: {why}", run.proves)),
+            other => other,
+        })?;
         log.check_all(run.expect.iter().chain(&scenario.expect))
             .map_err(|why| Failure::Broken(format!("{:?} run: {why}", run.proves)))?;
         Ok(())

@@ -118,7 +118,7 @@ pub(crate) struct Comparison {
 }
 
 /// The driver source that holds `VERIFIED_CLI_VERSION` for a live target.
-fn driver_file(target: &str) -> Option<&'static str> {
+pub(crate) fn driver_file(target: &str) -> Option<&'static str> {
     match target {
         "claude-code" => Some("crates/reno-harness/src/drivers/claude/mod.rs"),
         "codex" => Some("crates/reno-harness/src/drivers/codex/mod.rs"),

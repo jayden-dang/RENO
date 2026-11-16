@@ -34,7 +34,7 @@ Once a week, on a Monday say, with the CLIs up to date on the machine that runs 
    `reno executor refresh` so the daemon looks again.
 3. **Look at the unrecognised frames.** `reno executor frames` lists, per executor, each kind of
    message the driver did not recognise since the daemon started, how often, and when it was
-   first seen under the current CLI version. The daemon also logs one warning the first time it
+   first seen under the current CLI version (the counts start again when the CLI version changes). The daemon also logs one warning the first time it
    sees each kind per CLI version. A kind that appears after a CLI update is a new message: decide
    whether the driver should handle it (add it to the wire layer, with a test) or drop it on
    purpose (add it to the list of frames the driver knows and ignores). Do not just clear the
@@ -103,7 +103,7 @@ Do not touch `MIN_CLI_VERSION` unless the driver really stopped working on older
 `cargo xtask conformance-live` runs the live suite for the CLIs that are installed and signed in
 (`--clis claude-code,codex` insists on both), writes `<data dir>/conformance/YYYY-MM-DD.json` and
 `.md`, compares with the latest earlier report, prints the Markdown and exits 1 on a regression.
-The data directory is the daemon's (`RENO_DATA_DIR` or `--data-dir` override it); dates are UTC.
+The data directory is the daemon's (`RENO_DATA_DIR` or `--data-dir` override it); the date is the machine's local one.
 
 It is a regression, and the exit code is non-zero, when:
 
@@ -141,8 +141,9 @@ Codex, a question. A waiver that appears where there was none is a regression.
 
 ## Recording new fixtures
 
-Fixtures under `crates/reno-harness/tests/fixtures/{claude,codex}/` are what the CLIs really
-sent, named `live-<cli version>-<what it shows>.jsonl`. Record one when a CLI starts doing
+The captured transcripts under `crates/reno-harness/tests/fixtures/{claude,codex}/` are named
+`live-<cli version>-<what it shows>.jsonl` (other files there are hand-written to a known shape
+and say so). Record one when a CLI starts doing
 something the fakes do not (a new kind of message, a new way an approval arrives):
 
 1. Run the scenario against the real CLI in a scratch repository, with the frames recorded. For
@@ -157,5 +158,5 @@ something the fakes do not (a new kind of message, a new way an approval arrives
 4. If a fake CLI should reproduce the behaviour, teach it the scenario, so the suite catches a
    regression without a model.
 
-A fixture is evidence of what the CLI did at that version, not a contract: when a newer CLI
+A captured fixture is evidence of what the CLI did at that version, not a contract: when a newer CLI
 changes, add a new fixture beside the old one and keep both while the driver supports both.

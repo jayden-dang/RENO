@@ -486,7 +486,22 @@ async fn a_new_cli_version_makes_every_kind_new_again() {
     fx.kernel.refresh_executors(None).await.unwrap();
     let now = fx.kernel.executor_frames(None).unwrap();
     assert_eq!(now[0].cli_version.as_deref(), Some("1.1.0"));
-    assert!(now[0].frames[0].first_seen_ms > old);
+    assert!(
+        now[0].frames.is_empty(),
+        "what the old CLI sent is not the new one's: {:?}",
+        now[0].frames
+    );
+    // Only what rises from here counts, and it is new under the new version.
+    probed.frames.lock().unwrap().insert("type:a".into(), 3);
+    probed.frames.lock().unwrap().insert("type:b".into(), 1);
+    let rose = fx.kernel.executor_frames(None).unwrap();
+    let seen: Vec<(&str, u64)> = rose[0]
+        .frames
+        .iter()
+        .map(|f| (f.kind.as_str(), f.count))
+        .collect();
+    assert_eq!(seen, [("type:a", 2), ("type:b", 1)]);
+    assert!(rose[0].frames.iter().all(|f| f.first_seen_ms > old));
 }
 
 #[tokio::test(start_paused = true)]

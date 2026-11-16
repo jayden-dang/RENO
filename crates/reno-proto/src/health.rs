@@ -412,7 +412,8 @@ pub struct ExecutorFramesParams {
 pub struct UnknownFrameKind {
     /// The kind, as the driver names it (`type:foo`, `method:bar`).
     pub kind: String,
-    /// How many frames of this kind arrived since the daemon started.
+    /// How many frames of this kind arrived since the daemon started, or since the executor's CLI
+    /// version last changed.
     pub count: u64,
     /// When the daemon first saw this kind under the executor's current CLI version, in
     /// milliseconds since the Unix epoch.

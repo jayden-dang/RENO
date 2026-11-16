@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "targets": [
+    {
+      "target": "codex",
+      "model": "example-mini",
+      "cliVersion": "0.170.0",
+      "cliMin": "0.146.0",
+      "cliVerified": "0.169.0",
+      "versionGate": "untested",
+      "estimatedRuns": 13,
+      "cases": [
+        {
+          "case": "probe",
+          "status": "pass",
+          "reason": null,
+          "tookMs": 12
+        },
+        {
+          "case": "crash",
+          "status": "waived",
+          "reason": "a real CLI is not made to crash on purpose",
+          "tookMs": 0
+        }
+      ],
+      "unknownFrames": {
+        "method:thread/new": 2
+      }
+    },
+    {
+      "target": "claude-code",
+      "unavailable": "not signed in: run `claude login`"
+    }
+  ]
+}

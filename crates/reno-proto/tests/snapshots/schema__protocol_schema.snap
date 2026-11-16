@@ -7714,7 +7714,7 @@ expression: protocol_schema()
             "description": "One kind of frame an executor's wire layer did not recognise.",
             "properties": {
               "count": {
-                "description": "How many frames of this kind arrived since the daemon started.",
+                "description": "How many frames of this kind arrived since the daemon started, or since the executor's CLI\nversion last changed.",
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"

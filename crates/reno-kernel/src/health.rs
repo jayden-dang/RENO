@@ -76,6 +76,8 @@ pub(crate) struct HealthBoard {
 #[derive(Default)]
 struct FrameBook {
     version: Option<String>,
+    /// The executor's cumulative counts when `version` was adopted: what the CLI before it sent.
+    baseline: BTreeMap<String, u64>,
     first_seen_ms: BTreeMap<String, u64>,
 }
 
@@ -342,13 +344,24 @@ impl Shared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let book = books.entry(id.clone()).or_default();
-        if book.version != version {
-            // A new CLI version: its kinds are new news again.
-            book.version = version;
-            book.first_seen_ms.clear();
+        match (&book.version, &version) {
+            (Some(old), Some(new)) if old != new => {
+                // A new CLI version: the executor's counters are cumulative, so what is already
+                // counted came from the old one. Only what rises from here is the new one's.
+                book.version = version;
+                book.baseline.clone_from(&counts);
+                book.first_seen_ms.clear();
+            }
+            // The first probe names the version of everything counted so far.
+            (None, Some(_)) => book.version = version,
+            _ => {}
         }
         let mut frames = Vec::with_capacity(counts.len());
-        for (kind, count) in counts {
+        for (kind, total) in counts {
+            let count = total.saturating_sub(book.baseline.get(&kind).copied().unwrap_or(0));
+            if count == 0 {
+                continue;
+            }
             let first_seen_ms = *book.first_seen_ms.entry(kind.clone()).or_insert_with(|| {
                 tracing::warn!(
                     executor = %id,
