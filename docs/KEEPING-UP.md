@@ -42,8 +42,8 @@ Once a week, on a Monday say, with the CLIs up to date on the machine that runs 
 4. **Regenerate the Codex schema and diff it** against the snapshot (next section).
 5. **Run the live suite** (`cargo xtask conformance-live`, or `RENO_CONFORMANCE_LIVE=claude-code,codex
    cargo test -p reno-harness --test conformance_live -- --ignored --nocapture`). It makes
-   about fifteen short model runs per CLI at the cheapest model and takes a few minutes; it
-   prints its estimate first.
+   about a dozen short model runs per CLI at the cheapest model and prints its estimate first;
+   each case is capped at 120 s and each CLI at 900 s.
 6. **If it is green on a newer CLI, bump `cli_verified`** (below), with the schema snapshot when
    it is Codex.
 7. **If it is red, do not bump.** Fix the driver, or, when the CLI took away something Reno
