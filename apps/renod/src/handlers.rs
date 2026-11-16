@@ -30,12 +30,15 @@
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.install` | `install_executor` |
 //! | `executors.watch` | `watch_executors` |
+//! | `agent.auth` | `agent_authenticate` |
+//! | `agent.report`, `agent.request_approval` | `agent_report`, `agent_request_approval` |
+//! | `agent.board_read`, `agent.board_write` | `agent_board_read`, `agent_board_write` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
 //! handler for it. Every kernel failure goes through [`crate::errors`].
 //!
-//! Phase 0 has one kind of connection, the owner (ARCHITECTURE 8), so there are no per-method
-//! capability checks yet; the peer's uid was checked when it connected.
+//! A connection is the owner's, whose peer uid was checked when it connected, until `agent.auth`
+//! binds it to one run; then the router's guard lets it call `agent.*` and nothing else (T1.9).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +46,7 @@ use std::time::Instant;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
-use reno_kernel::{CurrentDefs, Kernel, KernelError, TaskRequest};
+use reno_kernel::{AgentSession, CurrentDefs, Kernel, KernelError, TaskRequest};
 use reno_proto::defs::{
     DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult, DefsSnapshot,
     DefsWatchParams,
@@ -51,6 +54,12 @@ use reno_proto::defs::{
 use reno_proto::{
     ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_COUNT, Attachment, RoutePreview, RoutePreviewParams,
     RoutePreviewResult, RunRouting, RunRoutingParams, RunRoutingResult,
+};
+use reno_proto::{
+    AgentApprovalParams, AgentApprovalResult, AgentAuth, AgentAuthParams, AgentAuthResult,
+    AgentBoardRead, AgentBoardReadParams, AgentBoardReadResult, AgentBoardWrite,
+    AgentBoardWriteParams, AgentBoardWriteResult, AgentReport, AgentReportParams,
+    AgentReportResult, AgentRequestApproval, token_digest,
 };
 use reno_proto::{
     ApprovalDecide, ApprovalDecideParams, ApprovalDecideResult, ApprovalHistory,
@@ -124,6 +133,19 @@ where
     move |params, _conn| handler(Arc::clone(&ctx), params)
 }
 
+/// Adapts `handler(ctx, connection, params)`, for the handlers that act for the connection's own
+/// run.
+fn bind_conn<P, Fut, F>(
+    ctx: &Arc<Ctx>,
+    handler: F,
+) -> impl Fn(P, Context) -> Fut + Send + Sync + 'static
+where
+    F: Fn(Arc<Ctx>, Context, P) -> Fut + Send + Sync + 'static,
+{
+    let ctx = Arc::clone(ctx);
+    move |params, conn| handler(Arc::clone(&ctx), conn, params)
+}
+
 /// The router for every method and subscription in `reno-proto`.
 pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
     Router::new()
@@ -148,6 +170,11 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
         .method::<TriggerList, _, _>(bind(ctx, trigger_list))
         .method::<TriggerFire, _, _>(bind(ctx, trigger_fire))
+        .method::<AgentAuth, _, _>(bind_conn(ctx, agent_auth))
+        .method::<AgentReport, _, _>(bind_conn(ctx, agent_report))
+        .method::<AgentRequestApproval, _, _>(bind_conn(ctx, agent_request_approval))
+        .method::<AgentBoardRead, _, _>(bind_conn(ctx, agent_board_read))
+        .method::<AgentBoardWrite, _, _>(bind_conn(ctx, agent_board_write))
         .method::<ExecutorList, _, _>(bind(ctx, executor_list))
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
@@ -160,9 +187,137 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .subscription::<DefsWatch, _, _, _>(bind(ctx, defs_watch))
         .subscription::<TriggersWatch, _, _, _>(bind(ctx, triggers_watch))
         .subscription::<ExecutorsWatch, _, _, _>(bind(ctx, executors_watch))
+        .guard(connection_guard)
 }
 
 type Reply<T> = Result<T, ErrorObject>;
+
+// ----- Connections that speak for a run (T1.9).
+//
+// A connection is the owner's until `agent.auth` binds it to a run with the run's token; from then
+// on it may call `agent.*` and nothing else (the guard below), so a run token cannot reach
+// `approval.decide`, `budget.pause`, `task.run` or any other method of the owner. The other
+// direction too: an `agent.*` method on a connection that has not authenticated is refused. The
+// peer's uid was checked when it connected, and that is all the owner's connection needs: a
+// process of the same user that never presents a token is the owner (ARCHITECTURE 8 point 2).
+
+/// Whether a connection that is bound to a run may call `method`: the handshake, and `agent.*`
+/// once authenticated.
+fn run_connection_may_call(method: &str) -> bool {
+    method == "daemon.hello" || (method.starts_with("agent.") && method != "agent.auth")
+}
+
+/// The router's guard: keeps each kind of connection to its own methods.
+fn connection_guard(conn: &Context, method: &str) -> Reply<()> {
+    let bound = conn.state::<AgentSession>().is_some();
+    if bound && !run_connection_may_call(method) {
+        return Err(ErrorObject::new(
+            ErrorCode::Unauthorized,
+            format!("a run connection may call only agent.* methods, not {method}"),
+        ));
+    }
+    if !bound && method.starts_with("agent.") && method != "agent.auth" {
+        return Err(ErrorObject::new(
+            ErrorCode::Unauthorized,
+            "authenticate with agent.auth first",
+        ));
+    }
+    Ok(())
+}
+
+/// The session the connection was bound to by `agent.auth`.
+fn bound(conn: &Context) -> Reply<Arc<AgentSession>> {
+    conn.state::<AgentSession>().ok_or_else(|| {
+        ErrorObject::new(
+            ErrorCode::Unauthorized,
+            "authenticate with agent.auth first",
+        )
+    })
+}
+
+async fn agent_auth(ctx: Arc<Ctx>, conn: Context, p: AgentAuthParams) -> Reply<AgentAuthResult> {
+    if conn.state::<AgentSession>().is_some() {
+        return Err(ErrorObject::new(
+            ErrorCode::Conflict,
+            "this connection is already bound to a run",
+        ));
+    }
+    // The kernel sees the digest; the token goes no further than this call.
+    let digest = token_digest(&p.token);
+    let session = ctx
+        .kernel
+        .agent_authenticate(&p.run_id, &digest)
+        .await
+        .map_err(|e| {
+            tracing::warn!(run = %p.run_id, "agent.auth refused");
+            kernel_error(&e)
+        })?;
+    let result = AgentAuthResult {
+        run_id: session.run().clone(),
+        bot: session.bot().map(str::to_owned),
+        scope: session.scope().to_owned(),
+    };
+    if !conn.set_state(session) {
+        return Err(ErrorObject::new(
+            ErrorCode::Conflict,
+            "this connection is already bound to a run",
+        ));
+    }
+    Ok(result)
+}
+
+async fn agent_report(
+    ctx: Arc<Ctx>,
+    conn: Context,
+    p: AgentReportParams,
+) -> Reply<AgentReportResult> {
+    let session = bound(&conn)?;
+    ctx.kernel
+        .agent_report(&session, p)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(AgentReportResult {})
+}
+
+async fn agent_request_approval(
+    ctx: Arc<Ctx>,
+    conn: Context,
+    p: AgentApprovalParams,
+) -> Reply<AgentApprovalResult> {
+    let session = bound(&conn)?;
+    ctx.kernel
+        .agent_request_approval(&session, p)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+async fn agent_board_read(
+    ctx: Arc<Ctx>,
+    conn: Context,
+    p: AgentBoardReadParams,
+) -> Reply<AgentBoardReadResult> {
+    let session = bound(&conn)?;
+    let (scope, entries) = ctx
+        .kernel
+        .agent_board_read(&session, p.key.as_deref())
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(AgentBoardReadResult { scope, entries })
+}
+
+async fn agent_board_write(
+    ctx: Arc<Ctx>,
+    conn: Context,
+    p: AgentBoardWriteParams,
+) -> Reply<AgentBoardWriteResult> {
+    let session = bound(&conn)?;
+    let (scope, version) = ctx
+        .kernel
+        .agent_board_write(&session, &p.key, &p.value, p.expected_version)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(AgentBoardWriteResult { scope, version })
+}
 
 async fn hello(_ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
     if p.protocol_version < PROTOCOL_VERSION {

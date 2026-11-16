@@ -23,7 +23,8 @@
 //! - `Done` is the last row; anything after it is ignored.
 
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ResolvedBy, Seq, StopReason,
+    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ReportStatus, ResolvedBy, Seq,
+    StopReason,
 };
 
 use crate::summary;
@@ -267,6 +268,12 @@ pub(crate) fn build_rows(
                 text: text.clone(),
                 steer: true,
             }),
+            ExecEvent::AgentReport {
+                status, summary, ..
+            } => built.rows.push(Row::Asked {
+                key,
+                line: format!("Reported {}: {summary}", report_word(*status)),
+            }),
             ExecEvent::NeedsInput {
                 request_id,
                 questions,
@@ -335,6 +342,16 @@ fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&st
         },
         ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
+    }
+}
+
+/// The word a report's status goes by in the transcript.
+fn report_word(status: ReportStatus) -> &'static str {
+    match status {
+        ReportStatus::Progress => "progress",
+        ReportStatus::Done => "done",
+        ReportStatus::Blocked => "blocked",
+        ReportStatus::Failed => "failed",
     }
 }
 
@@ -605,6 +622,22 @@ mod tests {
             &[],
         );
         assert!(matches!(&built.rows[0], Row::User { text, steer: true, .. } if text == "go left"));
+    }
+
+    #[test]
+    fn a_report_is_a_one_line_note_with_its_status() {
+        let built = build(
+            vec![ExecEvent::AgentReport {
+                status: ReportStatus::Blocked,
+                summary: "need the staging key".into(),
+                details: Some("tried the vault".into()),
+            }],
+            &[],
+        );
+        assert!(matches!(
+            &built.rows[0],
+            Row::Asked { line, .. } if line == "Reported blocked: need the staging key"
+        ));
     }
 
     #[test]

@@ -54,6 +54,11 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 rusqlite = { version = "0.41", features = ["bundled"] }
 rusqlite_migration = "2.7"
 
+# MCP (T1.9): the official Rust SDK, used by the CLI only (ARCH-4: only `apps/reno` knows MCP).
+rmcp = { version = "3", default-features = false, features = ["server", "macros", "transport-io"] }
+# Run tokens (T1.9): the operating system's random bytes.
+getrandom = "0.3"
+
 # GPUI: upstream Zed, pinned by git rev. The rev is `main` as of 2026-11-15.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14" }

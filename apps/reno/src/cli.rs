@@ -60,6 +60,9 @@ pub(crate) enum Command {
     Resume(Resume),
     /// Show each bot's limits and what it has used today, and what is paused.
     Budget,
+    /// Reno's own MCP server on stdio, for one run. Reno starts it when it launches a run; it is
+    /// not for people.
+    Mcp(crate::mcp::McpArgs),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
