@@ -6,7 +6,7 @@ use futures::StreamExt;
 use reno_proto::{ApprovalSubject, ExecEvent, ExecSpec, Question, RunId, StopReason};
 use tokio::sync::mpsc;
 
-use super::{DENY_MESSAGE, Expect, STEER_TEXT, Scenario, Target};
+use super::{DENY_MESSAGE, Expect, Scenario, Target};
 use crate::ProcessRecord;
 use crate::exec::{Decision, ExecControls, ExecError, ExecHandle, InputAnswer};
 
@@ -17,8 +17,8 @@ pub(crate) enum Behaviour {
     Passive,
     /// Decide every approval this way, with this message.
     Decide(Decision, Option<String>),
-    /// Send [`STEER_TEXT`] after the first `Text`.
-    Steer,
+    /// Send this text after the first `Text` or tool call.
+    Steer(String),
     /// Cancel as soon as the run has started.
     CancelOnStart,
 }
@@ -40,6 +40,8 @@ pub(crate) struct RunLog {
     pub(crate) questions: Vec<Vec<Question>>,
     pub(crate) records: Vec<ProcessRecord>,
     pub(crate) steered: bool,
+    /// The working directory of the run, for the path expectations.
+    pub(crate) cwd: std::path::PathBuf,
     /// How long the run took to end after the cancel, when it was cancelled.
     pub(crate) cancel_took: Option<Duration>,
 }
@@ -130,6 +132,12 @@ impl RunLog {
                     ))
                 }
             }
+            Expect::PathExists(rel) if self.cwd.join(rel).exists() => Ok(()),
+            Expect::PathExists(rel) => {
+                Err(format!("{rel} does not exist in {}", self.cwd.display()))
+            }
+            Expect::PathAbsent(rel) if !self.cwd.join(rel).exists() => Ok(()),
+            Expect::PathAbsent(rel) => Err(format!("{rel} exists in {}", self.cwd.display())),
             Expect::ApprovalClass(class) => {
                 if self.approvals.iter().any(|s| s.action == *class) {
                     Ok(())
@@ -164,8 +172,12 @@ impl Drop for CancelOnDrop {
 }
 
 impl Target {
-    /// The spec a scenario describes.
+    /// The spec a scenario describes. Paths the scenario wants fresh are removed here, so a
+    /// leftover of an earlier run never satisfies a path expectation.
     pub(crate) fn spec(&self, scenario: &Scenario) -> Result<ExecSpec, String> {
+        for rel in &scenario.fresh {
+            let _ = std::fs::remove_file(self.cwd.join(rel));
+        }
         let run_id = RunId::from_suffix("01HZXC").map_err(|e| format!("run id: {e}"))?;
         Ok(ExecSpec {
             run_id,
@@ -189,6 +201,7 @@ impl Target {
         spec: ExecSpec,
         behaviour: Behaviour,
     ) -> Result<RunLog, String> {
+        let spec_cwd = spec.cwd.clone();
         let (controls, handle) = ExecControls::new(8);
         let mut records = handle
             .take_process_records()
@@ -199,7 +212,10 @@ impl Target {
             .start(spec, controls)
             .await
             .map_err(|e| format!("start refused the run: {e}"))?;
-        let mut log = RunLog::default();
+        let mut log = RunLog {
+            cwd: spec_cwd,
+            ..RunLog::default()
+        };
         let mut cancelled_at: Option<Instant> = None;
         let mut deadline: Option<Instant> = None;
         loop {
@@ -258,12 +274,16 @@ impl Target {
                         .await
                         .map_err(|_| "the run closed before the answer".to_owned())?;
                 }
-                ExecEvent::Text { .. } if matches!(behaviour, Behaviour::Steer) && !log.steered => {
+                ExecEvent::Text { .. } | ExecEvent::Tool { .. }
+                    if matches!(behaviour, Behaviour::Steer(_)) && !log.steered =>
+                {
                     log.steered = true;
-                    handle
-                        .steer(STEER_TEXT)
-                        .await
-                        .map_err(|_| "the run closed before the steer".to_owned())?;
+                    if let Behaviour::Steer(text) = &behaviour {
+                        handle
+                            .steer(text.clone())
+                            .await
+                            .map_err(|_| "the run closed before the steer".to_owned())?;
+                    }
                 }
                 ExecEvent::Started { .. }
                     if matches!(behaviour, Behaviour::CancelOnStart) && cancelled_at.is_none() =>

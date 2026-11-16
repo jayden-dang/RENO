@@ -214,6 +214,10 @@ pub enum Expect {
     },
     /// Some `NeedsApproval` subject has this class.
     ApprovalClass(ActionClass),
+    /// This path, relative to the run's working directory, exists afterwards.
+    PathExists(String),
+    /// This path, relative to the run's working directory, does not exist afterwards.
+    PathAbsent(String),
 }
 
 /// One run to make: a prompt, how to start it, and what it must show.
@@ -232,8 +236,16 @@ pub struct Scenario {
     pub mcp: Vec<McpServerSpec>,
     /// A session to resume.
     pub resume: Option<SessionRef>,
+    /// Resume the session the lifecycle run started (a real CLI's session ids cannot be known
+    /// ahead). Used when `resume` is `None`.
+    pub resume_lifecycle_session: bool,
     /// A model override (live targets pass the cheapest).
     pub model: Option<String>,
+    /// Paths, relative to the working directory, removed before the run, so an earlier run's
+    /// leftovers cannot satisfy an [`Expect::PathExists`].
+    pub fresh: Vec<String>,
+    /// What a steer case sends mid-run, instead of [`STEER_TEXT`].
+    pub steer_text: Option<String>,
     /// What the run must show.
     pub expect: Vec<Expect>,
 }
@@ -248,7 +260,10 @@ impl Scenario {
             env: BTreeMap::new(),
             mcp: Vec::new(),
             resume: None,
+            resume_lifecycle_session: false,
             model: None,
+            fresh: Vec::new(),
+            steer_text: None,
             expect: Vec::new(),
         }
     }
@@ -278,6 +293,27 @@ impl Scenario {
     #[must_use]
     pub fn resume(mut self, session: impl Into<String>) -> Self {
         self.resume = Some(SessionRef(session.into()));
+        self
+    }
+
+    /// Resume the session the lifecycle run started.
+    #[must_use]
+    pub fn resume_lifecycle_session(mut self) -> Self {
+        self.resume_lifecycle_session = true;
+        self
+    }
+
+    /// Remove this path (relative to the working directory) before the run.
+    #[must_use]
+    pub fn fresh(mut self, path: impl Into<String>) -> Self {
+        self.fresh.push(path.into());
+        self
+    }
+
+    /// Send this instead of [`STEER_TEXT`] when steering.
+    #[must_use]
+    pub fn steer_text(mut self, text: impl Into<String>) -> Self {
+        self.steer_text = Some(text.into());
         self
     }
 

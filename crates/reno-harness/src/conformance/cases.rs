@@ -324,6 +324,23 @@ impl Cx<'_> {
 
     async fn approval(&mut self, decision: Decision, with_message: bool) -> CaseResultOf {
         let plan = self.need(&self.target.plan.approval, "approval")?;
+        let expect = match (decision, with_message) {
+            (Decision::Allow, _) => &plan.on_allow,
+            (Decision::Deny, false) => &plan.on_deny,
+            (Decision::Deny, true) => {
+                if plan.on_deny_message.is_empty() {
+                    return Err(Failure::Unplanned(
+                        "no expectation shows the deny message reaching the agent".into(),
+                    ));
+                }
+                &plan.on_deny_message
+            }
+        };
+        if expect.is_empty() {
+            return Err(Failure::Unplanned(
+                "the approval scenario declares no expectation of the decision".into(),
+            ));
+        }
         let behaviour = match decision {
             Decision::Allow => Behaviour::Decide(Decision::Allow, None),
             Decision::Deny => Behaviour::deny(with_message),
@@ -343,23 +360,6 @@ impl Cx<'_> {
                 )
                 .into());
             }
-        }
-        let expect = match (decision, with_message) {
-            (Decision::Allow, _) => &plan.on_allow,
-            (Decision::Deny, false) => &plan.on_deny,
-            (Decision::Deny, true) => {
-                if plan.on_deny_message.is_empty() {
-                    return Err(Failure::Unplanned(
-                        "no expectation shows the deny message reaching the agent".into(),
-                    ));
-                }
-                &plan.on_deny_message
-            }
-        };
-        if expect.is_empty() {
-            return Err(Failure::Unplanned(
-                "the approval scenario declares no expectation of the decision".into(),
-            ));
         }
         log.check_all(expect.iter().chain(&plan.scenario.expect))?;
         Ok(Outcome::Pass)
@@ -381,7 +381,11 @@ impl Cx<'_> {
 
     async fn steer(&mut self) -> CaseResultOf {
         let scenario = self.need(&self.target.plan.steer, "steer")?;
-        let log = self.run_completed(scenario, Behaviour::Steer).await?;
+        let text = scenario
+            .steer_text
+            .clone()
+            .unwrap_or_else(|| super::STEER_TEXT.to_owned());
+        let log = self.run_completed(scenario, Behaviour::Steer(text)).await?;
         if !log.steered {
             return Err("the run emitted no Text to steer after".into());
         }
@@ -436,14 +440,22 @@ impl Cx<'_> {
 
     async fn resume(&mut self) -> CaseResultOf {
         let scenario = self.need(&self.target.plan.resume, "resume")?;
+        let mut scenario = scenario.clone();
+        if scenario.resume.is_none() && scenario.resume_lifecycle_session {
+            self.plain_run().await?;
+            scenario.resume = self
+                .lifecycle_log
+                .as_ref()
+                .and_then(|log| log.started().first().map(|s| (*s).clone()));
+        }
         if scenario.resume.is_none() {
             return Err("the resume scenario carries no session to resume".into());
         }
-        let log = self.run_completed(scenario, Behaviour::Passive).await?;
+        let log = self.run_completed(&scenario, Behaviour::Passive).await?;
         if log.started().is_empty() {
             return Err("the resumed run never emitted Started".into());
         }
-        require_expectations(&log, scenario)
+        require_expectations(&log, &scenario)
     }
 
     async fn mcp(&mut self) -> CaseResultOf {
