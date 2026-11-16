@@ -7,7 +7,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
-use notify::event::{AccessKind, CreateKind, Event};
+use notify::event::{AccessKind, CreateKind, Event, Flag};
 use reno_kernel::Definitions;
 use reno_proto::defs::{DefKind, MAX_FILE_BYTES, ValidationContext, load_set};
 use tempfile::TempDir;
@@ -423,6 +423,36 @@ fn only_the_definition_files_count_as_edits() {
     ));
 }
 
+#[test]
+fn a_rescan_notice_or_a_watcher_error_reloads_everything() {
+    let root = Path::new("/r");
+    let rescan = |paths: &[&str]| event(EventKind::Other, paths).set_flag(Flag::Rescan);
+
+    // Not a definition path by itself, but the platform dropped events under it.
+    for paths in [
+        &["/r/scratch"][..],
+        &["/r/.git"],
+        &["/r"],
+        &["/"],
+        &["/elsewhere"],
+        &[],
+    ] {
+        let notice = rescan(paths);
+        assert!(signals_reload(&Ok(notice), root), "{paths:?} should reload");
+    }
+    // The same path without the flag is just a scratch file.
+    assert!(!signals_reload(
+        &Ok(event(EventKind::Other, &["/r/scratch"])),
+        root
+    ));
+    // Even a read-kind event carrying the flag.
+    let odd = event(EventKind::Access(AccessKind::Any), &["/r/scratch"]).set_flag(Flag::Rescan);
+    assert!(signals_reload(&Ok(odd), root));
+
+    let error = Err(notify::Error::generic("event buffer overflowed"));
+    assert!(signals_reload(&error, root));
+}
+
 // ---- the debounce -------------------------------------------------------------------------
 
 async fn tick() {
@@ -495,8 +525,25 @@ async fn next_signal(rx: &mut mpsc::Receiver<()>) {
         .expect("the watch ended");
 }
 
+/// Reads until `done` holds, re-reading on each signal. The failsafe only turns a hang into a
+/// failure.
+async fn until_snapshot(
+    fs_defs: &FsDefinitions,
+    changes: &mut mpsc::Receiver<()>,
+    done: impl Fn(&DefSnapshot) -> bool,
+) {
+    tokio::time::timeout(FAILSAFE, async {
+        while !done(&fs_defs.snapshot().await.unwrap()) {
+            next_signal(changes).await;
+        }
+    })
+    .await
+    .expect("the change never showed up in a read");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_edit_on_disk_is_reported_and_the_next_snapshot_has_it() {
+    let _serial = crate::test_serial().await;
     let (_dir, root) = temp_root();
     bootstrap(&root, fixed(GitOutcome::Unavailable))
         .await
@@ -504,33 +551,33 @@ async fn an_edit_on_disk_is_reported_and_the_next_snapshot_has_it() {
     let fs_defs = FsDefinitions::open(&root, Duration::from_millis(50)).unwrap();
     let mut changes = fs_defs.watch().unwrap();
 
+    // A signal only says "read again" (it may be a rescan notice, or a late one for an earlier
+    // write), so each step waits until a read shows the change rather than for one signal.
     write(&root, "bots/scout.toml", "name = \"scout\"\n");
-    next_signal(&mut changes).await;
-    let snapshot = fs_defs.snapshot().await.unwrap();
-    assert!(names(&snapshot).contains(&(DefKind::Bot, "scout")));
+    until_snapshot(&fs_defs, &mut changes, |s| {
+        names(s).contains(&(DefKind::Bot, "scout"))
+    })
+    .await;
 
     // An edit to an existing file, and a delete, are changes too.
     write(&root, "bots/scout.toml", "name = \"scout\"\n# edited\n");
-    next_signal(&mut changes).await;
-    assert!(
-        fs_defs
-            .snapshot()
-            .await
-            .unwrap()
-            .files
-            .iter()
-            .any(|f| f.text.contains("# edited"))
-    );
+    until_snapshot(&fs_defs, &mut changes, |s| {
+        s.files.iter().any(|f| f.text.contains("# edited"))
+    })
+    .await;
 
     fs::remove_file(root.join("bots/scout.toml")).unwrap();
-    next_signal(&mut changes).await;
-    assert!(!names(&fs_defs.snapshot().await.unwrap()).contains(&(DefKind::Bot, "scout")));
+    until_snapshot(&fs_defs, &mut changes, |s| {
+        !names(s).contains(&(DefKind::Bot, "scout"))
+    })
+    .await;
 
     fs_defs.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn many_quick_writes_end_with_a_snapshot_that_has_all_of_them() {
+    let _serial = crate::test_serial().await;
     let (_dir, root) = temp_root();
     bootstrap(&root, fixed(GitOutcome::Unavailable))
         .await
@@ -541,30 +588,21 @@ async fn many_quick_writes_end_with_a_snapshot_that_has_all_of_them() {
     for n in 0..20 {
         write(&root, &format!("triggers/t{n}.toml"), "x");
     }
-    // However the writes were batched, the signals stop and the last read has everything.
-    next_signal(&mut changes).await;
-    let seen = tokio::time::timeout(FAILSAFE, async {
-        loop {
-            let snapshot = fs_defs.snapshot().await.unwrap();
-            if snapshot
-                .files
-                .iter()
-                .filter(|f| f.kind == DefKind::Trigger)
-                .count()
-                == 20
-            {
-                return;
-            }
-            next_signal(&mut changes).await;
-        }
+    // However the writes were batched, the last read has everything.
+    until_snapshot(&fs_defs, &mut changes, |s| {
+        s.files
+            .iter()
+            .filter(|f| f.kind == DefKind::Trigger)
+            .count()
+            == 20
     })
     .await;
-    assert!(seen.is_ok(), "the 20 files never all showed up");
     fs_defs.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_ends_the_watch() {
+    let _serial = crate::test_serial().await;
     let (_dir, root) = temp_root();
     bootstrap(&root, fixed(GitOutcome::Unavailable))
         .await
@@ -582,6 +620,7 @@ async fn shutdown_ends_the_watch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_watch_is_refused() {
+    let _serial = crate::test_serial().await;
     let (_dir, root) = temp_root();
     bootstrap(&root, fixed(GitOutcome::Unavailable))
         .await

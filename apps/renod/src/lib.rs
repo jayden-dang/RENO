@@ -49,3 +49,12 @@ pub use executors::ExecutorSet;
 pub use fswatch::FsWatch;
 pub use paths::Paths;
 pub use worktrees::GitWorkspace;
+
+/// Held by the tests that rely on the platform's real file events, so they run one at a time:
+/// the suite's own parallel file churn would otherwise overload the event daemon (`fseventsd`),
+/// which then delays or drops per-file events.
+#[cfg(test)]
+pub(crate) async fn test_serial() -> tokio::sync::MutexGuard<'static, ()> {
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    SERIAL.lock().await
+}

@@ -13,6 +13,9 @@
 //! then waits for quiet: every signal re-arms a deadline, and when the deadline passes with no
 //! further signal the kernel is told once. Nothing wakes on an interval.
 //!
+//! A rescan notice (the platform dropped events and named a directory) and a watcher error both
+//! count whatever their path: the files that changed are unknown, and a read looks at them all.
+//!
 //! Only events at `policy.toml`, `bots/` and `triggers/` count. Whatever else lives in the
 //! directory (a `.git/`, a scratch folder) never reloads the definitions, and neither do file
 //! reads (`Access` events), so loading them does not reload them either.
@@ -27,6 +30,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -281,19 +285,18 @@ impl Definitions for FsDefinitions {
         let (out_tx, out_rx) = mpsc::channel(1);
         let root = self.root.clone();
 
+        let warned = AtomicBool::new(false);
         let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                match event {
-                    Ok(event) if !is_relevant(&event, &root) => {}
-                    Ok(_) => {
-                        // A full channel already holds a pending signal.
-                        let _ = raw_tx.try_send(());
-                    }
-                    Err(error) => {
-                        // The watcher lost track of something: read everything again.
-                        tracing::warn!(%error, "the definitions watcher reported an error");
-                        let _ = raw_tx.try_send(());
-                    }
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                if let Err(error) = &result
+                    && !warned.swap(true, Ordering::Relaxed)
+                {
+                    // Say so once: a failing watcher can repeat itself without end.
+                    tracing::warn!(%error, "the definitions watcher reported an error");
+                }
+                if signals_reload(&result, &root) {
+                    // A full channel already holds a pending signal.
+                    let _ = raw_tx.try_send(());
                 }
             })
             .map_err(|e| KernelError::Definitions(format!("cannot create a watcher: {e}")))?;
@@ -307,6 +310,18 @@ impl Definitions for FsDefinitions {
             .spawn(debounce(raw_rx, out_tx, self.debounce, self.stop.clone()));
         *watching = Some(Watching { _watcher: watcher });
         Ok(out_rx)
+    }
+}
+
+/// Whether one watcher callback asks for a reload. A snapshot always reads the whole directory,
+/// so a signal is a rescan. That is what the two cases with no usable path want: an error (the
+/// watcher lost track of something) and a rescan notice (the platform dropped events and named a
+/// directory instead, e.g. FSEvents `MustScanSubDirs` under load, possibly one that is not a
+/// definition directory).
+fn signals_reload(result: &notify::Result<notify::Event>, root: &Path) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(event) => event.need_rescan() || is_relevant(event, root),
     }
 }
 
