@@ -92,8 +92,16 @@
 //! unchanged: they still match any simple command in any stage. The exact grammar, the
 //! per-filter option lists and the rejected forms are in `pipeline.rs`.
 //!
-//! This is a guard, not a shell parser. A quoted `;` is treated as a break, which can make a
-//! deny rule match more and an allow rule match less than the shell would, never the reverse.
+//! The allow-side guard is quote-aware. Inside single quotes every character is literal. Inside
+//! double quotes `$`, a backtick and `\` stay dangerous (substitution, escapes), while
+//! `( ) ; & | < > { } * ? [ ] ~ #` are literal. Outside quotes a backslash escapes the next
+//! character. An unbalanced quote, a newline or carriage return anywhere, or a backslash before
+//! a newline keeps the line compound. So `git commit*` allows
+//! `git commit -m "chore(deps): cargo update" -- Cargo.lock` and `git commit -m 'a; b | c'`,
+//! and not `git commit -m "$(rm -rf ~)"`, `git commit -m x ; rm y` or `git commit -m "x`.
+//!
+//! This is a guard, not a shell parser. The deny and ask side still cuts at every `; & | ( )`,
+//! quoted or not, which can make a deny rule match more than the shell would, never less.
 //! The harness's own sandbox remains the control for what a permitted command can do.
 //!
 //! A glob that does not compile never matches. Validation rejects such a glob, so this only
@@ -263,8 +271,48 @@ fn allow_matches(glob: &GlobMatcher, line: &str) -> bool {
     pure_pipeline_head(line).is_some_and(|command| glob.is_match(command))
 }
 
+/// Whether an `allow` glob must treat `line` as compound: it chains, substitutes or redirects
+/// outside quotes, or its quoting cannot be read with confidence.
+///
+/// Quote-aware, in this scanner's terms:
+///
+/// - Outside quotes: `; & | ( ) < >`, a backtick and `$(` make it compound. A backslash escapes
+///   the next character (so `\;` is a literal `;`), except that a backslash before a newline,
+///   or at the end of the line, is compound.
+/// - Inside single quotes everything is literal.
+/// - Inside double quotes `$`, a backtick and `\` are dangerous (substitution, escapes) and make
+///   it compound; `( ) ; & | < > { } * ? [ ] ~ #` are literal.
+/// - A newline or carriage return is compound wherever it is, and an unbalanced quote is compound.
 pub(super) fn chains_or_redirects(line: &str) -> bool {
-    line.contains(['<', '>']) || line.contains(COMMAND_BREAKS) || line.contains("$(")
+    #[derive(Clone, Copy, PartialEq)]
+    enum Q {
+        None,
+        Single,
+        Double,
+    }
+    let mut quote = Q::None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\n' | '\r') {
+            return true;
+        }
+        match (quote, c) {
+            (Q::Single, '\'') | (Q::Double, '"') => quote = Q::None,
+            (Q::Single, _) => {}
+            (Q::Double, '$' | '`' | '\\') => return true,
+            (Q::Double, _) => {}
+            (Q::None, '\'') => quote = Q::Single,
+            (Q::None, '"') => quote = Q::Double,
+            (Q::None, '\\') => match chars.next() {
+                None | Some('\n' | '\r') => return true,
+                Some(_) => {}
+            },
+            (Q::None, '$') if chars.peek() == Some(&'(') => return true,
+            (Q::None, ';' | '&' | '|' | '(' | ')' | '<' | '>' | '`') => return true,
+            (Q::None, _) => {}
+        }
+    }
+    quote != Q::None
 }
 
 // ---- paths ---------------------------------------------------------------------------------
@@ -822,6 +870,130 @@ mod tests {
                 ("ask", DEFAULT_RULE),
                 "{line:?}"
             );
+        }
+    }
+
+    fn git_commit_allowed(line: &str) -> bool {
+        let p = policy(
+            r#"
+            default = "ask"
+            [[rules]]
+            note = "commit"
+            effect = "allow"
+            match = { action = "command", command = "git commit*" }
+            "#,
+        );
+        named(&eval(&p, None, &command(line))).0 == "allow"
+    }
+
+    #[test]
+    fn quoted_operators_do_not_make_a_line_compound() {
+        for line in [
+            "git commit -m \"chore(deps): cargo update\" -- Cargo.lock",
+            "git commit -m 'a; b | c'",
+            "git commit -m 'a $(x) `y` > z'",
+            "git commit -m \"a; b | c & d < e > f { } * ? [ ] ~ #\"",
+            "git commit -m a\\;b",
+            "git commit -m \"it's\"",
+            "git commit -m 'say \"hi\"'",
+        ] {
+            assert!(git_commit_allowed(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn unquoted_or_dangerous_text_keeps_a_line_compound() {
+        for line in [
+            "git commit -m \"$(rm -rf ~)\"",
+            "git commit -m \"`id`\"",
+            "git commit -m \"$HOME\"",
+            "git commit -m \"a\\\"b\"",
+            "git commit -m \"x\" ; rm y",
+            "git commit -m \"x\" && rm y",
+            "git commit -m \"x\" > f",
+            "git commit -m \"x",
+            "git commit -m 'x",
+            "git commit -m x\\\ny",
+            "git commit -m x\\",
+            "git commit -m \"a\nb\"",
+            "git commit -m 'a\nb'",
+            "git commit -m \\' ; rm y",
+            "git commit -m 'a'; rm y",
+            "git commit -m $(id)",
+        ] {
+            assert!(!git_commit_allowed(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_deny_rule_still_cuts_inside_quotes() {
+        let p = policy(
+            r#"
+            default = "allow"
+            [[rules]]
+            note = "no rm"
+            effect = "deny"
+            match = { action = "command", command = "rm *" }
+            "#,
+        );
+        assert_eq!(
+            named(&eval(&p, None, &command("echo \"a; rm -rf x\""))).0,
+            "deny"
+        );
+    }
+
+    mod quote_props {
+        use super::super::chains_or_redirects;
+        use proptest::prelude::*;
+
+        const OPS: &[&str] = &[
+            ";", "&", "|", "(", ")", "<", ">", "`", "$(", "\n", "&&", "||",
+        ];
+        const LITERAL: &[&str] = &[
+            ";", "&", "|", "(", ")", "<", ">", "{", "}", "*", "?", "[", "]", "~", "#", "x", " ",
+        ];
+
+        proptest! {
+            /// An operator outside quotes always makes the line compound.
+            #[test]
+            fn an_unquoted_operator_is_never_allow_matchable(
+                op in proptest::sample::select(OPS),
+                before in "[a-z ]{0,6}",
+                quoted in proptest::collection::vec(proptest::sample::select(LITERAL), 0..5),
+                after in "[a-z ]{0,6}",
+            ) {
+                let q: String = quoted.concat();
+                let line = format!("git commit -m \"{q}\" {before}{op}{after}");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+                let line = format!("git commit -m '{q}' {before}{op}{after}");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+            }
+
+            /// Quoted operators alone never make a line compound.
+            #[test]
+            fn quoted_operators_alone_are_never_compound(
+                parts in proptest::collection::vec(proptest::sample::select(LITERAL), 0..8),
+                single in any::<bool>(),
+            ) {
+                let q: String = parts.concat();
+                let line = if single {
+                    format!("git commit -m '{q}' -- f")
+                } else {
+                    format!("git commit -m \"{q}\" -- f")
+                };
+                prop_assert!(!chains_or_redirects(&line), "{line:?}");
+            }
+
+            /// Substitution inside double quotes keeps the line compound.
+            #[test]
+            fn substitution_in_double_quotes_is_compound(
+                pre in "[a-z ;|()]{0,6}",
+                sub in prop_oneof![Just("$("), Just("`"), Just("${"), Just("$x")],
+                post in "[a-z ]{0,6}",
+            ) {
+                let line = format!("git commit -m \"{pre}{sub}{post}\"");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+            }
         }
     }
 

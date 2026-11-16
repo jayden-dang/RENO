@@ -74,8 +74,12 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Mcp(_) => Err(anyhow::anyhow!(
             "reno mcp is served before commands are dispatched"
         )),
-        Command::Approve(args) => commands::decide(env, args, ApprovalDecision::ApproveOnce).await,
-        Command::Deny(args) => commands::decide(env, args, ApprovalDecision::Deny).await,
+        Command::Approve(args) => {
+            commands::decide(env, args, None, ApprovalDecision::ApproveOnce).await
+        }
+        Command::Deny(args) => {
+            commands::decide(env, args.decide, args.message, ApprovalDecision::Deny).await
+        }
     }
 }
 

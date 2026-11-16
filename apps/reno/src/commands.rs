@@ -557,9 +557,20 @@ struct Decided<'a> {
 pub(crate) async fn decide(
     env: &Env,
     args: Decide,
+    message: Option<String>,
     decision: ApprovalDecision,
 ) -> anyhow::Result<ExitCode> {
+    if message.as_deref().is_some_and(|m| m.trim().is_empty()) {
+        anyhow::bail!("--message is empty: say why, or leave it out");
+    }
     let client = env.connect().await?;
+    if message.is_some() && !client.supports(reno_proto::FEATURE_APPROVAL_MESSAGE) {
+        anyhow::bail!(
+            "this daemon cannot take a reason with a denial (it lacks the `{}` feature): \
+             update renod, or deny without --message",
+            reno_proto::FEATURE_APPROVAL_MESSAGE
+        );
+    }
     let remember = args.remember.map(|scope| reno_proto::Remember {
         scope: match scope {
             crate::cli::RememberArg::Run => reno_proto::RememberScope::Run,
@@ -569,7 +580,7 @@ pub(crate) async fn decide(
         expires_in_secs: args.expires_in,
     });
     client
-        .decide_remembering(&args.approval, decision, None, remember)
+        .decide_remembering(&args.approval, decision, message, remember)
         .await
         .map_err(|e| env.explain(e))?;
     if env.json {

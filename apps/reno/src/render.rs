@@ -184,7 +184,10 @@ impl<W: Write> Transcript<W> {
         }
         match hint {
             ApprovalHint::Pending(id) => {
-                writeln!(self.out, "  reno approve {id}   reno deny {id}")?;
+                writeln!(
+                    self.out,
+                    "  reno approve {id}   reno deny {id}   reno deny {id} --message \"…\""
+                )?;
             }
             ApprovalHint::Decided(text) => writeln!(self.out, "  already decided: {text}")?,
             ApprovalHint::Unknown => {}
@@ -1060,7 +1063,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "  already decided: approved by rule cargo is fine\n  reno approve appr_a2   reno deny appr_a2\n"
+            "  already decided: approved by rule cargo is fine\n  reno approve appr_a2   reno deny appr_a2   reno deny appr_a2 --message \"…\"\n"
         );
     }
 
