@@ -165,6 +165,20 @@ const ISOLATION_ENV: [(&str, &str); 2] = [
     ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
 ];
 
+/// A Reno run is headless: when the turn ends the run ends, and nobody is left to receive a
+/// "background task finished" notification. So every run, isolated or not, turns background
+/// work off: the Bash tool's `run_in_background`, Claude Code moving a timed-out shell command
+/// to the background on its own, and backgrounded subagents (Claude Code docs, env-vars:
+/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`). Seen live: a `cargo test` past the Bash tool's
+/// timeout was moved to the background and the run ended "waiting for a notification",
+/// without its report.
+const HEADLESS_ENV: [(&str, &str); 1] = [("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")];
+
+/// Tools a headless run never gets. `Monitor` still runs in the background with
+/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` set (docs), so it is removed from the model's context
+/// with `--disallowedTools` (a bare tool name removes the tool).
+const HEADLESS_DISALLOWED_TOOLS: &str = "Monitor";
+
 /// The inline `--mcp-config` JSON for the injected servers (the CLI accepts a JSON string as
 /// well as a file path), or `None` when there are none. A name that repeats keeps its first
 /// entry: Reno's own server is first in `ExecSpec::mcp`.
@@ -367,6 +381,7 @@ impl ClaudeExecutor {
         if !spec.inherit_user_config {
             args.extend(["--setting-sources".into(), ISOLATED_SETTING_SOURCES.into()]);
         }
+        args.extend(["--disallowedTools".into(), HEADLESS_DISALLOWED_TOOLS.into()]);
         args
     }
 
@@ -385,6 +400,9 @@ impl ClaudeExecutor {
         if !spec.inherit_user_config {
             cmd.envs(ISOLATION_ENV);
         }
+        // Always, and after the run's own variables: a headless run cannot wait in the
+        // background (see `HEADLESS_ENV`).
+        cmd.envs(HEADLESS_ENV);
         cmd.args(Self::launch_args(spec));
         if let Some(resume) = &spec.resume {
             cmd.arg(format!("--resume={}", resume.0));
@@ -1625,6 +1643,24 @@ mod tests {
         assert_eq!(flag(&args, "--setting-sources"), None);
         assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), None);
         assert_eq!(env_value(&env, "ENABLE_CLAUDEAI_MCP_SERVERS"), None);
+    }
+
+    #[test]
+    fn a_headless_run_never_works_in_the_background_in_either_mode() {
+        for inherit in [false, true] {
+            let mut s = spec(AccessMode::Supervised);
+            s.inherit_user_config = inherit;
+            s.env
+                .insert("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "0".into());
+            let (args, env) = args_and_env(&s);
+            // Set after the run's own variables, so a bot cannot turn background work back on.
+            assert_eq!(
+                env_value(&env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
+                Some("1"),
+                "inherit={inherit}"
+            );
+            assert_eq!(flag(&args, "--disallowedTools"), Some("Monitor"));
+        }
     }
 
     #[test]
