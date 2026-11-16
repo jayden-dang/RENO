@@ -178,6 +178,10 @@ impl Db {
         self.store.bot_usage(day).await
     }
 
+    pub(crate) async fn claimable_leases(&self, filter: &ClaimFilter) -> Result<Vec<(RunId, i64)>> {
+        self.store.claimable_leases(self.now_ms(), filter).await
+    }
+
     pub(crate) async fn occupancy(&self) -> Result<BTreeMap<String, Occupancy>> {
         self.store.occupancy().await
     }

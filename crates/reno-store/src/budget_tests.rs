@@ -462,3 +462,60 @@ async fn skipping_an_occurrence_moves_the_trigger_on_and_says_why() {
         .await;
     assert!(matches!(missing, Err(StoreError::NotFound { .. })));
 }
+
+/// The day label the kernel derives from its clock's zone, fed to the store: tokens used either
+/// side of local midnight, and across both DST changes of a zone, land on the right days.
+#[tokio::test]
+async fn the_local_day_boundary_splits_the_tokens_across_midnight_and_dst() {
+    use reno_proto::LocalZone;
+    let ny = LocalZone::named("America/New_York").unwrap();
+    let at = |text: &str| text.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+
+    let (_d, store) = open().await;
+    let v = put_bot(&store, "keeper", Some(4), None).await;
+    let run = queue(&store, "a1", Some(("keeper", v)), 10).await;
+    claim(&store, 100, &filter("x")).await.unwrap();
+    let add = Tokens {
+        input: 1,
+        output: 1,
+    };
+    // One minute before and after local midnight, a spring-forward day and a fall-back day.
+    let moments = [
+        "2023-11-14T04:59:00Z", // 23:59 on the 13th
+        "2023-11-14T05:01:00Z", // 00:01 on the 14th
+        "2024-03-10T04:59:00Z", // 23:59 on the 9th
+        "2024-03-10T05:01:00Z", // 00:01 on the 10th, a 23-hour day
+        "2024-03-11T03:59:00Z", // 23:59 on the 10th (EDT)
+        "2024-03-11T04:01:00Z", // 00:01 on the 11th
+        "2024-11-03T03:59:00Z", // 23:59 on the 2nd
+        "2024-11-03T04:01:00Z", // 00:01 on the 3rd, a 25-hour day
+        "2024-11-04T04:59:00Z", // 23:59 on the 3rd (EST)
+        "2024-11-04T05:01:00Z", // 00:01 on the 4th
+    ];
+    for (n, moment) in moments.iter().enumerate() {
+        let day = ny.day_of(at(moment));
+        store
+            .record_usage(&run, 1, Some("keeper"), &day, add, 200 + n as i64)
+            .await
+            .unwrap();
+    }
+    let days = [
+        "2023-11-13",
+        "2023-11-14",
+        "2024-03-09",
+        "2024-03-10",
+        "2024-03-11",
+        "2024-11-02",
+        "2024-11-03",
+        "2024-11-04",
+    ];
+    for day in days {
+        let used = store.bot_usage(day).await.unwrap();
+        let expect = match day {
+            "2024-03-10" | "2024-11-03" => 4, // both sides of the day's own change: 2 events
+            _ => 2,
+        };
+        assert_eq!(used["keeper"].total(), expect, "{day}");
+    }
+    assert_eq!(store.run_usage(&run).await.unwrap().total(), 20);
+}

@@ -81,6 +81,16 @@ pub(crate) async fn load(shared: &Shared) -> Result<()> {
     Ok(())
 }
 
+/// The name of the global pause is not a bot's: it would act on the wrong scope.
+fn reject_reserved(bot: Option<&str>) -> Result<()> {
+    match bot {
+        Some(name) if name == GLOBAL_PAUSE => Err(KernelError::Invalid(format!(
+            "{name:?} is not a bot name; leave the bot out to pause or resume everything"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// `budget.pause`.
 pub(crate) async fn pause(
     shared: &Shared,
@@ -90,6 +100,7 @@ pub(crate) async fn pause(
     if shared.root.is_cancelled() {
         return Err(KernelError::ShuttingDown);
     }
+    reject_reserved(bot)?;
     if let Some(name) = bot {
         let known = shared.current_defs().set().bot(name).is_some()
             || shared.pauses_tx.borrow().bots.contains(name);
@@ -126,6 +137,7 @@ pub(crate) async fn resume(shared: &Shared, bot: Option<&str>) -> Result<BudgetR
     if shared.root.is_cancelled() {
         return Err(KernelError::ShuttingDown);
     }
+    reject_reserved(bot)?;
     let changed = shared.db.resume(bot.unwrap_or(GLOBAL_PAUSE)).await?;
     shared.pauses_tx.send_if_modified(|current| {
         let mut next = (**current).clone();

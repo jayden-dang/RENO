@@ -638,3 +638,57 @@ async fn a_pause_survives_a_restart() {
     fx.kernel.resume(None).await.unwrap();
     fx.wait_status(&run, RunStatus::Succeeded).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_global_pause_is_not_a_bot_name() {
+    let fx = fx_with(
+        "max_concurrent_runs = 2",
+        [MockStep::Sleep(secs(1))],
+        config(8),
+    )
+    .await;
+    fx.kernel.pause(None, false).await.unwrap();
+    let wrong = fx.kernel.resume(Some("*")).await;
+    assert!(matches!(wrong, Err(KernelError::Invalid(_))), "{wrong:?}");
+    let wrong = fx.kernel.pause(Some("*"), false).await;
+    assert!(matches!(wrong, Err(KernelError::Invalid(_))), "{wrong:?}");
+    assert!(
+        fx.kernel.budget_status().await.unwrap().paused,
+        "the pause is still there, in memory and in the store"
+    );
+    assert!(fx.store.pauses().await.unwrap().contains_key("*"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_lease_the_claim_would_pass_over_does_not_wake_the_dispatcher() {
+    let fx = fx_with(
+        "max_concurrent_runs = 2",
+        [MockStep::Sleep(secs(1))],
+        config(8),
+    )
+    .await;
+    fx.kernel.pause(Some("keeper"), false).await.unwrap();
+    let run = as_bot(&fx, "keeper").await;
+    // Someone else leased it and died: the lease runs out, but the bot is paused.
+    let claimed = fx
+        .store
+        .claim_next("someone-else", fx.clock.now_ms(), 60_000)
+        .await
+        .unwrap();
+    assert_eq!(claimed.unwrap().run_id, run);
+    step(&fx, 5 * MIN).await;
+    // A turn of the dispatcher with the lease expired and the bot still paused.
+    fx.kernel.resume(Some("scribe")).await.unwrap();
+    // It must settle: no one-millisecond wake-ups claiming nothing, however long it sits.
+    fx.idle().await;
+    // (The hour trigger of the paused bot is held once; that is its own, single write.)
+    step(&fx, HOUR).await;
+    let writes = fx.idle().await;
+    step(&fx, 2 * HOUR).await;
+    assert_eq!(fx.idle().await, writes);
+    assert_eq!(fx.status(&run).await, RunStatus::Leased);
+
+    // Resuming the bot is what lets the claim take the run over.
+    fx.kernel.resume(Some("keeper")).await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+}

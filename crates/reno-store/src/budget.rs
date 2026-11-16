@@ -303,6 +303,42 @@ impl Store {
         .await
     }
 
+    /// The `leased` runs that [`ClaimFilter`] lets a claim take once their lease runs out, with
+    /// when it does. A lease whose run the filter would pass over is left out: nothing about the
+    /// lease changes that, so waiting for it would only wake the dispatcher to claim nothing.
+    pub async fn claimable_leases(
+        &self,
+        now: i64,
+        filter: &ClaimFilter,
+    ) -> Result<Vec<(RunId, i64)>> {
+        let filter = filter.clone();
+        self.read(move |c| {
+            let (paused, day) = filter_params(&filter)?;
+            let mut stmt = c
+                .prepare_cached(&format!(
+                    "SELECT r.id, r.lease_expires_at FROM runs r
+                     WHERE r.status = 'leased' AND r.lease_expires_at IS NOT NULL AND {}",
+                    claim_terms()
+                ))
+                .db()?;
+            let rows = stmt
+                .query_map(params![now, paused, day], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })
+                .db()?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, at) = row.db()?;
+                let run = id
+                    .parse()
+                    .map_err(|_| StoreError::Corrupt(format!("bad run id {id:?}")))?;
+                out.push((run, at));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     /// The bots with a queued run that [`ClaimFilter`] passes over only because the bot has used
     /// its token ceiling on `day`. The dispatcher arms its one day-boundary deadline from this.
     pub async fn token_blocked_bots(&self, day: &str) -> Result<Vec<String>> {
@@ -312,7 +348,7 @@ impl Store {
             let mut stmt = c
                 .prepare_cached(&format!(
                     "SELECT DISTINCT r.bot_name FROM runs r
-                     WHERE r.status = 'queued' AND r.bot_name IS NOT NULL
+                     WHERE r.status IN ('queued', 'leased') AND r.bot_name IS NOT NULL
                        AND COALESCE((SELECT u.input_tokens + u.output_tokens FROM bot_usage u
                                      WHERE u.bot = r.bot_name AND u.day = ?1), 0) >= {ceiling}
                      ORDER BY r.bot_name"

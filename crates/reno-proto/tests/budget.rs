@@ -99,6 +99,21 @@ fn budget_types_on_the_wire() {
 }
 
 #[test]
+fn the_refusal_payload_on_the_wire() {
+    golden(
+        &BudgetRefusal {
+            bot: "keeper".into(),
+            stop: BudgetStop {
+                kind: BudgetKind::Tokens,
+                limit: 100,
+                used: 120,
+            },
+        },
+        json!({"bot": "keeper", "stop": {"kind": "tokens", "limit": 100, "used": 120}}),
+    );
+}
+
+#[test]
 fn a_done_diagnostic_carries_a_budget_stop() {
     let stop = BudgetStop {
         kind: BudgetKind::Tokens,

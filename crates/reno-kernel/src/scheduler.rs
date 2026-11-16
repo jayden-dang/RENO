@@ -605,6 +605,15 @@ impl Scheduler {
     /// until the pause is lifted. Its due time stays, so the catch-up finds every occurrence
     /// that came due meanwhile and merges them into one run.
     async fn hold(&mut self, name: &str, due_at: i64) {
+        // An `fs` trigger has no due time of its own; its deadline is the end of a backoff.
+        let due_at = if due_at == i64::MIN {
+            self.plans
+                .get(name)
+                .and_then(|plan| plan.pending_fs)
+                .unwrap_or_else(|| self.now())
+        } else {
+            due_at
+        };
         if let Some(plan) = self.plans.get_mut(name) {
             plan.held = true;
         }

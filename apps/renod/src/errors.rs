@@ -71,7 +71,11 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
     match error {
         // The limit and the use, typed, so a client never parses the message.
         KernelError::BudgetExhausted { bot, stop } => ErrorObject {
-            data: Some(serde_json::json!({ "bot": bot, "stop": stop })),
+            data: serde_json::to_value(reno_proto::BudgetRefusal {
+                bot: bot.clone(),
+                stop: *stop,
+            })
+            .ok(),
             ..object
         },
         _ => object,
@@ -207,6 +211,22 @@ mod tests {
             assert_eq!(code_of(&error), code, "{error}");
             assert_eq!(kernel_error(&error).code, code, "{error}");
         }
+    }
+
+    #[test]
+    fn a_budget_refusal_carries_its_typed_payload() {
+        let stop = reno_proto::BudgetStop {
+            kind: reno_proto::BudgetKind::Tokens,
+            limit: 10,
+            used: 12,
+        };
+        let object = kernel_error(&KernelError::BudgetExhausted {
+            bot: "keeper".into(),
+            stop,
+        });
+        let data: reno_proto::BudgetRefusal =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!((data.bot.as_str(), data.stop), ("keeper", stop));
     }
 
     #[test]

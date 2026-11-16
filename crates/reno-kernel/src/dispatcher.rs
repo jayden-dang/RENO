@@ -142,12 +142,22 @@ async fn next_lease_expiry(shared: &Arc<Shared>) -> Option<Duration> {
     if shared.live_len() >= shared.config.max_concurrent {
         return None;
     }
-    let leased = shared.db.list_runs(Some(RunStatus::Leased)).await.ok()?;
+    let pauses = shared.pauses_tx.borrow().clone();
+    if pauses.global {
+        return None;
+    }
     let now = shared.db.now_ms();
+    let filter = ClaimFilter {
+        day: shared.db.today(),
+        paused_bots: pauses.bots.iter().cloned().collect(),
+    };
+    // Only leases a claim would take once they run out: a run the filter passes over is woken
+    // by what lifts the filter (a resume, a run's end, midnight), not by its lease.
+    let leased = shared.db.claimable_leases(&filter).await.ok()?;
     let expiry = leased
         .iter()
-        .filter(|run| !shared.is_live(&run.id))
-        .filter_map(|run| run.lease_expires_at)
+        .filter(|(run, _)| !shared.is_live(run))
+        .map(|(_, at)| *at)
         .min()?;
     let wait = u64::try_from(expiry.saturating_sub(now))
         .unwrap_or(0)

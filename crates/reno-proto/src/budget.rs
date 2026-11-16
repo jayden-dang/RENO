@@ -75,6 +75,17 @@ impl BudgetStop {
     }
 }
 
+/// The `data` of an error with code `BudgetExceeded`: which bot was refused and the limit it
+/// reached. Read it with `serde_json::from_value`; the message is for people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetRefusal {
+    /// The bot.
+    pub bot: String,
+    /// The limit and what had been used.
+    pub stop: BudgetStop,
+}
+
 impl fmt::Display for BudgetStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {

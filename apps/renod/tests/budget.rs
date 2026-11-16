@@ -171,6 +171,14 @@ daemon_test! {
 
         let refused = within(fx.client.run_task(bot_task("keeper"))).await.unwrap_err();
         assert_eq!(refused.code(), Some(ErrorCode::BudgetExceeded));
+        let reno_client::ClientError::Remote(object) = refused else {
+            panic!("not a daemon error");
+        };
+        let payload: reno_proto::BudgetRefusal =
+            serde_json::from_value(object.data.expect("typed data")).unwrap();
+        assert_eq!(payload.bot, "keeper");
+        assert_eq!(payload.stop.kind, BudgetKind::Tokens);
+        assert_eq!((payload.stop.limit, payload.stop.used), (100, 120));
 
         let status = within(fx.client.budget_status()).await.unwrap();
         let keeper = status.bots.iter().find(|b| b.bot == "keeper").unwrap();
