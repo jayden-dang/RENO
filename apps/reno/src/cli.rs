@@ -198,6 +198,10 @@ pub(crate) struct RunList {
 pub(crate) struct RunShow {
     /// The run.
     pub(crate) run: RunId,
+    /// Name every executor routing passed over, not just the ones with a reason about the
+    /// executor itself. `--json` always has the whole decision.
+    #[arg(long)]
+    pub(crate) verbose: bool,
 }
 
 #[derive(Debug, Args)]

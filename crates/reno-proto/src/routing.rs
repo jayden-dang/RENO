@@ -153,22 +153,98 @@ pub struct RoutingDecision {
     pub at_ms: u64,
 }
 
+impl RejectReason {
+    /// The `Excluded` reason of an executor its bot does not list.
+    pub fn unlisted_by_bot(bot: &str) -> Self {
+        Self::Excluded {
+            why: format!("bot {bot} {UNLISTED_TAIL}"),
+        }
+    }
+
+    /// The bot, when this is the reason [`Self::unlisted_by_bot`] makes.
+    pub fn unlisting_bot(&self) -> Option<&str> {
+        match self {
+            Self::Excluded { why } => why
+                .strip_prefix("bot ")?
+                .strip_suffix(UNLISTED_TAIL)?
+                .strip_suffix(' '),
+            _ => None,
+        }
+    }
+}
+
+/// What follows the bot's name in the reason an unlisted executor carries.
+const UNLISTED_TAIL: &str = "does not list it";
+
 impl RoutingDecision {
-    /// One line a person can read: who was chosen, by which rule, and who was passed over.
+    /// One line a person can read: who was chosen, by which rule, which executor is next in line,
+    /// and the executors passed over for a reason about the executor itself (not installed,
+    /// signed out). Executors the task or its bot simply leaves out are not listed; use
+    /// [`Self::explain_verbose`] or [`Self::left_out_lines`] for them.
     pub fn explain(&self) -> String {
+        let mut text = self.headline(true);
+        for Rejection { executor, reason } in &self.rejected {
+            if !matches!(reason, RejectReason::Excluded { .. }) {
+                text.push_str(&format!("; not {executor}: {reason}"));
+            }
+        }
+        text
+    }
+
+    /// [`Self::explain`] with every passed-over executor and its reason.
+    pub fn explain_verbose(&self) -> String {
+        let mut text = self.headline(false);
+        for Rejection { executor, reason } in &self.rejected {
+            text.push_str(&format!("; not {executor}: {reason}"));
+        }
+        text
+    }
+
+    /// The executors left out by the task or its bot, one line per reason: `6 others not listed
+    /// by bot keeper`. Empty when none were.
+    pub fn left_out_lines(&self) -> Vec<String> {
+        let mut groups: Vec<(String, usize)> = Vec::new();
+        for Rejection { reason, .. } in &self.rejected {
+            let label = match reason {
+                RejectReason::Excluded { why } => match reason.unlisting_bot() {
+                    Some(bot) => format!("not listed by bot {bot}"),
+                    None => format!("excluded ({why})"),
+                },
+                _ => continue,
+            };
+            match groups.iter_mut().find(|(known, _)| *known == label) {
+                Some((_, count)) => *count += 1,
+                None => groups.push((label, 1)),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(label, count)| match count {
+                1 => format!("1 other {label}"),
+                n => format!("{n} others {label}"),
+            })
+            .collect()
+    }
+
+    /// `claude-code (bot keeper prefers it; fallback codex)`.
+    fn headline(&self, with_fallback: bool) -> String {
         let rule = match &self.rule_matched {
             RuleMatched::ExplicitExecutor => "the task named it".to_owned(),
             RuleMatched::BotPreference { bot } => format!("bot {bot} prefers it"),
             RuleMatched::Default => "default order".to_owned(),
         };
-        let mut text = match &self.chosen {
-            Some(chosen) => format!("{chosen} ({rule})"),
-            None => format!("no eligible executor ({rule})"),
+        let Some(chosen) = &self.chosen else {
+            return format!("no eligible executor ({rule})");
         };
-        for Rejection { executor, reason } in &self.rejected {
-            text.push_str(&format!("; not {executor}: {reason}"));
+        let next = self
+            .ranked
+            .iter()
+            .position(|id| id == chosen)
+            .and_then(|at| self.ranked.get(at + 1));
+        match next {
+            Some(next) if with_fallback => format!("{chosen} ({rule}; fallback {next})"),
+            _ => format!("{chosen} ({rule})"),
         }
-        text
     }
 }
 
