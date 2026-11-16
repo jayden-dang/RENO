@@ -92,6 +92,9 @@ pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 /// decision and accepts `inPlace`.
 pub const FEATURE_ROUTING: &str = "routing";
 
+/// Feature: `task.run` accepts `attachments`.
+pub const FEATURE_ATTACHMENTS: &str = "attachments";
+
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EVENTS_RESUME,
@@ -108,6 +111,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_EXECUTOR_INSTALL,
     FEATURE_APPROVAL_MESSAGE,
     FEATURE_ROUTING,
+    FEATURE_ATTACHMENTS,
 ];
 
 /// A request with a single reply.
@@ -228,7 +232,7 @@ pub struct DaemonStatusInfo {
 pub struct DaemonShutdownResult {}
 
 /// Params of `task.run`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRunParams {
     /// The task prompt.
@@ -253,6 +257,49 @@ pub struct TaskRunParams {
     /// feature `routing`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
+    /// Files the task refers to. The daemon checks that each is a readable file, within
+    /// [`ATTACHMENTS_MAX_COUNT`] and [`ATTACHMENT_MAX_BYTES`], and appends an "Attached files:"
+    /// list of their paths to the prompt; the executor reads them from disk. Needs feature
+    /// `attachments`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file attached to a task: a path on the daemon's machine, with the name to show for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// Absolute path of a readable regular file.
+    pub path: PathBuf,
+    /// The name to show: usually the file name.
+    pub name: String,
+    /// The media type, when known (`image/png`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+}
+
+/// The most files one task may attach.
+pub const ATTACHMENTS_MAX_COUNT: usize = 10;
+/// The largest file one task may attach, in bytes.
+pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+impl Attachment {
+    /// The prompt text the daemon appends for `attachments`: a blank line, "Attached files:",
+    /// and one `- path (name, mime)` line each. Empty when there are none.
+    pub fn prompt_suffix(attachments: &[Self]) -> String {
+        if attachments.is_empty() {
+            return String::new();
+        }
+        let mut text = String::from("\n\nAttached files:\n");
+        for a in attachments {
+            text.push_str(&format!("- {}", a.path.display()));
+            match &a.mime {
+                Some(mime) => text.push_str(&format!(" ({}, {mime})\n", a.name)),
+                None => text.push_str(&format!(" ({})\n", a.name)),
+            }
+        }
+        text
+    }
 }
 
 /// Result of `task.run`.

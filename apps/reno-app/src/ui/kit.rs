@@ -80,7 +80,7 @@ pub(crate) fn exec_icon(theme: &Theme, executor_id: &str) -> (Icon, Hsla) {
     match executor_id {
         "claude-code" => (Icon::XClaude, hsla(0.04, 0.62, 0.62, 1.0)),
         "codex" => (Icon::XCodex, theme.text),
-        "grok" => (Icon::XGrok, theme.text),
+        "grok" | "acp.grok" => (Icon::XGrok, theme.text),
         "opencode" => (Icon::XOpencode, theme.muted),
         _ => (Icon::Cpu, theme.muted),
     }

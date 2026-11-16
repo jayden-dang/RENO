@@ -21,6 +21,19 @@ const HOUR: u64 = 60 * MINUTE;
 
 /// The bots of the demo team.
 pub const BOTS: [&str; 5] = ["keeper", "scout", "builder", "reviewer", "architect"];
+
+/// The executors the router takes when the task names neither an executor nor a bot.
+pub(super) const DEFAULT_EXECUTORS: [&str; 2] = ["claude-code", "codex"];
+
+/// A demo bot's executors, most preferred first. `None` for a name that is not a demo bot.
+pub(super) fn bot_preference(bot: &str) -> Option<&'static [&'static str]> {
+    Some(match bot {
+        "keeper" | "architect" => &["claude-code", "codex"],
+        "scout" | "reviewer" => &["codex", "claude-code"],
+        "builder" => &["acp.grok", "claude-code", "codex"],
+        _ => return None,
+    })
+}
 /// The fictional repositories.
 pub const REPOS: [&str; 3] = ["atlas-api", "web-console", "reno"];
 

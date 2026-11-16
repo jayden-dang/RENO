@@ -189,6 +189,7 @@ daemon_test! {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         }))
         .await
         .unwrap();

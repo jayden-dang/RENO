@@ -27,6 +27,7 @@ use reno_proto::{
 };
 
 use crate::summary;
+use crate::vm::routing::RoutingView;
 
 /// Stable identity of a row: the seq of the event that opened it, plus one. The prompt is 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -34,6 +35,8 @@ pub(crate) struct Key(pub(crate) u64);
 
 impl Key {
     const PROMPT: Self = Self(0);
+    /// The routing card: not an event, so it has a key no event can have.
+    pub(crate) const ROUTING: Self = Self(u64::MAX);
 
     fn at(seq: Seq) -> Self {
         Self(seq.0.saturating_add(1))
@@ -88,6 +91,8 @@ pub(crate) enum Row {
     Approval { key: Key, approval: Approval },
     /// A past approval request or its resolution, one muted line.
     Asked { key: Key, line: String },
+    /// Where the run was routed and why: a card after the prompt, with the "why" collapsed.
+    Routing { key: Key, view: RoutingView },
     /// The final status line.
     Done {
         key: Key,
@@ -107,6 +112,7 @@ impl Row {
             | Self::Question { key, .. }
             | Self::Approval { key, .. }
             | Self::Asked { key, .. }
+            | Self::Routing { key, .. }
             | Self::Done { key, .. } => *key,
         }
     }
@@ -134,6 +140,22 @@ pub(crate) struct Facts {
     pub(crate) model: Option<String>,
     /// Why the run failed, when `Done` says so in words.
     pub(crate) diagnostic: Option<String>,
+}
+
+/// Puts the routing card after the prompt (first, when the prompt is not known), if there is a
+/// decision to show.
+pub(crate) fn with_routing(mut rows: Vec<Row>, routing: Option<RoutingView>) -> Vec<Row> {
+    if let Some(view) = routing {
+        let at = usize::from(matches!(rows.first(), Some(Row::User { steer: false, .. })));
+        rows.insert(
+            at,
+            Row::Routing {
+                key: Key::ROUTING,
+                view,
+            },
+        );
+    }
+    rows
 }
 
 /// The result of [`build_rows`].
@@ -796,6 +818,7 @@ mod tests {
                 Row::Question { .. } => "question",
                 Row::Approval { .. } => "approval",
                 Row::Asked { .. } => "asked",
+                Row::Routing { .. } => "routing",
                 Row::Done { .. } => "done",
             })
             .collect();
@@ -819,5 +842,31 @@ mod tests {
                 output: 2
             })
         );
+    }
+
+    fn routing_view() -> RoutingView {
+        use reno_proto::{RoutingDecision, RuleMatched};
+        crate::vm::routing::view(&RoutingDecision {
+            chosen: Some("codex".parse().unwrap()),
+            ranked: vec!["codex".parse().unwrap()],
+            rejected: vec![],
+            rule_matched: RuleMatched::Default,
+            fallbacks: vec![],
+            at_ms: 1,
+        })
+    }
+
+    #[test]
+    fn the_routing_card_follows_the_prompt() {
+        let built = build_rows(Some("do it"), &at(vec![text("ok")]), &[]);
+        let rows = with_routing(built.rows, Some(routing_view()));
+        assert!(matches!(rows[0], Row::User { .. }));
+        assert!(matches!(&rows[1], Row::Routing { key, .. } if *key == Key::ROUTING));
+        assert!(matches!(rows[2], Row::Prose { .. }));
+        // With no prompt known it leads; with no decision there is no card.
+        let built = build_rows(None, &at(vec![text("ok")]), &[]);
+        let rows = with_routing(built.rows.clone(), Some(routing_view()));
+        assert!(matches!(rows[0], Row::Routing { .. }));
+        assert_eq!(with_routing(built.rows.clone(), None), built.rows);
     }
 }

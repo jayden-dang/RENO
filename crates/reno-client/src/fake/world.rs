@@ -87,7 +87,7 @@ impl World {
                 routing: None,
             })
             .collect();
-        Self {
+        let mut world = Self {
             runs,
             approvals: seed.approvals,
             next_id: 1,
@@ -98,7 +98,49 @@ impl World {
             defs: seed.extras.defs,
             records: seed.extras.records,
             history: seed.extras.history,
+        };
+        for at in 0..world.runs.len() {
+            let routing = world.seed_routing(at);
+            world.runs[at].routing = Some(routing);
         }
+        world
+    }
+
+    /// The decision a seeded run is shown with: the demo router's answer for its bot, bent to
+    /// the executor the run really has. `builder0` also shows a fallback walk: its first choice
+    /// would not start.
+    fn seed_routing(&self, at: usize) -> reno_proto::RoutingDecision {
+        use reno_proto::{FallbackStep, RejectReason, Rejection, StartFailureKind};
+        let summary = &self.runs[at].summary;
+        let mut decision = self.route(&reno_proto::TaskRunParams {
+            bot: summary.bot.as_ref().map(|b| b.name.clone()),
+            ..reno_proto::TaskRunParams::default()
+        });
+        decision.at_ms = summary.created_at_ms;
+        if decision.chosen.as_ref() != Some(&summary.executor) {
+            decision.chosen = Some(summary.executor.clone());
+            decision.ranked = vec![summary.executor.clone()];
+            decision.rejected.clear();
+        }
+        if summary.run_id.to_string().ends_with("builder0")
+            && let Ok(grok) = "acp.grok".parse::<ExecutorId>()
+        {
+            let reason = RejectReason::StartFailed {
+                failure: StartFailureKind::NoEligibleExecutor,
+                detail: "grok 0.4.0 is older than 0.9.0".to_owned(),
+            };
+            decision.rejected = vec![Rejection {
+                executor: grok.clone(),
+                reason: reason.clone(),
+            }];
+            decision.fallbacks = vec![FallbackStep {
+                from: grok,
+                reason,
+                to: Some(summary.executor.clone()),
+                at_ms: summary.created_at_ms + 2_000,
+            }];
+        }
+        decision
     }
 
     /// Probes again: stamps the health of `id` (every executor when `None`) with a new time.
@@ -190,21 +232,32 @@ impl World {
         all
     }
 
-    /// A simplified router: the named executor, else every executor by id; each is dropped for
-    /// what its health or access modes say. The real daemon's router is in `reno-kernel`.
+    /// A simplified router: the named executor, else the bot's executors in its order of
+    /// preference (the demo bots), else the two default executors; each is dropped for what its
+    /// health or access modes say. The real daemon's router is in `reno-kernel`.
     pub(super) fn route(&self, params: &reno_proto::TaskRunParams) -> reno_proto::RoutingDecision {
         use reno_proto::{Ineligible, RejectReason, Rejection, RuleMatched};
         let (rule_matched, order) = match &params.executor {
             Some(executor) => (RuleMatched::ExplicitExecutor, vec![executor.clone()]),
-            None => {
-                let mut ids: Vec<ExecutorId> = self
-                    .executors
-                    .iter()
-                    .map(|e| e.descriptor.id.clone())
-                    .collect();
-                ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                (RuleMatched::Default, ids)
-            }
+            None => match params
+                .bot
+                .as_deref()
+                .and_then(|b| data::bot_preference(b).map(|order| (b, order)))
+            {
+                Some((bot, order)) => (
+                    RuleMatched::BotPreference {
+                        bot: bot.to_owned(),
+                    },
+                    order.iter().filter_map(|id| id.parse().ok()).collect(),
+                ),
+                None => (
+                    RuleMatched::Default,
+                    data::DEFAULT_EXECUTORS
+                        .iter()
+                        .filter_map(|id| id.parse().ok())
+                        .collect(),
+                ),
+            },
         };
         let mut ranked = Vec::new();
         let mut rejected = Vec::new();
@@ -287,7 +340,10 @@ impl World {
                 prompt: Some(params.prompt.clone()),
                 model: params.model.clone(),
                 stop_reason: None,
-                bot: None,
+                bot: params.bot.as_ref().map(|name| reno_proto::defs::BotPin {
+                    name: name.clone(),
+                    version: 1,
+                }),
                 created_at_ms: now,
                 updated_at_ms: now,
             },
@@ -470,6 +526,7 @@ impl World {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         };
         let executor = params.executor.clone().ok_or("no executor")?;
         let routing = self.route(&params);

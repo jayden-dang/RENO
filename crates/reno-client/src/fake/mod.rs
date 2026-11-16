@@ -109,6 +109,8 @@ pub(crate) struct Shared {
     injected: Mutex<HashMap<String, ErrorObject>>,
     /// One token per open connection, so a test can cut them all.
     connections: Mutex<Vec<CancellationToken>>,
+    /// The tasks `route.preview` was asked about, oldest first.
+    previews: Mutex<Vec<reno_proto::TaskRunParams>>,
     config: FakeConfig,
     tracker: TaskTracker,
     cancel: CancellationToken,
@@ -224,6 +226,7 @@ impl FakeDaemon {
             defs_tx,
             injected: Mutex::new(HashMap::new()),
             connections: Mutex::new(Vec::new()),
+            previews: Mutex::new(Vec::new()),
             tracker: TaskTracker::new(),
             cancel,
             event_subscriptions: AtomicUsize::new(0),
@@ -285,6 +288,15 @@ impl FakeDaemon {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(method.to_owned(), error);
+    }
+
+    /// The tasks `route.preview` has been asked about so far, oldest first.
+    pub fn route_previews(&self) -> Vec<reno_proto::TaskRunParams> {
+        self.shared
+            .previews
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Removes every injected error.
@@ -447,13 +459,28 @@ fn router(shared: &Arc<Shared>) -> Router {
     let task_run = move |p: reno_proto::TaskRunParams, _| {
         let s = Arc::clone(&s);
         async move {
-            // The fake has no definitions, so there is no bot to run as.
-            if p.bot.is_some() {
+            injected(&s, "task.run")?;
+            // The fake knows the demo bots only.
+            if p.bot
+                .as_deref()
+                .is_some_and(|bot| !data::BOTS.contains(&bot))
+            {
                 return Err(ErrorObject::new(
                     ErrorCode::InvalidParams,
-                    "the fake daemon has no bots",
+                    "the fake daemon has no such bot",
                 ));
             }
+            if p.attachments.len() > reno_proto::ATTACHMENTS_MAX_COUNT
+                || p.attachments.iter().any(|a| !a.path.is_absolute())
+            {
+                return Err(ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    "too many attachments, or one is not an absolute path",
+                ));
+            }
+            let mut p = p;
+            p.prompt
+                .push_str(&reno_proto::Attachment::prompt_suffix(&p.attachments));
             let routing = s.read(|w| w.route(&p));
             let Some(executor) = routing.chosen.clone().or_else(|| p.executor.clone()) else {
                 return Err(ErrorObject::new(
@@ -499,6 +526,11 @@ fn router(shared: &Arc<Shared>) -> Router {
     let route_preview = move |p: reno_proto::RoutePreviewParams, _| {
         let s = Arc::clone(&s);
         async move {
+            injected(&s, "route.preview")?;
+            s.previews
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(p.task.clone());
             Ok(reno_proto::RoutePreviewResult {
                 decision: s.read(|w| w.route(&p.task)),
             })

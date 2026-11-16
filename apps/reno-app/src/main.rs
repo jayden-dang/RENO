@@ -8,8 +8,8 @@
 
 mod actions;
 mod app;
+mod attach;
 mod nav;
-mod route;
 mod screens;
 mod store;
 mod summary;
@@ -17,6 +17,8 @@ mod transcript;
 mod ui;
 mod vm;
 
+#[cfg(test)]
+mod composer_tests;
 #[cfg(test)]
 mod screen_tests;
 #[cfg(test)]

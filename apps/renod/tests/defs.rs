@@ -271,6 +271,7 @@ async fn run_for_bot(
         cwd: None,
         model: None,
         in_place: false,
+        attachments: Vec::new(),
     }))
     .await
 }
@@ -330,6 +331,7 @@ daemon_test! {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         }))
         .await
         .unwrap();

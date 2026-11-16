@@ -25,6 +25,7 @@ fn task_run_in_place_is_opt_in_and_omitted_when_off() {
             cwd: None,
             model: None,
             in_place: true,
+            attachments: Vec::new(),
         },
         json!({"prompt": "go", "inPlace": true}),
     );

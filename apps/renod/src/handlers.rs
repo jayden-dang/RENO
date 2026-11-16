@@ -47,6 +47,10 @@ use reno_proto::defs::{
     DefsWatchParams,
 };
 use reno_proto::{
+    ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_COUNT, Attachment, RoutePreview, RoutePreviewParams,
+    RoutePreviewResult, RunRouting, RunRoutingParams, RunRoutingResult,
+};
+use reno_proto::{
     ApprovalDecide, ApprovalDecideParams, ApprovalDecideResult, ApprovalHistory,
     ApprovalHistoryParams, ApprovalHistoryResult, ApprovalList, ApprovalListResult,
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
@@ -65,10 +69,6 @@ use reno_proto::{
     ExecutorInfo, ExecutorInstall, ExecutorInstallParams, ExecutorInstallResult, ExecutorList,
     ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatch,
     ExecutorsWatchParams,
-};
-use reno_proto::{
-    RoutePreview, RoutePreviewParams, RoutePreviewResult, RunRouting, RunRoutingParams,
-    RunRoutingResult,
 };
 use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
@@ -250,6 +250,9 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
         }
         None => ctx.default_cwd.clone(),
     };
+    let mut p = p;
+    let suffix = attachment_suffix(&p.attachments).await?;
+    p.prompt.push_str(&suffix);
     let request = task_request(p, cwd);
     let (run_id, decision) = ctx
         .kernel
@@ -260,6 +263,63 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
         run_id,
         routing: Some(decision),
     })
+}
+
+/// Checks the attachments of a `task.run` and returns the text to append to its prompt.
+///
+/// The executors are given no new input channel: each attachment is a path the executor reads
+/// itself, listed under "Attached files:" at the end of the prompt. So the daemon only has to
+/// see that each is an absolute path to a readable regular file within the size cap, and that
+/// there are not too many. The paths are resolved first, so the list names the files, not
+/// symlinks to them.
+async fn attachment_suffix(attachments: &[Attachment]) -> Result<String, ErrorObject> {
+    if attachments.len() > ATTACHMENTS_MAX_COUNT {
+        return Err(invalid(format!(
+            "too many attachments: {} (at most {ATTACHMENTS_MAX_COUNT})",
+            attachments.len()
+        )));
+    }
+    let mut checked = Vec::with_capacity(attachments.len());
+    for a in attachments {
+        let shown = a.path.display();
+        if !a.path.is_absolute() {
+            return Err(invalid(format!(
+                "attachment {shown} is not an absolute path"
+            )));
+        }
+        let path = tokio::fs::canonicalize(&a.path)
+            .await
+            .map_err(|e| invalid(format!("attachment {shown} cannot be read: {e}")))?;
+        let meta = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| invalid(format!("attachment {shown} cannot be read: {e}")))?;
+        if !meta.is_file() {
+            return Err(invalid(format!("attachment {shown} is not a file")));
+        }
+        if meta.len() > ATTACHMENT_MAX_BYTES {
+            return Err(invalid(format!(
+                "attachment {shown} is {} MiB (at most {} MiB)",
+                meta.len().div_ceil(1024 * 1024),
+                ATTACHMENT_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+        // Opening is the readable check: a mode the daemon's user cannot read fails here.
+        tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| invalid(format!("attachment {shown} cannot be read: {e}")))?;
+        let name = if a.name.trim().is_empty() {
+            path.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        } else {
+            a.name.clone()
+        };
+        checked.push(Attachment {
+            path,
+            name,
+            mime: a.mime.clone(),
+        });
+    }
+    Ok(Attachment::prompt_suffix(&checked))
 }
 
 /// The kernel's view of a `task.run`.

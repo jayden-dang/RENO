@@ -22,14 +22,14 @@
 //!
 //! Dropping the store drops its task and the `Mirror`, which cancels its tracked tasks.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use gpui::{Context, EventEmitter, Task};
+use gpui::{AppContext as _, Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
@@ -39,8 +39,8 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, ExecutorId, FiringOutcome, RunId, RunListParams, RunStatus,
-    TaskRunParams,
+    ApprovalDecision, ApprovalId, ExecutorId, FiringOutcome, RoutingDecision, RunId, RunListParams,
+    RunStatus, TaskRunParams,
 };
 
 use crate::summary;
@@ -62,6 +62,26 @@ pub(crate) enum StoreEvent {
     /// An executor's adapter was installed and probed again.
     ExecutorInstalled(String),
     Failed(String),
+    /// A task or steer sent with this ticket did not go through (`Failed` says why): the
+    /// composer that sent it gets its draft back.
+    SendFailed(u64),
+}
+
+/// What the daemon says about where one run went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunRouting {
+    /// Asked, no answer yet.
+    Loading,
+    /// The decision; `None` for a run made before routing existed.
+    Ready(Option<RoutingDecision>),
+    Failed(String),
+}
+
+/// A run's routing, and what it was fetched for: the decision changes while the run starts (a
+/// fallback), so it is fetched again when the run's executor or status changes.
+struct RoutingEntry {
+    key: Option<(ExecutorId, RunStatus)>,
+    routing: RunRouting,
 }
 
 pub(crate) struct Store {
@@ -94,6 +114,10 @@ pub(crate) struct Store {
     status_seen_at_ms: u64,
     /// The run the Run screen shows: its transcript changes notify.
     open: Option<RunId>,
+    /// Routing decisions by run, from `task.run` and `run.routing`.
+    routings: BTreeMap<RunId, RoutingEntry>,
+    /// Tasks and steers sent and not yet answered.
+    sending: u32,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
     bridge: Option<Task<()>>,
 }
@@ -119,6 +143,8 @@ impl Store {
             system_clock: false,
             status_seen_at_ms: 0,
             open: None,
+            routings: BTreeMap::new(),
+            sending: 0,
             bridge: None,
         }
     }
@@ -335,6 +361,96 @@ impl Store {
         self.mirror.as_ref().and_then(Mirror::client)
     }
 
+    /// Whether a task or a steer is on its way to the daemon.
+    pub(crate) fn is_sending(&self) -> bool {
+        self.sending > 0
+    }
+
+    /// The routing decision of `run`, as far as it is known.
+    pub(crate) fn routing(&self, run: &RunId) -> Option<&RunRouting> {
+        self.routings.get(run).map(|e| &e.routing)
+    }
+
+    /// `route.preview` for `params`: the decision the daemon would make. The caller owns the
+    /// task; dropping it cancels the request.
+    pub(crate) fn preview_route(
+        &self,
+        params: TaskRunParams,
+        cx: &gpui::App,
+    ) -> Task<Result<RoutingDecision, String>> {
+        let Some(client) = self.client() else {
+            return Task::ready(Err("the daemon is not connected".to_owned()));
+        };
+        if !self.state.supports(reno_proto::FEATURE_ROUTING) {
+            return Task::ready(Err("this daemon cannot preview routes".to_owned()));
+        }
+        let call = Tokio::spawn(cx, async move { client.route_preview(params).await });
+        cx.background_spawn(async move { flatten(call.await) })
+    }
+
+    /// Reads `run.routing` for `run` unless the answer held is for its current executor and
+    /// status. Quiet: a missing decision is shown as missing, not as an error toast.
+    pub(crate) fn ensure_routing(&mut self, run: &RunId, cx: &mut Context<Self>) {
+        if !self.state.supports(reno_proto::FEATURE_ROUTING) {
+            return;
+        }
+        let Some(summary) = self.state.run(run) else {
+            return;
+        };
+        let key = Some((summary.executor.clone(), summary.status));
+        if self
+            .routings
+            .get(run)
+            .is_some_and(|e| e.key == key || e.routing == RunRouting::Loading)
+        {
+            return;
+        }
+        let kept = self.routings.remove(run).map(|e| e.routing);
+        self.routings.insert(
+            run.clone(),
+            RoutingEntry {
+                key: key.clone(),
+                // Keep showing the old answer while the new one comes.
+                routing: kept
+                    .filter(|r| matches!(r, RunRouting::Ready(_)))
+                    .unwrap_or(RunRouting::Loading),
+            },
+        );
+        let done_run = run.clone();
+        let failed_run = run.clone();
+        self.call(
+            "Could not read the routing decision",
+            {
+                let run = run.clone();
+                move |client| async move { client.run_routing(&run).await }
+            },
+            cx,
+            D {
+                ok: Box::new(move |store, decision, cx| {
+                    store.routings.insert(
+                        done_run,
+                        RoutingEntry {
+                            key,
+                            routing: RunRouting::Ready(decision),
+                        },
+                    );
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    if let Some(entry) = store.routings.get_mut(&failed_run)
+                        && entry.routing == RunRouting::Loading
+                    {
+                        entry.routing = RunRouting::Failed("the daemon would not say".to_owned());
+                        // Fetched again when the run changes, not in a loop.
+                    }
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+        cx.notify();
+    }
+
     /// Ends the wait before the next connection attempt.
     pub(crate) fn retry_now(&mut self) {
         if let Some(mirror) = &self.mirror {
@@ -422,14 +538,33 @@ impl Store {
         }
     }
 
-    /// `run.steer`. A failure is reported as a store event.
-    pub(crate) fn steer(&mut self, run: RunId, prompt: String, cx: &mut Context<Self>) {
+    /// `run.steer`. A failure is reported as a store event, with the ticket the sender can use
+    /// to take its draft back.
+    pub(crate) fn steer(
+        &mut self,
+        run: RunId,
+        prompt: String,
+        ticket: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.sending += 1;
         self.call(
             "Could not steer the run",
             move |client| async move { client.steer(&run, prompt).await },
             cx,
-            D::fire_and_forget(),
+            D {
+                ok: Box::new(|store, (), cx| {
+                    store.sending = store.sending.saturating_sub(1);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.sending = store.sending.saturating_sub(1);
+                    cx.emit(StoreEvent::SendFailed(ticket));
+                }),
+                quiet: false,
+            },
         );
+        cx.notify();
     }
 
     /// `run.cancel`: Stop. The run's new state arrives through `runs.watch`.
@@ -544,6 +679,7 @@ impl Store {
     }
 
     /// `task.run` on the given executor id.
+    #[cfg(test)]
     pub(crate) fn run_task(&mut self, prompt: String, executor_id: &str, cx: &mut Context<Self>) {
         let executor = match executor_id.parse() {
             Ok(executor) => executor,
@@ -557,17 +693,46 @@ impl Store {
         let params = TaskRunParams {
             prompt,
             executor: Some(executor),
-            bot: None,
-            cwd: None,
-            model: None,
-            in_place: false,
+            ..TaskRunParams::default()
         };
+        self.submit_task(params, 0, cx);
+    }
+
+    /// `task.run`. The run opens on [`StoreEvent::RunStarted`]; a failure is a
+    /// [`StoreEvent::Failed`] and then [`StoreEvent::SendFailed`] with `ticket`.
+    pub(crate) fn submit_task(
+        &mut self,
+        params: TaskRunParams,
+        ticket: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.sending += 1;
         self.call(
             "Could not start the task",
-            move |client| async move { client.run_task(params).await },
+            move |client| async move { client.submit_task(params).await },
             cx,
-            D::then(|_, run, cx| cx.emit(StoreEvent::RunStarted(run))),
+            D {
+                ok: Box::new(|store, started: reno_proto::TaskRunResult, cx| {
+                    store.sending = store.sending.saturating_sub(1);
+                    if let Some(decision) = started.routing {
+                        store.routings.insert(
+                            started.run_id.clone(),
+                            RoutingEntry {
+                                key: None,
+                                routing: RunRouting::Ready(Some(decision)),
+                            },
+                        );
+                    }
+                    cx.emit(StoreEvent::RunStarted(started.run_id));
+                }),
+                err: Box::new(move |store, cx| {
+                    store.sending = store.sending.saturating_sub(1);
+                    cx.emit(StoreEvent::SendFailed(ticket));
+                }),
+                quiet: false,
+            },
         );
+        cx.notify();
     }
 
     /// `trigger.fire`: fires a trigger now. The new state arrives through `triggers.watch`.
