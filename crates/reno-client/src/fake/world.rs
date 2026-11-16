@@ -66,6 +66,8 @@ pub(super) struct World {
     paused: bool,
     /// Bots paused by themselves.
     paused_bots: std::collections::BTreeSet<String>,
+    /// The names of the secrets that are set. The fake never keeps a value: nothing reads one.
+    secrets: std::collections::BTreeSet<String>,
 }
 
 /// Why the fake daemon refuses an install.
@@ -104,6 +106,7 @@ impl World {
             history: seed.extras.history,
             paused: false,
             paused_bots: std::collections::BTreeSet::new(),
+            secrets: std::collections::BTreeSet::new(),
         };
         for at in 0..world.runs.len() {
             let routing = world.seed_routing(at);
@@ -669,6 +672,37 @@ impl World {
             None => std::mem::replace(&mut self.paused, false),
         };
         reno_proto::BudgetResumeResult { changed }
+    }
+
+    /// `secret.list`: the names set, plus the secrets the demo bots ask for.
+    pub(super) fn secret_list(&self) -> reno_proto::SecretListResult {
+        let asked: Vec<(&str, &str)> = data::BOT_SECRETS.to_vec();
+        let mut names: std::collections::BTreeSet<&str> =
+            self.secrets.iter().map(String::as_str).collect();
+        names.extend(asked.iter().map(|(_, secret)| *secret));
+        let secrets = names
+            .into_iter()
+            .map(|name| reno_proto::SecretInfo {
+                name: name.to_owned(),
+                set: self.secrets.contains(name),
+                used_by: asked
+                    .iter()
+                    .filter(|(_, secret)| *secret == name)
+                    .map(|(bot, _)| (*bot).to_owned())
+                    .collect(),
+            })
+            .collect();
+        reno_proto::SecretListResult { secrets }
+    }
+
+    /// `secret.set`. Whether the name was already set.
+    pub(super) fn secret_set(&mut self, name: &str) -> bool {
+        !self.secrets.insert(name.to_owned())
+    }
+
+    /// `secret.delete`. Whether the name was set.
+    pub(super) fn secret_delete(&mut self, name: &str) -> bool {
+        self.secrets.remove(name)
     }
 
     /// Counts for `daemon.status`: runs awake (not queued, not terminal) and runs queued.

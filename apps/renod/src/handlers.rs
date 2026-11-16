@@ -27,6 +27,7 @@
 //! | `triggers.watch` | `watch_triggers` |
 //! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
 //! | `workspace.clean` | `clean_workspaces` |
+//! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.install` | `install_executor` |
 //! | `executors.watch` | `watch_executors` |
@@ -43,7 +44,7 @@ use std::time::Instant;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
-use reno_kernel::{CurrentDefs, Kernel, KernelError, TaskRequest};
+use reno_kernel::{CurrentDefs, Kernel, KernelError, SecretValue, Secrets, TaskRequest};
 use reno_proto::defs::{
     DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult, DefsSnapshot,
     DefsWatchParams,
@@ -77,6 +78,10 @@ use reno_proto::{
     ExecutorsWatchParams,
 };
 use reno_proto::{
+    SECRET_VALUE_MAX, SecretDelete, SecretDeleteParams, SecretDeleteResult, SecretInfo, SecretList,
+    SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
+};
+use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
     WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
 };
@@ -84,7 +89,7 @@ use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::errors::{install_error, invalid, kernel_error};
+use crate::errors::{install_error, invalid, kernel_error, secrets_error};
 use crate::install::Installer;
 
 /// How many times in a row a `run.events` stream may be cut off by the kernel without delivering
@@ -113,6 +118,9 @@ pub(crate) struct Ctx {
     pub(crate) default_cwd: PathBuf,
     /// Cancelled to ask the daemon to shut down.
     pub(crate) stop: CancellationToken,
+    /// The secret store `secret.*` reads and writes; `None` when the daemon was started without
+    /// one.
+    pub(crate) secrets: Option<Arc<dyn Secrets>>,
 }
 
 /// Adapts `handler(ctx, params)` to the closure shape `Router` takes.
@@ -151,6 +159,9 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ExecutorList, _, _>(bind(ctx, executor_list))
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
+        .method::<SecretList, _, _>(bind(ctx, secret_list))
+        .method::<SecretSet, _, _>(bind(ctx, secret_set))
+        .method::<SecretDelete, _, _>(bind(ctx, secret_delete))
         .method::<WorkspaceList, _, _>(bind(ctx, workspace_list))
         .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
         .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
@@ -539,6 +550,67 @@ async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceI
         .workspace(&p.run_id)
         .await
         .map_err(|e| kernel_error(&e))
+}
+
+/// The secret store, or the refusal of a daemon that has none.
+fn secret_port(ctx: &Ctx) -> Reply<&Arc<dyn Secrets>> {
+    ctx.secrets.as_ref().ok_or_else(|| {
+        ErrorObject::new(
+            ErrorCode::Unavailable,
+            "this daemon was started without a secret store",
+        )
+    })
+}
+
+/// Names and whether each is set: those in the Keychain, and those a bot's definition asks for.
+/// Never a value.
+async fn secret_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<SecretListResult> {
+    let stored = secret_port(&ctx)?
+        .names()
+        .await
+        .map_err(|e| secrets_error(&e))?;
+    let mut used_by: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (bot, def) in ctx.kernel.current_defs().set().bots() {
+        for name in &def.secrets {
+            used_by.entry(name.clone()).or_default().push(bot.clone());
+        }
+    }
+    let mut names: std::collections::BTreeSet<String> = stored.iter().cloned().collect();
+    names.extend(used_by.keys().cloned());
+    let secrets = names
+        .into_iter()
+        .map(|name| SecretInfo {
+            set: stored.contains(&name),
+            used_by: used_by.remove(&name).unwrap_or_default(),
+            name,
+        })
+        .collect();
+    Ok(SecretListResult { secrets })
+}
+
+/// Stores a value straight into the Keychain. The value is not logged, and it is moved into the
+/// port, never copied into a message.
+async fn secret_set(ctx: Arc<Ctx>, p: SecretSetParams) -> Reply<SecretSetResult> {
+    let port = secret_port(&ctx)?;
+    if p.value.len() > SECRET_VALUE_MAX {
+        return Err(invalid(format!(
+            "a secret value is at most {SECRET_VALUE_MAX} bytes"
+        )));
+    }
+    let SecretSetParams { name, value } = p;
+    tracing::info!(secret = %name, "storing a secret");
+    let replaced = port
+        .set(&name, SecretValue::new(value))
+        .await
+        .map_err(|e| secrets_error(&e))?;
+    Ok(SecretSetResult { replaced })
+}
+
+async fn secret_delete(ctx: Arc<Ctx>, p: SecretDeleteParams) -> Reply<SecretDeleteResult> {
+    let port = secret_port(&ctx)?;
+    tracing::info!(secret = %p.name, "deleting a secret");
+    let deleted = port.delete(&p.name).await.map_err(|e| secrets_error(&e))?;
+    Ok(SecretDeleteResult { deleted })
 }
 
 async fn workspace_clean(ctx: Arc<Ctx>, p: WorkspaceCleanParams) -> Reply<WorkspaceCleanResult> {

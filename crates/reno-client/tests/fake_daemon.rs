@@ -802,3 +802,47 @@ async fn the_fake_pauses_and_resumes_and_shows_it_in_the_budget() {
     let unknown = client.pause(Some("nobody"), false).await.unwrap_err();
     assert_eq!(unknown.code(), Some(reno_proto::ErrorCode::NotFound));
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_fake_lists_sets_and_deletes_secrets_and_never_returns_a_value() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    // A name a bot asks for is listed before anyone sets it.
+    let listed = client.list_secrets().await.unwrap().secrets;
+    let github = listed.iter().find(|s| s.name == "GITHUB_TOKEN").unwrap();
+    assert!(!github.set);
+    assert_eq!(github.used_by, ["builder", "keeper"]);
+
+    assert!(
+        !client
+            .set_secret("GITHUB_TOKEN", "ghp_example_value_1")
+            .await
+            .unwrap()
+    );
+    assert!(
+        client
+            .set_secret("GITHUB_TOKEN", "ghp_example_value_2")
+            .await
+            .unwrap()
+    );
+    assert!(
+        client
+            .set_secret("NPM_TOKEN", "npm_example_value")
+            .await
+            .is_ok()
+    );
+    let listed = client.list_secrets().await.unwrap();
+    assert!(!format!("{listed:?}").contains("example_value"));
+    assert_eq!(
+        listed
+            .secrets
+            .iter()
+            .map(|s| (s.name.as_str(), s.set))
+            .collect::<Vec<_>>(),
+        [("GITHUB_TOKEN", true), ("NPM_TOKEN", true)]
+    );
+
+    assert!(client.delete_secret("NPM_TOKEN").await.unwrap());
+    assert!(!client.delete_secret("NPM_TOKEN").await.unwrap());
+    let bad = client.set_secret("lower", "x").await.unwrap_err();
+    assert_eq!(bad.code(), Some(reno_proto::ErrorCode::InvalidParams));
+}

@@ -12,7 +12,9 @@ use reno_harness::exec::Executor;
 use reno_kernel::ExecutorRegistry;
 use renod::defs::{self, DEFS_DIR_ENV};
 use renod::paths::{self, DATA_DIR_ENV, SOCKET_ENV, ensure_private_dir};
-use renod::{Daemon, DaemonConfig, ExecutorSet, ExecutorSource, Paths, executors, logging};
+use renod::{
+    Daemon, DaemonConfig, ExecutorSet, ExecutorSource, Paths, executors, logging, secrets,
+};
 use tokio::signal::unix::{SignalKind, signal};
 
 /// The allocator is chosen by measurement (ARCHITECTURE 17.8): the `mimalloc` feature selects v2.
@@ -53,6 +55,10 @@ struct Args {
     /// that need a run with a real child process, and for pinning a binary. Looks for no other CLI.
     #[arg(long, env = "RENO_CLAUDE_EXECUTABLE", hide = true, value_name = "PATH")]
     claude_executable: Option<PathBuf>,
+    /// Keep secrets in memory instead of the Keychain, for tests: they vanish when the daemon
+    /// stops, and no real Keychain is touched.
+    #[arg(long, env = "RENO_MEMORY_SECRETS", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
+    memory_secrets: bool,
     /// How many runs may be live at once [default: the kernel's own], for benchmarks.
     #[arg(long, env = "RENO_MAX_CONCURRENT", hide = true, value_name = "N")]
     max_concurrent: Option<usize>,
@@ -110,6 +116,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         !args.no_harnesses,
         args.claude_executable,
         args.max_concurrent,
+        args.memory_secrets,
     ));
     if let Err(error) = &outcome {
         tracing::error!(%error, "renod failed");
@@ -123,6 +130,7 @@ async fn serve(
     harnesses: bool,
     claude_executable: Option<PathBuf>,
     max_concurrent: Option<usize>,
+    memory_secrets: bool,
 ) -> anyhow::Result<()> {
     let executors = match claude_executable {
         Some(program) => ExecutorSource::Given(pinned_claude(mock_hold, program)?),
@@ -133,6 +141,12 @@ async fn serve(
     };
     let mut config = DaemonConfig::new(paths, executors);
     config.system_wake = true;
+    let keychain: Arc<dyn secrets::Keychain> = if memory_secrets {
+        Arc::new(secrets::MemoryKeychain::new())
+    } else {
+        secrets::login_keychain()
+    };
+    config.secrets = Some(Arc::new(secrets::KeychainSecrets::new(keychain)));
     if let Some(limit) = max_concurrent {
         config.kernel.max_concurrent = limit;
     }

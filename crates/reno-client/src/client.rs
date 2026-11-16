@@ -254,6 +254,41 @@ impl Client {
             .triggers)
     }
 
+    /// `secret.list`: the names of the secrets in the Keychain and of those bots ask for, and
+    /// whether each is set. Never a value. Needs feature `secrets`.
+    pub async fn list_secrets(&self) -> Result<reno_proto::SecretListResult, ClientError> {
+        self.require(reno_proto::FEATURE_SECRETS)?;
+        Ok(self.rpc.call::<reno_proto::SecretList>(NoParams {}).await?)
+    }
+
+    /// `secret.set`: stores `value` under `name` in the daemon's Keychain. Whether it replaced
+    /// one. Needs feature `secrets`.
+    pub async fn set_secret(&self, name: &str, value: &str) -> Result<bool, ClientError> {
+        self.require(reno_proto::FEATURE_SECRETS)?;
+        let params = reno_proto::SecretSetParams {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        };
+        Ok(self
+            .rpc
+            .call::<reno_proto::SecretSet>(params)
+            .await?
+            .replaced)
+    }
+
+    /// `secret.delete`: removes `name`. Whether it was set. Needs feature `secrets`.
+    pub async fn delete_secret(&self, name: &str) -> Result<bool, ClientError> {
+        self.require(reno_proto::FEATURE_SECRETS)?;
+        let params = reno_proto::SecretDeleteParams {
+            name: name.to_owned(),
+        };
+        Ok(self
+            .rpc
+            .call::<reno_proto::SecretDelete>(params)
+            .await?
+            .deleted)
+    }
+
     /// `budget.status`: every bot's limits and use today, and what is paused. Needs feature
     /// `budget`.
     pub async fn budget_status(&self) -> Result<reno_proto::BudgetStatusResult, ClientError> {

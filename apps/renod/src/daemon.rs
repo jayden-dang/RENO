@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reno_harness::exec::Executor;
-use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, SystemClock, WakeSignal};
+use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, Secrets, SystemClock, WakeSignal};
 use reno_proto::defs::ValidationContext;
 use reno_proto::{ExecutorId, IdError};
 use reno_rpc::{RpcError, Server, UnixServer};
@@ -92,6 +92,10 @@ pub struct DaemonConfig {
     /// Listen for the system waking from sleep and tell the scheduler. Off by default so that
     /// tests never register with the system; the binary turns it on.
     pub system_wake: bool,
+    /// Where bots' secrets and the `secret.*` methods go. `None` starts the daemon without a
+    /// secret store (tests): `secret.*` answers unavailable, and a bot that lists a secret
+    /// cannot run. The binary sets the login Keychain.
+    pub secrets: Option<Arc<dyn Secrets>>,
 }
 
 impl DaemonConfig {
@@ -106,7 +110,15 @@ impl DaemonConfig {
             defs_debounce: defs::DEFAULT_DEBOUNCE,
             git_init: defs::git_init,
             system_wake: false,
+            secrets: None,
         }
+    }
+
+    /// The same, keeping secrets in `secrets`.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: Arc<dyn Secrets>) -> Self {
+        self.secrets = Some(secrets);
+        self
     }
 }
 
@@ -180,6 +192,7 @@ impl Daemon {
             defs_debounce,
             git_init,
             system_wake,
+            secrets,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -237,9 +250,12 @@ impl Daemon {
         kernel.scratch_root = Some(scratch.clone());
         let fs_watch = Arc::new(FsWatch::new());
         let wake = WakeSignal::new();
-        let setup = DefsSetup::new(fs_defs.clone(), context)
+        let mut setup = DefsSetup::new(fs_defs.clone(), context)
             .with_watch(fs_watch.clone())
             .with_wake(wake.clone());
+        if let Some(secrets) = &secrets {
+            setup = setup.with_secrets(Arc::clone(secrets));
+        }
         let kernel = match Kernel::start_with(
             kernel,
             store,
@@ -280,6 +296,7 @@ impl Daemon {
             executors: ids,
             default_cwd: scratch,
             stop: stop.clone(),
+            secrets,
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));
         drop(ctx);

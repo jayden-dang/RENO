@@ -538,6 +538,49 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let secret_list = move |_: NoParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "secret.list")?;
+            Ok(s.read(World::secret_list))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let secret_set = move |p: reno_proto::SecretSetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "secret.set")?;
+            if let Err(error) = reno_proto::check_secret_name(&p.name) {
+                return Err(ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    error.to_string(),
+                ));
+            }
+            if p.value.is_empty() {
+                return Err(ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    "a secret value must not be empty",
+                ));
+            }
+            // The fake keeps the name only: it never holds a value.
+            let replaced = s.with(|w| w.secret_set(&p.name));
+            Ok(reno_proto::SecretSetResult { replaced })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let secret_delete = move |p: reno_proto::SecretDeleteParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "secret.delete")?;
+            Ok(reno_proto::SecretDeleteResult {
+                deleted: s.with(|w| w.secret_delete(&p.name)),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let budget_status = move |_: reno_proto::BudgetStatusParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -867,6 +910,9 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunGet, _, _>(run_get)
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
+        .method::<reno_proto::SecretList, _, _>(secret_list)
+        .method::<reno_proto::SecretSet, _, _>(secret_set)
+        .method::<reno_proto::SecretDelete, _, _>(secret_delete)
         .method::<reno_proto::BudgetStatus, _, _>(budget_status)
         .method::<reno_proto::BudgetPause, _, _>(budget_pause)
         .method::<reno_proto::BudgetResume, _, _>(budget_resume)
