@@ -35,11 +35,12 @@ use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
     RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, StartFailureKind, StopReason,
 };
-use reno_store::{Claim, RunRecord, StoreError};
+use reno_store::{Claim, ClaimFilter, RunRecord, StoreError};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+use crate::budget;
 use crate::lifecycle;
 use crate::router;
 use crate::scheduler::{SchedCmd, StartFailure};
@@ -53,7 +54,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
             break;
         }
         let wait = match fill(&shared).await {
-            Ok(()) => next_lease_expiry(&shared).await,
+            Ok(()) => next_deadline(&shared).await,
             Err(error) => {
                 tracing::error!(%error, "dispatcher could not claim; retrying");
                 Some(shared.config.store_retry)
@@ -75,16 +76,59 @@ async fn sleep_for(wait: Option<Duration>) {
     }
 }
 
-/// Claim runs until every slot is taken or nothing is claimable.
+/// Claim runs until every slot is taken or nothing is claimable. Nothing is claimed while
+/// everything is paused (and no store call is made). A paused bot's runs, a bot's runs past its
+/// concurrency limit and a bot's runs past its token ceiling are passed over in the claim itself,
+/// so they never hold up the runs behind them (see `budget`).
 async fn fill(shared: &Arc<Shared>) -> Result<(), StoreError> {
     let lease_ms = shared.config.lease_ms();
     while shared.live_len() < shared.config.max_concurrent && !shared.root.is_cancelled() {
-        let Some(claim) = shared.db.claim_next(&shared.config.owner, lease_ms).await? else {
+        let pauses = shared.pauses_tx.borrow().clone();
+        if pauses.global {
+            break;
+        }
+        let filter = ClaimFilter {
+            day: shared.db.today(),
+            paused_bots: pauses.bots.iter().cloned().collect(),
+        };
+        let Some(claim) = shared
+            .db
+            .claim_next_filtered(&shared.config.owner, lease_ms, &filter)
+            .await?
+        else {
             break;
         };
         launch(shared, claim).await;
     }
     Ok(())
+}
+
+/// How long until the dispatcher must look again with nothing else having happened: the earliest
+/// of a lease held by someone else running out, and the local midnight that gives a bot held back
+/// by its token ceiling a new day. Both are deadlines (ARCH-10).
+async fn next_deadline(shared: &Arc<Shared>) -> Option<Duration> {
+    let lease = next_lease_expiry(shared).await;
+    let day = next_day_start(shared).await;
+    [lease, day].into_iter().flatten().min()
+}
+
+/// How long until the next local midnight, when a bot has queued runs that only its token ceiling
+/// holds back. Only asked while a slot is free and nothing is paused globally (which holds
+/// everything anyway).
+async fn next_day_start(shared: &Arc<Shared>) -> Option<Duration> {
+    if shared.live_len() >= shared.config.max_concurrent || shared.pauses_tx.borrow().global {
+        return None;
+    }
+    let now = shared.db.now_ms();
+    let zone = shared.db.zone();
+    let blocked = shared.db.token_blocked_bots(&zone.day_of(now)).await.ok()?;
+    if blocked.is_empty() {
+        return None;
+    }
+    let wait = u64::try_from(zone.next_day_start_ms(now).saturating_sub(now))
+        .unwrap_or(0)
+        .max(1);
+    Some(Duration::from_millis(wait))
 }
 
 /// How long until the earliest lease held by someone else runs out. Only asked while a slot is
@@ -114,6 +158,11 @@ struct LaunchSettings {
     instructions: Option<String>,
     /// Whether the bot lets a write run work in a directory that is not a git repository.
     in_place_writes: bool,
+    /// The longest the run may take: its pinned bot version's `budget.max_wall_time`, else the
+    /// kernel's default.
+    wall_time: Duration,
+    /// The daily token ceiling of the pinned bot version; none for a run with no bot.
+    token_ceiling: Option<u64>,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -124,6 +173,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             sandbox: shared.config.sandbox,
             instructions: None,
             in_place_writes: false,
+            wall_time: shared.config.default_wall_time,
+            token_ceiling: None,
         });
     };
     let stored = shared
@@ -148,6 +199,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         sandbox: bot.sandbox,
         instructions: Some(bot.instructions).filter(|text| !text.trim().is_empty()),
         in_place_writes: bot.in_place_writes,
+        wall_time: budget::wall_time(&bot.budget, shared.config.default_wall_time),
+        token_ceiling: bot.budget.daily_token_ceiling,
     })
 }
 
@@ -387,6 +440,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         LiveRun {
             cancel: cancel.clone(),
             cmd: cmd_tx,
+            bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         },
     );
     if let Err(error) = shared
@@ -432,6 +486,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     let info = RunInfo {
         cwd: spec.cwd.clone(),
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
+        wall_time: settings.wall_time,
+        token_ceiling: settings.token_ceiling,
     };
 
     // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not

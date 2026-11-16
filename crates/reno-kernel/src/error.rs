@@ -1,7 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, ExecutorId, RunId, RunStatus, Seq};
+use reno_proto::{ApprovalId, BudgetStop, ExecutorId, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;
@@ -66,6 +66,15 @@ pub enum KernelError {
     /// The `Definitions` port failed.
     #[error("definitions: {0}")]
     Definitions(String),
+    /// The bot has used its daily token ceiling, so no new run of it is accepted until the next
+    /// local day. Typed: it is not an account failure and does not back a trigger off.
+    #[error("bot {bot:?} is refused: {stop}")]
+    BudgetExhausted {
+        /// The bot.
+        bot: String,
+        /// The limit and what had been used.
+        stop: BudgetStop,
+    },
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]
     Invalid(String),

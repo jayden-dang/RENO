@@ -52,6 +52,10 @@ pub struct KernelConfig {
     /// reached by naming it or through a bot. Empty (the default) means no task goes to an
     /// executor unasked.
     pub default_executors: Vec<reno_proto::ExecutorId>,
+    /// The longest a run with no bot may take before the supervisor stops it (`interrupted`,
+    /// `BudgetExceeded`). A run for a bot has its bot's `budget.max_wall_time` instead. A
+    /// generous ceiling by default: it is there to catch a run that hangs, not to shape work.
+    pub default_wall_time: Duration,
 }
 
 impl Default for KernelConfig {
@@ -73,6 +77,7 @@ impl Default for KernelConfig {
             trigger_cwd: PathBuf::from("."),
             scratch_root: None,
             default_executors: Vec::new(),
+            default_wall_time: Duration::from_secs(4 * 60 * 60),
         }
     }
 }

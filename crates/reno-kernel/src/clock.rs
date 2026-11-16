@@ -8,12 +8,20 @@
 //! enforces that by path: `SystemTime::now` is forbidden in every other kernel source.
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use reno_proto::LocalZone;
 
 /// A source of wall-clock time, in milliseconds since the Unix epoch.
 pub trait Clock: Send + Sync {
     /// The current time.
     fn now_ms(&self) -> i64;
+
+    /// The zone whose midnight ends a budget day. UTC unless a clock knows better.
+    fn zone(&self) -> LocalZone {
+        LocalZone::utc()
+    }
 }
 
 /// The real clock. Used by the daemon; the only reader of the system clock in the kernel crate.
@@ -28,12 +36,17 @@ impl Clock for SystemClock {
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
             .unwrap_or(0)
     }
+
+    fn zone(&self) -> LocalZone {
+        LocalZone::system()
+    }
 }
 
 /// A clock that moves only when told to, for tests.
 #[derive(Debug, Default)]
 pub struct ManualClock {
     now: AtomicI64,
+    zone: Mutex<Option<LocalZone>>,
 }
 
 impl ManualClock {
@@ -41,7 +54,13 @@ impl ManualClock {
     pub fn new(now_ms: i64) -> Self {
         Self {
             now: AtomicI64::new(now_ms),
+            zone: Mutex::new(None),
         }
+    }
+
+    /// The zone this clock reports (UTC by default).
+    pub fn set_zone(&self, zone: LocalZone) {
+        *self.zone.lock().unwrap_or_else(PoisonError::into_inner) = Some(zone);
     }
 
     /// Set the time.
@@ -58,6 +77,14 @@ impl ManualClock {
 impl Clock for ManualClock {
     fn now_ms(&self) -> i64 {
         self.now.load(Ordering::SeqCst)
+    }
+
+    fn zone(&self) -> LocalZone {
+        self.zone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(LocalZone::utc)
     }
 }
 

@@ -56,6 +56,7 @@
 //!   the one an executor reports in `Started` is not shown), and `prompt` is the task's goal.
 
 mod approvals;
+mod budget;
 mod clock;
 mod config;
 mod db;
