@@ -122,7 +122,7 @@ use tokio_util::task::TaskTracker;
 use crate::agent_id::HarnessId;
 use crate::exec::{
     ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, Resolved, probe,
-    require_access,
+    require_access, require_sandbox,
 };
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::proc::scratch::ScratchDir;
@@ -149,6 +149,8 @@ const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_LOAD_TIMEOUT: Duration = Duration::from_secs(90);
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
 const CONTRACT_VERSION: u32 = 1;
+/// The sandbox levels this driver honours; `start` refuses any other (ARCH-15).
+const SANDBOX_LEVELS: [SandboxLevel; 1] = [SandboxLevel::Unrestricted];
 /// What the stream carries before the session loop starts: room for a burst of events.
 const EVENT_CAPACITY: usize = 256;
 
@@ -525,7 +527,7 @@ impl Executor for AcpExecutor {
                 // The agent's own sandbox is not one Reno can set, so only `Unrestricted` (no
                 // sandbox, as asked) is honoured; the other levels would run with more latitude
                 // than requested and are not declared (ARCH-15).
-                sandbox_levels: vec![SandboxLevel::Unrestricted],
+                sandbox_levels: SANDBOX_LEVELS.to_vec(),
                 mcp_injection: true,
                 structured_output: false,
                 // `session/prompt`'s response is the turn's end.
@@ -628,6 +630,7 @@ impl Executor for AcpExecutor {
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved, installed or spawned (ARCH-15).
         require_access(spec.access, &self.access_modes)?;
+        require_sandbox(spec.sandbox, &SANDBOX_LEVELS)?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }

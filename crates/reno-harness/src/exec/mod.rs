@@ -53,7 +53,7 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, SandboxLevel};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -363,5 +363,35 @@ pub(crate) fn require_access(
             requested,
             supported: supported.to_vec(),
         })
+    }
+}
+
+/// Fail with [`ExecError::InvalidSpec`] unless `supported` lists the sandbox level `requested`
+/// (ARCH-15): a run never gets more latitude than the spec asked for, and an executor that
+/// cannot enforce a level does not pretend to. The router refuses first; this is the executor's
+/// own defence, so a caller that skips the router is refused too.
+pub(crate) fn require_sandbox(
+    requested: SandboxLevel,
+    supported: &[SandboxLevel],
+) -> Result<(), ExecError> {
+    if supported.contains(&requested) {
+        Ok(())
+    } else {
+        Err(ExecError::InvalidSpec(format!(
+            "sandbox level {requested:?} is not supported; supported: {supported:?}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sandbox_level_outside_the_declared_ones_is_refused_before_a_run() {
+        let supported = [SandboxLevel::Unrestricted];
+        assert!(require_sandbox(SandboxLevel::Unrestricted, &supported).is_ok());
+        let refused = require_sandbox(SandboxLevel::ReadOnly, &supported);
+        assert!(matches!(refused, Err(ExecError::InvalidSpec(why)) if why.contains("ReadOnly")));
     }
 }

@@ -39,7 +39,7 @@ async fn managed_install_reaches_started() {
         model: None,
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),

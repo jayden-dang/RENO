@@ -32,7 +32,7 @@ fn spec(prompt: &str) -> ExecSpec {
         model: None,
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),

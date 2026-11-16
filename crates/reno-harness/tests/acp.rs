@@ -61,7 +61,7 @@ fn spec(prompt: &str) -> ExecSpec {
         model: Some("grok-4.5".into()),
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),

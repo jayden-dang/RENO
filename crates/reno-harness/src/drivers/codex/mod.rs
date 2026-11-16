@@ -76,7 +76,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::exec::{
     Decision, ExecAnswer, ExecControls, ExecError, Executor, InputAnswer, Open, OpenRequests,
-    ProcessSink, Resolved, probe, require_access,
+    ProcessSink, Resolved, probe, require_access, require_sandbox,
 };
 use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::owned::Child as OwnedChild;
@@ -97,6 +97,13 @@ pub const VERIFIED_CLI_VERSION: &str = "0.169.0";
 
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
 const CONTRACT_VERSION: u32 = 1;
+/// The sandbox levels this driver honours (the spec's level is a ceiling); `start` refuses any
+/// other (ARCH-15).
+const SANDBOX_LEVELS: [SandboxLevel; 3] = [
+    SandboxLevel::ReadOnly,
+    SandboxLevel::WorkspaceWrite,
+    SandboxLevel::Unrestricted,
+];
 
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "codex";
@@ -535,11 +542,7 @@ impl Executor for CodexExecutor {
                 access_modes: self.access_modes.clone(),
                 // The spec's sandbox is a ceiling: each level is what a run gets at most, and
                 // the access mode can only narrow it (see the table on the type).
-                sandbox_levels: vec![
-                    SandboxLevel::ReadOnly,
-                    SandboxLevel::WorkspaceWrite,
-                    SandboxLevel::Unrestricted,
-                ],
+                sandbox_levels: SANDBOX_LEVELS.to_vec(),
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the app-server's own terminal `turn/completed`.
@@ -631,6 +634,7 @@ impl Executor for CodexExecutor {
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
         require_access(spec.access, &self.access_modes)?;
+        require_sandbox(spec.sandbox, &SANDBOX_LEVELS)?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }

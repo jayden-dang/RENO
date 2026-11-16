@@ -59,6 +59,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::exec::{
     ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, probe, require_access,
+    require_sandbox,
 };
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
@@ -78,6 +79,8 @@ pub const VERIFIED_CLI_VERSION: &str = "2.1.325";
 
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
 const CONTRACT_VERSION: u32 = 1;
+/// The sandbox levels this driver honours; `start` refuses any other (ARCH-15).
+const SANDBOX_LEVELS: [SandboxLevel; 1] = [SandboxLevel::Unrestricted];
 
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "claude-code";
@@ -458,7 +461,7 @@ impl Executor for ClaudeExecutor {
                 // mode drives. A run is therefore honoured only at `Unrestricted` (no sandbox,
                 // as asked); `ReadOnly` and `WorkspaceWrite` would be run with more latitude
                 // than requested, so they are not declared (ARCH-15).
-                sandbox_levels: vec![SandboxLevel::Unrestricted],
+                sandbox_levels: SANDBOX_LEVELS.to_vec(),
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the CLI's own terminal `result` frame.
@@ -525,6 +528,7 @@ impl Executor for ClaudeExecutor {
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
         require_access(spec.access, &self.access_modes)?;
+        require_sandbox(spec.sandbox, &SANDBOX_LEVELS)?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }
@@ -1392,7 +1396,7 @@ mod tests {
             model: None,
             effort: None,
             access,
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: SandboxLevel::Unrestricted,
             resume: None,
             mcp: Vec::new(),
             env: Default::default(),

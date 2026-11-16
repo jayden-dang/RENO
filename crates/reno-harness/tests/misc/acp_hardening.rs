@@ -35,7 +35,7 @@ fn spec(mode: &str) -> ExecSpec {
         model: None,
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: [("FAKE_ACP_MODE".to_owned(), mode.to_owned())]
