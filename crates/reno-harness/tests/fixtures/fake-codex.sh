@@ -733,6 +733,29 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 
+*scenario:conf-happy*)
+  # Conformance: text, a command and a file change, a result. No parameter is checked.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","turnId":"t-1","itemId":"m1","delta":"conf-hello"}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"c1","type":"commandExecution","command":"ls -la"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"c1","type":"commandExecution","command":"ls -la","status":"completed","exitCode":0,"aggregatedOutput":"ok\n"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
+  say "conf-done"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
+*scenario:conf-unknown*)
+  # Conformance: a notification method and a server request from an app-server newer than
+  # the driver.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"zz/futureNotification","params":{"threadId":"th-1","n":1}}'
+  say "unknown-done"
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  ;;
+
 *)
   fail_turn "$tid" "unknown scenario"
   ;;

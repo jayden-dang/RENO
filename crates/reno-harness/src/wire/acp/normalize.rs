@@ -188,6 +188,35 @@ pub(crate) fn session_update<'a>(
     params.get("update")
 }
 
+/// The `sessionUpdate` kinds the driver knows by name: those it turns into events and those it
+/// ignores on purpose (the ACP schema's other update kinds).
+const KNOWN_UPDATES: &[&str] = &[
+    "user_message_chunk",
+    "agent_message_chunk",
+    "agent_thought_chunk",
+    "tool_call",
+    "tool_call_update",
+    "plan",
+    "available_commands_update",
+    "current_mode_update",
+    "config_option_update",
+    "session_info_update",
+    "usage_update",
+];
+
+/// What a notification is called in the unrecognised-frame counters, when the driver has no name
+/// for it: `method:<method>` for a notification other than `session/update`, `update:<kind>`
+/// for a `sessionUpdate` kind outside [`KNOWN_UPDATES`]. `None` for anything known, and for
+/// another session's traffic.
+pub(crate) fn unknown_kind(method: &str, params: &Value, session_id: &str) -> Option<String> {
+    if method != "session/update" {
+        return Some(format!("method:{method}"));
+    }
+    let update = session_update(method, params, session_id)?;
+    let kind = update_kind(update);
+    (!KNOWN_UPDATES.contains(&kind)).then(|| format!("update:{kind}"))
+}
+
 /// The `sessionUpdate` kind of an update.
 pub(crate) fn update_kind(update: &Value) -> &str {
     str_field(update, "sessionUpdate")

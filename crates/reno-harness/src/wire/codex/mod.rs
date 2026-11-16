@@ -3,5 +3,6 @@
 
 pub(crate) mod catalog;
 pub(crate) mod elicitation;
+pub(crate) mod known;
 pub(crate) mod normalize;
 pub(crate) mod permission;

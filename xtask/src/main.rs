@@ -53,7 +53,9 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
 ];
 
 /// Extra dev-dependency edges, as `(member, dependency)`.
-const ALLOWED_DEV_EDGES: &[(&str, &str)] = &[("renod", "reno-client")];
+/// `reno-harness` names itself so its own tests run with the `conformance` feature on.
+const ALLOWED_DEV_EDGES: &[(&str, &str)] =
+    &[("renod", "reno-client"), ("reno-harness", "reno-harness")];
 
 /// Members outside the layering.
 const EXEMPT: &[&str] = &["xtask"];

@@ -446,6 +446,30 @@ case "$first" in
   exit 3
   ;;
 
+*scenario:conf-mcp*)
+  # Conformance: the inline `--mcp-config` carries the injected server.
+  cfg=none
+  prev=
+  for arg in "$@"; do
+    [ "$prev" = "--mcp-config" ] && cfg=$arg
+    prev=$arg
+  done
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-mcp"}'
+  case "$cfg" in
+  *'"conf-server"'*'"/opt/conf/server"'*) result=mcp:conf-server ;;
+  *) result="mcp:missing:$(printf '%s' "$cfg" | tr -d '"\\')" ;;
+  esac
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"$result\",\"errors\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-mcp\"}"
+  ;;
+
+*scenario:conf-unknown*)
+  # Conformance: a frame type from a CLI newer than the driver.
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-unk"}'
+  emit '{"type":"zz_future_frame","payload":{"n":1}}'
+  emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"after the unknown frame"}}}'
+  emit '{"type":"result","subtype":"success","result":"unknown-done","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-unk"}'
+  ;;
+
 *)
   emit '{"type":"result","subtype":"error_during_execution","errors":["unknown scenario"],"usage":{"input_tokens":0,"output_tokens":0},"session_id":"sess-x"}'
   ;;

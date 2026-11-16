@@ -380,6 +380,35 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"refusal\"}}"
   ;;
 
+*scenario:conf-happy*)
+  # Conformance: text, a command with its result, an end of turn.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"conf-hello"}}'
+  update '{"sessionUpdate":"tool_call","toolCallId":"t1","title":"ls -la","kind":"execute","status":"pending","rawInput":{"command":"ls -la"}}'
+  update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"ok"}}]}'
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"conf-done"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:conf-question*)
+  # Conformance: a choice between options; any option answers it.
+  emit "{\"id\":88,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$SID\",\"toolCall\":{\"toolCallId\":\"q1\",\"title\":\"Which async runtime should I use?\"},\"options\":[{\"optionId\":\"opt-tokio\",\"name\":\"Use tokio\"},{\"optionId\":\"opt-smol\",\"name\":\"Use smol\"}]}}"
+  read -r ans || exit 1
+  has "$ans" '"id":88' || exit 1
+  case "$ans" in
+    *'"optionId":"'*) picked=$(printf '%s' "$ans" | sed 's/.*"optionId":"\([^"]*\)".*/\1/') ;;
+    *) picked=none ;;
+  esac
+  update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"answered:$picked\"}}"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  ;;
+
+*scenario:conf-crash*)
+  # Conformance: the agent dies in the middle of its turn.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}'
+  echo 'conformance crash context' >&2
+  exit 23
+  ;;
+
 *scenario:resumed*)
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"back again"}}'
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"

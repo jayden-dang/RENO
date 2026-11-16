@@ -58,8 +58,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, probe, require_access,
-    require_sandbox,
+    ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, UnknownFrames, probe,
+    require_access, require_sandbox,
 };
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
@@ -197,6 +197,8 @@ pub struct ClaudeExecutor {
     /// Where `probe` looks for a credential in the environment.
     probe_env: health::EnvLookup,
     tracker: TaskTracker,
+    /// Frames of a type the wire layer does not know, counted across runs.
+    unknown: UnknownFrames,
 }
 
 impl std::fmt::Debug for ClaudeExecutor {
@@ -223,6 +225,7 @@ impl Default for ClaudeExecutor {
             probe_budget: probe::COMMAND_BUDGET,
             probe_env: health::process_env(),
             tracker: TaskTracker::new(),
+            unknown: UnknownFrames::new(),
         }
     }
 }
@@ -521,6 +524,10 @@ impl Executor for ClaudeExecutor {
         }
     }
 
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.unknown.snapshot()
+    }
+
     async fn start(
         &self,
         spec: ExecSpec,
@@ -606,6 +613,7 @@ impl Executor for ClaudeExecutor {
             stderr_tail,
             stderr_task,
             tracker: self.tracker.clone(),
+            unknown: self.unknown.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -722,6 +730,7 @@ struct Session {
     stderr_tail: crate::StderrTail,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     tracker: TaskTracker,
+    unknown: UnknownFrames,
 }
 
 /// What the driver needs to answer an approval later: the tool's input, which an allow echoes
@@ -929,6 +938,7 @@ async fn run_session(session: Session) {
         mut stderr_tail,
         mut stderr_task,
         tracker,
+        unknown,
     } = session;
 
     let mut pending_steers = std::collections::VecDeque::new();
@@ -1019,6 +1029,9 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    if let Frame::Unknown(kind) = &frame {
+                        unknown.note(&format!("type:{kind}"));
+                    }
                     if restore_fallback
                         && !interrupted
                         && !norm.started()

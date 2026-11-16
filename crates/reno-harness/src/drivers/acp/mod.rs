@@ -121,8 +121,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::agent_id::HarnessId;
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, Resolved, probe,
-    require_access, require_sandbox,
+    ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, Resolved, UnknownFrames,
+    probe, require_access, require_sandbox,
 };
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::proc::scratch::ScratchDir;
@@ -186,6 +186,8 @@ pub struct AcpExecutor {
     /// The agent's version `probe` last read, for the descriptor.
     cli_version: Arc<Mutex<Option<String>>>,
     tracker: TaskTracker,
+    /// Notifications and `sessionUpdate` kinds the wire layer does not know, counted across runs.
+    unknown: UnknownFrames,
 }
 
 impl std::fmt::Debug for AcpExecutor {
@@ -214,6 +216,7 @@ impl AcpExecutor {
             access_modes: spec.access_modes.to_vec(),
             cli_version: Arc::new(Mutex::new(None)),
             tracker: TaskTracker::new(),
+            unknown: UnknownFrames::new(),
             spec: Arc::new(spec),
         })
     }
@@ -659,6 +662,7 @@ impl Executor for AcpExecutor {
         let (event_tx, event_rx) = mpsc::channel::<ExecEvent>(EVENT_CAPACITY);
         self.tracker.spawn(run_session(Session {
             tracker: self.tracker.clone(),
+            unknown: self.unknown.clone(),
             child,
             scratch,
             event_tx,
@@ -693,6 +697,10 @@ impl Executor for AcpExecutor {
     async fn shutdown(&self) {
         self.tracker.close();
         self.tracker.wait().await;
+    }
+
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.unknown.snapshot()
     }
 }
 
@@ -738,6 +746,7 @@ fn unix_noop_browser(
 struct Session {
     /// The executor's task tracker: the JSON-RPC reader and writer run on it.
     tracker: TaskTracker,
+    unknown: UnknownFrames,
     child: Child,
     scratch: Option<ScratchDir>,
     event_tx: mpsc::Sender<ExecEvent>,
@@ -803,6 +812,7 @@ struct Pump {
     echo: Option<SystemMessageEchoFilter>,
     tx: mpsc::Sender<ExecEvent>,
     /// The run was cancelled: nothing new is allowed, and nobody is left to ask.
+    unknown: UnknownFrames,
     interrupted: bool,
 }
 
@@ -823,6 +833,9 @@ impl Pump {
 
     /// The events a notification stands for.
     fn events_for(&mut self, method: &str, params: &Value) -> Vec<ExecEvent> {
+        if let Some(kind) = normalize::unknown_kind(method, params, &self.session_id) {
+            self.unknown.note(&kind);
+        }
         normalize::session_update(method, params, &self.session_id)
             .map(|update| self.normalizer.update(update))
             .unwrap_or_default()
@@ -989,6 +1002,7 @@ fn current_model(session_options: &Value, requested: Option<&str>) -> String {
 async fn run_session(session: Session) {
     let Session {
         tracker,
+        unknown,
         // Locals drop in reverse binding order: reap the child before cleanup.
         scratch: _scratch,
         mut child,
@@ -1215,6 +1229,7 @@ async fn run_session(session: Session) {
         echo: (harness == HarnessId::Antigravity).then(SystemMessageEchoFilter::default),
         tx: event_tx.clone(),
         interrupted: false,
+        unknown: unknown.clone(),
     };
     if !pump
         .emit(ExecEvent::Started {
