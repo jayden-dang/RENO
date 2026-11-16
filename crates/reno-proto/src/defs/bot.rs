@@ -11,6 +11,7 @@ use super::time::check_duration;
 use super::{Cx, Sink, check_name, check_ref_name};
 use crate::exec::{AccessMode, SandboxLevel};
 use crate::ids::ExecutorId;
+use crate::secrets::check_secret_name;
 
 /// The longest `instructions` text, in bytes.
 pub(super) const MAX_INSTRUCTIONS_BYTES: usize = 64 * 1024;
@@ -18,6 +19,8 @@ pub(super) const MAX_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 pub(super) const MAX_EXECUTORS: usize = 16;
 /// The most triggers a bot may list.
 pub(super) const MAX_BOT_TRIGGERS: usize = 64;
+/// The most secrets a bot may list.
+pub(super) const MAX_BOT_SECRETS: usize = 32;
 /// The most runs a bot may have live at once.
 pub(super) const MAX_CONCURRENT_RUNS: u32 = 64;
 /// The longest wall time one run may be given.
@@ -36,6 +39,7 @@ pub(super) const MAX_WALL_TIME: Duration = Duration::from_secs(24 * 3600);
 /// team = "core"                          # optional
 /// triggers = ["nightly"]                 # names of triggers/<name>.toml
 /// in_place_writes = false                # optional: allow writes in a non-git directory
+/// secrets = ["GITHUB_TOKEN"]             # optional: Keychain secrets its runs get as env vars
 ///
 /// [budget]
 /// max_concurrent_runs = 2
@@ -74,6 +78,11 @@ pub struct BotDef {
     /// is no worktree to isolate it in. A git repository is never written in place.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place_writes: bool,
+    /// Names of the secrets this bot's runs receive, each as an environment variable of the same
+    /// name (`GITHUB_TOKEN`). The values live in the Keychain (`reno secret set`), never in this
+    /// file. A run whose secret is not set does not start. Left out, the run gets none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
 }
 
 fn default_access() -> AccessMode {
@@ -140,6 +149,7 @@ impl BotDef {
         }
 
         self.validate_triggers(stem, cx, sink);
+        self.validate_secrets(sink);
 
         let budget = &self.budget;
         if !(1..=MAX_CONCURRENT_RUNS).contains(&budget.max_concurrent_runs) {
@@ -187,6 +197,27 @@ impl BotDef {
                 sink.err(path, format!("duplicate executor {:?}", executor.as_str()));
             } else if !cx.ctx.executors.contains(executor) {
                 sink.err(path, format!("unknown executor {:?}", executor.as_str()));
+            }
+        }
+    }
+
+    fn validate_secrets(&self, sink: &mut Sink<'_>) {
+        if self.secrets.len() > MAX_BOT_SECRETS {
+            sink.err(
+                "secrets",
+                format!(
+                    "lists {} secrets; the limit is {MAX_BOT_SECRETS}",
+                    self.secrets.len()
+                ),
+            );
+        }
+        let mut seen = BTreeSet::new();
+        for (i, name) in self.secrets.iter().enumerate() {
+            let path = format!("secrets[{i}]");
+            if let Err(error) = check_secret_name(name) {
+                sink.err(path, format!("{name:?}: {error}"));
+            } else if !seen.insert(name.as_str()) {
+                sink.err(path, format!("duplicate secret {name:?}"));
             }
         }
     }

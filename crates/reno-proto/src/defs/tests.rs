@@ -1331,3 +1331,46 @@ fn trigger_prompt_placeholders_are_checked() {
         "triggers/nightly.toml: target.prompt: has `{{` with no closing",
     );
 }
+
+// ---- secrets (T1.13) ----------------------------------------------------------------------
+
+#[test]
+fn a_bot_names_the_secrets_its_runs_receive() {
+    let set = load(&[file(
+        DefKind::Bot,
+        "keeper",
+        &bot_with("secrets = [\"GITHUB_TOKEN\", \"NPM_TOKEN\"]"),
+    )])
+    .unwrap();
+    assert_eq!(
+        set.bot("keeper").unwrap().secrets,
+        ["GITHUB_TOKEN", "NPM_TOKEN"]
+    );
+}
+
+#[test]
+fn an_omitted_secrets_list_leaves_the_content_hash_alone() {
+    let a = hash_of_bot(&bot_with(""));
+    assert_eq!(hash_of_bot(&bot_with("secrets = []")), a);
+    let set = load(&[file(DefKind::Bot, "keeper", &bot_with(""))]).unwrap();
+    // A canonical form with no `secrets` key: every version stored before the field existed
+    // keeps its hash.
+    assert!(!set.bot("keeper").unwrap().canonical().contains("secrets"));
+    assert_ne!(hash_of_bot(&bot_with("secrets = [\"A\"]")), a);
+}
+
+#[test]
+fn secret_names_are_validated() {
+    let errors = bot_errors(&bot_with("secrets = [\"github_token\"]"));
+    assert_one(&errors, "bots/keeper.toml: secrets[0]: ");
+    assert!(errors[0].contains("not a valid secret name"), "{errors:?}");
+    let errors = bot_errors(&bot_with("secrets = [\"A\", \"A\"]"));
+    assert_one(&errors, "bots/keeper.toml: secrets[1]: ");
+    assert!(errors[0].contains("duplicate"), "{errors:?}");
+    let errors = bot_errors(&bot_with("secrets = [\"RENO_RUN_ID\"]"));
+    assert_one(&errors, "bots/keeper.toml: secrets[0]: ");
+    assert!(errors[0].contains("RENO_"), "{errors:?}");
+    let many: Vec<String> = (0..33).map(|i| format!("\"S{i}\"")).collect();
+    let errors = bot_errors(&bot_with(&format!("secrets = [{}]", many.join(", "))));
+    assert_one(&errors, "bots/keeper.toml: secrets: lists 33 secrets");
+}

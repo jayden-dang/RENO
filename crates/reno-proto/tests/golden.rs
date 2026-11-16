@@ -283,7 +283,7 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message", "routing", "attachments", "budget"],
+                            "executor.install", "approval.message", "routing", "attachments", "budget", "secrets"],
                "pid": 4242}),
     );
 }
@@ -1115,4 +1115,90 @@ fn task_run_attachments() {
         "\n\nAttached files:\n- /tmp/shot.png (shot.png, image/png)\n- /tmp/notes.txt (notes)\n"
     );
     assert_eq!(Attachment::prompt_suffix(&[]), "");
+}
+
+#[test]
+fn secrets_on_the_wire() {
+    assert_eq!(<SecretList as Method>::NAME, "secret.list");
+    assert_eq!(<SecretSet as Method>::NAME, "secret.set");
+    assert_eq!(<SecretDelete as Method>::NAME, "secret.delete");
+    assert!(FEATURES.contains(&FEATURE_SECRETS));
+    golden(
+        &SecretListResult {
+            secrets: vec![
+                SecretInfo {
+                    name: "GITHUB_TOKEN".into(),
+                    set: true,
+                    used_by: vec!["keeper".into()],
+                },
+                SecretInfo {
+                    name: "NPM_TOKEN".into(),
+                    set: false,
+                    used_by: Vec::new(),
+                },
+            ],
+        },
+        json!({"secrets": [
+            {"name": "GITHUB_TOKEN", "set": true, "usedBy": ["keeper"]},
+            {"name": "NPM_TOKEN", "set": false},
+        ]}),
+    );
+    golden(
+        &SecretSetParams {
+            name: "GITHUB_TOKEN".into(),
+            value: "ghp_example".into(),
+        },
+        json!({"name": "GITHUB_TOKEN", "value": "ghp_example"}),
+    );
+    golden(
+        &SecretSetResult { replaced: true },
+        json!({"replaced": true}),
+    );
+    golden(
+        &SecretDeleteParams {
+            name: "NPM_TOKEN".into(),
+        },
+        json!({"name": "NPM_TOKEN"}),
+    );
+    golden(
+        &SecretDeleteResult { deleted: false },
+        json!({"deleted": false}),
+    );
+}
+
+#[test]
+fn a_bot_lists_secrets_by_name_only_when_it_has_some() {
+    let bot: BotDef = serde_json::from_value(json!({
+        "name": "keeper", "instructions": "x", "executors": ["codex"],
+        "secrets": ["GITHUB_TOKEN"],
+    }))
+    .unwrap();
+    assert_eq!(bot.secrets, ["GITHUB_TOKEN"]);
+    assert_eq!(
+        serde_json::to_value(&bot).unwrap()["secrets"],
+        json!(["GITHUB_TOKEN"])
+    );
+    let plain: BotDef = serde_json::from_value(json!({
+        "name": "keeper", "instructions": "x", "executors": ["codex"],
+    }))
+    .unwrap();
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("secrets")
+            .is_none()
+    );
+}
+
+#[test]
+fn an_exec_spec_never_debug_prints_its_environment_values() {
+    let spec: ExecSpec = serde_json::from_value(json!({
+        "runId": "run_01HZX9", "prompt": "go", "cwd": "/w",
+        "access": "supervised", "sandbox": "unrestricted",
+        "env": {"GITHUB_TOKEN": "ghp_supersecretvalue"},
+    }))
+    .unwrap();
+    let shown = format!("{spec:?}");
+    assert!(shown.contains("GITHUB_TOKEN"), "{shown}");
+    assert!(!shown.contains("ghp_supersecretvalue"), "{shown}");
 }
