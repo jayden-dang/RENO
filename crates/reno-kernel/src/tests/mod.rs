@@ -49,12 +49,26 @@ pub(super) fn id(name: &str) -> ExecutorId {
 }
 
 /// Probe until it yields, moving paused time 1 ms per try.
+///
+/// The bound is real time, not a count of tries: a probe that only reads memory (an armed-timer
+/// counter, a task's `is_finished`) costs microseconds, so a count of tries can run out before
+/// the store's writer thread, or the OS scheduler under load, has let the thing waited for
+/// happen. After a burst of quick tries each further try therefore gives the other threads a real
+/// millisecond.
 pub(super) async fn until<T>(mut probe: impl AsyncFnMut() -> Option<T>) -> T {
-    for _ in 0..30_000 {
+    let started = std::time::Instant::now();
+    let mut tries = 0_u32;
+    while started.elapsed() < Duration::from_secs(60) {
         if let Some(found) = probe().await {
             return found;
         }
         tokio::time::advance(Duration::from_millis(1)).await;
+        tries = tries.saturating_add(1);
+        if tries > 64 {
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(1)))
+                .await
+                .unwrap();
+        }
     }
     panic!("condition never became true");
 }
