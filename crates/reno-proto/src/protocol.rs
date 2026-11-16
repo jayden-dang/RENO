@@ -17,6 +17,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::budget::{
+    BudgetPauseParams, BudgetPauseResult, BudgetResumeParams, BudgetResumeResult,
+    BudgetStatusParams, BudgetStatusResult,
+};
 use crate::defs::{
     BotDef, BotPin, DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult,
     DefsSnapshot, DefsWatchParams, PolicyDef, TriggerDef,
@@ -92,6 +96,10 @@ pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 /// decision and accepts `inPlace`.
 pub const FEATURE_ROUTING: &str = "routing";
 
+/// Feature: `budget.status`, `budget.pause` and `budget.resume` exist, and `task.run` may be
+/// refused with the `BudgetExceeded` error code.
+pub const FEATURE_BUDGET: &str = "budget";
+
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EVENTS_RESUME,
@@ -108,6 +116,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_EXECUTOR_INSTALL,
     FEATURE_APPROVAL_MESSAGE,
     FEATURE_ROUTING,
+    FEATURE_BUDGET,
 ];
 
 /// A request with a single reply.
@@ -579,6 +588,21 @@ method!(
     RoutePreview, "route.preview", RoutePreviewParams => RoutePreviewResult
 );
 method!(
+    /// `budget.status`: every bot's limits and what it has used today, and whether anything is
+    /// paused. Needs feature `budget`.
+    BudgetStatus, "budget.status", BudgetStatusParams => BudgetStatusResult
+);
+method!(
+    /// `budget.pause`: the kill switch. Stops new runs from being claimed (everything, or one
+    /// bot), holds that bot's triggers, and with `stopLive` stops the live runs. The pause
+    /// survives a restart. Needs feature `budget`.
+    BudgetPause, "budget.pause", BudgetPauseParams => BudgetPauseResult
+);
+method!(
+    /// `budget.resume`: lifts a pause. Needs feature `budget`.
+    BudgetResume, "budget.resume", BudgetResumeParams => BudgetResumeResult
+);
+method!(
     /// `run.list`: runs, optionally filtered by status.
     RunList, "run.list", RunListParams => RunListResult
 );
@@ -737,6 +761,9 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunGet>(),
             method_entry::<RunRouting>(),
             method_entry::<RoutePreview>(),
+            method_entry::<BudgetStatus>(),
+            method_entry::<BudgetPause>(),
+            method_entry::<BudgetResume>(),
             method_entry::<RunList>(),
             method_entry::<RunCancel>(),
             method_entry::<RunSteer>(),

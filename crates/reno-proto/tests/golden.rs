@@ -283,7 +283,7 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message", "routing"],
+                            "executor.install", "approval.message", "routing", "budget"],
                "pid": 4242}),
     );
 }

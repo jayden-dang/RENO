@@ -47,6 +47,7 @@
 //!
 //! A new method, notification or subscription must also be added to [`protocol_schema`].
 
+pub mod budget;
 pub mod defs;
 pub mod error;
 pub mod exec;
@@ -58,6 +59,7 @@ pub mod run;
 pub mod triggers;
 pub mod workspace;
 
+pub use budget::*;
 pub use error::*;
 pub use exec::*;
 pub use health::*;
