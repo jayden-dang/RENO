@@ -269,6 +269,11 @@ pub struct DaemonStatusInfo {
     pub queued_runs: u32,
     /// Executors the daemon found installed.
     pub executors: Vec<ExecutorId>,
+    /// Why edits to the definitions are not being noticed, while the daemon cannot start its
+    /// file watch and is retrying: the definitions in force are the last good ones, and a change
+    /// on disk is not seen until the watch starts. Absent when the watch is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions_watch: Option<String>,
 }
 
 /// Result of `daemon.shutdown`: empty.

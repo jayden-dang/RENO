@@ -762,6 +762,13 @@ expression: protocol_schema()
             "minimum": 0,
             "type": "integer"
           },
+          "definitionsWatch": {
+            "description": "Why edits to the definitions are not being noticed, while the daemon cannot start its\nfile watch and is retrying: the definitions in force are the last good ones, and a change\non disk is not seen until the watch starts. Absent when the watch is running.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "executors": {
             "description": "Executors the daemon found installed.",
             "items": {

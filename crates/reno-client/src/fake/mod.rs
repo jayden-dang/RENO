@@ -451,6 +451,7 @@ fn router(shared: &Arc<Shared>) -> Router {
                     .iter()
                     .filter_map(|e| e.parse().ok())
                     .collect(),
+                definitions_watch: None,
             })
         }
     };

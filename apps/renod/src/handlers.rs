@@ -138,6 +138,8 @@ pub(crate) struct Ctx {
     /// The secret store `secret.*` reads and writes; `None` when the daemon was started without
     /// one.
     pub(crate) secrets: Option<Arc<dyn Secrets>>,
+    /// The definitions port, for whether its file watch is running.
+    pub(crate) fs_defs: Arc<crate::defs::FsDefinitions>,
 }
 
 /// Adapts `handler(ctx, params)` to the closure shape `Router` takes.
@@ -381,6 +383,7 @@ async fn status(ctx: Arc<Ctx>, _: NoParams) -> Reply<DaemonStatusInfo> {
         uptime_secs: ctx.started.elapsed().as_secs(),
         active_runs: count(&ctx, &ACTIVE).await?,
         queued_runs: count(&ctx, &[RunStatus::Queued]).await?,
+        definitions_watch: ctx.fs_defs.watch_problem(),
         // The executors found installed: one whose last probe says otherwise is left out.
         executors: ctx
             .kernel

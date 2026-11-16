@@ -91,6 +91,13 @@ cancel grace and the heartbeat period. A sleeping Mac does no work, so a run is 
 the hours it slept; a run's screen therefore shows time awake, which can be less than the time
 since it started.
 
+A watch that cannot start is the one other timer. The platform has a finite pool of
+file-watch streams shared by every process on the machine, so a start can be refused for a while. The daemon then keeps serving what it
+has (the last good definitions, a trigger shown as failed), says so (`daemon.status`,
+`trigger.list`, one warning in the log) and retries the start after a doubling delay with a
+ceiling. That timer is armed only while a start is failing, ends with the first start that works,
+and never asks whether files changed; once the watch runs, changes arrive as events again.
+
 **ARCH-11 — Every queue is bounded, and every task is owned.** Each channel has a capacity. Each
 spawned task belongs to a task tracker and a cancellation token, so shutdown waits for it.
 Actors reply by one-shot channel and never form a cycle of bounded channels.

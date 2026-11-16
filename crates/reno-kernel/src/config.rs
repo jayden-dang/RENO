@@ -24,6 +24,9 @@ pub struct KernelConfig {
     /// How long the dispatcher waits before it retries after the store failed it. A deadline that
     /// exists only while the store is failing.
     pub store_retry: Duration,
+    /// How long to wait before trying again to start a file watch that failed to start, for `fs`
+    /// triggers. A deadline that exists only while a start is failing (ARCH-10).
+    pub watch_retry: crate::WatchBackoff,
     /// Events one `run_events` subscriber may have queued; past that it gets a gap error
     /// (ARCH-12). At least 1.
     pub subscriber_queue: usize,
@@ -80,6 +83,7 @@ impl Default for KernelConfig {
             shutdown_deadline: Duration::from_secs(15),
             sweep_grace: Duration::from_secs(3),
             store_retry: Duration::from_secs(1),
+            watch_retry: crate::WatchBackoff::default(),
             subscriber_queue: 256,
             watch_limit: 500,
             recent_runs: 50,

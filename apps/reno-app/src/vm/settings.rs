@@ -504,6 +504,7 @@ mod tests {
                 active_runs: 2,
                 queued_runs: 1,
                 executors: vec!["claude-code".parse().unwrap()],
+                definitions_watch: None,
             }),
         }));
         let socket = std::path::Path::new("/tmp/reno.sock");

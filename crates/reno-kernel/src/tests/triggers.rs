@@ -901,6 +901,87 @@ async fn an_fs_trigger_without_a_watcher_is_shown_as_failed() {
     assert!(t.error.unwrap().contains("no file watcher"));
 }
 
+/// Refuses the first `failures` starts, as a platform out of watch streams does, then works.
+#[derive(Debug)]
+struct FlakyWatch {
+    failures: Mutex<u32>,
+    starts: Mutex<Vec<mpsc::Sender<()>>>,
+    attempts: Mutex<u32>,
+}
+
+impl Watch for FlakyWatch {
+    fn watch(&self, _spec: &WatchSpec) -> crate::Result<WatchStream> {
+        *self.attempts.lock().unwrap() += 1;
+        {
+            let mut left = self.failures.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(KernelError::Definitions(
+                    "unable to start FSEvent stream".into(),
+                ));
+            }
+        }
+        let (tx, rx) = mpsc::channel(1);
+        self.starts.lock().unwrap().push(tx);
+        Ok(WatchStream::new(rx, ()))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_fs_trigger_whose_watch_cannot_start_shows_failed_and_retries_with_backoff() {
+    let watch = Arc::new(FlakyWatch {
+        failures: Mutex::new(3),
+        starts: Mutex::default(),
+        attempts: Mutex::new(0),
+    });
+    let port = FakePort::with(files(vec![trigger(
+        "inbox",
+        "kind = \"fs\"\npaths = [\"/data/inbox/**\"]\ndebounce = \"2s\"",
+        "new files",
+    )]));
+    let config = KernelConfig {
+        watch_retry: crate::WatchBackoff {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+        },
+        ..KernelConfig::default()
+    };
+    let fx = Fx::with_definitions(
+        config,
+        registry(&[mock([])]),
+        setup(&port).with_watch(watch.clone()),
+    )
+    .await;
+    let t = info(&fx, "inbox");
+    assert_eq!(t.status, TriggerStatus::Failed);
+    let error = t.error.unwrap();
+    assert!(error.contains("unable to start FSEvent stream"), "{error}");
+    assert!(error.contains("retrying"), "{error}");
+    assert_eq!(*watch.attempts.lock().unwrap(), 1);
+
+    // The delays double: 1 s, 2 s, 4 s. Nothing is tried before its time.
+    for (wait_ms, attempts) in [(900, 1), (200, 2), (1_900, 2), (200, 3), (3_900, 3)] {
+        fx.clock.advance(wait_ms);
+        tokio::time::advance(Duration::from_millis(u64::try_from(wait_ms).unwrap())).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *watch.attempts.lock().unwrap(),
+            attempts,
+            "after {wait_ms} ms"
+        );
+    }
+    fx.clock.advance(200);
+    tokio::time::advance(Duration::from_millis(200)).await;
+    until(async || (info(&fx, "inbox").status == TriggerStatus::Watching).then_some(())).await;
+    assert_eq!(*watch.attempts.lock().unwrap(), 4);
+    assert!(info(&fx, "inbox").error.is_none());
+
+    // The recovered watch fires the trigger.
+    let tx = watch.starts.lock().unwrap()[0].clone();
+    tx.send(()).await.unwrap();
+    until(async || (!runs(&fx).await.is_empty()).then_some(())).await;
+}
+
 // ---- idleness ----------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

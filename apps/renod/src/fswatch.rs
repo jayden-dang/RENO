@@ -6,6 +6,10 @@
 //! with no further signal the kernel is told once, with `debounce` taken from the definition.
 //! Nothing wakes on an interval.
 //!
+//! A watch the platform refuses to start (its pool of streams is shared by every process on the machine) is an
+//! error from [`FsWatch::watch`]; the scheduler shows the trigger as failed and starts it again
+//! after a growing delay. That timer exists only while a start is failing (ARCH-10).
+//!
 //! # Paths
 //!
 //! A path is absolute or starts with `~/`. A path with no glob characters is watched as it is
@@ -19,26 +23,44 @@
 //! prefix.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use globset::{Glob, GlobMatcher};
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::EventKind;
 use reno_kernel::{KernelError, Watch, WatchSpec, WatchStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::watcher::{NotifyWatchers, WatcherFactory, WatcherGuard};
+
 /// The `Watch` port: `notify`, debounced per definition.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FsWatch {
     tasks: TaskTracker,
+    watchers: Arc<dyn WatcherFactory>,
+}
+
+impl Default for FsWatch {
+    fn default() -> Self {
+        Self::with_watchers(Arc::new(NotifyWatchers))
+    }
 }
 
 impl FsWatch {
     /// A port with no watches yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A port that starts its watchers with `watchers`.
+    pub fn with_watchers(watchers: Arc<dyn WatcherFactory>) -> Self {
+        Self {
+            tasks: TaskTracker::new(),
+            watchers,
+        }
     }
 
     /// Waits for the debounce tasks of watches that were dropped. Call it after the kernel has
@@ -51,7 +73,7 @@ impl FsWatch {
 
 /// What a watch holds while it runs: dropping it stops the watcher and its debounce task.
 struct Guard {
-    _watcher: RecommendedWatcher,
+    _watcher: WatcherGuard,
     stop: CancellationToken,
 }
 
@@ -210,28 +232,27 @@ impl Watch for FsWatch {
         let roots: Vec<PathBuf> = targets.iter().map(|t| t.root.clone()).collect();
         let name = spec.trigger.clone();
         let warned = AtomicBool::new(false);
-        let mut watcher =
-            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                let verdict = classify(&result, &targets);
-                if verdict == Verdict::Failed
-                    && let Err(error) = &result
-                    && first_failure(&warned)
-                {
-                    // The watcher lost track of something, so the paths may have changed. Say
-                    // so once: a failing watcher can repeat itself without end.
-                    tracing::warn!(trigger = %name, %error, "a file watcher reported an error");
-                }
-                if verdict != Verdict::Ignore {
-                    // A full channel already holds a pending signal.
-                    let _ = raw_tx.try_send(());
-                }
-            })
-            .map_err(|e| fail(format!("cannot create a watcher: {e}")))?;
-        for root in &roots {
-            watcher
-                .watch(root, RecursiveMode::Recursive)
-                .map_err(|e| fail(format!("cannot watch {}: {e}", root.display())))?;
-        }
+        let watcher = self
+            .watchers
+            .start(
+                &roots,
+                Box::new(move |result: notify::Result<notify::Event>| {
+                    let verdict = classify(&result, &targets);
+                    if verdict == Verdict::Failed
+                        && let Err(error) = &result
+                        && first_failure(&warned)
+                    {
+                        // The watcher lost track of something, so the paths may have changed.
+                        // Say so once: a failing watcher can repeat itself without end.
+                        tracing::warn!(trigger = %name, %error, "a file watcher reported an error");
+                    }
+                    if verdict != Verdict::Ignore {
+                        // A full channel already holds a pending signal.
+                        let _ = raw_tx.try_send(());
+                    }
+                }),
+            )
+            .map_err(fail)?;
 
         let stop = CancellationToken::new();
         self.tasks
@@ -286,6 +307,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::watcher::Captured;
 
     fn spec(paths: Vec<String>) -> WatchSpec {
         WatchSpec {
@@ -421,27 +443,37 @@ mod tests {
         task.await.unwrap();
     }
 
-    // ---- real files and the real watcher ---------------------------------------------------
+    // ---- a started watch, end to end -------------------------------------------------------
     //
-    // These share one lock so the suite's own file churn does not overload the platform's event
-    // daemon, and they accept any signal: under load the daemon sends a rescan notice instead of
-    // per-file events, which is the same "look again" as far as a trigger is concerned.
+    // The events are raised by the test, through a watcher that starts nothing real: the platform
+    // has a finite pool of watch streams shared by every process on the machine, and a test that
+    // needs one fails when the pool is empty. What the real backend reports is covered by the
+    // daemon's integration tests, which wait their turn.
+
+    fn create(path: PathBuf) -> notify::Event {
+        notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(path)
+    }
 
     #[tokio::test]
     async fn a_matching_file_change_is_reported_after_it_settles() {
-        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
-        let inbox = dir.path().join("inbox");
+        let inbox = fs::canonicalize(dir.path()).unwrap().join("inbox");
         fs::create_dir(&inbox).unwrap();
-        let port = FsWatch::new();
-        let pattern = format!("{}/*.txt", dir.path().join("inbox").display());
+        let events = Arc::new(Captured::default());
+        let port = FsWatch::with_watchers(events.clone());
+        let pattern = format!("{}/*.txt", inbox.display());
         let mut stream = port.watch(&spec(vec![pattern])).unwrap();
 
-        // A burst of writes is signalled (the debounce itself is tested above with no files).
+        // Files the pattern does not match are not ours.
+        events.raise(create(inbox.join("a.log")));
+        assert!(!changed(&mut stream, Duration::from_millis(300)).await);
+
+        // A burst of matching writes is signalled once the quiet has passed.
         for n in 0..5 {
-            fs::write(inbox.join(format!("a{n}.txt")), "x").unwrap();
+            events.raise(create(inbox.join(format!("a{n}.txt"))));
         }
         assert!(changed(&mut stream, FAILSAFE).await);
+        assert!(!changed(&mut stream, Duration::from_millis(300)).await);
 
         drop(stream);
         port.shutdown().await;
@@ -449,15 +481,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_directory_covers_what_is_created_under_it_later() {
-        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
-        let port = FsWatch::new();
-        let later = dir.path().join("not-yet");
+        let later = fs::canonicalize(dir.path()).unwrap().join("not-yet");
+        let events = Arc::new(Captured::default());
+        let port = FsWatch::with_watchers(events.clone());
         let mut stream = port
             .watch(&spec(vec![later.display().to_string()]))
             .unwrap();
-        fs::create_dir(&later).unwrap();
-        fs::write(later.join("f"), "x").unwrap();
+        events.raise(create(later.join("f")));
         assert!(changed(&mut stream, FAILSAFE).await);
         drop(stream);
         port.shutdown().await;

@@ -16,6 +16,17 @@
 //! A rescan notice (the platform dropped events and named a directory) and a watcher error both
 //! count whatever their path: the files that changed are unknown, and a read looks at them all.
 //!
+//! # When the watch cannot start
+//!
+//! The platform has a finite pool of watch streams shared by every process on the machine (see
+//! [`watcher`](crate::watcher)), so a start can fail for a while and work later. Then the daemon
+//! keeps serving the last good definitions, says so ([`FsDefinitions::watch_problem`], shown in
+//! `daemon.status`) and logs one warning, and tries again after a growing delay
+//! (`reno_kernel::WatchBackoff`). That is a retry-on-error timer, armed only while a start is
+//! failing and ended by the first start that works; it never asks whether files changed
+//! (ARCH-10). When the watch starts, a reload is signalled, because edits made meanwhile were
+//! missed.
+//!
 //! Only events at `policy.toml`, `bots/` and `triggers/` count. Whatever else lives in the
 //! directory (a `.git/`, a scratch folder) never reloads the definitions, and neither do file
 //! reads (`Access` events), so loading them does not reload them either.
@@ -31,13 +42,13 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use reno_kernel::{DefSnapshot, Definitions, KernelError};
+use notify::EventKind;
+use reno_kernel::{DefSnapshot, Definitions, KernelError, WatchBackoff};
 use reno_proto::defs::{
     DefError, DefFile, DefKind, MAX_FILE_BYTES, MAX_FILES_PER_KIND, POLICY_NAME, defaults,
 };
@@ -45,6 +56,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+use crate::watcher::{NotifyWatchers, WatcherFactory, WatcherGuard};
 
 /// How long the files must be quiet before a change is reported.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -217,19 +230,33 @@ fn write_new(path: &Path, text: &str) -> io::Result<()> {
 pub struct FsDefinitions {
     root: PathBuf,
     debounce: Duration,
-    watching: Mutex<Option<Watching>>,
+    watchers: Arc<dyn WatcherFactory>,
+    retry: WatchBackoff,
+    /// Whether `watch` was called.
+    watching: AtomicBool,
+    /// Where the running watcher lives, once one has started. Dropping it stops its stream.
+    state: Arc<WatchState>,
     tasks: TaskTracker,
     stop: CancellationToken,
 }
 
-/// A running watch: dropping the watcher ends the callbacks.
-struct Watching {
-    _watcher: RecommendedWatcher,
+/// What the start of the watch leaves behind; shared with the task that retries it.
+#[derive(Debug, Default)]
+struct WatchState {
+    watcher: Mutex<Option<WatcherGuard>>,
+    /// Why the watch is not running, while its start is being retried.
+    problem: Mutex<Option<String>>,
 }
 
-impl std::fmt::Debug for Watching {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Watching")
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Drop for FsDefinitions {
+    /// A port dropped without `shutdown` still lets go of its stream, and stops its tasks.
+    fn drop(&mut self) {
+        self.stop.cancel();
+        lock(&self.state.watcher).take();
     }
 }
 
@@ -240,10 +267,27 @@ impl FsDefinitions {
         Ok(Self {
             root: fs::canonicalize(root)?,
             debounce,
-            watching: Mutex::new(None),
+            watchers: Arc::new(NotifyWatchers),
+            retry: WatchBackoff::default(),
+            watching: AtomicBool::new(false),
+            state: Arc::default(),
             tasks: TaskTracker::new(),
             stop: CancellationToken::new(),
         })
+    }
+
+    /// The same, starting its watcher with `watchers`.
+    #[must_use]
+    pub fn with_watchers(mut self, watchers: Arc<dyn WatcherFactory>) -> Self {
+        self.watchers = watchers;
+        self
+    }
+
+    /// The same, waiting as `retry` says between starts of a watch that failed to start.
+    #[must_use]
+    pub fn with_retry(mut self, retry: WatchBackoff) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// The resolved directory.
@@ -251,16 +295,92 @@ impl FsDefinitions {
         &self.root
     }
 
-    /// Stops watching and waits for the debounce task. Safe to call twice.
+    /// Why edits are not being noticed: the watch could not start and is being retried. `None`
+    /// when it is running, or was never asked for.
+    pub fn watch_problem(&self) -> Option<String> {
+        lock(&self.state.problem).clone()
+    }
+
+    /// Stops watching and waits for the tasks. Safe to call twice.
     pub async fn shutdown(&self) {
         self.stop.cancel();
-        self.watching().take();
+        lock(&self.state.watcher).take();
         self.tasks.close();
         self.tasks.wait().await;
     }
 
-    fn watching(&self) -> MutexGuard<'_, Option<Watching>> {
-        self.watching.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Starts the platform watcher for `root`, feeding `raw`.
+    fn start_watcher(&self, raw: mpsc::Sender<()>) -> Result<WatcherGuard, String> {
+        start_watcher(&*self.watchers, &self.root, raw)
+    }
+}
+
+fn start_watcher(
+    watchers: &dyn WatcherFactory,
+    root: &Path,
+    raw: mpsc::Sender<()>,
+) -> Result<WatcherGuard, String> {
+    let owned = root.to_owned();
+    let warned = AtomicBool::new(false);
+    watchers.start(
+        &[root.to_owned()],
+        Box::new(move |result: notify::Result<notify::Event>| {
+            if let Err(error) = &result
+                && !warned.swap(true, Ordering::Relaxed)
+            {
+                // Say so once: a failing watcher can repeat itself without end.
+                tracing::warn!(%error, "the definitions watcher reported an error");
+            }
+            if signals_reload(&result, &owned) {
+                // A full channel already holds a pending signal.
+                let _ = raw.try_send(());
+            }
+        }),
+    )
+}
+
+/// Starts the watch again until it works or `stop` is cancelled. Each wait is a deadline that
+/// exists only because the last start failed (ARCH-10).
+async fn retry_start(
+    watchers: Arc<dyn WatcherFactory>,
+    root: PathBuf,
+    backoff: WatchBackoff,
+    state: Arc<WatchState>,
+    raw: mpsc::Sender<()>,
+    stop: CancellationToken,
+) {
+    let mut failures = 1u32;
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(backoff.delay(failures)) => {}
+        }
+        match start_watcher(&*watchers, &root, raw.clone()) {
+            Ok(guard) => {
+                {
+                    let mut slot = lock(&state.watcher);
+                    // `shutdown` cancels before it takes the slot, so a guard stored here is
+                    // always taken after; one that arrives late is dropped.
+                    if stop.is_cancelled() {
+                        return;
+                    }
+                    *slot = Some(guard);
+                }
+                lock(&state.problem).take();
+                tracing::info!(
+                    attempts = failures.saturating_add(1),
+                    "the definitions watch started; edits are noticed again"
+                );
+                // Edits made while nothing watched were missed.
+                let _ = raw.try_send(());
+                return;
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                *lock(&state.problem) = Some(error);
+            }
+        }
     }
 }
 
@@ -275,40 +395,35 @@ impl Definitions for FsDefinitions {
     }
 
     fn watch(&self) -> reno_kernel::Result<mpsc::Receiver<()>> {
-        let mut watching = self.watching();
-        if watching.is_some() {
+        if self.watching.swap(true, Ordering::SeqCst) {
             return Err(KernelError::Definitions(
                 "the definitions are already being watched".into(),
             ));
         }
         let (raw_tx, raw_rx) = mpsc::channel(1);
         let (out_tx, out_rx) = mpsc::channel(1);
-        let root = self.root.clone();
-
-        let warned = AtomicBool::new(false);
-        let mut watcher =
-            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Err(error) = &result
-                    && !warned.swap(true, Ordering::Relaxed)
-                {
-                    // Say so once: a failing watcher can repeat itself without end.
-                    tracing::warn!(%error, "the definitions watcher reported an error");
-                }
-                if signals_reload(&result, &root) {
-                    // A full channel already holds a pending signal.
-                    let _ = raw_tx.try_send(());
-                }
-            })
-            .map_err(|e| KernelError::Definitions(format!("cannot create a watcher: {e}")))?;
-        watcher
-            .watch(&self.root, RecursiveMode::Recursive)
-            .map_err(|e| {
-                KernelError::Definitions(format!("cannot watch {}: {e}", self.root.display()))
-            })?;
-
         self.tasks
             .spawn(debounce(raw_rx, out_tx, self.debounce, self.stop.clone()));
-        *watching = Some(Watching { _watcher: watcher });
+
+        // The first start is made now, so that the kernel's read after it misses no edit.
+        match self.start_watcher(raw_tx.clone()) {
+            Ok(guard) => *lock(&self.state.watcher) = Some(guard),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "cannot watch the definitions; keeping what is loaded and trying again"
+                );
+                *lock(&self.state.problem) = Some(error);
+                self.tasks.spawn(retry_start(
+                    Arc::clone(&self.watchers),
+                    self.root.clone(),
+                    self.retry,
+                    Arc::clone(&self.state),
+                    raw_tx,
+                    self.stop.clone(),
+                ));
+            }
+        }
         Ok(out_rx)
     }
 }

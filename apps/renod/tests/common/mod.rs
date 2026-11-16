@@ -131,6 +131,58 @@ pub(crate) struct Fixture {
     pub(crate) client: Client,
 }
 
+/// Most watchers one test process holds at once. The machine's pool of file-watch streams is
+/// finite and shared by every process on it (about sixteen were free when measured), and a test binary runs its tests in parallel, each
+/// with a daemon. Past the limit a start is refused like the platform refuses it, and the daemon
+/// retries (that is the behaviour under test in `watch_streams.rs`), so a daemon that must watch
+/// waits for a turn instead of failing.
+const WATCHERS_PER_PROCESS: usize = 4;
+
+static HELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The real platform watcher, at most [`WATCHERS_PER_PROCESS`] at a time.
+#[derive(Debug)]
+struct Budgeted;
+
+struct Permit;
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        HELD.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A started watcher with its permit; the fields drop in order, so the stream stops before the
+/// permit goes back.
+struct Held {
+    _guard: renod::watcher::WatcherGuard,
+    _permit: Permit,
+}
+
+impl renod::WatcherFactory for Budgeted {
+    fn start(
+        &self,
+        roots: &[std::path::PathBuf],
+        handler: renod::watcher::Handler,
+    ) -> Result<renod::watcher::WatcherGuard, String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let taken = HELD.fetch_update(SeqCst, SeqCst, |n| {
+            (n < WATCHERS_PER_PROCESS).then_some(n + 1)
+        });
+        if taken.is_err() {
+            return Err(
+                "unable to start FSEvent stream (this test process holds its share)".into(),
+            );
+        }
+        let permit = Permit;
+        let guard = renod::watcher::NotifyWatchers.start(roots, handler)?;
+        Ok(renod::watcher::WatcherGuard::new(Held {
+            _guard: guard,
+            _permit: permit,
+        }))
+    }
+}
+
 pub(crate) fn config(dir: &TempDir, executors: &Executors) -> DaemonConfig {
     let mut config = DaemonConfig::new(
         Paths::new(dir.path().join("data"), None),
@@ -140,9 +192,15 @@ pub(crate) fn config(dir: &TempDir, executors: &Executors) -> DaemonConfig {
     // and no test runs `git`.
     config.defs_debounce = Duration::from_millis(50);
     config.git_init = |_| Box::pin(async { GitOutcome::Initialized });
+    config.watchers = Arc::new(Budgeted);
     // Short, so a test that does stall on shutdown fails instead of waiting a quarter minute.
     config.kernel = KernelConfig {
         shutdown_deadline: Duration::from_secs(10),
+        // A watch that fails to start is tried again quickly.
+        watch_retry: reno_kernel::WatchBackoff {
+            initial: Duration::from_millis(20),
+            max: Duration::from_millis(200),
+        },
         ..KernelConfig::default()
     };
     config

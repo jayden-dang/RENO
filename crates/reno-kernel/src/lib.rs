@@ -103,7 +103,7 @@ pub use registry::ExecutorRegistry;
 pub use router::{BotPreference, Candidate, RouteRequest, fall_back, ineligibility, route};
 pub use secrets::{FakeSecrets, SecretValue, Secrets, SecretsError, check_name, check_secret};
 pub use wake::WakeSignal;
-pub use watch::{Watch, WatchSpec, WatchStream};
+pub use watch::{Watch, WatchBackoff, WatchSpec, WatchStream};
 pub use workspace::{
     FAKE_WORKTREES, FakeWorkspace, InPlace, Inspection, Placement, ReleasePolicy, Released,
     Workspace, WorkspaceError,

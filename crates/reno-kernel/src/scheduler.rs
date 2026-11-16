@@ -130,6 +130,15 @@ struct ActiveWatch {
     stop: CancellationToken,
 }
 
+/// A file watch that could not be started, and when the start is tried again.
+struct WatchFailure {
+    message: String,
+    /// Failed starts in a row, from 1.
+    attempts: u32,
+    /// When to try again, in wall-clock milliseconds.
+    retry_at: i64,
+}
+
 /// One trigger in force.
 struct Plan {
     def: TriggerDef,
@@ -139,6 +148,9 @@ struct Plan {
     /// What is stored.
     row: TriggerRow,
     watch: Option<ActiveWatch>,
+    /// Why the watch is not running, while the start is being retried. The trigger shows as
+    /// failed meanwhile; unlike `error` it ends when the start works.
+    watch_failure: Option<WatchFailure>,
     /// When the first file change that has not been acted on arrived (an `fs` trigger).
     pending_fs: Option<i64>,
     /// When to try again after the store failed.
@@ -150,7 +162,15 @@ struct Plan {
 
 impl Plan {
     fn running(&self) -> bool {
-        self.def.enabled && self.error.is_none()
+        self.def.enabled && self.error.is_none() && self.watch_failure.is_none()
+    }
+
+    /// When the start of a failed watch is tried again.
+    fn watch_retry_at(&self) -> Option<i64> {
+        self.watch_failure
+            .as_ref()
+            .filter(|_| self.def.enabled && self.error.is_none())
+            .map(|failure| failure.retry_at)
     }
 
     /// Whether a pause holds this trigger back: everything is paused, or its bot is.
@@ -162,7 +182,10 @@ impl Plan {
     /// trigger has none: nothing is armed while a pause lasts, and its due time stays as it was,
     /// so lifting the pause finds the occurrences due and merges them into one run.
     fn deadline(&self, pauses: &Pauses) -> Option<i64> {
-        if !self.running() || (self.held && self.paused(pauses)) {
+        if !self.running() {
+            return self.watch_retry_at();
+        }
+        if self.held && self.paused(pauses) {
             return None;
         }
         let backoff = self.row.backoff_until.unwrap_or(i64::MIN);
@@ -174,7 +197,7 @@ impl Plan {
     fn status(&self) -> TriggerStatus {
         if !self.def.enabled {
             TriggerStatus::Disabled
-        } else if self.error.is_some() {
+        } else if self.error.is_some() || self.watch_failure.is_some() {
             TriggerStatus::Failed
         } else if self.row.failures > 0 {
             TriggerStatus::BackedOff
@@ -201,7 +224,14 @@ impl Plan {
             last_run_id: self.row.last_run.clone(),
             failures: self.row.failures,
             backoff_until_ms: self.row.backoff_until.map(ms),
-            error: self.error.clone(),
+            error: self.error.clone().or_else(|| {
+                self.watch_failure.as_ref().map(|failure| {
+                    format!(
+                        "{}; retrying (failed start {})",
+                        failure.message, failure.attempts
+                    )
+                })
+            }),
             cwd: self.def.target.cwd.clone(),
         }
     }
@@ -406,6 +436,7 @@ impl Scheduler {
                 error,
                 row,
                 watch: None,
+                watch_failure: None,
                 pending_fs: before.as_ref().and_then(|p| p.pending_fs),
                 retry_at: None,
                 held: before.as_ref().is_some_and(|p| p.held),
@@ -439,54 +470,102 @@ impl Scheduler {
     fn sync_watches(&mut self) {
         let names: Vec<String> = self.plans.keys().cloned().collect();
         for name in names {
-            let wanted =
-                self.plans
-                    .get(&name)
-                    .and_then(|plan| match (&plan.def.when, plan.running()) {
-                        (TriggerKind::Fs { paths, debounce }, true) => {
-                            let debounce = reno_proto::defs::parse_duration(debounce).ok()?;
-                            Some(WatchSpec {
-                                trigger: name.clone(),
-                                paths: paths.clone(),
-                                debounce,
-                            })
-                        }
-                        _ => None,
-                    });
-            let Some(plan) = self.plans.get_mut(&name) else {
-                continue;
-            };
-            let keep = matches!((&plan.watch, &wanted), (Some(a), Some(w)) if a.spec == *w);
-            if keep {
-                continue;
-            }
-            if let Some(old) = plan.watch.take() {
-                old.stop.cancel();
-            }
-            let Some(spec) = wanted else {
-                continue;
-            };
-            let Some(port) = self.watch_port.clone() else {
-                plan.error = Some("this daemon has no file watcher".to_owned());
-                continue;
-            };
-            match port.watch(&spec) {
-                Ok(stream) => {
-                    self.next_generation += 1;
-                    let generation = self.next_generation;
-                    let stop = self.shared.root.child_token();
-                    plan.watch = Some(ActiveWatch {
-                        spec,
-                        generation,
-                        stop: stop.clone(),
-                    });
-                    self.shared
-                        .spawn(forward(self.shared.clone(), name, generation, stream, stop));
+            self.sync_watch(&name);
+        }
+    }
+
+    /// Tries again every watch whose retry time has come.
+    fn retry_watches(&mut self, now: i64) {
+        let names: Vec<String> = self
+            .plans
+            .iter()
+            .filter(|(_, plan)| plan.watch_retry_at().is_some_and(|at| at <= now))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in names {
+            self.sync_watch(&name);
+        }
+    }
+
+    /// Starts, keeps or stops the file watch of one `fs` trigger. A start that fails is retried
+    /// at `watch_retry`'s next delay, until it works or the definition changes.
+    fn sync_watch(&mut self, name: &str) {
+        let backoff = self.shared.config.watch_retry;
+        let now = self.now();
+        let wanted = self.plans.get(name).and_then(|plan| {
+            let enabled = plan.def.enabled && plan.error.is_none();
+            match &plan.def.when {
+                TriggerKind::Fs { paths, debounce } if enabled => {
+                    let debounce = reno_proto::defs::parse_duration(debounce).ok()?;
+                    Some(WatchSpec {
+                        trigger: name.to_owned(),
+                        paths: paths.clone(),
+                        debounce,
+                    })
                 }
-                Err(error) => {
-                    tracing::warn!(trigger = %name, %error, "cannot watch the paths");
-                    plan.error = Some(error.to_string());
+                _ => None,
+            }
+        });
+        let Some(plan) = self.plans.get_mut(name) else {
+            return;
+        };
+        let keep = matches!((&plan.watch, &wanted), (Some(a), Some(w)) if a.spec == *w);
+        if keep {
+            return;
+        }
+        if let Some(old) = plan.watch.take() {
+            old.stop.cancel();
+        }
+        let Some(spec) = wanted else {
+            plan.watch_failure = None;
+            return;
+        };
+        let Some(port) = self.watch_port.clone() else {
+            plan.error = Some("this daemon has no file watcher".to_owned());
+            return;
+        };
+        match port.watch(&spec) {
+            Ok(stream) => {
+                if let Some(failure) = plan.watch_failure.take() {
+                    tracing::info!(
+                        trigger = %name, attempts = failure.attempts,
+                        "the file watch started; the trigger is watching again"
+                    );
                 }
+                self.next_generation += 1;
+                let generation = self.next_generation;
+                let stop = self.shared.root.child_token();
+                plan.watch = Some(ActiveWatch {
+                    spec,
+                    generation,
+                    stop: stop.clone(),
+                });
+                self.shared.spawn(forward(
+                    self.shared.clone(),
+                    name.to_owned(),
+                    generation,
+                    stream,
+                    stop,
+                ));
+            }
+            Err(error) => {
+                let attempts = plan
+                    .watch_failure
+                    .as_ref()
+                    .map_or(1, |failure| failure.attempts.saturating_add(1));
+                let delay = i64::try_from(backoff.delay(attempts).as_millis()).unwrap_or(i64::MAX);
+                if attempts == 1 {
+                    // Once: the rest of the retries are visible in `trigger.list`.
+                    tracing::warn!(
+                        trigger = %name, %error,
+                        "cannot watch the paths; the trigger is failed and the start is retried"
+                    );
+                }
+                plan.watch_failure = Some(WatchFailure {
+                    message: error.to_string(),
+                    attempts,
+                    retry_at: now.saturating_add(delay),
+                });
             }
         }
     }
@@ -587,6 +666,7 @@ impl Scheduler {
     /// Fires every trigger that is due now.
     async fn fire_due(&mut self) {
         let now = self.now();
+        self.retry_watches(now);
         let pauses = self.pauses.borrow().clone();
         let mut held = Vec::new();
         let mut due = Vec::new();
