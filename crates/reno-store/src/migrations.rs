@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -259,6 +259,37 @@ CREATE TABLE run_routing (
 ) WITHOUT ROWID;
 ";
 
+/// Migration 10 (T1.7, budgets): token accounting and the kill switch.
+///
+/// `bot_usage` holds what each bot's runs used on each local day (`day` is `YYYY-MM-DD`, a label
+/// the kernel computes in the machine's zone); a new day is a new row, never a reset. `run_usage`
+/// holds each run's own total. `pauses` holds one row per paused scope: `*` for everything,
+/// otherwise a bot's name; it is what makes a pause outlive the daemon. `runs_bot_slots` serves
+/// the per-bot concurrency count of the claim.
+const V10: &str = "
+CREATE TABLE bot_usage (
+    bot           TEXT NOT NULL,
+    day           TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    PRIMARY KEY (bot, day)
+) WITHOUT ROWID;
+
+CREATE TABLE run_usage (
+    run_id        TEXT PRIMARY KEY REFERENCES runs (id),
+    input_tokens  INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    updated_at    INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE pauses (
+    scope     TEXT PRIMARY KEY,
+    paused_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE INDEX runs_bot_slots ON runs (bot_name, status) WHERE bot_name IS NOT NULL;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -271,6 +302,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V7),
         M::up(V8),
         M::up(V9),
+        M::up(V10),
     ])
 }
 
@@ -319,7 +351,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -482,5 +514,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!((runs, health), (1, 0));
+    }
+
+    /// Upgrading a database written before budgets (schema 9): its runs and triggers keep their
+    /// rows, the new tables start empty and work, and a bot-pinned run is counted by the index.
+    #[test]
+    fn upgrade_from_a_version_nine_database_adds_empty_budget_tables() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 9).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT 1 FROM bot_usage").is_err());
+        run(&mut conn).unwrap();
+        let (runs, usage, runs_usage, pauses): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM bot_usage),
+                        (SELECT count(*) FROM run_usage), (SELECT count(*) FROM pauses)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((runs, usage, runs_usage, pauses), (1, 0, 0, 0));
+        conn.execute_batch(
+            "INSERT INTO run_usage (run_id, input_tokens, output_tokens, updated_at)
+             VALUES ('run_a', 1, 2, 3);
+             INSERT INTO pauses (scope, paused_at) VALUES ('*', 4);",
+        )
+        .unwrap();
     }
 }

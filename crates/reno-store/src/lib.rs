@@ -30,6 +30,7 @@
 //! since the epoch.
 
 pub mod approvals;
+pub mod budget;
 pub mod db;
 pub mod definitions;
 pub mod error;
@@ -44,6 +45,7 @@ mod workspaces;
 mod writer;
 
 pub use approvals::{ExpireScope, Expired, NewApproval, StoredApproval};
+pub use budget::{ClaimFilter, GLOBAL as GLOBAL_PAUSE, Occupancy, Tokens};
 pub use db::Store;
 pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOutcome};
 pub use error::{Result, StoreError};
@@ -55,6 +57,8 @@ pub use writer::StoreConfig;
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod budget_tests;
 #[cfg(test)]
 mod definition_tests;
 #[cfg(test)]
