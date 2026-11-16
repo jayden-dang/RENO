@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reno_harness::exec::Executor;
-use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, SystemClock, WakeSignal};
+use reno_kernel::{DefsSetup, Kernel, KernelConfig, KernelError, RunLink, SystemClock, WakeSignal};
 use reno_proto::defs::ValidationContext;
 use reno_proto::{ExecutorId, IdError};
 use reno_rpc::{RpcError, Server, UnixServer};
@@ -46,6 +46,7 @@ use crate::executors::{self, ExecutorSet};
 use crate::fswatch::FsWatch;
 use crate::handlers::{self, Ctx};
 use crate::install::Installer;
+use crate::link::{FsRunLink, resolve_reno};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
 use crate::power::{self, PowerWatch};
@@ -89,6 +90,9 @@ pub struct DaemonConfig {
     pub defs_debounce: Duration,
     /// How `git init` is run on first start; tests replace it.
     pub git_init: GitInit,
+    /// The `reno` binary the injected `reno mcp` server runs. `None` looks for `reno` next to
+    /// this executable; with none found the daemon runs without Reno's MCP server and says so.
+    pub reno_bin: Option<PathBuf>,
     /// Listen for the system waking from sleep and tell the scheduler. Off by default so that
     /// tests never register with the system; the binary turns it on.
     pub system_wake: bool,
@@ -105,6 +109,7 @@ impl DaemonConfig {
             server_deadline: SERVER_DEADLINE,
             defs_debounce: defs::DEFAULT_DEBOUNCE,
             git_init: defs::git_init,
+            reno_bin: None,
             system_wake: false,
         }
     }
@@ -180,6 +185,7 @@ impl Daemon {
             defs_debounce,
             git_init,
             system_wake,
+            reno_bin,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -240,13 +246,27 @@ impl Daemon {
         let setup = DefsSetup::new(fs_defs.clone(), context)
             .with_watch(fs_watch.clone())
             .with_wake(wake.clone());
-        let kernel = match Kernel::start_with(
+        let link: Option<Arc<dyn RunLink>> = match resolve_reno(reno_bin) {
+            Some(reno) => Some(Arc::new(FsRunLink::new(
+                paths.runs(),
+                paths.socket.clone(),
+                reno,
+            ))),
+            None => {
+                tracing::warn!(
+                    "no `reno` binary next to renod: runs start without Reno's MCP server"
+                );
+                None
+            }
+        };
+        let kernel = match Kernel::start_linked(
             kernel,
             store,
             registry,
             Arc::new(SystemClock),
             Some(setup),
             Some(Arc::new(GitWorkspace::new(paths.worktrees()))),
+            link,
         )
         .await
         {

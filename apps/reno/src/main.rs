@@ -13,6 +13,7 @@ mod daemon;
 mod defs;
 mod env;
 mod follow;
+mod mcp;
 mod policy;
 mod render;
 
@@ -39,6 +40,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    // `reno mcp` is started by Reno with its own environment: it needs neither a data directory
+    // nor a home, and must not start a daemon.
+    if let Command::Mcp(args) = cli.command {
+        return mcp::run(args, cli.socket);
+    }
     let env = Env::from_cli(&cli)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -60,6 +66,10 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
         Command::Policy(command) => policy::run(env, command),
+        // Served before `Env` exists, in `run`.
+        Command::Mcp(_) => Err(anyhow::anyhow!(
+            "reno mcp is served before commands are dispatched"
+        )),
         Command::Approve(args) => commands::decide(env, args, ApprovalDecision::ApproveOnce).await,
         Command::Deny(args) => commands::decide(env, args, ApprovalDecision::Deny).await,
     }

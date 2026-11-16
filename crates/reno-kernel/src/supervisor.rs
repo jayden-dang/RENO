@@ -33,7 +33,7 @@
 
 mod approval;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -46,13 +46,14 @@ use reno_harness::exec::{ExecHandle, SteerRejected};
 use reno_proto::{BudgetKind, BudgetStop, ExecEvent, RunId, RunStatus, Seq, StopReason};
 use reno_store::{JournalWriter, StoreError, Tokens};
 use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::oneshot;
 use tokio::time::{Sleep, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
 use crate::lifecycle;
 use crate::procs::{Records, Spawned};
-use crate::shared::{Shared, Slot, Subscription, SupCmd};
+use crate::shared::{AgentDecision, Shared, Slot, Subscription, SupCmd};
 
 /// A `run_events` subscriber's queue, from the supervisor's side.
 #[derive(Debug)]
@@ -116,6 +117,11 @@ pub(crate) struct Supervisor {
     /// An expiry could not be recorded, so a row may still be pending that `open_approvals` no
     /// longer lists; the end of the run closes it.
     approvals_unrecorded: bool,
+    /// Approvals the run asked for itself (`request_approval`), by the request id they carry in
+    /// the journal, each with the one place its answer goes.
+    agent_waiters: HashMap<String, oneshot::Sender<AgentDecision>>,
+    /// Counts the request ids minted for `agent_waiters`.
+    agent_seq: u64,
     open_inputs: HashSet<String>,
     /// Something went wrong that makes the run's record untrustworthy; the run ends `error`.
     fatal: Option<String>,
@@ -186,6 +192,8 @@ impl Supervisor {
             open_approvals: Vec::new(),
             expiry: None,
             approvals_unrecorded: false,
+            agent_waiters: HashMap::new(),
+            agent_seq: 0,
             open_inputs: HashSet::new(),
             fatal: None,
             lost: false,
@@ -427,6 +435,11 @@ impl Supervisor {
                 // The caller may have gone away; the decision stands either way.
                 let _ = reply.send(outcome);
             }
+            SupCmd::Report { event, reply } => {
+                self.publish(&event);
+                let _ = reply.send(Ok(()));
+            }
+            SupCmd::AgentApproval { subject, reply } => self.agent_approval(subject, reply).await,
             SupCmd::Steer { prompt, reply } => {
                 // Never wait here: the executor drains steering from inside the stream this task
                 // reads, so a full queue would park the supervisor behind its own executor.
@@ -483,6 +496,9 @@ impl Supervisor {
     }
 
     async fn finish(&mut self, end: End) {
+        // The run is over, whatever the state says next: its token stops working now, and the
+        // link's file goes (T1.9).
+        crate::agent::revoke(&self.shared, &self.run).await;
         // A process reported just before the end must reach the table before the run leaves it.
         while let Some(spawned) = self.records.try_next() {
             self.persist(spawned).await;
@@ -526,6 +542,8 @@ impl Supervisor {
                 ),
             }
         }
+        // A caller still waiting on an approval the run asked for hears the run ended.
+        self.agent_waiters.clear();
         self.subs.clear();
         self.shared.mark_runs_dirty();
     }

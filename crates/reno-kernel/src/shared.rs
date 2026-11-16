@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use reno_harness::exec::Decision;
 use reno_proto::defs::ValidationContext;
 use reno_proto::{
-    ApprovalId, ExecEvent, PROMPT_SUMMARY_CHARS, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RunId,
-    RunStatus, RunSummary, Seq, StopReason, TriggerInfo,
+    ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, PROMPT_SUMMARY_CHARS,
+    RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, ResolvedBy, RunId, RunStatus, RunSummary, Seq,
+    StopReason, TriggerInfo,
 };
 use reno_store::{RunRecord, StoreError};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -26,6 +27,7 @@ use crate::defs::CurrentDefs;
 use crate::error::{KernelError, Result};
 use crate::health::HealthBoard;
 use crate::ids::IdMint;
+use crate::link::RunLink;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
 use crate::workspace::Workspace;
@@ -55,6 +57,25 @@ pub(crate) enum SupCmd {
         prompt: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Journal a structured report the run made through Reno's MCP server.
+    Report {
+        event: ExecEvent,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// An approval the run asked for through Reno's MCP server. The answer comes on `reply`
+    /// when it is decided, expires or the run ends; the supervisor holds the sender until then.
+    AgentApproval {
+        subject: ApprovalSubject,
+        reply: oneshot::Sender<AgentDecision>,
+    },
+}
+
+/// How an approval the run asked for itself ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentDecision {
+    pub(crate) outcome: ApprovalOutcome,
+    pub(crate) by: ResolvedBy,
+    pub(crate) message: Option<String>,
 }
 
 /// What a supervisor hands a new subscriber.
@@ -135,6 +156,8 @@ pub(crate) struct Shared {
     pub(crate) mint: IdMint,
     /// Where write runs work; `None` runs everything in place.
     pub(crate) workspace: Option<Arc<dyn Workspace>>,
+    /// How a run's own `reno mcp` reaches the daemon; `None` injects nothing.
+    pub(crate) link: Option<Arc<dyn RunLink>>,
     /// The scheduler's inbox. Senders wait when it is full; the scheduler never waits on them.
     pub(crate) sched_tx: mpsc::Sender<SchedCmd>,
     sched_rx: Mutex<Option<mpsc::Receiver<SchedCmd>>>,
@@ -161,6 +184,7 @@ impl Shared {
         mut config: KernelConfig,
         defs_ctx: ValidationContext,
         workspace: Option<Arc<dyn Workspace>>,
+        link: Option<Arc<dyn RunLink>>,
     ) -> Self {
         config.max_concurrent = config.max_concurrent.max(1);
         config.subscriber_queue = config.subscriber_queue.max(1);
@@ -183,6 +207,7 @@ impl Shared {
             defs_ctx,
             mint: IdMint::default(),
             workspace,
+            link,
             sched_tx,
             sched_rx: Mutex::new(Some(sched_rx)),
             triggers_tx: watch::channel(Arc::default()).0,

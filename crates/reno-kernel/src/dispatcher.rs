@@ -45,6 +45,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent;
 use crate::budget;
 use crate::lifecycle;
 use crate::router;
@@ -352,6 +353,14 @@ async fn attempt(
         };
     };
     let descriptor = executor.descriptor();
+    // An executor that cannot inject MCP servers gets none: Reno's own server is left out, and
+    // the run can only work alone.
+    let mut spec = spec.clone();
+    if !descriptor.caps.mcp_injection && !spec.mcp.is_empty() {
+        tracing::warn!(executor = %id, "the executor does not inject MCP servers; Reno's is left out");
+        spec.mcp.clear();
+    }
+    let spec = &spec;
     let found = shared.health_for_dispatch(id).await;
     if let Some(refusal) =
         no_eligible_executor(&descriptor, found.as_ref(), spec.access, spec.sandbox)
@@ -497,6 +506,10 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
             return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
         }
         Some(Ok(placement)) => spec.cwd = placement.cwd(),
+    }
+    // Reno's own MCP server, with a token for this run (T1.9).
+    if let Err(why) = agent::provision(shared, &row, settings.wall_time, &mut spec).await {
+        return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
     }
     let info = RunInfo {
         cwd: spec.cwd.clone(),
@@ -656,6 +669,8 @@ async fn conclude(
     cmd_rx: mpsc::Receiver<crate::shared::SupCmd>,
     slot: Slot,
 ) {
+    // The run has no executor to speak for it any more: its token goes first.
+    agent::revoke(shared, run).await;
     match lifecycle::end_run(&shared.db, run, fence, RunStatus::Running, stop).await {
         Ok(_) => {
             workspaces::release_after_run(shared, run).await;

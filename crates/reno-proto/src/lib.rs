@@ -19,6 +19,7 @@
 //! - [`routing`]: the routing decision (which executor, and why), `route.preview`, `run.routing`.
 //! - [`triggers`]: the state of triggers on the wire (`trigger.list`, `trigger.fire`).
 //! - [`workspace`]: the worktree a write run works in (`workspace.list`, `workspace.clean`).
+//! - [`agent`]: the `agent.*` methods a run's own `reno mcp` process calls, and the run token digest.
 //! - [`error`]: stable wire error codes.
 //!
 //! # Serde conventions
@@ -47,6 +48,7 @@
 //!
 //! A new method, notification or subscription must also be added to [`protocol_schema`].
 
+pub mod agent;
 pub mod budget;
 pub mod defs;
 pub mod error;
@@ -59,6 +61,7 @@ pub mod run;
 pub mod triggers;
 pub mod workspace;
 
+pub use agent::*;
 pub use budget::*;
 pub use error::*;
 pub use exec::*;

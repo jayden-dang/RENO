@@ -44,6 +44,7 @@ use crate::dispatcher;
 use crate::error::{KernelError, Result};
 use crate::events;
 use crate::health;
+use crate::link::RunLink;
 use crate::recovery;
 use crate::registry::ExecutorRegistry;
 use crate::router::{self, BotPreference, Candidate, RouteRequest};
@@ -70,6 +71,11 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    /// The shared state, for the kernel's own modules.
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
     /// Recover from the previous run, then start the dispatcher.
     ///
     /// Unlike a plain constructor this is `async` and fallible: recovery reads and repairs the
@@ -81,7 +87,7 @@ impl Kernel {
         executors: ExecutorRegistry,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        Self::start_inner(config, store, executors, clock, None, None).await
+        Self::start_inner(config, store, executors, clock, None, None, None).await
     }
 
     /// Like [`start`](Self::start), and loads definitions through `definitions` (the
@@ -95,7 +101,16 @@ impl Kernel {
         clock: Arc<dyn Clock>,
         definitions: DefsSetup,
     ) -> Result<Self> {
-        Self::start_inner(config, store, executors, clock, Some(definitions), None).await
+        Self::start_inner(
+            config,
+            store,
+            executors,
+            clock,
+            Some(definitions),
+            None,
+            None,
+        )
+        .await
     }
 
     /// The general form of [`start`](Self::start): with or without definitions, and with or
@@ -110,7 +125,40 @@ impl Kernel {
         definitions: Option<DefsSetup>,
         workspace: Option<Arc<dyn Workspace>>,
     ) -> Result<Self> {
-        Self::start_inner(config, store, executors, clock, definitions, workspace).await
+        Self::start_inner(
+            config,
+            store,
+            executors,
+            clock,
+            definitions,
+            workspace,
+            None,
+        )
+        .await
+    }
+
+    /// The general form of [`start_with`](Self::start_with), with the [`RunLink`] port: every run
+    /// is started with Reno's own MCP server first in `ExecSpec::mcp`, holding a token bound to
+    /// that run and revoked when it ends (see [`RunLink`]). Without the port nothing is injected.
+    pub async fn start_linked(
+        config: KernelConfig,
+        store: reno_store::Store,
+        executors: ExecutorRegistry,
+        clock: Arc<dyn Clock>,
+        definitions: Option<DefsSetup>,
+        workspace: Option<Arc<dyn Workspace>>,
+        link: Option<Arc<dyn RunLink>>,
+    ) -> Result<Self> {
+        Self::start_inner(
+            config,
+            store,
+            executors,
+            clock,
+            definitions,
+            workspace,
+            link,
+        )
+        .await
     }
 
     async fn start_inner(
@@ -120,6 +168,7 @@ impl Kernel {
         clock: Arc<dyn Clock>,
         definitions: Option<DefsSetup>,
         workspace: Option<Arc<dyn Workspace>>,
+        link: Option<Arc<dyn RunLink>>,
     ) -> Result<Self> {
         // Without a port the kernel still validates bodies, against the executors it has.
         let watch_port = definitions.as_ref().and_then(|setup| setup.watch.clone());
@@ -135,6 +184,7 @@ impl Kernel {
             config,
             context,
             workspace,
+            link,
         ));
         recovery::recover(&shared).await?;
         workspaces::sweep(&shared).await?;

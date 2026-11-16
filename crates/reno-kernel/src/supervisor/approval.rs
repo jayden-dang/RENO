@@ -46,12 +46,17 @@ use std::time::Duration;
 
 use reno_harness::exec::Decision;
 use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, RuleRef, evaluate};
-use reno_proto::{ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, ResolvedBy, RunStatus};
+use reno_proto::{
+    ActionClass, ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, MCP_SERVER_NAME,
+    MCP_TOOLS, ResolvedBy, RunStatus,
+};
 use reno_store::{ExpireScope, NewApproval, StoreError};
+use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use super::Supervisor;
 use crate::error::{KernelError, Result};
+use crate::shared::AgentDecision;
 
 /// A request that waits for a human.
 #[derive(Debug)]
@@ -76,6 +81,22 @@ enum Verdict {
     Ask { ttl: Duration },
 }
 
+/// The name the built-in allowance of Reno's own MCP tools goes by in the record.
+const RENO_TOOL_RULE: &str = "builtin:reno-mcp";
+
+/// The most approvals one run may have asked for through `request_approval` at once.
+const MAX_AGENT_APPROVALS: usize = 8;
+
+/// Whether `subject` is a call to one of the tools of Reno's own MCP server, by the name a
+/// harness gives it (`mcp__reno__report`). Exact names only: another server's tool, or a tool of
+/// Reno's that does not exist, is not covered.
+fn is_reno_tool(subject: &ApprovalSubject) -> bool {
+    subject.action == ActionClass::McpTool
+        && MCP_TOOLS
+            .iter()
+            .any(|tool| subject.tool == format!("mcp__{MCP_SERVER_NAME}__{tool}"))
+}
+
 fn named(rule: Option<RuleRef>) -> ResolvedBy {
     ResolvedBy::Rule {
         name: rule.map_or_else(
@@ -97,6 +118,34 @@ fn decision_of(outcome: ApprovalOutcome) -> Decision {
 }
 
 impl Supervisor {
+    /// An approval the run asked for through Reno's MCP server: raised like a harness's own,
+    /// and answered to the caller waiting on `reply` instead of the harness.
+    pub(super) async fn agent_approval(
+        &mut self,
+        subject: ApprovalSubject,
+        reply: oneshot::Sender<AgentDecision>,
+    ) {
+        if self.agent_waiters.len() >= MAX_AGENT_APPROVALS {
+            let decision = AgentDecision {
+                outcome: ApprovalOutcome::Denied,
+                by: ResolvedBy::Rule {
+                    name: "builtin:too-many-requests".to_owned(),
+                },
+                message: Some("too many approval requests are waiting; wait for one".to_owned()),
+            };
+            let _ = reply.send(decision);
+            return;
+        }
+        self.agent_seq += 1;
+        let request_id = format!("agent-{}", self.agent_seq);
+        self.agent_waiters.insert(request_id.clone(), reply);
+        self.approval_requested(ExecEvent::NeedsApproval {
+            request_id,
+            subject,
+        })
+        .await;
+    }
+
     /// Handle a `NeedsApproval`: judge it, answer or hold it, and journal it (before its
     /// resolution, which a rule or a store failure may add at once).
     pub(super) async fn approval_requested(&mut self, event: ExecEvent) {
@@ -158,6 +207,16 @@ impl Supervisor {
             PolicyDecision::Allow { rule } => Verdict::Auto {
                 outcome: ApprovalOutcome::Approved,
                 by: named(rule),
+                message: None,
+            },
+            // Reno's own tools need no second question: where one is an approval, it raises its
+            // own, and the rest touch only the run's own board and journal (ARCHITECTURE 8). A
+            // rule that denies them still wins, above.
+            PolicyDecision::Ask { .. } if is_reno_tool(subject) => Verdict::Auto {
+                outcome: ApprovalOutcome::Approved,
+                by: ResolvedBy::Rule {
+                    name: RENO_TOOL_RULE.to_owned(),
+                },
                 message: None,
             },
             PolicyDecision::Ask { .. } => Verdict::Ask {
@@ -259,7 +318,7 @@ impl Supervisor {
         let for_harness = message
             .clone()
             .filter(|_| outcome == ApprovalOutcome::Denied);
-        self.answer(request_id, outcome, for_harness).await;
+        self.answer(request_id, outcome, for_harness, &by).await;
         self.publish(&ExecEvent::ApprovalResolved {
             request_id: request_id.to_owned(),
             decision: outcome,
@@ -273,7 +332,13 @@ impl Supervisor {
     /// audit.
     async fn refuse_unrecorded(&mut self, request_id: &str, why: &str) {
         tracing::error!(run = %self.run, request_id, %why, "approval not recorded; denying it");
-        self.answer(request_id, ApprovalOutcome::Denied, None).await;
+        self.answer(
+            request_id,
+            ApprovalOutcome::Denied,
+            None,
+            &ResolvedBy::Expired,
+        )
+        .await;
         self.publish(&ExecEvent::ApprovalResolved {
             request_id: request_id.to_owned(),
             decision: ApprovalOutcome::Denied,
@@ -290,7 +355,18 @@ impl Supervisor {
         request_id: &str,
         outcome: ApprovalOutcome,
         message: Option<String>,
+        by: &ResolvedBy,
     ) -> bool {
+        // An approval the run asked for itself is answered to the caller waiting on it, never to
+        // the harness.
+        if let Some(waiter) = self.agent_waiters.remove(request_id) {
+            let decision = AgentDecision {
+                outcome,
+                by: by.clone(),
+                message,
+            };
+            return waiter.send(decision).is_ok();
+        }
         let sent = tokio::select! {
             sent = self.handle.decide_with_message(request_id.to_owned(), decision_of(outcome), message) => sent,
             () = self.cancel.cancelled() => Err(reno_harness::exec::ControlsClosed),
@@ -341,7 +417,12 @@ impl Supervisor {
         let open = self.open_approvals.remove(at);
         self.rearm();
         let delivered = self
-            .answer(&open.request_id, outcome, message.clone())
+            .answer(
+                &open.request_id,
+                outcome,
+                message.clone(),
+                &ResolvedBy::Human,
+            )
             .await;
         // State before visibility, as when raising: commit `running`, then drop it from the list.
         self.resolve_wait().await;
@@ -385,8 +466,13 @@ impl Supervisor {
                 tracing::error!(run = %self.run, approval = %open.id, %error, "could not record an expiry");
                 self.approvals_unrecorded = true;
             }
-            self.answer(&open.request_id, ApprovalOutcome::Denied, None)
-                .await;
+            self.answer(
+                &open.request_id,
+                ApprovalOutcome::Denied,
+                None,
+                &ResolvedBy::Expired,
+            )
+            .await;
             self.publish(&ExecEvent::ApprovalResolved {
                 request_id: open.request_id,
                 decision: ApprovalOutcome::Denied,
@@ -412,6 +498,13 @@ impl Supervisor {
         match self.shared.db.expire_pending(scope).await {
             Ok(expired) => {
                 for closed in expired {
+                    self.answer(
+                        &closed.request_id,
+                        ApprovalOutcome::Denied,
+                        None,
+                        &ResolvedBy::Expired,
+                    )
+                    .await;
                     self.publish(&ExecEvent::ApprovalResolved {
                         request_id: closed.request_id,
                         decision: ApprovalOutcome::Denied,

@@ -123,6 +123,17 @@ impl<W: Write> Transcript<W> {
                 writeln!(self.out, "  (the CLI cannot answer questions yet)")
             }
             ExecEvent::UserMessage { text } => writeln!(self.out, "you: {text}"),
+            ExecEvent::AgentReport {
+                status,
+                summary,
+                details,
+            } => {
+                writeln!(self.out, "report ({}): {summary}", wire_name(status))?;
+                match details {
+                    Some(details) => writeln!(self.out, "  {}", shorten(details, INPUT_WIDTH)),
+                    None => Ok(()),
+                }
+            }
             ExecEvent::Done {
                 stop, diagnostic, ..
             } => {
@@ -808,6 +819,19 @@ mod tests {
         );
         assert!(out.contains("? the run asks: Which branch?\n"));
         assert!(out.ends_with("you: go on\n"));
+    }
+
+    #[test]
+    fn a_report_prints_its_status_and_summary_and_a_shortened_detail() {
+        let (out, _) = render(
+            false,
+            vec![ExecEvent::AgentReport {
+                status: reno_proto::ReportStatus::Done,
+                summary: "tests pass".into(),
+                details: Some("ran cargo test".into()),
+            }],
+        );
+        assert_eq!(out, "report (done): tests pass\n  ran cargo test\n");
     }
 
     #[test]

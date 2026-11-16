@@ -15,9 +15,9 @@ use reno_proto::{
     RoutingDecision, RunId, RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
-    Applied, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired, FireResult, Journals,
-    NewApproval, NewDefinition, NewFiring, NewTask, Occupancy, RunRecord, Store, StoreError,
-    StoredApproval, Tokens, TriggerRow,
+    Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
+    FireResult, Journals, NewApproval, NewDefinition, NewFiring, NewRunToken, NewTask, Occupancy,
+    RunRecord, RunToken, Store, StoreError, StoredApproval, Tokens, TriggerRow,
 };
 
 use crate::clock::Clock;
@@ -430,5 +430,50 @@ impl Db {
 
     pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {
         self.store.was_denied(run, digest).await
+    }
+
+    pub(crate) async fn put_run_token(&self, token: NewRunToken) -> Result<()> {
+        self.wrote();
+        self.store.put_run_token(token, self.now_ms()).await
+    }
+
+    pub(crate) async fn run_token(
+        &self,
+        run: &RunId,
+        token_hash: &str,
+    ) -> Result<Option<RunToken>> {
+        self.store.run_token(run, token_hash).await
+    }
+
+    pub(crate) async fn revoke_run_tokens(&self, run: &RunId) -> Result<u64> {
+        self.wrote();
+        self.store.revoke_run_tokens(run, self.now_ms()).await
+    }
+
+    pub(crate) async fn revoke_open_run_tokens(&self) -> Result<Vec<RunId>> {
+        self.wrote();
+        self.store.revoke_open_run_tokens(self.now_ms()).await
+    }
+
+    pub(crate) async fn board_get(&self, scope: &str, key: &str) -> Result<Option<BoardRow>> {
+        self.store.board_get(scope, key).await
+    }
+
+    pub(crate) async fn board_list(&self, scope: &str) -> Result<Vec<BoardRow>> {
+        self.store.board_list(scope).await
+    }
+
+    pub(crate) async fn board_put(
+        &self,
+        scope: &str,
+        key: &str,
+        value: &str,
+        expected: Option<u64>,
+        run: &RunId,
+    ) -> Result<BoardWrite> {
+        self.wrote();
+        self.store
+            .board_put(scope, key, value, expected, run, self.now_ms())
+            .await
     }
 }

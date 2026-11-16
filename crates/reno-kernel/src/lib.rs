@@ -2,7 +2,7 @@
 //! them. Routing, triggers, flows, boards, policy and evaluation join it in later phases.
 //!
 //! Owns ARCH-7: the kernel does no I/O of its own. It reaches the world only through `reno-store`
-//! and its ports (`Clock`, `Executor`, `Workspace`, `Watch`, `WakeSignal`, `Definitions`, `Secrets`), which are
+//! and its ports (`Clock`, `Executor`, `Workspace`, `Watch`, `WakeSignal`, `Definitions`, `Secrets`, `RunLink`), which are
 //! implemented outside it and faked in tests. `cargo xtask check` scans these sources for file,
 //! process and socket use and for clock reads. Owns ARCH-10 and ARCH-11: nothing polls, every
 //! queue is bounded and every task is owned.
@@ -11,6 +11,8 @@
 //!
 //! - `clock`: the `Clock` port, `SystemClock` (the one reader of the system clock), `ManualClock`.
 //! - `registry`: executors by id.
+//! - `link`, `agent`: the `RunLink` port (a run's token and the MCP server that carries it) and what a
+//!   run may do with its token: `report`, `request_approval` and its own board (T1.9).
 //! - `kernel`: [`Kernel`], the façade, and the layout of tasks and channels.
 //! - `defs`: the `Definitions` port and the validated set in force; loading, storing versions
 //!   and publishing, with the last good set kept when files do not validate.
@@ -57,6 +59,7 @@
 //!   `RunSummary::model` is the model the task asked for (no event updates the row's model, so
 //!   the one an executor reports in `Started` is not shown), and `prompt` is the task's goal.
 
+mod agent;
 mod approvals;
 mod budget;
 mod clock;
@@ -70,6 +73,7 @@ mod health;
 mod ids;
 mod kernel;
 mod lifecycle;
+mod link;
 mod procs;
 mod recovery;
 mod registry;
@@ -83,11 +87,13 @@ mod watch;
 mod workspace;
 mod workspaces;
 
+pub use agent::AgentSession;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::KernelConfig;
 pub use defs::{CurrentDefs, DefSnapshot, Definitions, DefsSetup, StoredVersion};
 pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport, TaskRequest};
+pub use link::{FakeRunLink, IssuedLink, LinkError, RunLink};
 pub use registry::ExecutorRegistry;
 pub use router::{BotPreference, Candidate, RouteRequest, fall_back, ineligibility, route};
 pub use wake::WakeSignal;

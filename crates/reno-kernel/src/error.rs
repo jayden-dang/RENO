@@ -75,6 +75,23 @@ pub enum KernelError {
         /// The limit and what had been used.
         stop: BudgetStop,
     },
+    /// A run token was refused: it is unknown, belongs to another run, was revoked, has expired,
+    /// or its run is no longer live. One answer for every cause, so a caller learns nothing
+    /// about which tokens exist.
+    #[error("the run token is not valid")]
+    AgentDenied,
+    /// A board write named a version that is not the key's current one. Nothing was written.
+    #[error("the board entry changed since the version this write was based on")]
+    BoardStale {
+        /// The entry as it stands, with its value; `None` when the key does not exist.
+        current: Option<Box<reno_proto::BoardEntry>>,
+    },
+    /// A board scope already holds as many keys as it may, and this key is new.
+    #[error("board scope {scope:?} is full")]
+    BoardFull {
+        /// The scope.
+        scope: String,
+    },
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]
     Invalid(String),

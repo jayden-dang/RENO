@@ -14,6 +14,7 @@
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
+//! - [`link`]: the `RunLink` port: each run's token file and the `reno mcp` server that reads it.
 //! - [`worktrees`]: the `Workspace` port over git worktrees in `<data-dir>/worktrees/`.
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
@@ -30,6 +31,7 @@ pub mod executors;
 pub mod fswatch;
 mod handlers;
 pub mod install;
+pub mod link;
 pub mod lock;
 pub mod logging;
 pub mod paths;

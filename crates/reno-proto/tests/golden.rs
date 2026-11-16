@@ -85,6 +85,14 @@ fn exec_event_every_variant() {
             ]}),
         ),
         (
+            ExecEvent::AgentReport {
+                status: reno_proto::ReportStatus::Blocked,
+                summary: "need a token".into(),
+                details: None,
+            },
+            json!({"type": "agent_report", "status": "blocked", "summary": "need a token"}),
+        ),
+        (
             ExecEvent::UserMessage {
                 text: "use the other branch".into(),
             },
@@ -283,7 +291,7 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message", "routing", "attachments", "budget"],
+                            "executor.install", "approval.message", "routing", "attachments", "budget", "agent"],
                "pid": 4242}),
     );
 }

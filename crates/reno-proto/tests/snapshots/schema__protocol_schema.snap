@@ -615,7 +615,8 @@ expression: protocol_schema()
     "approval.message",
     "routing",
     "attachments",
-    "budget"
+    "budget",
+    "agent"
   ],
   "methods": [
     {
@@ -6514,6 +6515,450 @@ expression: protocol_schema()
         "title": "ExecutorInstallResult",
         "type": "object"
       }
+    },
+    {
+      "name": "agent.auth",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.auth`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run the token was minted for."
+          },
+          "token": {
+            "description": "The run token (the contents of the file named by [`ENV_TOKEN_FILE`]). Never logged.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "token"
+        ],
+        "title": "AgentAuthParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.auth`.",
+        "properties": {
+          "bot": {
+            "description": "The bot the run is pinned to, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run the connection now speaks for."
+          },
+          "scope": {
+            "description": "The board scope this run reads and writes: `bot:<name>`, or `run:<id>` for a run with no\nbot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "scope"
+        ],
+        "title": "AgentAuthResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.report",
+      "params": {
+        "$defs": {
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.report`.",
+        "properties": {
+          "details": {
+            "description": "Anything longer, for the transcript.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/ReportStatus",
+            "description": "How the work stands."
+          },
+          "summary": {
+            "description": "One short paragraph.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "summary"
+        ],
+        "title": "AgentReportParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.report`.",
+        "title": "AgentReportResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.request_approval",
+      "params": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.request_approval`.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/ActionClass",
+            "description": "The class of the action to be approved."
+          },
+          "command": {
+            "description": "The command line, for a command action.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "default": [],
+            "description": "The paths the action touches.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Why the run wants to do it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "reason"
+        ],
+        "title": "AgentApprovalParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ApprovalOutcome": {
+            "description": "How an approval request ended: the executor was told yes or no.",
+            "oneOf": [
+              {
+                "const": "approved",
+                "description": "The action may proceed.",
+                "type": "string"
+              },
+              {
+                "const": "denied",
+                "description": "The action is refused.",
+                "type": "string"
+              }
+            ]
+          },
+          "ResolvedBy": {
+            "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",
+            "oneOf": [
+              {
+                "description": "A person decided it.",
+                "properties": {
+                  "type": {
+                    "const": "human",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "properties": {
+                  "name": {
+                    "description": "The rule's name.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "rule",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "properties": {
+                  "type": {
+                    "const": "expired",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The same action was denied earlier in this run, so it was denied again unasked.",
+                "properties": {
+                  "type": {
+                    "const": "repeat_denial",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.request_approval`: how the request ended.",
+        "properties": {
+          "by": {
+            "$ref": "#/$defs/ResolvedBy",
+            "description": "Who or what decided."
+          },
+          "decision": {
+            "$ref": "#/$defs/ApprovalOutcome",
+            "description": "Whether the action may go ahead."
+          },
+          "message": {
+            "description": "For a denial, the reason, when one was given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "by"
+        ],
+        "title": "AgentApprovalResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.board_read",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.board_read`.",
+        "properties": {
+          "key": {
+            "description": "The key to read. Without one, every key of the scope is listed (without values).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "AgentBoardReadParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BoardEntry": {
+            "description": "One entry of a board scope.",
+            "properties": {
+              "key": {
+                "description": "The key.",
+                "type": "string"
+              },
+              "size": {
+                "description": "Size of the value in bytes.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "updatedAtMs": {
+                "description": "When it was last written, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "value": {
+                "description": "The value. Absent in a listing.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "description": "How many times the key has been written; the first write is version 1.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "key",
+              "version",
+              "size",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.board_read`.",
+        "properties": {
+          "entries": {
+            "description": "The entry asked for (empty when the key does not exist), or every entry of the scope.",
+            "items": {
+              "$ref": "#/$defs/BoardEntry"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "description": "The scope that was read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "entries"
+        ],
+        "title": "AgentBoardReadResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.board_write",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.board_write`.",
+        "properties": {
+          "expectedVersion": {
+            "description": "The version the writer last saw (0 for a key that must not exist yet). When it is not the\ncurrent version the write is refused with the current entry. Without it the write always\nsucceeds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "key": {
+            "description": "The key.",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value, at most [`BOARD_VALUE_MAX_BYTES`] bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "AgentBoardWriteParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.board_write`.",
+        "properties": {
+          "scope": {
+            "description": "The scope written.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The key's version after the write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "version"
+        ],
+        "title": "AgentBoardWriteResult",
+        "type": "object"
+      }
     }
   ],
   "notifications": [
@@ -6890,6 +7335,36 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "The run called Reno's `report` tool: a structured status, shown in the transcript. Only\ndaemons that negotiate the `agent` feature emit it.",
+                "properties": {
+                  "details": {
+                    "description": "Anything longer.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "$ref": "#/$defs/ReportStatus",
+                    "description": "How the work stands."
+                  },
+                  "summary": {
+                    "description": "A short summary.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "agent_report",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "status",
+                  "summary"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "The run ended; always the last event.",
                 "properties": {
                   "diagnostic": {
@@ -6953,6 +7428,31 @@ expression: protocol_schema()
               "prompt"
             ],
             "type": "object"
+          },
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
           },
           "ResolvedBy": {
             "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",

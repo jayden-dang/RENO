@@ -163,7 +163,9 @@ pub fn resolve_codex_executable() -> Option<PathBuf> {
 ///
 /// Reno's server is pre-approved (`default_tools_approval_mode`) only when `pre_approve` says
 /// nobody is asked: under any mode that asks, a call to it is an approval like any other and
-/// reaches Reno as `NeedsApproval`. A plugin's tools are never pre-approved. Only Reno's server
+/// reaches Reno as `NeedsApproval`, where the kernel allows the four tools of Reno's own server by
+/// exact name (`mcp__reno__report`, ...) without asking a person, since each is either harmless
+/// or itself an approval (T1.9). A plugin's tools are never pre-approved. Only Reno's server
 /// gets the long tool timeout and the generous start-up time.
 fn mcp_overrides(servers: &[McpServerSpec], pre_approve: bool) -> Vec<(String, Value)> {
     let mut seen = HashSet::new();
