@@ -201,8 +201,8 @@ impl Cx<'_> {
             return Err("the descriptor has no id or contract version".into());
         }
         let caps = &descriptor.caps;
-        if caps.access_modes.is_empty() || caps.sandbox_levels.is_empty() {
-            return Err("the descriptor declares no access mode or no sandbox level".into());
+        if caps.access_modes.is_empty() {
+            return Err("the descriptor declares no access mode".into());
         }
         unique_models(caps.models.iter().map(|m| m.id.as_str()), "descriptor")?;
         if let (Ok(min), Ok(verified)) = (

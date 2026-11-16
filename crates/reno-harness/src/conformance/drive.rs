@@ -10,6 +10,9 @@ use super::{DENY_MESSAGE, Expect, Scenario, Target};
 use crate::ProcessRecord;
 use crate::exec::{Decision, ExecControls, ExecError, ExecHandle, InputAnswer};
 
+/// How long a run that said nothing after `Started` is left alone before it is cancelled.
+const CANCEL_SETTLE: Duration = Duration::from_millis(300);
+
 /// What the driver does when the run asks or waits.
 #[derive(Debug, Clone)]
 pub(crate) enum Behaviour {
@@ -19,7 +22,7 @@ pub(crate) enum Behaviour {
     Decide(Decision, Option<String>),
     /// Send this text after the first `Text` or tool call.
     Steer(String),
-    /// Cancel as soon as the run has started.
+    /// Cancel once the run has started and shown a sign of life (or fallen quiet).
     CancelOnStart,
 }
 
@@ -217,9 +220,13 @@ impl Target {
             ..RunLog::default()
         };
         let mut cancelled_at: Option<Instant> = None;
+        // After the cancel: when the run must have ended by.
         let mut deadline: Option<Instant> = None;
+        // Before it: when to cancel if the run says nothing more after `Started`.
+        let mut cancel_at: Option<Instant> = None;
         loop {
-            let next = match deadline {
+            let waiting_until = deadline.or(cancel_at);
+            let next = match waiting_until {
                 Some(at) => {
                     match tokio::time::timeout(
                         at.saturating_duration_since(Instant::now()),
@@ -228,11 +235,20 @@ impl Target {
                     .await
                     {
                         Ok(next) => next,
-                        Err(_) => {
+                        Err(_) if cancelled_at.is_some() => {
                             return Err(format!(
                                 "the run did not end within {:?} of the cancel",
                                 self.limits.cancel
                             ));
+                        }
+                        Err(_) => {
+                            // Quiet since `Started`: cancel now.
+                            handle.cancel();
+                            let now = Instant::now();
+                            cancelled_at = Some(now);
+                            cancel_at = None;
+                            deadline = Some(now + self.limits.cancel);
+                            continue;
                         }
                     }
                 }
@@ -288,9 +304,20 @@ impl Target {
                 ExecEvent::Started { .. }
                     if matches!(behaviour, Behaviour::CancelOnStart) && cancelled_at.is_none() =>
                 {
+                    // Not at `Started` itself: the turn may not have begun, and then there is
+                    // nothing to interrupt. Cancel on the run's next sign of life, or after a
+                    // short quiet.
+                    cancel_at = Some(Instant::now() + CANCEL_SETTLE);
+                }
+                ExecEvent::Usage { .. } | ExecEvent::Done { .. } => {}
+                _ if matches!(behaviour, Behaviour::CancelOnStart)
+                    && cancel_at.is_some()
+                    && cancelled_at.is_none() =>
+                {
                     handle.cancel();
                     let now = Instant::now();
                     cancelled_at = Some(now);
+                    cancel_at = None;
                     deadline = Some(now + self.limits.cancel);
                 }
                 _ => {}

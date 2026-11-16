@@ -224,27 +224,30 @@ async fn the_real_clis_pass_the_suite() {
     let mut unavailable = Vec::new();
     for name in &wanted {
         let repo = scratch_repo();
-        let (executor, model): (Arc<dyn Executor>, String) = match name.as_str() {
-            "claude-code" => {
-                let executor = ClaudeExecutor::new();
-                let model = cheapest(&executor, "RENO_CONFORMANCE_CLAUDE_MODEL", &["haiku"]);
-                (Arc::new(executor), model)
-            }
-            "codex" => {
-                let executor = CodexExecutor::new();
-                let model = cheapest(
-                    &executor,
-                    "RENO_CONFORMANCE_CODEX_MODEL",
-                    &["mini", "luna", "spark"],
-                );
-                (Arc::new(executor), model)
-            }
+        let executor: Arc<dyn Executor> = match name.as_str() {
+            "claude-code" => Arc::new(ClaudeExecutor::new()),
+            "codex" => Arc::new(CodexExecutor::new()),
             other => panic!("unknown live target {other:?}: claude-code or codex"),
         };
+        // Probe first: the model lists change with it (Claude drops what its CLI is too old
+        // for, Codex swaps in the account's live list).
         if let Some(why) = unusable(executor.as_ref()).await {
             unavailable.push(format!("{name}: {why}"));
             continue;
         }
+        let model = if name == "claude-code" {
+            cheapest(
+                executor.as_ref(),
+                "RENO_CONFORMANCE_CLAUDE_MODEL",
+                &["haiku"],
+            )
+        } else {
+            cheapest(
+                executor.as_ref(),
+                "RENO_CONFORMANCE_CODEX_MODEL",
+                &["mini", "luna", "spark"],
+            )
+        };
         println!(
             "{name}: model {model}, scratch repo {}",
             repo.path().display()

@@ -15,7 +15,7 @@ use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockSt
 use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, RegistryAgent};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorId,
-    HealthProbe, McpServerSpec, Question, SessionRef, StopReason, ToolCall,
+    HealthProbe, McpServerSpec, Question, StopReason, ToolCall,
 };
 
 pub(crate) fn fixture(name: &str) -> PathBuf {
@@ -247,7 +247,10 @@ pub(crate) fn mock_target_for(executor: Arc<dyn Executor>) -> Target {
 
 pub(crate) fn claude_target() -> Target {
     let executor = ClaudeExecutor::new().with_executable(fixture("fake-claude.sh"));
-    let no_history = std::env::temp_dir().join("reno-conformance-no-claude-history");
+    let no_history = std::env::temp_dir().join(format!(
+        "reno-conformance-no-claude-history-{}",
+        std::process::id()
+    ));
     let plan = Plan {
         lifecycle: Some(
             Scenario::new("scenario:happy")
@@ -523,7 +526,28 @@ pub(crate) fn registry_target() -> Target {
     .with_plan(with_model(acp_plan()))
 }
 
-#[allow(dead_code)]
-pub(crate) fn session(id: &str) -> SessionRef {
-    SessionRef(id.into())
+/// Devin and Hermes over the same fake agent: their descriptors differ (access modes, steering),
+/// so the suite checks each one's own claims. The fake's model catalog is not theirs, so no
+/// model is named.
+pub(crate) fn devin_target() -> Target {
+    acp_target("acp.devin", AcpExecutor::devin())
+}
+
+pub(crate) fn hermes_target() -> Target {
+    acp_target("acp.hermes", AcpExecutor::hermes())
+}
+
+fn acp_target(name: &str, executor: AcpExecutor) -> Target {
+    let executor = executor.with_executable(fixture("fake-acp.sh"));
+    Target::new(
+        name,
+        Arc::new(executor),
+        Profile {
+            deny_message_on_wire: true,
+            ..Profile::driver()
+        },
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(acp_plan())
 }

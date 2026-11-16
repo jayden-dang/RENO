@@ -6,9 +6,18 @@
 //! `codex app-server generate-json-schema` (see `schema.rs` for which directory). The captured
 //! and hand-written frames under `tests/fixtures/codex` are validated the same way.
 //!
-//! What this does not cover: the fake's *responses* to the driver's requests are stubs
-//! (`{"thread":{"id":"th-1"}}`), so response shapes are not checked, only the reply shapes the
-//! driver sends.
+//! What this does not cover, and so what stays unverified against the real CLI:
+//!
+//! - The fake's *responses* to the driver's requests are stubs (`{"thread":{"id":"th-1"}}`), so
+//!   response shapes are not checked, only the reply shapes the driver sends.
+//! - Frames the driver *reads* (server notifications and requests) are checked for the types,
+//!   enums and variants of the fields they carry, not for completeness (the fakes trim them to
+//!   what the driver reads) and not for unknown field names: a field Codex renamed that the
+//!   driver reads, in a frame the fake writes under the old name, passes. (Closing objects to
+//!   unlisted fields was tried and flagged only noise: Codex flattens tagged requests.)
+//! - Fields the driver sends under `experimentalApi` and that a plain `generate-json-schema`
+//!   leaves out (`EXPERIMENTAL_FIELDS`) are unchecked.
+//! - The 0.146.1 live capture predates the snapshot's 0.169: it is checked only for shape.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -21,7 +30,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use reno_harness::CodexExecutor;
 use reno_harness::exec::{Decision, ExecControls, Executor, InputAnswer};
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, McpServerSpec, RunId, SandboxLevel, SessionRef};
+use reno_proto::{
+    AccessMode, Effort, ExecEvent, ExecSpec, McpServerSpec, RunId, SandboxLevel, SessionRef,
+};
 use schema::{Schemas, Strictness, Union, schema_dir};
 use serde_json::Value;
 
@@ -53,9 +64,21 @@ const OFF_SCHEMA: &[(&str, &str)] = &[
     ),
 ];
 
+/// Request fields the driver sends under `experimentalApi` that the non-experimental schema
+/// (`generate-json-schema` without `--experimental`) does not list: unverified here.
+const EXPERIMENTAL_FIELDS: &[(&str, &str, &str)] = &[(
+    "turn/start",
+    "collaborationMode",
+    "leaving plan mode on a resumed thread; its shape is not in the 0.169 schema",
+)];
+
 /// Scenarios whose server frames deliberately keep an older app-server's shape, because the
 /// driver still reads it. Their server frames are not held to 0.169; what the driver sends is.
 const LEGACY_SCENARIOS: &[(&str, &str)] = &[
+    (
+        "scenario:happy",
+        "both spellings of a delta, string file-change kinds and a todoList item: the tolerance test",
+    ),
     (
         "scenario:decline",
         "the command is an argv array, as older app-servers sent",
@@ -91,6 +114,9 @@ struct Scenario {
     mcp: Vec<McpServerSpec>,
     resume: Option<&'static str>,
     react: React,
+    model: Option<&'static str>,
+    effort: Option<Effort>,
+    instructions: Option<&'static str>,
 }
 
 fn scenario(prompt: &'static str, access: AccessMode) -> Scenario {
@@ -100,6 +126,9 @@ fn scenario(prompt: &'static str, access: AccessMode) -> Scenario {
         mcp: Vec::new(),
         resume: None,
         react: React::Nothing,
+        model: None,
+        effort: None,
+        instructions: None,
     }
 }
 
@@ -138,6 +167,38 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             resume: Some("th-conf"),
             ..scenario("scenario:resumed", AccessMode::FullAccess)
+        },
+        // The launch options: model, effort and instructions ride on thread/start and turn/start.
+        // `happy` checks them on the wire too.
+        Scenario {
+            model: Some("gpt-5.6-sol"),
+            effort: Some(Effort::High),
+            ..scenario("scenario:happy", AccessMode::FullAccess)
+        },
+        Scenario {
+            model: Some("gpt-5.6-terra"),
+            effort: Some(Effort::Low),
+            instructions: Some("Answer briefly."),
+            ..scenario("scenario:conf-happy", AccessMode::Supervised)
+        },
+        Scenario {
+            effort: Some(Effort::Medium),
+            instructions: Some("Answer briefly."),
+            ..scenario("scenario:conf-happy", AccessMode::AutoAcceptEdits)
+        },
+        // The resume paths: a fresh start after a lost rollout, an archived thread, a thread
+        // left in plan mode.
+        Scenario {
+            resume: Some("resume-fail"),
+            ..scenario("scenario:resumed", AccessMode::FullAccess)
+        },
+        Scenario {
+            resume: Some("resume-archived"),
+            ..scenario("scenario:resumed", AccessMode::FullAccess)
+        },
+        Scenario {
+            resume: Some("resume-in-plan"),
+            ..scenario("scenario:leave-plan", AccessMode::FullAccess)
         },
         Scenario {
             react: React::SteerAfterText,
@@ -196,15 +257,15 @@ async fn record(s: &Scenario) -> Recorded {
         run_id: RunId::from_suffix("01HZXD").unwrap(),
         prompt: s.prompt.into(),
         cwd: PathBuf::from("/tmp"),
-        model: None,
-        effort: None,
+        model: s.model.map(Into::into),
+        effort: s.effort,
         access: s.access,
         sandbox: SandboxLevel::Unrestricted,
         resume: s.resume.map(|r| SessionRef(r.into())),
         mcp: s.mcp.clone(),
         env: Default::default(),
         output_schema: None,
-        instructions: None,
+        instructions: s.instructions.map(Into::into),
     };
     let (controls, handle) = ExecControls::new(8);
     let mut stream = executor.start(spec, controls).await.unwrap();
@@ -271,10 +332,15 @@ fn check(schemas: &mut Schemas, label: &str, run: &Recorded) -> Vec<String> {
     for frame in &run.sent {
         match (method(frame), frame.get("id")) {
             (Some(m), Some(_)) => {
-                note(
-                    format!("request {m}"),
-                    schemas.check(Union::ClientRequest, m, frame),
-                );
+                let mut why = schemas.check(Union::ClientRequest, m, frame);
+                // An experimental-API field is absent from the schema a plain generation emits, so
+                // it cannot be checked; it is sent only because the driver opts in at `initialize`.
+                why.retain(|w| {
+                    !EXPERIMENTAL_FIELDS.iter().any(|(method, field, _)| {
+                        *method == m && w.starts_with(&format!("params.{field} is not a field of"))
+                    })
+                });
+                note(format!("request {m}"), why);
             }
             (Some(m), None) => {
                 note(
@@ -331,6 +397,7 @@ fn check(schemas: &mut Schemas, label: &str, run: &Recorded) -> Vec<String> {
 async fn what_the_driver_sends_and_the_fake_serves_matches_the_codex_schema() {
     let mut schemas = Schemas::open(&schema_dir());
     let mut problems = Vec::new();
+    let mut sent_methods = std::collections::BTreeSet::new();
     for s in scenarios() {
         let run = record(&s).await;
         assert!(
@@ -338,8 +405,26 @@ async fn what_the_driver_sends_and_the_fake_serves_matches_the_codex_schema() {
             "{}",
             s.prompt
         );
+        sent_methods.extend(run.sent.iter().filter_map(method).map(str::to_owned));
         problems.extend(check(&mut schemas, s.prompt, &run));
     }
+    // Every request the driver can make was made, and so checked. A new one (a fork, a
+    // rollback) fails here until a scenario makes it.
+    assert_eq!(
+        sent_methods.into_iter().collect::<Vec<_>>(),
+        [
+            "account/read",
+            "initialize",
+            "initialized",
+            "model/list",
+            "thread/resume",
+            "thread/start",
+            "thread/unarchive",
+            "turn/interrupt",
+            "turn/start",
+            "turn/steer",
+        ]
+    );
     problems.sort();
     problems.dedup();
     assert!(

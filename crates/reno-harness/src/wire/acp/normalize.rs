@@ -204,13 +204,16 @@ const KNOWN_UPDATES: &[&str] = &[
     "usage_update",
 ];
 
+/// Notification methods other than `session/update` the driver handles by name.
+const KNOWN_METHODS: &[&str] = &["_x.ai/session/prompt_complete"];
+
 /// What a notification is called in the unrecognised-frame counters, when the driver has no name
 /// for it: `method:<method>` for a notification other than `session/update`, `update:<kind>`
 /// for a `sessionUpdate` kind outside [`KNOWN_UPDATES`]. `None` for anything known, and for
 /// another session's traffic.
 pub(crate) fn unknown_kind(method: &str, params: &Value, session_id: &str) -> Option<String> {
     if method != "session/update" {
-        return Some(format!("method:{method}"));
+        return (!KNOWN_METHODS.contains(&method)).then(|| format!("method:{method}"));
     }
     let update = session_update(method, params, session_id)?;
     let kind = update_kind(update);
@@ -378,6 +381,38 @@ mod tests {
                     ActionClass::Other
                 ),
             }]
+        );
+    }
+
+    #[test]
+    fn only_what_the_driver_has_no_name_for_is_counted_unknown() {
+        let own = |kind: &str| {
+            unknown_kind(
+                "session/update",
+                &json!({"sessionId": "s", "update": {"sessionUpdate": kind}}),
+                "s",
+            )
+        };
+        for known in KNOWN_UPDATES {
+            assert_eq!(own(known), None, "{known}");
+        }
+        assert_eq!(own("zz_future"), Some("update:zz_future".into()));
+        assert_eq!(
+            unknown_kind("_x.ai/session/prompt_complete", &json!({}), "s"),
+            None
+        );
+        assert_eq!(
+            unknown_kind("zz/other", &json!({}), "s"),
+            Some("method:zz/other".into())
+        );
+        // Another session's traffic is not this run's to count.
+        assert_eq!(
+            unknown_kind(
+                "session/update",
+                &json!({"sessionId": "other", "update": {"sessionUpdate": "zz"}}),
+                "s"
+            ),
+            None
         );
     }
 

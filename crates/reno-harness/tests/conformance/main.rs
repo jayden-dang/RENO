@@ -2,7 +2,7 @@
 //!
 //! One table, case by executor. The labels of every column are pinned below: a case that quietly
 //! turns into a skip, or a claim that stops being exercised, fails here. The suite itself is
-//! tested too (`suite_self_test.rs` module): an executor that breaks the contract must fail the
+//! tested too (`broken.rs`): an executor that breaks the contract must fail the
 //! cases that prove it.
 
 #![cfg(unix)]
@@ -13,7 +13,10 @@ mod targets;
 
 use reno_harness::conformance::{CaseId, Status, Target, TargetReport, render_table, run_suite};
 
-use targets::{claude_target, codex_target, grok_target, mock_target, registry_target};
+use targets::{
+    claude_target, codex_target, devin_target, grok_target, hermes_target, mock_target,
+    registry_target,
+};
 
 async fn run_all(targets: Vec<Target>) -> Vec<TargetReport> {
     let runs = targets
@@ -44,6 +47,8 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         codex_target(),
         grok_target(),
         registry_target(),
+        devin_target(),
+        hermes_target(),
     ])
     .await;
     println!("\n{}", render_table(&reports));
@@ -90,7 +95,9 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         ("deny-message", "skip"),
         ("plan-mode", "skip"),
     ];
-    assert_eq!(labels("acp.grok"), pinned(&acp_full_access_only));
+    for name in ["acp.grok", "acp.devin", "acp.hermes"] {
+        assert_eq!(labels(name), pinned(&acp_full_access_only), "{name}");
+    }
     assert_eq!(labels("acp.registry"), pinned(&[("plan-mode", "skip")]));
 
     // The counters: only what the fakes made up, never the clean runs.
@@ -110,5 +117,17 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         counted("codex").into_iter().collect::<Vec<_>>(),
         vec![("method:zz/futureNotification".to_owned(), 1)]
     );
+    // ACP's unknown-frame scenario is the fake's `happy`, which makes up two frames; everything
+    // else the suite ran (approvals, questions, steering, resume, a crash) counted nothing.
+    for name in ["acp.registry", "acp.grok", "acp.devin", "acp.hermes"] {
+        assert_eq!(
+            counted(name).into_iter().collect::<Vec<_>>(),
+            vec![
+                ("method:some/unknownNotification".to_owned(), 1),
+                ("update:totally_unknown_kind".to_owned(), 1),
+            ],
+            "{name}"
+        );
+    }
     assert!(counted("mock").is_empty());
 }
