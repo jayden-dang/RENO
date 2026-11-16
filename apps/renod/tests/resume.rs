@@ -32,6 +32,33 @@ fn refused_for(error: ClientError) -> NotResumed {
     data.why
 }
 
+/// `run.resume` once the run's supervisor has let go of it. A run's journal ends with its `Done`
+/// before its slot is freed, so a resume sent the moment the stream ended can still be told
+/// `StillStopping`; that is the daemon being right, and the answer to wait out.
+async fn resume_when_stopped(
+    fx: &Fixture,
+    run: &RunId,
+    prompt: Option<String>,
+) -> Result<u32, ClientError> {
+    loop {
+        match within(fx.client.resume_run(run, prompt.clone())).await {
+            Err(error) if is_still_stopping(&error) => tokio::task::yield_now().await,
+            other => return other,
+        }
+    }
+}
+
+fn is_still_stopping(error: &ClientError) -> bool {
+    let ClientError::Remote(object) = error else {
+        return false;
+    };
+    object
+        .data
+        .clone()
+        .and_then(|data| serde_json::from_value::<NotResumable>(data).ok())
+        .is_some_and(|data| data.why == NotResumed::StillStopping)
+}
+
 async fn texts_until_held(fx: &Fixture, run: &RunId, texts: usize) {
     let mut events = Box::pin(fx.client.run_events(run.clone(), None));
     let mut seen = 0;
@@ -63,7 +90,7 @@ daemon_test! {
         assert_eq!(summary.not_resumed, Some(NotResumed::Cancelled));
         assert_eq!(summary.session, Some(SessionRef("mock-session".into())));
 
-        let attempt = within(fx.client.resume_run(&run, Some("carry on".into()))).await.unwrap();
+        let attempt = resume_when_stopped(&fx, &run, Some("carry on".into())).await.unwrap();
         assert_eq!(attempt, 2);
         // The second attempt is live and held again; steering lets it finish.
         texts_until_held(&fx, &run, 2).await;
@@ -88,7 +115,7 @@ daemon_test! {
         let fx = Fixture::start().await;
         let finished = fx.run("mock", "quick").await;
         fx.events(&finished, None).await;
-        let refused = within(fx.client.resume_run(&finished, None)).await.unwrap_err();
+        let refused = resume_when_stopped(&fx, &finished, None).await.unwrap_err();
         assert_eq!(
             refused_for(refused),
             NotResumed::WrongStatus { status: RunStatus::Succeeded }

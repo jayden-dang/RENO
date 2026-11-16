@@ -18,8 +18,9 @@ use crate::ui::theme::Appearance;
 use crate::vm::runs::RunFilter;
 use crate::vm::{Section, inbox, settings, triggers};
 
-fn store_with(cx: &mut TestAppContext, config: FakeConfig) -> Entity<Store> {
+fn store_with(cx: &mut TestAppContext, mut config: FakeConfig) -> Entity<Store> {
     cx.update(gpui_tokio::init);
+    config.step = std::time::Duration::ZERO;
     cx.new(|cx| {
         let mut store = Store::connecting();
         store.start_fake_with(config, cx);
