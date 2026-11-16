@@ -81,6 +81,24 @@ unreachable memory. The small residual is one 80 B, one 32 B and one 16 B alloca
 (about 130 B), and one buffer that grew to 1.6 MiB; the release binary is stripped, so the owner
 is not identified. Hypothesis: a per-run entry kept in a task, channel or map table. Unverified.
 
+### The mock's log (after Phase 1 regressed the growth to 2.46 MiB per 1,000 runs)
+
+Phase 1 measured 33.2, 36.0, 38.4, 40.6 MiB (2.46 MiB per 1,000 runs, over budget). A release
+build with symbols and `MallocStackLogging=1` (`heap`, `malloc_history -allBySize`) showed live
+malloc nodes rising by about 18 per run (22,284 after 800 runs, 36,718 after 1,600), every
+one of them a clone of the run's `ExecSpec` (args, env, `McpServerSpec` list) made in
+`dispatcher::attempt`. The owner was `MockExecutor`'s `MockLog`, which records every spec it
+starts, and the daemon's own `mock` executor kept that log for the life of the process. Tests
+read the log, so it stays the default; the daemon's mock is now built with `without_log()`.
+The residual "one 80 B, 32 B and 16 B allocation per run" above was the same log. No other
+structure was found to grow with finished runs (health board, routing, tokens, link and
+approval maps were checked in the heap diff and are flat).
+
+Full mode after the fix: 29.3, 31.5, 31.9, 31.9 MiB, **0.86 MiB per 1,000 runs**, every budget
+passes. The 3 x 2 MiB page caches fill in the first few thousand runs; a longer profile
+(8 batches of 1,000, symbols build) reads 31.5, 31.7, 31.9, 32.0, 32.1, 32.1, 32.1, 32.1 MiB: a
+plateau.
+
 ## Allocator decision (ARCHITECTURE 17.8)
 
 `mimalloc` (`v2` feature, MIT) is an optional feature of `renod` and `reno-app`
