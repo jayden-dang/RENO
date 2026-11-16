@@ -35,6 +35,7 @@ pub enum HarnessError {
 
 pub mod acp_registry;
 mod agent_id;
+pub mod child_env;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
 pub use drivers::{acp, claude, codex};
@@ -52,6 +53,7 @@ pub use proc::{
 };
 pub(crate) use proc::{adapter_install, code_signature, executable};
 pub use proc::{archive_install, process, shell_env};
+pub use redact::{MIN_SECRET_VALUE_LEN, ValueRedactor};
 pub(crate) mod wire;
 
 /// Compose the child's PATH: the resolved executable's directory first, then

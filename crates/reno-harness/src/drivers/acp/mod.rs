@@ -352,6 +352,7 @@ impl AcpExecutor {
         spec: &ExecSpec,
     ) -> Result<(), HarnessError> {
         let launcher = self.launcher();
+        crate::child_env::restrict(cmd, crate::child_env::for_harness(self.spec.id));
         child::configure(cmd);
         crate::compose_child_path(cmd, exe);
         launcher.configure_environment(cmd, exe);

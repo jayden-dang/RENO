@@ -338,6 +338,8 @@ impl ClaudeExecutor {
 
     fn build_command(exe: &Path, spec: &ExecSpec) -> Command {
         let mut cmd = Command::new(exe);
+        // Only the allowlisted part of the daemon's environment (see `child_env`).
+        crate::child_env::restrict(&mut cmd, crate::child_env::CLAUDE);
         // Its own process group, so teardown reaches the MCP servers and tools it started;
         // and no inherited Claude Code session markers.
         crate::process::owned::configure(&mut cmd);

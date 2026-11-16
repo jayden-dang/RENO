@@ -368,6 +368,7 @@ impl CodexExecutor {
         budget: Duration,
     ) -> Result<AppServerAnswers, HarnessError> {
         let mut cmd = Command::new(exe);
+        crate::child_env::restrict(&mut cmd, crate::child_env::CODEX);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, exe);
         cmd.stdin(Stdio::piped())
@@ -756,6 +757,7 @@ async fn launch(
     processes: &ProcessSink,
 ) -> Result<AppServer, std::io::Error> {
     let mut cmd = Command::new(exe);
+    crate::child_env::restrict(&mut cmd, crate::child_env::CODEX);
     cmd.arg("app-server");
     crate::compose_child_path(&mut cmd, exe);
     // The allowlisted environment of the run (host-resolved credentials: a Cloud device's
