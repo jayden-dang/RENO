@@ -228,15 +228,18 @@ impl Store {
         .await
     }
 
-    /// The rules, newest first. Only those in force at `now` (not revoked, not expired) unless
-    /// `include_inactive`.
+    /// The rules, newest first. Only those in force at `now` (not revoked, not expired, and for a
+    /// rule of one run, that run not over) unless `include_inactive`.
     pub async fn list_rules(&self, include_inactive: bool, now: i64) -> Result<Vec<StandingRule>> {
         self.read(move |conn| {
             query(
                 conn,
                 &format!(
                     "SELECT {COLUMNS} FROM standing_rules
-                     WHERE ?1 OR (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?2))
+                     WHERE ?1 OR (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?2)
+                        AND (scope_run IS NULL OR scope_run IN
+                             (SELECT id FROM runs
+                              WHERE status NOT IN ('succeeded', 'failed', 'cancelled'))))
                      ORDER BY created_at DESC, rowid DESC"
                 ),
                 &[&include_inactive, &now],

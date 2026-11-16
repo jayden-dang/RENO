@@ -24,8 +24,9 @@
 //!
 //! # Waiting
 //!
-//! `NeedsApproval` is judged by policy (see the `approval` module): a rule or a repeated denial
-//! answers it at once and the run never leaves `running`; otherwise the run moves to
+//! `NeedsApproval` is judged by policy and standing rules (see the `approval` module, which has
+//! the exact order): a rule or a repeated denial answers it at once and the run never leaves
+//! `running` (a call to Reno's own tools is not journaled at all); otherwise the run moves to
 //! `waiting_approval` with a stored pending approval, which `decide` or the approval's deadline
 //! answers, and the run returns to `running`. `NeedsInput` moves it to `waiting_input`. Phase 0
 //! has no client path that answers input, so such a run waits until it is cancelled, the

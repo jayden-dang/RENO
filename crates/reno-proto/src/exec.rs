@@ -273,9 +273,10 @@ pub enum ApprovalOutcome {
 pub enum ResolvedBy {
     /// A person decided it.
     Human,
-    /// A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or
-    /// `rules[N]` when it has none, or `default` when no rule matched and the policy's default
-    /// effect applied.
+    /// A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`
+    /// when it has none, or `default` when no rule matched and the policy's default effect
+    /// applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or
+    /// `builtin:reno-mcp` for a call to one of Reno's own MCP tools.
     Rule {
         /// The rule's name.
         name: String,

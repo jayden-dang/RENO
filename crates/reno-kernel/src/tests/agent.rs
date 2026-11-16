@@ -545,6 +545,44 @@ async fn a_request_still_waiting_when_the_run_ends_is_denied_as_expired() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_approval_the_run_asked_for_itself_cannot_be_kept_as_a_standing_rule() {
+    use reno_proto::{Remember, RememberScope};
+    let rig = Rig::new(hold(), config(1)).await;
+    let (_, session) = rig.live(None).await;
+    let asked = ask(&rig, &session, approval("git push"));
+    let held = pending(&rig).await;
+    let refused = rig
+        .fx
+        .kernel
+        .decide_remembering(
+            &held.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember {
+                scope: RememberScope::Always,
+                expires_in_secs: None,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(KernelError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert!(rig.fx.kernel.list_rules(true).await.unwrap().is_empty());
+    // It is still held, and a plain answer goes through.
+    assert_eq!(pending(&rig).await.id, held.id);
+    rig.fx
+        .kernel
+        .decide(&held.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    assert_eq!(
+        asked.await.unwrap().unwrap().decision,
+        ApprovalOutcome::Approved
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_policy_rule_answers_a_request_without_a_human() {
     let policy = r#"
 default = "ask"

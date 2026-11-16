@@ -312,3 +312,48 @@ async fn a_rule_is_never_edited_or_deleted() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_rule_of_one_run_is_not_in_force_once_that_run_is_over() {
+    let (_d, store) = store_with_runs(2).await;
+    for n in 0..2 {
+        store
+            .create_rule(
+                rule(
+                    n,
+                    StandingScope::Run { run: run_id(n) },
+                    StandingEffect::Allow,
+                    None,
+                ),
+                10,
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .create_rule(
+            rule(9, StandingScope::Always, StandingEffect::Allow, None),
+            11,
+        )
+        .await
+        .unwrap();
+    store
+        .write(crate::writer::Durability::Normal, |c| {
+            c.execute(
+                "UPDATE runs SET status = 'succeeded' WHERE id = 'run_r0'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::error::db)
+        })
+        .await
+        .unwrap();
+    let ids = |rules: Vec<reno_proto::StandingRule>| -> Vec<String> {
+        rules.into_iter().map(|r| r.id.to_string()).collect()
+    };
+    assert_eq!(
+        ids(store.list_rules(false, 20).await.unwrap()),
+        ["rule_u9", "rule_u1"]
+    );
+    assert_eq!(store.list_rules(true, 20).await.unwrap().len(), 3);
+}

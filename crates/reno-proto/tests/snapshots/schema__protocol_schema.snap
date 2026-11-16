@@ -4657,7 +4657,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -8271,7 +8271,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -9059,7 +9059,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",

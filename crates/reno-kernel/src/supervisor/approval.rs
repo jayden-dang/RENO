@@ -45,7 +45,9 @@
 //! `decide` may carry a [`Remember`]. The rule is made from the open approval's own subject
 //! (`RuleMatcher::derive`, never broader than it) and is committed in the same transaction as the
 //! decision, so a rule exists only for a decision that was made. Its effect is the decision's.
-//! A person's approval is `approve once` for the request and `allow` for the rule.
+//! A person's approval is `approve once` for the request and `allow` for the rule. An approval the
+//! run asked for itself through `request_approval` cannot be remembered (`Invalid`): its tool is
+//! constant and what distinguishes it is free text the run wrote.
 //!
 //! # Order of effects
 //!
@@ -263,10 +265,7 @@ impl Supervisor {
             return Ok(auto(
                 ApprovalOutcome::Denied,
                 standing_by(rule),
-                Some(format!(
-                    "denied by a standing rule you made ({}); revoke it with `reno rule revoke {}`",
-                    rule.id, rule.id
-                )),
+                Some(format!("denied by a standing rule ({})", rule.id)),
             ));
         }
         // 3. A refusal in this run stands.
@@ -474,6 +473,19 @@ impl Supervisor {
         };
         let message = message.filter(|_| outcome == ApprovalOutcome::Denied);
         let rule = match &remember {
+            Some(_)
+                if self
+                    .agent_waiters
+                    .contains_key(&self.open_approvals[at].request_id) =>
+            {
+                // The run wrote this subject itself: its tool is always `request_approval` and
+                // the part that says why is free text, so a rule derived from it would cover
+                // everything the run might ask for next.
+                return Err(KernelError::Invalid(
+                    "an approval the run asked for itself cannot be kept as a rule; answer it once"
+                        .to_owned(),
+                ));
+            }
             Some(remember) => Some(self.rule_from(&self.open_approvals[at], outcome, remember)?),
             None => None,
         };

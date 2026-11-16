@@ -120,6 +120,42 @@ async fn a_supervised_shell_command_is_held_denied_by_a_person_and_denied_again_
     }
 }
 
+/// "Approve once" is exact: the same subject asked again in the same run is held again.
+#[tokio::test(start_paused = true)]
+async fn approving_once_does_not_cover_the_same_subject_asked_again() {
+    let rig = Rig::new(
+        ASK,
+        script(vec![
+            ("r1", command("git push")),
+            ("r2", command("git push")),
+        ]),
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    let first = rig.pending().await;
+    rig.fx
+        .kernel
+        .decide(&first.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    let second = rig.pending().await;
+    assert_ne!(
+        second.id, first.id,
+        "asked again, not answered by the first"
+    );
+    assert_eq!(second.subject, first.subject);
+    assert!(rig.fx.kernel.list_rules(true).await.unwrap().is_empty());
+    rig.fx
+        .kernel
+        .decide(&second.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    finish(&rig, &run).await;
+    let history = rig.history(&run).await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].subject_digest, history[1].subject_digest);
+}
+
 // ---- scopes -------------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
@@ -155,7 +191,9 @@ async fn a_run_rule_covers_the_rest_of_that_run_and_no_other_run() {
     let by: Vec<_> = resolved(&journal).into_iter().map(|r| r.2).collect();
     assert_eq!(by, [ResolvedBy::Human, rule(&name), ResolvedBy::Human]);
 
-    let rules = rig.fx.kernel.list_rules(false).await.unwrap();
+    // A run's rule ends with its run: it is no longer listed as in force, only in the history.
+    assert!(rig.fx.kernel.list_rules(false).await.unwrap().is_empty());
+    let rules = rig.fx.kernel.list_rules(true).await.unwrap();
     assert_eq!(rules[0].scope, StandingScope::Run { run: first.clone() });
     assert_eq!(rules[0].effect, StandingEffect::Allow);
     assert!(rules[0].source_approval.is_some());
@@ -298,9 +336,10 @@ async fn a_remembered_denial_refuses_unasked_in_later_runs_with_a_message_naming
     };
     assert_eq!((*outcome, by), (ApprovalOutcome::Denied, &rule(&name)));
     let message = message.as_deref().unwrap();
+    assert!(message.contains("standing rule"), "{message}");
     assert!(
-        message.contains("standing rule") && message.contains("rule revoke"),
-        "{message}"
+        !message.contains("revoke"),
+        "the harness is not told how to undo a person's refusal: {message}"
     );
     assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny]);
 }
