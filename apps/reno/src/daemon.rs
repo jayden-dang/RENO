@@ -278,6 +278,9 @@ struct StatusOut<'a> {
     /// The LaunchAgent's plist, when one for this data directory is installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     launch_agent: Option<&'a Path>,
+    /// Whether everything is paused (`reno pause`); absent when the daemon does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paused: Option<bool>,
     #[serde(flatten)]
     info: Option<&'a DaemonStatusInfo>,
 }
@@ -294,6 +297,7 @@ async fn status(env: &Env) -> anyhow::Result<ExitCode> {
                 running: false,
                 socket: &env.socket,
                 launch_agent: agent.as_deref(),
+                paused: None,
                 info: None,
             })?;
         } else {
@@ -311,15 +315,25 @@ async fn status(env: &Env) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::FAILURE);
     };
     let info = client.status().await.map_err(|e| env.explain(e))?;
+    // Best effort: a daemon from before budgets does not answer.
+    let paused = client
+        .budget_status()
+        .await
+        .ok()
+        .map(|budget| budget.paused);
     if env.json {
         print_json(&StatusOut {
             running: true,
             socket: &env.socket,
             launch_agent: agent.as_deref(),
+            paused,
             info: Some(&info),
         })?;
     } else {
         print_line(render::status_text(&info, &env.socket))?;
+        if paused == Some(true) {
+            print_line("paused: nothing new starts (`reno resume` lifts it)")?;
+        }
         if let Some(agent) = &agent {
             print_line(format_args!("launch agent: {}", agent.display()))?;
         }
