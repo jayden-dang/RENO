@@ -591,7 +591,13 @@ async fn a_trigger_is_held_during_a_pause_and_caught_up_once_on_resume() {
     assert!(firings[0].missed >= 3, "{firings:?}");
     // The schedule goes on from there.
     let after = u64::try_from(START_MS + 3 * HOUR).unwrap();
-    until(async || trigger_info(&fx).next_due_at_ms.filter(|due| *due > after).map(|_| ())).await;
+    until(async || {
+        trigger_info(&fx)
+            .next_due_at_ms
+            .filter(|due| *due > after)
+            .map(|_| ())
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
