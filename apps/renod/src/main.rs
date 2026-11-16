@@ -93,6 +93,8 @@ fn run(args: Args) -> anyhow::Result<()> {
         .with_context(|| format!("cannot prepare {}", paths.data_dir.display()))?;
     let logs = paths.logs();
     ensure_private_dir(&logs).with_context(|| format!("cannot prepare {}", logs.display()))?;
+    // A launcher that points our stderr at a file only ever appends to it.
+    logging::bound_stderr_file(std::io::stderr(), logging::STDERR_LIMIT);
     let _logs = logging::init(&logs)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
