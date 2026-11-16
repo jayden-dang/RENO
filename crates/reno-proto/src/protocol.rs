@@ -120,6 +120,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_ROUTING,
     FEATURE_ATTACHMENTS,
     FEATURE_BUDGET,
+    crate::agent::FEATURE_AGENT,
 ];
 
 /// A request with a single reply.
@@ -827,6 +828,11 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),
+            method_entry::<crate::agent::AgentAuth>(),
+            method_entry::<crate::agent::AgentReport>(),
+            method_entry::<crate::agent::AgentRequestApproval>(),
+            method_entry::<crate::agent::AgentBoardRead>(),
+            method_entry::<crate::agent::AgentBoardWrite>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),

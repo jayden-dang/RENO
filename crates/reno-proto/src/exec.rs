@@ -349,6 +349,17 @@ pub enum ExecEvent {
         /// The message text.
         text: String,
     },
+    /// The run called Reno's `report` tool: a structured status, shown in the transcript. Only
+    /// daemons that negotiate the `agent` feature emit it.
+    AgentReport {
+        /// How the work stands.
+        status: crate::agent::ReportStatus,
+        /// A short summary.
+        summary: String,
+        /// Anything longer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+    },
     /// The run ended; always the last event.
     Done {
         /// Why it stopped.
