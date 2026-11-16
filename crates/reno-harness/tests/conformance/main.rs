@@ -77,6 +77,7 @@ async fn the_mock_and_every_driver_pass_the_suite() {
             ("process-records", "skip"),
             ("deny-message", "skip"),
             ("plan-mode", "skip"),
+            ("user-config", "skip"),
             ("unknown-frames", "skip"),
         ])
     );
@@ -87,7 +88,11 @@ async fn the_mock_and_every_driver_pass_the_suite() {
     );
     assert_eq!(
         labels("codex"),
-        pinned(&[("deny-message", "skip"), ("plan-mode", "skip")]),
+        pinned(&[
+            ("deny-message", "skip"),
+            ("plan-mode", "skip"),
+            ("user-config", "skip"),
+        ]),
         "Codex's approval reply has no field for a reason"
     );
     let acp_full_access_only = [
@@ -95,11 +100,15 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         ("approval-deny", "skip"),
         ("deny-message", "skip"),
         ("plan-mode", "skip"),
+        ("user-config", "skip"),
     ];
     for name in ["acp.grok", "acp.devin", "acp.hermes"] {
         assert_eq!(labels(name), pinned(&acp_full_access_only), "{name}");
     }
-    assert_eq!(labels("acp.registry"), pinned(&[("plan-mode", "skip")]));
+    assert_eq!(
+        labels("acp.registry"),
+        pinned(&[("plan-mode", "skip"), ("user-config", "skip")])
+    );
 
     // The counters: only what the fakes made up, never the clean runs.
     let counted = |name: &str| {

@@ -328,6 +328,7 @@ fn live_plan(shape: &Shape, repo: &Path, outside_file: &Path) -> Plan {
         ),
         output_schema: None,
         unknown_frames: None,
+        user_config: None,
         mode_runs,
     }
 }
@@ -351,6 +352,13 @@ fn live_target(name: &str, executor: Arc<dyn Executor>, cwd: &Path, plan: Plan) 
         "a real CLI cannot be asked to send a frame it does not know",
     );
     target.exhaustive = false;
+    if name == "claude-code" {
+        target = target.waive(
+            CaseId::UserConfig,
+            "a tiny live prompt cannot show what an owner's config would have added; the \
+             flags and variables are asserted against the fake CLI",
+        );
+    }
     if name == "codex" {
         target = target.waive(
             CaseId::Input,
@@ -576,7 +584,7 @@ mod plans {
         };
         assert_eq!(
             waived("claude-code"),
-            [CaseId::Crash, CaseId::UnknownFrames]
+            [CaseId::Crash, CaseId::UserConfig, CaseId::UnknownFrames]
         );
         assert_eq!(
             waived("codex"),

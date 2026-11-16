@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reno_harness::conformance::{
-    CaseId, Expect, Limits, Plan, Profile, Scenario, Status, Target, TargetReport, run_suite,
+    CaseId, Expect, Limits, Plan, Profile, Scenario, Status, Target, TargetReport, UserConfigPlan,
+    run_suite,
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor};
 use reno_proto::{
@@ -290,6 +291,33 @@ async fn a_case_the_descriptor_does_not_claim_is_skipped_not_passed() {
     assert!(matches!(status(&report, CaseId::Steer), Status::Skip(_)));
     assert!(matches!(status(&report, CaseId::Resume), Status::Skip(_)));
     assert!(report.is_green(), "{:?}", report.failures());
+}
+
+#[tokio::test]
+async fn a_claimed_isolation_that_is_not_applied_fails_the_user_config_case() {
+    let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
+    descriptor.caps.isolates_user_config = true;
+    let executor = Arc::new(ScriptedMock::with_descriptor(Some(descriptor)));
+    let mut target = crate::targets::mock_target_for(executor);
+    target.plan.user_config = Some(UserConfigPlan {
+        scenario: Scenario::new("mock:user-config-ignored"),
+        isolated: vec![Expect::TextContains("user-config:isolated".into())],
+        inherited: vec![Expect::TextContains("user-config:inherited".into())],
+    });
+    let report = run_suite(&target).await;
+    let Status::Fail(why) = status(&report, CaseId::UserConfig) else {
+        panic!("{:?}", report.labels());
+    };
+    assert!(why.contains("inherit_user_config = false"), "{why}");
+    assert!(failed(&report, CaseId::Claims));
+
+    // A claim with no scenario at all is unproven (ARCH-15), not skipped.
+    target.plan.user_config = None;
+    let report = run_suite(&target).await;
+    let Status::Fail(why) = status(&report, CaseId::UserConfig) else {
+        panic!("{:?}", report.labels());
+    };
+    assert!(why.contains("ARCH-15"), "{why}");
 }
 
 #[tokio::test]

@@ -1100,6 +1100,41 @@ async fn results_settling_killed_tasks_on_resume_do_not_end_the_run() {
 }
 
 // ---------------------------------------------------------------------------
+// The owner's personal Claude Code config
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_run_is_isolated_from_the_owners_personal_config_by_default() {
+    let events = run_to_end(&executor(), spec("scenario:user-config")).await;
+    assert_eq!(result_of(&events), "user-config:isolated");
+}
+
+#[tokio::test]
+async fn a_bot_that_opts_in_gets_the_owners_personal_config() {
+    let opted = ExecSpec {
+        inherit_user_config: true,
+        ..spec("scenario:user-config")
+    };
+    let events = run_to_end(&executor(), opted).await;
+    assert_eq!(result_of(&events), "user-config:inherited");
+}
+
+#[tokio::test]
+async fn a_resumed_run_stays_isolated_too() {
+    let resumed = ExecSpec {
+        resume: Some(SessionRef("sess-uc".into())),
+        ..spec("scenario:user-config")
+    };
+    let events = run_to_end(&executor(), resumed).await;
+    assert_eq!(result_of(&events), "user-config:isolated");
+}
+
+#[test]
+fn the_descriptor_claims_the_isolation_it_enforces() {
+    assert!(executor().descriptor().caps.isolates_user_config);
+}
+
+// ---------------------------------------------------------------------------
 // Resume, crashes, launch failures
 // ---------------------------------------------------------------------------
 

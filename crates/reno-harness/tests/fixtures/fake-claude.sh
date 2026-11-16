@@ -64,6 +64,31 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"done!","errors":[],"usage":{"input_tokens":10,"output_tokens":20},"session_id":"sess-1","total_cost_usd":0.01}'
   ;;
 
+*scenario:user-config*)
+  # Reports whether the isolation from the owner's personal config reached the CLI: the setting
+  # sources it was given and the two environment switches. `isolated` only when all three are
+  # there, `inherited` only when none is.
+  sources=all
+  prev=
+  for arg in "$@"; do
+    [ "$prev" = "--setting-sources" ] && sources=$arg
+    prev=$arg
+  done
+  switches=0
+  [ "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-}" = 1 ] && switches=$((switches + 1))
+  [ "${ENABLE_CLAUDEAI_MCP_SERVERS:-}" = false ] && switches=$((switches + 1))
+  if [ "$sources" = "project,local" ] && [ "$switches" = 2 ]; then
+    verdict=isolated
+  elif [ "$sources" = all ] && [ "$switches" = 0 ]; then
+    verdict=inherited
+  else
+    verdict="partial(sources=$sources,switches=$switches)"
+  fi
+  emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-uc"}'
+  emit '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"user-config:'"$verdict"'"}]}}'
+  emit '{"type":"result","subtype":"success","result":"user-config:'"$verdict"'","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-uc"}'
+  ;;
+
 *scenario:env*)
   # Prints the environment the child was given to the file the run's own env names, so a test
   # can read what reached it (tests/child_env.rs).

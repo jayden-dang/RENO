@@ -1284,6 +1284,32 @@ async fn a_bot_run_launches_with_the_bots_access_and_sandbox() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_bot_run_is_isolated_from_user_config_unless_the_bot_opts_in() {
+    let m = mock([MockStep::text("hi")]);
+    let port = FakePort::with(vec![
+        bot("plain", ""),
+        bot("open", "inherit_user_config = true"),
+    ]);
+    let fx =
+        Fx::with_definitions(config(1), registry(std::slice::from_ref(&m)), setup(&port)).await;
+    for name in ["plain", "open"] {
+        let run = fx
+            .kernel
+            .submit_for_bot(name, "go", None, WORKTREE.into(), None)
+            .await
+            .unwrap();
+        fx.wait_status(&run, RunStatus::Succeeded).await;
+    }
+    let specs = m.log().specs;
+    assert!(!specs[0].inherit_user_config);
+    assert!(specs[1].inherit_user_config);
+    // A task with no bot is isolated too.
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert!(!m.log().specs[2].inherit_user_config);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_queued_run_keeps_the_settings_of_the_bot_version_it_is_pinned_to() {
     let m = mock([MockStep::text("hi")]);
     let port = FakePort::with(vec![bot("keeper", "access = \"auto_accept_edits\"")]);

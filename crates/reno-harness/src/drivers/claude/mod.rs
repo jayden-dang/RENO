@@ -27,6 +27,26 @@
 //! - Resume: `ExecSpec::resume` becomes `--resume=<session>`. A session whose transcript holds
 //!   no conversation, or that the CLI cannot restore, starts a fresh one; the `Started` event
 //!   names whichever session the run really has.
+//! - ISOLATION FROM THE OWNER'S CONFIG (`ExecSpec::inherit_user_config`, off by default): the run
+//!   passes `--setting-sources project,local` and sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and
+//!   `ENABLE_CLAUDEAI_MCP_SERVERS=false` (see [`ISOLATION_ENV`]). Per the Claude Code docs
+//!   (`--setting-sources` in the CLI reference; "What settingSources does not control" in the
+//!   Agent SDK guide):
+//!   - EXCLUDED: user settings (`~/.claude/settings.json`: user hooks, `enabledPlugins`,
+//!     permissions, `outputStyle`, `env`, ...) and `~/.claude/CLAUDE.md` (loaded by the `user`
+//!     source); auto-memory (`~/.claude/projects/<project>/memory/`, which the sources do NOT
+//!     control, hence the first variable); claude.ai MCP connectors (second variable).
+//!   - STILL LOADED: project and local settings, the project's `CLAUDE.md` and `.mcp.json`,
+//!     Reno's injected MCP server and policy (never `--strict-mcp-config`, which would drop the
+//!     project's own servers); managed policy settings (MDM / managed file / server-managed);
+//!     `~/.claude.json` (global config, always read); `sandbox.credentials` deny entries from
+//!     `~/.claude/settings.json`. User-scope MCP servers kept in `~/.claude.json` are not
+//!     documented as following the setting sources, so they may still load.
+//!   - SIGN-IN: credentials are not settings. The docs describe `--setting-sources` as a settings
+//!     filter only and list `~/.claude.json` and the credential environment as read regardless;
+//!     the docs do not state authentication independence in so many words, so the first live
+//!     run is the confirmation. The flag is documented for the CLI but its introduction version
+//!     is not stated; it is assumed to predate [`MIN_CLI_VERSION`].
 //! - Process records: every child this module spawns is reported through
 //!   `ExecControls::processes` as soon as it exists, so a crash of the daemon leaves a row for
 //!   the orphan sweep (ARCHITECTURE 17.3).
@@ -133,6 +153,17 @@ fn config_root(env: &std::collections::BTreeMap<String, String>) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"))
 }
+
+/// The setting sources an isolated run loads: the project's and the local ones, never the user's.
+const ISOLATED_SETTING_SOURCES: &str = "project,local";
+
+/// What the setting sources do not control, switched off for an isolated run: the agent reading
+/// and writing the owner's auto-memory under `~/.claude/projects/`, and the claude.ai MCP
+/// connectors of the owner's login.
+const ISOLATION_ENV: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+    ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
+];
 
 /// The inline `--mcp-config` JSON for the injected servers (the CLI accepts a JSON string as
 /// well as a file path), or `None` when there are none. A name that repeats keeps its first
@@ -333,6 +364,9 @@ impl ClaudeExecutor {
             "--permission-mode".into(),
             permission::permission_mode(spec.access).into(),
         ]);
+        if !spec.inherit_user_config {
+            args.extend(["--setting-sources".into(), ISOLATED_SETTING_SOURCES.into()]);
+        }
         args
     }
 
@@ -347,6 +381,10 @@ impl ClaudeExecutor {
         // The allowlisted environment of the run (credentials the host resolved, for one).
         // Never a Claude.ai subscription token: those stay inside the CLI's own login.
         crate::apply_run_env(&mut cmd, &spec.env);
+        // After the run's own variables, so nothing a bot supplies switches the isolation off.
+        if !spec.inherit_user_config {
+            cmd.envs(ISOLATION_ENV);
+        }
         cmd.args(Self::launch_args(spec));
         if let Some(resume) = &spec.resume {
             cmd.arg(format!("--resume={}", resume.0));
@@ -1539,6 +1577,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed["mcpServers"]["reno"]["command"], "/first");
+    }
+
+    fn args_and_env(spec: &ExecSpec) -> (Vec<String>, Vec<(String, Option<String>)>) {
+        let command = ClaudeExecutor::build_command(std::path::Path::new("claude"), spec);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let env = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        (args, env)
+    }
+
+    fn env_value<'a>(env: &'a [(String, Option<String>)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| v.as_deref())
+    }
+
+    #[test]
+    fn a_run_loads_only_project_and_local_settings_unless_the_bot_opts_in() {
+        let (args, env) = args_and_env(&spec(AccessMode::Supervised));
+        assert_eq!(flag(&args, "--setting-sources"), Some("project,local"));
+        // What the setting sources do not control: auto-memory and claude.ai connectors.
+        assert_eq!(
+            env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+            Some("1")
+        );
+        assert_eq!(
+            env_value(&env, "ENABLE_CLAUDEAI_MCP_SERVERS"),
+            Some("false")
+        );
+
+        let mut opted = spec(AccessMode::Supervised);
+        opted.inherit_user_config = true;
+        let (args, env) = args_and_env(&opted);
+        assert_eq!(flag(&args, "--setting-sources"), None);
+        assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), None);
+        assert_eq!(env_value(&env, "ENABLE_CLAUDEAI_MCP_SERVERS"), None);
+    }
+
+    #[test]
+    fn reno_s_own_mcp_server_rides_along_in_both_modes() {
+        for inherit in [false, true] {
+            let mut s = spec(AccessMode::Supervised);
+            s.inherit_user_config = inherit;
+            s.mcp = vec![server("reno", "reno")];
+            let (args, _) = args_and_env(&s);
+            assert!(args.contains(&"--mcp-config".to_owned()), "{args:?}");
+            // Never `--strict-mcp-config`: it would drop the project's own `.mcp.json`.
+            assert!(
+                !args.contains(&"--strict-mcp-config".to_owned()),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_envs_own_value_cannot_switch_the_isolation_back_off() {
+        let mut s = spec(AccessMode::Supervised);
+        s.env
+            .insert("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "0".into());
+        let (_, env) = args_and_env(&s);
+        assert_eq!(
+            env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+            Some("1")
+        );
     }
 
     #[test]

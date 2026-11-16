@@ -194,6 +194,8 @@ struct LaunchSettings {
     /// The secrets the pinned bot version lists: the names its run receives as environment
     /// variables.
     secrets: Vec<String>,
+    /// Whether the pinned bot opted in to the owner's personal harness config.
+    inherit_user_config: bool,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -208,6 +210,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             token_ceiling: None,
             bot: None,
             secrets: Vec::new(),
+            inherit_user_config: false,
         });
     };
     let stored = shared
@@ -236,6 +239,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         token_ceiling: bot.budget.daily_token_ceiling,
         bot: Some(pin.name.clone()),
         secrets: bot.secrets,
+        inherit_user_config: bot.inherit_user_config,
     })
 }
 
@@ -334,7 +338,6 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
     };
     Ok(ExecSpec {
         run_id: row.id.clone(),
-        inherit_user_config: false,
         prompt,
         cwd: PathBuf::from(cwd),
         model,
@@ -347,6 +350,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         // Reno's own variables for the run; the bot's secrets join them at launch.
         env: run_env(&row.id, settings.bot.as_deref()),
         output_schema: None,
+        inherit_user_config: settings.inherit_user_config,
     })
 }
 
