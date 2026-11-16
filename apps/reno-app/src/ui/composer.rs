@@ -195,9 +195,7 @@ pub(crate) fn steer_state(status: Option<RunStatus>) -> SteerState {
 }
 
 fn ended(how: &str) -> SteerState {
-    SteerState::Ended(format!(
-        "This run {how}. It can't be steered any more, and follow-ups are not available yet."
-    ))
+    SteerState::Ended(format!("This run {how}. It can't be steered any more."))
 }
 
 /// What the route preview was last asked for. A new request goes out only when this changes.
@@ -1383,7 +1381,7 @@ impl Composer {
                 let label = |text: &'static str| {
                     div()
                         .flex_none()
-                        .w(px(58.0))
+                        .w(px(84.0))
                         .text_color(theme.faint)
                         .child(text)
                 };
