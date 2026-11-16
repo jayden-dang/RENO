@@ -160,8 +160,10 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
     assert!(executor.installed());
     // Probed from its record: its version is the record's.
     let health = executor.probe().await;
-    assert!(health.installed);
-    assert_eq!(health.version.as_deref(), Some("1.2.3"));
+    assert!(matches!(
+        &health.installed,
+        reno_proto::InstallStatus::Installed { version: Some(version), .. } if version == "1.2.3"
+    ));
     assert!(executor.descriptor().adapter_version.contains("CLI 1.2.3"));
     let (controls, _handle) = ExecControls::new(8);
     let spec = ExecSpec {

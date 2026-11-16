@@ -66,7 +66,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, ApprovalSubject, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    McpServerSpec, ModelInfo, SandboxLevel, SessionRef, Steering, StopReason, VersionRange,
+    HealthProbe, McpServerSpec, ModelCatalog, ModelInfo, SandboxLevel, SessionRef, SignedIn,
+    Steering, StopReason, VersionGate, VersionRange,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -74,8 +75,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::exec::{
-    Decision, ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, InputAnswer, Open,
-    OpenRequests, ProcessSink, Resolved, require_access,
+    Decision, ExecAnswer, ExecControls, ExecError, Executor, InputAnswer, Open, OpenRequests,
+    ProcessSink, Resolved, probe, require_access,
 };
 use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::owned::Child as OwnedChild;
@@ -239,6 +240,8 @@ pub struct CodexExecutor {
     cli_version: Arc<Mutex<Option<String>>>,
     /// The models `model/list` last returned, for the descriptor.
     models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
+    /// How long `probe` lets its short-lived app-server take in all.
+    probe_budget: Duration,
     tracker: TaskTracker,
 }
 
@@ -265,6 +268,7 @@ impl Default for CodexExecutor {
             ],
             cli_version: Arc::new(Mutex::new(None)),
             models: Arc::new(Mutex::new(None)),
+            probe_budget: probe::WIRE_BUDGET,
             tracker: TaskTracker::new(),
         }
     }
@@ -300,6 +304,13 @@ impl CodexExecutor {
         self
     }
 
+    /// Bound the app-server `probe` starts (tests shrink it; default 20 s).
+    #[must_use]
+    pub fn with_probe_budget(mut self, budget: Duration) -> Self {
+        self.probe_budget = budget;
+        self
+    }
+
     /// Honour only these access modes: the descriptor lists them and `start` refuses the rest.
     #[must_use]
     pub fn with_access_modes(mut self, modes: Vec<AccessMode>) -> Self {
@@ -321,24 +332,39 @@ impl CodexExecutor {
     /// Ask the app-server which models the signed-in account may use (`model/list`, paged;
     /// hidden models are skipped, the account's default leads) and keep the answer for the
     /// descriptor. A failure leaves what the descriptor already offered: the last discovery, or
-    /// the curated list.
+    /// the curated list. [`Executor::probe`] does this too, together with the sign-in check.
     ///
     /// Spawns a short-lived app-server, reaped before this returns; it is not a run, so it
-    /// reports no process record. Nothing calls it on its own: tests never reach a real binary
-    /// (ARCH-16).
+    /// reports no process record.
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>, HarnessError> {
         let exe = self
             .resolve_executable()
             .map_err(|error| HarnessError::NotInstalled(error.to_string()))?;
-        let mut cmd = Command::new(&exe);
+        self.query_app_server(&exe, false, Duration::from_secs(10))
+            .await?
+            .models
+    }
+
+    /// One short-lived `codex app-server` that answers, within `budget`, the model catalog and,
+    /// when `want_account`, `account/read` (the login Codex holds, read without refreshing it).
+    /// `Err` only when the app-server could not be started, did not initialize or ran out of
+    /// time; a failed `account/read` is `Unknown` and a failed catalog is in
+    /// [`AppServerAnswers::models`]. A catalog that was found is kept for the descriptor.
+    async fn query_app_server(
+        &self,
+        exe: &Path,
+        want_account: bool,
+        budget: Duration,
+    ) -> Result<AppServerAnswers, HarnessError> {
+        let mut cmd = Command::new(exe);
         cmd.arg("app-server");
-        crate::compose_child_path(&mut cmd, &exe);
+        crate::compose_child_path(&mut cmd, exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
         let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
-            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
+            crate::executable::spawn_error(e, None, || crate::executable::binary_hint(exe))
         })?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             child.shutdown(self.kill_grace).await;
@@ -350,58 +376,88 @@ impl CodexExecutor {
                 .request("initialize", initialize_params(false))
                 .await?;
             client.notify("initialized", None);
-
-            let mut models: Vec<ModelInfo> = Vec::new();
-            let mut seen_cursors = HashSet::new();
-            let mut cursor: Option<String> = None;
-            let mut default_model: Option<String> = None;
-            loop {
-                let mut params = json!({ "limit": 20, "includeHidden": false });
-                if let Some(cursor) = cursor.as_deref() {
-                    params["cursor"] = Value::String(cursor.to_owned());
-                }
-                let page = client.request("model/list", params).await?;
-                let (found, next) = catalog::parse_model_page(&page);
-                for (model, is_default) in found {
-                    if models.iter().all(|known| known.id != model.id) {
-                        if is_default && default_model.is_none() {
-                            default_model = Some(model.id.clone());
-                        }
-                        models.push(model);
-                    }
-                }
-                let Some(next) = next.filter(|next| !next.is_empty()) else {
-                    break;
-                };
-                if !seen_cursors.insert(next.clone()) {
-                    break;
-                }
-                cursor = Some(next);
-            }
-            if let Some(default) = default_model
-                && let Some(at) = models.iter().position(|model| model.id == default)
-                && at != 0
-            {
-                let model = models.remove(at);
-                models.insert(0, model);
-            }
-            if models.is_empty() {
-                return Err(HarnessError::Protocol(
-                    "Codex returned an empty model catalog".into(),
-                ));
-            }
-            Ok::<Vec<ModelInfo>, HarnessError>(models)
+            let signed_in = if want_account {
+                Some(
+                    match client
+                        .request("account/read", json!({ "refreshToken": false }))
+                        .await
+                    {
+                        Ok(reply) => catalog::account_state(&reply),
+                        Err(_) => SignedIn::Unknown,
+                    },
+                )
+            } else {
+                None
+            };
+            Ok::<_, HarnessError>(AppServerAnswers {
+                signed_in,
+                models: list_models(&client).await,
+            })
         };
-        let result = tokio::time::timeout(Duration::from_secs(10), discovery).await;
+        let result = tokio::time::timeout(budget, discovery).await;
         child.shutdown(self.kill_grace).await;
         client.abort();
-        let models = match result {
+        let answers = match result {
             Ok(inner) => inner?,
-            Err(_) => return Err(HarnessError::Protocol("model discovery timed out".into())),
+            Err(_) => return Err(HarnessError::Protocol("app-server probe timed out".into())),
         };
-        *self.models.lock().unwrap_or_else(PoisonError::into_inner) = Some(models.clone());
-        Ok(models)
+        if let Ok(models) = &answers.models {
+            *self.models.lock().unwrap_or_else(PoisonError::into_inner) = Some(models.clone());
+        }
+        Ok(answers)
     }
+}
+
+/// What a short-lived app-server told the probe.
+struct AppServerAnswers {
+    /// `account/read`'s verdict; `None` when it was not asked.
+    signed_in: Option<SignedIn>,
+    /// The model catalog, or why there is none.
+    models: Result<Vec<ModelInfo>, HarnessError>,
+}
+
+/// The account's model catalog, paged, hidden models skipped, the account's default first.
+async fn list_models(client: &RpcClient) -> Result<Vec<ModelInfo>, HarnessError> {
+    let mut models: Vec<ModelInfo> = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut default_model: Option<String> = None;
+    loop {
+        let mut params = json!({ "limit": 20, "includeHidden": false });
+        if let Some(cursor) = cursor.as_deref() {
+            params["cursor"] = Value::String(cursor.to_owned());
+        }
+        let page = client.request("model/list", params).await?;
+        let (found, next) = catalog::parse_model_page(&page);
+        for (model, is_default) in found {
+            if models.iter().all(|known| known.id != model.id) {
+                if is_default && default_model.is_none() {
+                    default_model = Some(model.id.clone());
+                }
+                models.push(model);
+            }
+        }
+        let Some(next) = next.filter(|next| !next.is_empty()) else {
+            break;
+        };
+        if !seen_cursors.insert(next.clone()) {
+            break;
+        }
+        cursor = Some(next);
+    }
+    if let Some(default) = default_model
+        && let Some(at) = models.iter().position(|model| model.id == default)
+        && at != 0
+    {
+        let model = models.remove(at);
+        models.insert(0, model);
+    }
+    if models.is_empty() {
+        return Err(HarnessError::Protocol(
+            "Codex returned an empty model catalog".into(),
+        ));
+    }
+    Ok(models)
 }
 
 /// The CLI to launch: the fixed `executable` if there is one, else `CODEX_EXECUTABLE`, else
@@ -496,38 +552,75 @@ impl Executor for CodexExecutor {
         }
     }
 
-    /// Installed, and the CLI's version. Whether the CLI is signed in is not knowable without
-    /// starting a run, so `signed_in` stays `None`.
-    async fn probe(&self) -> ExecutorHealth {
+    /// Where the CLI is, its version against the verified range, and, from one short-lived
+    /// app-server, whether Codex holds a login (`account/read`, no refresh, no model call) and
+    /// which models the account may use (`model/list`). When the app-server cannot be asked the
+    /// sign-in is `Unknown` and the models are the last live list, else the curated one.
+    async fn probe(&self) -> HealthProbe {
+        let overridden = self.executable.is_some()
+            || std::env::var_os("CODEX_EXECUTABLE").is_some_and(|value| !value.is_empty());
         let fixed = self.executable.clone();
-        let probed = tokio::task::spawn_blocking(move || {
-            resolve_executable(fixed.as_deref()).map(|exe| crate::executable::binary_version(&exe))
-        })
-        .await;
-        let version = match probed {
-            Ok(Ok(version)) => version,
-            Ok(Err(error)) => {
-                return ExecutorHealth {
-                    detail: Some(error.to_string()),
-                    ..ExecutorHealth::default()
-                };
-            }
-            Err(error) => {
-                return ExecutorHealth {
-                    detail: Some(format!("probe failed: {error}")),
-                    ..ExecutorHealth::default()
-                };
+        let resolved =
+            tokio::task::spawn_blocking(move || resolve_executable(fixed.as_deref())).await;
+        let fallback = || {
+            let found = self
+                .models
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match found {
+                Some(models) => ModelCatalog::live(models),
+                None => ModelCatalog::curated(catalog::static_model_infos()),
             }
         };
+        let exe = match resolved {
+            Ok(Ok(exe)) => exe,
+            Ok(Err(error)) => {
+                return HealthProbe::not_installed(
+                    probe::not_installed_reason(error.to_string(), overridden),
+                    fallback(),
+                );
+            }
+            Err(error) => return probe::failed(error, fallback()),
+        };
+        let version = probe::cli_version(exe.clone()).await;
         *self
             .cli_version
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = version.as_ref().map(ToString::to_string);
-        ExecutorHealth {
-            installed: true,
-            detail: too_old_message(version.as_ref()),
-            version: version.map(|v| v.to_string()),
-            signed_in: None,
+            .unwrap_or_else(PoisonError::into_inner) = version.clone();
+        let version_gate = reno_proto::version_gate(
+            version.as_deref(),
+            &VersionRange {
+                min: MIN_CLI_VERSION.into(),
+                verified: VERIFIED_CLI_VERSION.into(),
+            },
+        );
+        let (signed_in, models) = if matches!(version_gate, VersionGate::TooOld { .. }) {
+            // An app-server this old is not launched.
+            (SignedIn::Unknown, fallback())
+        } else {
+            match self.query_app_server(&exe, true, self.probe_budget).await {
+                Ok(answers) => (
+                    answers.signed_in.unwrap_or(SignedIn::Unknown),
+                    answers.models.map_or_else(
+                        |error| {
+                            tracing::debug!(%error, "codex model discovery failed; keeping the last list");
+                            fallback()
+                        },
+                        ModelCatalog::live,
+                    ),
+                ),
+                Err(error) => {
+                    tracing::debug!(%error, "the codex app-server probe failed");
+                    (SignedIn::Unknown, fallback())
+                }
+            }
+        };
+        HealthProbe {
+            installed: probe::installed(exe, version),
+            version_gate,
+            signed_in,
+            models,
         }
     }
 

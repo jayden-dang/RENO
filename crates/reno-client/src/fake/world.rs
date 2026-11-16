@@ -55,6 +55,7 @@ pub(super) struct World {
     next_id: u64,
     now_ms: u64,
     started_ms: u64,
+    pub(super) executors: Vec<reno_proto::ExecutorInfo>,
     pub(super) triggers: Vec<TriggerInfo>,
     pub(super) defs: DefsSnapshot,
     records: Vec<DefRecord>,
@@ -80,11 +81,32 @@ impl World {
             next_id: 1,
             now_ms: data::NOW_MS,
             started_ms: data::NOW_MS,
+            executors: seed.extras.executors,
             triggers: seed.extras.triggers,
             defs: seed.extras.defs,
             records: seed.extras.records,
             history: seed.extras.history,
         }
+    }
+
+    /// Probes again: stamps the health of `id` (every executor when `None`) with a new time.
+    /// `Err` when `id` is not an executor here.
+    pub(super) fn refresh_executors(
+        &mut self,
+        id: Option<&reno_proto::ExecutorId>,
+    ) -> Result<(), ()> {
+        if id.is_some_and(|id| !self.executors.iter().any(|e| &e.descriptor.id == id)) {
+            return Err(());
+        }
+        let now = self.tick();
+        for info in &mut self.executors {
+            if id.is_none_or(|id| id == &info.descriptor.id)
+                && let Some(health) = &mut info.health
+            {
+                health.checked_at_ms = now;
+            }
+        }
+        Ok(())
     }
 
     fn tick(&mut self) -> u64 {

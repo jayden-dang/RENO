@@ -25,6 +25,11 @@ say() {
   emit "{\"method\":\"item/completed\",\"params\":{\"item\":{\"id\":\"final\",\"type\":\"agentMessage\",\"text\":\"$text\"}}}"
 }
 
+# `--version`, for the driver's probe.
+case "$1" in
+  --version) echo "codex-cli ${FAKE_CODEX_VERSION:-0.169.0}"; exit 0 ;;
+esac
+
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
 has "$line" '"method":"initialize"' || exit 1
@@ -44,8 +49,23 @@ emit "{\"id\":$(rid "$line"),\"result\":{\"userAgent\":\"fake-codex\"}}"
 read -r line || exit 1 # initialized notification (no reply)
 has "$line" '"method":"initialized"' || exit 1
 
-# ---- thread start / resume -------------------------------------------------
+# ---- probe: account/read, in the state FAKE_CODEX_ACCOUNT names ----------------
+# (chatgpt, apikey, signedout, noauth, error, hang). Only a probe sends it, right after
+# `initialized`; a run goes straight to thread/start.
 read -r line || exit 1
+if has "$line" '"method":"account/read"'; then
+  has "$line" '"refreshToken":false' || exit 1
+  case "${FAKE_CODEX_ACCOUNT:-chatgpt}" in
+    chatgpt) emit "{\"id\":$(rid "$line"),\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":\"me@example.com\",\"planType\":\"pro\"},\"requiresOpenaiAuth\":true}}" ;;
+    apikey) emit "{\"id\":$(rid "$line"),\"result\":{\"account\":{\"type\":\"apiKey\"},\"requiresOpenaiAuth\":true}}" ;;
+    signedout) emit "{\"id\":$(rid "$line"),\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}" ;;
+    noauth) emit "{\"id\":$(rid "$line"),\"result\":{\"account\":null,\"requiresOpenaiAuth\":false}}" ;;
+    hang) exec sleep 30 ;;
+    *) emit "{\"id\":$(rid "$line"),\"error\":{\"code\":-32601,\"message\":\"method not found\"}}" ;;
+  esac
+  read -r line || exit 1
+fi
+# ---- thread start / resume -------------------------------------------------
 thread_line="$line"
 if has "$line" 'crash-on-thread-start'; then
   # The app-server dies under thread/start: the run must report why.

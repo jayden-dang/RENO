@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -237,6 +237,17 @@ CREATE UNIQUE INDEX workspaces_live_path ON workspaces (path)
     WHERE status IN ('preparing', 'active', 'kept');
 ";
 
+/// Migration 8 (T1.1, executor health): the latest probe of each executor, as the wire type's
+/// JSON, so a restarted daemon shows what it last found before it probes again. One row per
+/// executor, replaced by each probe; the history is in the event log.
+const V8: &str = "
+CREATE TABLE executor_health (
+    executor   TEXT PRIMARY KEY,
+    health     TEXT NOT NULL CHECK (json_valid(health)),
+    checked_at INTEGER NOT NULL
+) WITHOUT ROWID;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -247,6 +258,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V5),
         M::up(V6),
         M::up(V7),
+        M::up(V8),
     ])
 }
 
@@ -295,7 +307,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -434,5 +446,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!((runs, workspaces), (1, 0));
+    }
+
+    /// Upgrading a database written before executor health was stored (schema 7): its runs keep
+    /// their rows and the new table starts empty and works.
+    #[test]
+    fn upgrade_from_a_version_seven_database_adds_an_empty_executor_health_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT 1 FROM executor_health").is_err());
+        run(&mut conn).unwrap();
+        let (runs, health): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM executor_health)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((runs, health), (1, 0));
     }
 }

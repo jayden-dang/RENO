@@ -233,6 +233,45 @@ impl Client {
         Ok(self.rpc.call::<reno_proto::TriggerFire>(params).await?)
     }
 
+    /// `executor.list`: every executor with its descriptor and the health of its last probe.
+    /// Needs feature `executors`.
+    pub async fn list_executors(&self) -> Result<Vec<reno_proto::ExecutorInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTORS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorList>(NoParams {})
+            .await?
+            .executors)
+    }
+
+    /// `executor.refresh`: probes `id` again (every executor when `None`), waits for the answer
+    /// and returns the whole list. Needs feature `executors`.
+    pub async fn refresh_executors(
+        &self,
+        id: Option<reno_proto::ExecutorId>,
+    ) -> Result<Vec<reno_proto::ExecutorInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTORS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRefresh>(reno_proto::ExecutorRefreshParams { id })
+            .await?
+            .executors)
+    }
+
+    /// `executors.watch`: every executor and its health, then a new full list on every change.
+    /// Latest-value, like [`Client::watch_runs`]. Needs feature `executors`.
+    pub async fn watch_executors(
+        &self,
+    ) -> Result<BoxStream<'static, Result<reno_proto::ExecutorsSnapshot, ClientError>>, ClientError>
+    {
+        self.require(reno_proto::FEATURE_EXECUTORS)?;
+        watch_stream::<reno_proto::ExecutorsWatch>(
+            &self.rpc,
+            reno_proto::ExecutorsWatchParams::default(),
+        )
+        .await
+    }
+
     /// `workspace.list`: the worktrees of write runs, newest first, optionally only those in
     /// one of `status`. Needs feature `workspaces`.
     pub async fn list_workspaces(

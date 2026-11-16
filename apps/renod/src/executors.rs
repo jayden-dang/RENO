@@ -5,10 +5,11 @@
 //!   and waits to be steered or cancelled, which gives tests and demos a run that stays live
 //!   without any timer.
 //! - `claude-code` is the native [`ClaudeExecutor`] and `codex` the native [`CodexExecutor`]; both
-//!   are registered when their CLIs are found. Nothing here starts them.
+//!   are always registered, found or not: the kernel probes them (installed, version, signed in)
+//!   and refuses a run on one that cannot run. Nothing here starts them.
 //! - The agents built on ACP are native [`AcpExecutor`]s, one per agent, each under its own id:
 //!   `acp.grok`, `acp.devin`, `acp.hermes`, `acp.fx`, `acp.antigravity`, and `acp.<registry id>`
-//!   for each agent added from the ACP registry. They are registered when found, like the
+//!   for each agent added from the ACP registry. They are always registered, like the
 //!   others. A registry agent never replaces an executor that is already registered: the
 //!   registry lists agents Reno drives itself (`devin`, ...), and its record must not take over
 //!   their id.
@@ -101,9 +102,12 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
     steps
 }
 
-/// Builds the registry: `mock`, plus each harness whose CLI is installed. With `harnesses` false
-/// only `mock` is registered and no CLI is looked for, let alone started.
-pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError> {
+/// Builds the registry: `mock`, plus every harness Reno can drive, installed or not. Nothing is
+/// probed or started here: the kernel probes each executor when the daemon starts, and an
+/// executor that is not installed, too old or signed out stays listed (with the reason) and is
+/// refused a run before anything is spawned. With `harnesses` false only `mock` is registered
+/// and no CLI is looked for, let alone started.
+pub fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError> {
     let mut set = ExecutorSet {
         registry: ExecutorRegistry::new().with(Arc::new(mock_executor(hold_mock)?)),
         harnesses: Vec::new(),
@@ -131,23 +135,9 @@ pub async fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, I
             .map(|executor| Arc::new(executor) as Arc<dyn Executor>),
     );
     for executor in candidates {
-        let id = executor.descriptor().id;
-        let health = executor.probe().await;
-        if health.installed {
-            tracing::info!(
-                executor = %id,
-                version = health.version.as_deref().unwrap_or("unknown"),
-                "executor found"
-            );
-            set.registry.insert(id, executor.clone());
-            set.harnesses.push(executor);
-        } else {
-            tracing::info!(
-                executor = %id,
-                detail = health.detail.as_deref().unwrap_or(""),
-                "executor not installed"
-            );
-        }
+        set.registry
+            .insert(executor.descriptor().id, Arc::clone(&executor));
+        set.harnesses.push(executor);
     }
     Ok(set)
 }
@@ -200,9 +190,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn without_harnesses_only_the_mock_is_registered_and_nothing_is_probed() {
-        let set = discover(false, false).await.expect("discover");
+    #[test]
+    fn without_harnesses_only_the_mock_is_registered_and_nothing_is_probed() {
+        let set = discover(false, false).expect("discover");
         let ids: Vec<_> = set.registry.ids().map(ExecutorId::as_str).collect();
         assert_eq!(ids, [MOCK_ID]);
         assert!(set.harnesses.is_empty());

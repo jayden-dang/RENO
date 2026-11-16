@@ -16,6 +16,8 @@ croner.workspace = true
 globset.workspace = true
 jiff.workspace = true
 sha2.workspace = true
+# Health (src/health): comparing a CLI version with its verified range.
+semver.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

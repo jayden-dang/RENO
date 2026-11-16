@@ -26,9 +26,9 @@ use reno_proto::defs::{
 };
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, Approval, ApprovalDecision,
-    ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget, ExecutorId, RunEventItem,
-    RunId, RunStatus, RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo,
-    WorkspaceStatus,
+    ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget, ExecutorId, ExecutorInfo,
+    RunEventItem, RunId, RunStatus, RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo,
+    WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -42,6 +42,7 @@ use crate::defs::{self, CurrentDefs, DefsSetup};
 use crate::dispatcher;
 use crate::error::{KernelError, Result};
 use crate::events;
+use crate::health;
 use crate::recovery;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{self, SchedCmd};
@@ -135,6 +136,7 @@ impl Kernel {
         ));
         recovery::recover(&shared).await?;
         workspaces::sweep(&shared).await?;
+        shared.load_executor_health().await?;
         shared.approvals.refresh(&shared.db).await?;
         if let Some(setup) = definitions {
             defs::start(&shared, setup).await?;
@@ -258,6 +260,42 @@ impl Kernel {
     /// queues them.
     pub fn watch_triggers(&self) -> watch::Receiver<Arc<Vec<TriggerInfo>>> {
         self.shared.triggers_tx.subscribe()
+    }
+
+    /// Every executor with its descriptor and the health of its last probe. Latest value wins:
+    /// a slow reader skips versions, never queues them. The health stored by the previous daemon
+    /// is shown until this one has probed.
+    pub fn watch_executors(&self) -> watch::Receiver<Arc<Vec<ExecutorInfo>>> {
+        self.shared.health.subscribe()
+    }
+
+    /// Every executor and its last health now, by id.
+    pub fn executors(&self) -> Vec<ExecutorInfo> {
+        self.shared.health.list()
+    }
+
+    /// Probes `id` (every executor when `None`) again, waits for the answers and returns the
+    /// list. Probes never overlap for one executor and at most a few run at once. Errors with
+    /// [`KernelError::ExecutorNotFound`] for an id that is not registered.
+    pub async fn refresh_executors(&self, id: Option<&ExecutorId>) -> Result<Vec<ExecutorInfo>> {
+        if self.shared.root.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
+        self.shared
+            .probe_executors(id, health::Probing::Fresh)
+            .await?;
+        Ok(self.executors())
+    }
+
+    /// Probes every executor in the background, on the kernel's own tasks. The daemon calls it
+    /// once when it starts; nothing probes on a timer (ARCH-10).
+    pub fn probe_executors_in_background(&self) {
+        let shared = Arc::clone(&self.shared);
+        self.shared.spawn(async move {
+            if let Err(error) = shared.probe_executors(None, health::Probing::Shared).await {
+                tracing::debug!(%error, "the start-up probe of the executors ended early");
+            }
+        });
     }
 
     /// Every trigger and its state now.
@@ -610,9 +648,9 @@ pub(crate) fn bot_launch(
         .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
     let eligible = |id: &&ExecutorId| {
         shared.executors.get(id).is_some_and(|executor| {
-            dispatcher::no_eligible_executor(&executor.descriptor(), def.access, def.sandbox)
+            dispatcher::no_eligible_executor(&executor.descriptor(), None, def.access, def.sandbox)
                 .is_none()
-        })
+        }) && shared.executor_is_healthy(id)
     };
     let executor = match executor {
         Some(executor) => executor,

@@ -753,6 +753,42 @@ fn trigger_list_and_fire_through_the_cli() {
     );
 }
 
+#[test]
+fn executor_list_and_refresh_through_the_cli() {
+    let world = World::new();
+    world.start_daemon();
+
+    // A refresh waits for the probe, so what follows is the daemon's own answer, not a race with
+    // its start-up probe.
+    let refreshed = world.reno(&["executor", "refresh"]);
+    assert!(refreshed.status.success(), "{}", text(&refreshed.stderr));
+    let shown = text(&refreshed.stdout);
+    assert!(
+        shown.starts_with("mock") && shown.contains("installed") && shown.contains("signed in"),
+        "{shown}"
+    );
+
+    let json = world.json(&["executor", "list"]);
+    let mock = &json["executors"][0];
+    assert_eq!(mock["descriptor"]["id"], "mock");
+    assert_eq!(mock["health"]["installed"]["type"], "installed");
+    assert_eq!(mock["health"]["signedIn"]["type"], "yes");
+    assert_eq!(mock["health"]["models"]["source"], "curated");
+    assert!(mock["health"]["checkedAtMs"].as_u64().unwrap() > 0);
+
+    let one = world.reno(&["executor", "refresh", "mock"]);
+    assert!(one.status.success(), "{}", text(&one.stderr));
+    assert_eq!(text(&one.stdout).lines().count(), 1);
+
+    let ghost = world.reno(&["executor", "refresh", "nowhere"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    assert!(
+        text(&ghost.stderr).contains("not found"),
+        "{}",
+        text(&ghost.stderr)
+    );
+}
+
 // ---- workspaces ---------------------------------------------------------------------------
 
 /// A hermetic `git`: nothing from the user's own configuration leaks in.

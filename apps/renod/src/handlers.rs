@@ -23,6 +23,8 @@
 //! | `triggers.watch` | `watch_triggers` |
 //! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
 //! | `workspace.clean` | `clean_workspaces` |
+//! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
+//! | `executors.watch` | `watch_executors` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
 //! handler for it. Every kernel failure goes through [`crate::errors`].
@@ -55,6 +57,10 @@ use reno_proto::{
     DefGet, DefList, DefValidate, DefsWatch, TriggerFire, TriggerFireParams, TriggerFireResult,
     TriggerInfo, TriggerList, TriggerListResult, TriggersSnapshot, TriggersWatch,
     TriggersWatchParams,
+};
+use reno_proto::{
+    ExecutorInfo, ExecutorList, ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams,
+    ExecutorsSnapshot, ExecutorsWatch, ExecutorsWatchParams,
 };
 use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
@@ -120,6 +126,8 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
         .method::<TriggerList, _, _>(bind(ctx, trigger_list))
         .method::<TriggerFire, _, _>(bind(ctx, trigger_fire))
+        .method::<ExecutorList, _, _>(bind(ctx, executor_list))
+        .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<WorkspaceList, _, _>(bind(ctx, workspace_list))
         .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
         .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
@@ -128,6 +136,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
         .subscription::<DefsWatch, _, _, _>(bind(ctx, defs_watch))
         .subscription::<TriggersWatch, _, _, _>(bind(ctx, triggers_watch))
+        .subscription::<ExecutorsWatch, _, _, _>(bind(ctx, executors_watch))
 }
 
 type Reply<T> = Result<T, ErrorObject>;
@@ -171,7 +180,21 @@ async fn status(ctx: Arc<Ctx>, _: NoParams) -> Reply<DaemonStatusInfo> {
         uptime_secs: ctx.started.elapsed().as_secs(),
         active_runs: count(&ctx, &ACTIVE).await?,
         queued_runs: count(&ctx, &[RunStatus::Queued]).await?,
-        executors: ctx.executors.clone(),
+        // The executors found installed: one whose last probe says otherwise is left out.
+        executors: ctx
+            .kernel
+            .executors()
+            .into_iter()
+            .filter(|info| {
+                !info.health.as_ref().is_some_and(|health| {
+                    matches!(
+                        health.installed,
+                        reno_proto::InstallStatus::NotInstalled { .. }
+                    )
+                })
+            })
+            .map(|info| info.descriptor.id)
+            .collect(),
     })
 }
 
@@ -326,6 +349,24 @@ async fn trigger_fire(ctx: Arc<Ctx>, p: TriggerFireParams) -> Reply<TriggerFireR
         .map_err(|e| kernel_error(&e))
 }
 
+async fn executor_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<ExecutorListResult> {
+    Ok(ExecutorListResult {
+        executors: ctx.kernel.executors(),
+    })
+}
+
+/// Probes again and waits for the answer: the one call a person makes to say "I fixed it".
+async fn executor_refresh(ctx: Arc<Ctx>, p: ExecutorRefreshParams) -> Reply<ExecutorListResult> {
+    tracing::info!(executor = ?p.id, "executor refresh requested");
+    Ok(ExecutorListResult {
+        executors: ctx
+            .kernel
+            .refresh_executors(p.id.as_ref())
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
+}
+
 async fn workspace_list(ctx: Arc<Ctx>, p: WorkspaceListParams) -> Reply<WorkspaceListResult> {
     Ok(WorkspaceListResult {
         workspaces: ctx
@@ -457,6 +498,18 @@ async fn triggers_watch(
         ctx.kernel.watch_triggers(),
         |all: &Arc<Vec<TriggerInfo>>| TriggersSnapshot {
             triggers: all.as_ref().clone(),
+        },
+    ))
+}
+
+async fn executors_watch(
+    ctx: Arc<Ctx>,
+    _: ExecutorsWatchParams,
+) -> Reply<impl Stream<Item = SubItem<ExecutorsSnapshot>> + Send + use<>> {
+    Ok(latest(
+        ctx.kernel.watch_executors(),
+        |all: &Arc<Vec<ExecutorInfo>>| ExecutorsSnapshot {
+            executors: all.as_ref().clone(),
         },
     ))
 }

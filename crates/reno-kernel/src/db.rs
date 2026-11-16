@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ApprovalId, ApprovalOutcome, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId,
+    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, ResolvedBy, RunId, RunStatus, TaskId,
     WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
@@ -310,6 +310,21 @@ impl Db {
         statuses: &[WorkspaceStatus],
     ) -> Result<Vec<WorkspaceInfo>> {
         self.store.list_workspaces(statuses).await
+    }
+
+    pub(crate) async fn put_executor_health(
+        &self,
+        executor: &ExecutorId,
+        health: &ExecutorHealth,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .put_executor_health(executor, health, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn executor_health(&self) -> Result<Vec<(ExecutorId, ExecutorHealth)>> {
+        self.store.executor_health().await
     }
 
     pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {

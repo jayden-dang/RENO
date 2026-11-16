@@ -82,6 +82,12 @@ CREATE TABLE events (
 
 CREATE INDEX events_subject ON events (subject_type, subject_id, seq);
 
+CREATE TABLE executor_health (
+    executor   TEXT PRIMARY KEY,
+    health     TEXT NOT NULL CHECK (json_valid(health)),
+    checked_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
 CREATE TABLE firings (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     nonce        TEXT NOT NULL UNIQUE,

@@ -5,7 +5,7 @@
 //! 1. the data directory is made private (0700);
 //! 2. the data-directory lock is taken, before anything else is opened;
 //! 3. the worktrees directory is made (with the data directory's privacy);
-//!    the executors are looked up, the store is opened, the definitions directory is created on
+//!    the executors are built, the store is opened, the definitions directory is created on
 //!    first start, and the kernel starts: it recovers the last run's leftovers, then loads the
 //!    definitions;
 //! 4. the socket is bound and the server starts answering.
@@ -58,8 +58,8 @@ pub const SERVER_DEADLINE: Duration = Duration::from_secs(5);
 /// Where the daemon's executors come from.
 #[derive(Debug)]
 pub enum ExecutorSource {
-    /// `mock`, plus each harness whose CLI is installed. Looked up after the lock is taken, so a
-    /// second daemon fails fast.
+    /// `mock`, plus every harness Reno can drive, installed or not; the kernel probes them once
+    /// the daemon starts. Built after the lock is taken, so a second daemon fails fast.
     Discover {
         /// Use the mock's hold script: it waits to be steered or cancelled.
         hold_mock: bool,
@@ -189,7 +189,7 @@ impl Daemon {
             ExecutorSource::Discover {
                 hold_mock,
                 harnesses,
-            } => executors::discover(hold_mock, harnesses).await?,
+            } => executors::discover(hold_mock, harnesses)?,
             ExecutorSource::Given(set) => set,
         };
         let db = paths.db();
@@ -249,6 +249,9 @@ impl Daemon {
             }
         };
 
+        // The daemon's start is a definite signal to find out what each executor can do. The
+        // probes run on the kernel's own tasks; what they find reaches clients as it lands.
+        kernel.probe_executors_in_background();
         // After the kernel, so the scheduler is listening before the first notification.
         let power = if system_wake {
             match power::watch(wake) {

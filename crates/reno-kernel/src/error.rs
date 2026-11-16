@@ -1,7 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, RunId, RunStatus, Seq};
+use reno_proto::{ApprovalId, ExecutorId, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;
@@ -35,6 +35,9 @@ pub enum KernelError {
     /// The kernel is shutting down.
     #[error("the kernel is shutting down")]
     ShuttingDown,
+    /// No executor with this id is registered.
+    #[error("executor {0} not found")]
+    ExecutorNotFound(ExecutorId),
     /// No such definition, or no such version of it.
     #[error("{kind} {name:?} {}", match version { Some(v) => format!("version {v} not found"), None => "not found".to_owned() })]
     DefinitionNotFound {

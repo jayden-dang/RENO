@@ -110,8 +110,9 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use reno_proto::{
-    AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, IdError,
-    ModelInfo, SandboxLevel, SessionRef, Steering, StopReason, VersionRange,
+    AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, HealthProbe,
+    IdError, ModelCatalog, ModelInfo, NotInstalledReason, SandboxLevel, SessionRef, SignedIn,
+    Steering, StopReason, VersionGate, VersionRange,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -120,7 +121,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::agent_id::HarnessId;
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, Open, OpenRequests, Resolved,
+    ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, Resolved, probe,
     require_access,
 };
 use crate::jsonrpc::{Incoming, RpcClient};
@@ -132,7 +133,7 @@ use crate::wire::acp::system_message::SystemMessageEchoFilter;
 use crate::{HarnessError, Signal, send_signal};
 use child::Child;
 use config::{ConfigRules, select_session_config};
-use launch::{Launch, Launcher};
+use launch::{Inspected, Launch, Launcher};
 use session::{
     authenticate_for_run, cancel_params, initialize_params, is_auth_required, is_sign_in_prompt,
     not_signed_in, open_session, prompt_turn, signed_out, steering_call_future, steering_supported,
@@ -433,6 +434,26 @@ impl AcpExecutor {
         })
     }
 
+    /// What [`Executor::probe`] reports as sign-in: asked of a registry agent, `Unknown` for
+    /// every other agent and whenever the agent cannot be asked in time.
+    async fn sign_in_state(&self) -> SignedIn {
+        if !matches!(self.spec.id, HarnessId::Registry(_)) {
+            return SignedIn::Unknown;
+        }
+        match tokio::time::timeout(probe::WIRE_BUDGET, self.registry_sign_in_state()).await {
+            Ok(Ok(state)) if state.signed_in => SignedIn::Yes {
+                account: state.account,
+            },
+            Ok(Ok(_)) => SignedIn::No {
+                hint: format!(
+                    "{} is signed out; sign in with the agent's own login",
+                    self.spec.display_name
+                ),
+            },
+            Ok(Err(_)) | Err(_) => SignedIn::Unknown,
+        }
+    }
+
     fn known_models(&self) -> Vec<ModelInfo> {
         self.spec
             .models
@@ -517,39 +538,87 @@ impl Executor for AcpExecutor {
         }
     }
 
-    /// Installed, and the agent's version. Whether it is signed in is not knowable without
-    /// starting a run, so `signed_in` stays `None`.
-    async fn probe(&self) -> ExecutorHealth {
+    /// Where the agent is (or that its adapter needs the explicit install), its version against
+    /// the verified range, and whether it is signed in.
+    ///
+    /// Sign-in: an agent added from the ACP registry is asked the way ACP itself tests it, an
+    /// `initialize` and a `session/new` (never a prompt, so no model runs); a session refused as
+    /// `auth_required` is signed out. The built-in agents (Grok, Devin, Hermes, fx, Antigravity)
+    /// have no status the driver can read without starting a run, so they are `Unknown`.
+    /// The models are the curated list: ACP agents advertise theirs only inside a session.
+    async fn probe(&self) -> HealthProbe {
+        let curated = || ModelCatalog::curated(self.known_models());
         let spec = Arc::clone(&self.spec);
         let executable = self.executable.clone();
-        let probed = tokio::task::spawn_blocking(move || {
-            let launcher = Launcher {
+        let inspected = tokio::task::spawn_blocking(move || {
+            Launcher {
                 spec: &spec,
                 executable: executable.as_deref(),
-            };
-            let installed = launcher.installed();
-            let version = installed.then(|| launcher.version()).flatten();
-            (installed, version)
+            }
+            .inspect()
         })
         .await;
-        match probed {
-            Ok((installed, version)) => {
-                *self
-                    .cli_version
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = version.clone();
-                ExecutorHealth {
-                    installed,
-                    version,
-                    signed_in: None,
-                    detail: (!installed).then(|| self.spec.install_hint.to_owned()),
-                }
+        let (path, version) = match inspected {
+            Ok(Inspected::Ready { path, version }) => (path, version),
+            Ok(Inspected::NeedsInstall { what }) => {
+                return HealthProbe::not_installed(
+                    NotInstalledReason::NeedsInstall { what },
+                    curated(),
+                );
             }
-            Err(error) => ExecutorHealth {
-                detail: Some(format!("probe failed: {error}")),
-                ..ExecutorHealth::default()
+            Ok(Inspected::Missing {
+                message,
+                overridden,
+            }) => {
+                return HealthProbe::not_installed(
+                    probe::not_installed_reason(message, overridden),
+                    curated(),
+                );
+            }
+            Err(error) => return probe::failed(error, curated()),
+        };
+        *self
+            .cli_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = version.clone();
+        let (min, verified) = self.spec.cli_verified.unwrap_or(("0", "unverified"));
+        let version_gate = reno_proto::version_gate(
+            version.as_deref(),
+            &VersionRange {
+                min: min.into(),
+                verified: verified.into(),
             },
+        );
+        let signed_in = if matches!(version_gate, VersionGate::TooOld { .. }) {
+            SignedIn::Unknown
+        } else {
+            self.sign_in_state().await
+        };
+        HealthProbe {
+            installed: probe::installed(path, version),
+            version_gate,
+            signed_in,
+            models: curated(),
         }
+    }
+
+    /// Fetches the managed adapter (npm) or the pinned release archive this agent needs, on the
+    /// executor's own task tracker so shutdown waits for it. The only place an install happens:
+    /// `start` never installs.
+    async fn install(&self) -> Result<(), HarnessError> {
+        let spec = Arc::clone(&self.spec);
+        let executable = self.executable.clone();
+        let installing = self.tracker.spawn(async move {
+            Launcher {
+                spec: &spec,
+                executable: executable.as_deref(),
+            }
+            .install()
+            .await
+        });
+        installing
+            .await
+            .map_err(|error| HarnessError::Install(format!("the install task failed: {error}")))?
     }
 
     async fn start(
@@ -562,7 +631,7 @@ impl Executor for AcpExecutor {
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }
-        let (exe, args) = match self.launcher().resolve_program(true).await {
+        let (exe, args) = match self.launcher().resolve_program() {
             Ok(program) => program,
             Err(HarnessError::NotInstalled(why)) => return Err(ExecError::NotInstalled(why)),
             // A failed managed install is a failed run, not an ineligible executor.

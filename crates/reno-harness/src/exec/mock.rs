@@ -12,11 +12,12 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
-    AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, ModelInfo,
-    SandboxLevel, SessionRef, Steering, StopReason, VersionRange,
+    AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, HealthProbe,
+    InstallStatus, ModelCatalog, ModelInfo, SandboxLevel, SessionRef, SignedIn, Steering,
+    StopReason, VersionGate, VersionRange,
 };
 
-use super::{ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, require_access};
+use super::{ExecAnswer, ExecControls, ExecError, Executor, require_access};
 #[cfg(unix)]
 use crate::proc::ProcessRecord;
 
@@ -165,12 +166,16 @@ impl Executor for MockExecutor {
         self.descriptor.clone()
     }
 
-    async fn probe(&self) -> ExecutorHealth {
-        ExecutorHealth {
-            installed: true,
-            version: Some("mock".into()),
-            signed_in: Some(true),
-            detail: None,
+    /// Always installed and signed in: the mock is the daemon's own script, nothing to find.
+    async fn probe(&self) -> HealthProbe {
+        HealthProbe {
+            installed: InstallStatus::Installed {
+                path: std::path::PathBuf::from("mock"),
+                version: Some("mock".into()),
+            },
+            version_gate: VersionGate::Unchecked,
+            signed_in: SignedIn::Yes { account: None },
+            models: ModelCatalog::curated(self.descriptor.caps.models.clone()),
         }
     }
 
@@ -651,8 +656,9 @@ mod tests {
     async fn probe_reports_a_healthy_mock_and_the_trait_is_object_safe() {
         let mock: std::sync::Arc<dyn Executor> = std::sync::Arc::new(MockExecutor::new(id("mock")));
         let health = mock.probe().await;
-        assert!(health.installed);
-        assert_eq!(health.signed_in, Some(true));
+        assert!(matches!(health.installed, InstallStatus::Installed { .. }));
+        assert_eq!(health.signed_in, SignedIn::Yes { account: None });
+        assert_eq!(health.ineligible(), None);
         assert_eq!(mock.descriptor().id, id("mock"));
     }
 }

@@ -23,6 +23,7 @@ use crate::config::KernelConfig;
 use crate::db::Db;
 use crate::defs::CurrentDefs;
 use crate::error::{KernelError, Result};
+use crate::health::HealthBoard;
 use crate::ids::IdMint;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
@@ -104,6 +105,8 @@ impl Drop for Slot {
 pub(crate) struct Shared {
     pub(crate) db: Db,
     pub(crate) executors: ExecutorRegistry,
+    /// What the last probe found about each executor.
+    pub(crate) health: HealthBoard,
     pub(crate) config: KernelConfig,
     /// Cancelled by `shutdown`. Every run's token is its child.
     pub(crate) root: CancellationToken,
@@ -157,6 +160,7 @@ impl Shared {
         Self {
             db,
             executors,
+            health: HealthBoard::new(),
             config,
             root: CancellationToken::new(),
             abort: CancellationToken::new(),

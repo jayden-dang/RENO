@@ -49,6 +49,10 @@ pub(crate) enum Command {
     /// List the git worktrees write runs work in, and clean them up.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// List the executors (the agent CLIs Reno drives) with what the daemon found out about
+    /// each, and ask it to look again.
+    #[command(subcommand)]
+    Executor(ExecutorCommand),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -167,6 +171,22 @@ pub(crate) enum TriggerCommand {
 pub(crate) struct TriggerFire {
     /// The trigger, as `reno trigger list` shows it.
     pub(crate) name: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ExecutorCommand {
+    /// List every executor: whether it is installed and at which version, whether that version
+    /// is one the adapter was verified on, whether it is signed in, and which models it offers.
+    List,
+    /// Probe one executor (or all) again, wait for the answer and show it. Nothing probes on a
+    /// timer: run this after installing or signing in.
+    Refresh(ExecutorRefresh),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorRefresh {
+    /// The executor, as `reno executor list` shows it [default: all of them].
+    pub(crate) id: Option<ExecutorId>,
 }
 
 #[derive(Debug, Subcommand)]

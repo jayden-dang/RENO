@@ -31,12 +31,14 @@ use std::time::Duration;
 use reno_harness::exec::{ExecControls, ExecError};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
-    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, RunId, RunStatus, SandboxLevel, StopReason,
+    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, RunId, RunStatus,
+    SandboxLevel, StopReason,
 };
 use reno_store::{Claim, RunRecord, StoreError};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+use crate::health;
 use crate::lifecycle;
 use crate::scheduler::{SchedCmd, StartFailure};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
@@ -146,29 +148,52 @@ async fn in_place_opt_in(shared: &Shared, row: &RunRecord) -> bool {
         .is_some_and(|bot| bot.in_place_writes)
 }
 
-/// The diagnostic of a run that no executor can honour, or `None` when `descriptor` can: it must
-/// declare both the access mode and the sandbox level the run asks for (ARCH-15).
+/// Why an executor may not start a run, and how a trigger's backoff accounts for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    /// The run's diagnostic, starting `NoEligibleExecutor:`.
+    pub(crate) why: String,
+    /// The account-level failure the scheduler backs off on.
+    pub(crate) account: StartFailure,
+}
+
+/// The refusal of a run that `descriptor` cannot honour, or `None` when it can: it must declare
+/// both the access mode and the sandbox level the run asks for (ARCH-15), and the health of its
+/// last probe, when this process has one, must not say it is not installed, too old or signed
+/// out. Unknown sign-in and an untested version never refuse.
 pub(crate) fn no_eligible_executor(
     descriptor: &ExecutorDescriptor,
+    health: Option<&ExecutorHealth>,
     access: AccessMode,
     sandbox: SandboxLevel,
-) -> Option<String> {
+) -> Option<Refusal> {
+    let refuse = |why: String| Refusal {
+        why,
+        account: StartFailure::NoEligibleExecutor,
+    };
     if !descriptor.caps.access_modes.contains(&access) {
-        return Some(format!(
+        return Some(refuse(format!(
             "NoEligibleExecutor: the run asks for access mode {access:?}, and executor {} supports \
              only {:?}; a run is never started with a different access mode than it asked for",
             descriptor.id, descriptor.caps.access_modes
-        ));
+        )));
     }
     // `Unrestricted` asks for no ceiling beyond the access mode, so it needs no declaration.
     if sandbox != SandboxLevel::Unrestricted && !descriptor.caps.sandbox_levels.contains(&sandbox) {
-        return Some(format!(
+        return Some(refuse(format!(
             "NoEligibleExecutor: the run asks for sandbox level {sandbox:?}, and executor {} \
              declares only {:?}; a run is never started with a different sandbox than it asked for",
             descriptor.id, descriptor.caps.sandbox_levels
-        ));
+        )));
     }
-    None
+    let ineligible = health?.ineligible()?;
+    Some(Refusal {
+        why: format!(
+            "NoEligibleExecutor: executor {} is not usable: {ineligible}",
+            descriptor.id
+        ),
+        account: health::start_failure(&ineligible),
+    })
 }
 
 /// The task's prompt, working directory and model, as `submit` stored them.
@@ -267,9 +292,15 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         let why = format!("unknown executor {}", row.executor);
         return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
     };
-    if let Some(why) = no_eligible_executor(&executor.descriptor(), spec.access, spec.sandbox) {
-        let account = Some(StartFailure::NoEligibleExecutor);
-        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+    let found = shared.health_for_dispatch(&row.executor).await;
+    if let Some(refusal) = no_eligible_executor(
+        &executor.descriptor(),
+        found.as_ref(),
+        spec.access,
+        spec.sandbox,
+    ) {
+        let account = Some(refusal.account);
+        return fail_start(shared, &run_id, fence, refusal.why, account, cmd_rx, slot).await;
     }
     let info = RunInfo {
         cwd: spec.cwd.clone(),
@@ -305,8 +336,15 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         Some(Err(error)) => {
             let why = format!("the executor refused the run: {error}");
             let account = match error {
-                ExecError::NotInstalled(_) => Some(StartFailure::NotInstalled),
-                ExecError::NotSignedIn(_) => Some(StartFailure::NotSignedIn),
+                ExecError::NotInstalled(_) => {
+                    // A definite signal that what the board holds may be out of date.
+                    shared.probe_soon(&row.executor);
+                    Some(StartFailure::NotInstalled)
+                }
+                ExecError::NotSignedIn(_) => {
+                    shared.probe_soon(&row.executor);
+                    Some(StartFailure::NotSignedIn)
+                }
                 ExecError::UnsupportedAccess { .. } => Some(StartFailure::NoEligibleExecutor),
                 ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => None,
             };

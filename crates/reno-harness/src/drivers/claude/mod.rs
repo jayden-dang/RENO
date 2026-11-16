@@ -32,6 +32,7 @@
 //!   the orphan sweep (ARCHITECTURE 17.3).
 
 pub(crate) mod catalog;
+mod health;
 pub mod refresh_lock;
 mod resume;
 
@@ -47,7 +48,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    McpServerSpec, SandboxLevel, Steering, StopReason, VersionRange,
+    HealthProbe, McpServerSpec, ModelCatalog, SandboxLevel, SignedIn, Steering, StopReason,
+    VersionGate, VersionRange,
 };
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -56,8 +58,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, ExecutorHealth, OpenRequests, Resolved,
-    require_access,
+    ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, probe, require_access,
 };
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
@@ -150,16 +151,6 @@ fn mcp_servers_config_arg(servers: &[McpServerSpec]) -> Option<String> {
     Some(serde_json::json!({ "mcpServers": config }).to_string())
 }
 
-/// `Some(why)` when `version` is a CLI version older than [`MIN_CLI_VERSION`]. An unknown or
-/// unparsable version is never too old: the CLI decides.
-fn too_old_message(version: Option<&str>) -> Option<String> {
-    let found = semver::Version::parse(version?.trim()).ok()?;
-    let min = semver::Version::parse(MIN_CLI_VERSION).ok()?;
-    (found < min).then(|| {
-        format!("Claude Code {found} is older than the {min} this driver supports; update it")
-    })
-}
-
 /// The Claude Code executor. Construct with [`ClaudeExecutor::new`]; tests point it at a fake
 /// CLI with [`ClaudeExecutor::with_executable`].
 ///
@@ -198,6 +189,10 @@ pub struct ClaudeExecutor {
     access_modes: Vec<AccessMode>,
     /// The CLI version `probe` last read, for the descriptor.
     cli_version: Arc<Mutex<Option<String>>>,
+    /// How long `probe` lets each status command (`--version`, `auth status`) run.
+    probe_budget: Duration,
+    /// Where `probe` looks for a credential in the environment.
+    probe_env: health::EnvLookup,
     tracker: TaskTracker,
 }
 
@@ -222,6 +217,8 @@ impl Default for ClaudeExecutor {
                 AccessMode::FullAccess,
             ],
             cli_version: Arc::new(Mutex::new(None)),
+            probe_budget: probe::COMMAND_BUDGET,
+            probe_env: health::process_env(),
             tracker: TaskTracker::new(),
         }
     }
@@ -246,6 +243,25 @@ impl ClaudeExecutor {
     pub fn with_graces(mut self, interrupt_grace: Duration, kill_grace: Duration) -> Self {
         self.interrupt_grace = interrupt_grace;
         self.kill_grace = kill_grace;
+        self
+    }
+
+    /// Bound each status command `probe` runs (tests shrink it; default 10 s).
+    #[must_use]
+    pub fn with_probe_budget(mut self, budget: Duration) -> Self {
+        self.probe_budget = budget;
+        self
+    }
+
+    /// Where `probe` looks for a credential in the environment instead of the process's own
+    /// (a test seam: the machine a test runs on may have one set).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_probe_env(
+        mut self,
+        lookup: impl Fn(&str) -> Option<std::ffi::OsString> + Send + Sync + 'static,
+    ) -> Self {
+        self.probe_env = std::sync::Arc::new(lookup);
         self
     }
 
@@ -364,11 +380,6 @@ fn resolve_executable(executable: Option<&Path>) -> Result<PathBuf, ExecError> {
     })
 }
 
-/// The version of the CLI at `exe`, when it will say.
-fn cli_version(exe: &Path) -> Option<String> {
-    crate::executable::binary_version(exe).map(|v| v.to_string())
-}
-
 /// Start one CLI process for a run, wire its stdio up and report it for the orphan sweep.
 async fn launch(
     tracker: &TaskTracker,
@@ -456,38 +467,50 @@ impl Executor for ClaudeExecutor {
         }
     }
 
-    /// Installed, and the CLI's version. Whether the CLI is signed in is not knowable without
-    /// starting a run, so `signed_in` stays `None`.
-    async fn probe(&self) -> ExecutorHealth {
+    /// Where the CLI is and its version, whether its version is one the driver supports, and
+    /// whether it is signed in (`claude auth status`, or a credential in the environment; see
+    /// [`health`]). The model list is the curated one: the CLI has no cheap, offline way to
+    /// list models.
+    async fn probe(&self) -> HealthProbe {
+        let overridden = self.executable.is_some()
+            || std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_some_and(|value| !value.is_empty());
         let fixed = self.executable.clone();
-        let probed = tokio::task::spawn_blocking(move || {
-            resolve_executable(fixed.as_deref()).map(|exe| cli_version(&exe))
-        })
-        .await;
-        let version = match probed {
-            Ok(Ok(version)) => version,
+        let resolved =
+            tokio::task::spawn_blocking(move || resolve_executable(fixed.as_deref())).await;
+        let curated = |cli: Option<&str>| ModelCatalog::curated(catalog::supported_models(cli));
+        let exe = match resolved {
+            Ok(Ok(exe)) => exe,
             Ok(Err(error)) => {
-                return ExecutorHealth {
-                    detail: Some(error.to_string()),
-                    ..ExecutorHealth::default()
-                };
+                return HealthProbe::not_installed(
+                    probe::not_installed_reason(error.to_string(), overridden),
+                    curated(None),
+                );
             }
-            Err(error) => {
-                return ExecutorHealth {
-                    detail: Some(format!("probe failed: {error}")),
-                    ..ExecutorHealth::default()
-                };
-            }
+            Err(error) => return probe::failed(error, curated(None)),
         };
+        let version = probe::cli_version(exe.clone()).await;
         *self
             .cli_version
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = version.clone();
-        ExecutorHealth {
-            installed: true,
-            detail: too_old_message(version.as_deref()),
-            version,
-            signed_in: None,
+        let version_gate = reno_proto::version_gate(
+            version.as_deref(),
+            &VersionRange {
+                min: MIN_CLI_VERSION.into(),
+                verified: VERIFIED_CLI_VERSION.into(),
+            },
+        );
+        // An older CLI is ineligible already, and may not know `auth status`: not asked.
+        let signed_in = if matches!(version_gate, VersionGate::TooOld { .. }) {
+            SignedIn::Unknown
+        } else {
+            health::sign_in(&exe, self.probe_budget, &self.probe_env).await
+        };
+        HealthProbe {
+            installed: probe::installed(exe, version.clone()),
+            version_gate,
+            signed_in,
+            models: curated(version.as_deref()),
         }
     }
 
@@ -1506,19 +1529,6 @@ mod tests {
         assert!(
             semver::Version::parse(MIN_CLI_VERSION).unwrap()
                 <= semver::Version::parse(VERIFIED_CLI_VERSION).unwrap()
-        );
-    }
-
-    #[test]
-    fn a_cli_older_than_the_minimum_is_named_in_the_probe_detail() {
-        assert_eq!(too_old_message(Some("2.1.325")), None);
-        assert_eq!(too_old_message(Some(MIN_CLI_VERSION)), None);
-        assert_eq!(too_old_message(None), None);
-        assert_eq!(too_old_message(Some("not a version")), None);
-        let message = too_old_message(Some("2.1.100")).expect("too old");
-        assert!(
-            message.contains("2.1.100") && message.contains(MIN_CLI_VERSION),
-            "{message}"
         );
     }
 }

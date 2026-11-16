@@ -358,3 +358,24 @@ async fn an_abandoned_sign_in_kills_its_agent() {
     }
     panic!("the sign-in agent {pid} outlived the abandoned call");
 }
+
+#[tokio::test]
+async fn probe_asks_a_registry_agent_whether_it_is_signed_in_without_a_run() {
+    use reno_harness::exec::Executor;
+    use reno_proto::SignedIn;
+    let health = harness("signed-in-email").probe().await;
+    assert_eq!(
+        health.signed_in,
+        SignedIn::Yes {
+            account: Some("ada@example.com".into())
+        }
+    );
+    assert_eq!(health.ineligible(), None);
+
+    let health = harness("droid").probe().await;
+    assert!(
+        matches!(health.signed_in, SignedIn::No { .. }),
+        "{health:?}"
+    );
+    assert!(health.ineligible().is_some());
+}
