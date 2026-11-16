@@ -14,7 +14,8 @@
 //!    each becomes `expired` (a `synchronous=FULL` write), and its run's journal gets the
 //!    `ApprovalResolved { denied, expired }` that its supervisor never wrote. The harness that
 //!    asked is gone with its run, which is `interrupted` above.
-//! 3a. **Run tokens.** Every token still open is revoked, and the `RunLink` port clears its files.
+//!    Run tokens (T1.9) go with them: every token still open is revoked, and the `RunLink` port
+//!    clears its files.
 //! 4. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
 //!    its journal if the journal does not already end in one, with the stop reason its status
 //!    implies.

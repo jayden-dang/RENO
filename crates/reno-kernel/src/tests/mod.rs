@@ -305,6 +305,7 @@ impl Fx {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_over_with(
         dir: Option<TempDir>,
         store: Store,
