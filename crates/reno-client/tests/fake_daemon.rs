@@ -566,3 +566,54 @@ async fn a_daemon_without_definitions_is_not_asked_for_bots_or_definitions() {
     // A run on a named executor still works.
     client.run_task(task("go")).await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn executors_are_listed_refreshed_and_watched() {
+    use reno_proto::{ExecutorId, ModelSource, SignedIn};
+    let daemon = FakeDaemon::start(FakeConfig::default()).unwrap();
+    let client = daemon.connect().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_EXECUTORS));
+
+    let listed = client.list_executors().await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|e| e.descriptor.id.as_str()).collect();
+    assert_eq!(ids, ["claude-code", "codex", "acp.hermes", "mock"]);
+    let codex = listed
+        .iter()
+        .find(|e| e.descriptor.id.as_str() == "codex")
+        .unwrap();
+    let health = codex.health.as_ref().unwrap();
+    assert!(matches!(health.signed_in, SignedIn::No { .. }));
+    assert_eq!(health.models.source, ModelSource::Live);
+    assert!(health.ineligible().is_some());
+
+    // The watch starts with the list as it stands, then follows a refresh.
+    let mut watch = client.watch_executors().await.unwrap();
+    assert_eq!(watch.next().await.unwrap().unwrap().executors, listed);
+    let one: ExecutorId = "codex".parse().unwrap();
+    let refreshed = client.refresh_executors(Some(one)).await.unwrap();
+    let stamp = |list: &[reno_proto::ExecutorInfo], id: &str| {
+        list.iter()
+            .find(|e| e.descriptor.id.as_str() == id)
+            .and_then(|e| e.health.as_ref())
+            .map(|h| h.checked_at_ms)
+    };
+    assert!(
+        stamp(&refreshed, "codex") > stamp(&listed, "codex"),
+        "re-probed"
+    );
+    assert_eq!(
+        stamp(&refreshed, "mock"),
+        stamp(&listed, "mock"),
+        "only that one"
+    );
+    assert_eq!(watch.next().await.unwrap().unwrap().executors, refreshed);
+
+    // An id the daemon does not have is not found, and failures can be injected.
+    let error = client
+        .refresh_executors(Some("nowhere".parse().unwrap()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some(reno_proto::ErrorCode::NotFound));
+    daemon.set_executors(vec![]);
+    assert!(client.list_executors().await.unwrap().is_empty());
+}

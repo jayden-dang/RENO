@@ -58,8 +58,12 @@ struct Probed {
 
 impl Probed {
     fn new(says: HealthProbe) -> Self {
+        Self::named("mock", says)
+    }
+
+    fn named(name: &str, says: HealthProbe) -> Self {
         Self {
-            inner: MockExecutor::new(id("mock")).with_steps([MockStep::text("hi")]),
+            inner: MockExecutor::new(id(name)).with_steps([MockStep::text("hi")]),
             says: Arc::new(Mutex::new(says)),
             probes: Arc::default(),
             starts: Arc::default(),
@@ -375,4 +379,48 @@ async fn the_listed_models_are_the_ones_the_health_labels() {
         listed[0].health.as_ref().unwrap().models.source,
         ModelSource::Live
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bot_goes_to_the_first_of_its_executors_that_is_not_known_to_be_unusable() {
+    use reno_proto::defs::DefKind;
+
+    use super::defs::{FakePort, file, setup};
+    let bot = file(
+        DefKind::Bot,
+        "keeper",
+        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"codex\", \"mock\"]\n",
+    );
+    let codex = Probed::named("codex", signed_out());
+    let mock = Probed::new(signed_in());
+    let registry = ExecutorRegistry::new()
+        .with(Arc::new(codex.clone()))
+        .with(Arc::new(mock.clone()));
+    let port = FakePort::with(vec![bot]);
+    let fx = Fx::with_definitions(config(1), registry, setup(&port)).await;
+
+    // Unprobed, the bot's first executor is chosen.
+    let first = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, "/work".into(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.kernel.get_run(&first).await.unwrap().executor,
+        id("codex")
+    );
+    fx.wait_status(&first, RunStatus::Succeeded).await;
+
+    // Once codex is known to be signed out, the next run is not sent to it.
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let second = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, "/work".into(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.kernel.get_run(&second).await.unwrap().executor,
+        id("mock")
+    );
+    fx.wait_status(&second, RunStatus::Succeeded).await;
 }

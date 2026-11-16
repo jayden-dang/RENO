@@ -25,6 +25,17 @@
 //! the executor is ineligible for the request (not installed, not signed in, cannot honour the
 //! access mode), so the router can pick another one (ARCH-15).
 //!
+//! # Discovery
+//!
+//! [`Executor::probe`] finds out, without a model call, whether the harness is installed, at
+//! which version, whether that version is inside the range the adapter was verified on, whether
+//! it is signed in, and which models it offers (`HealthProbe`). A fact a driver cannot establish
+//! is reported as unknown, never guessed: sign-in per driver is Claude's `claude auth status`
+//! (or a credential in the environment), Codex's `account/read`, an ACP registry agent's
+//! `session/new`, and unknown for the other ACP agents. [`Executor::install`] is the one
+//! explicit install step (a managed npm adapter or a pinned release archive); `start` never
+//! installs, and a harness that needs it is reported as `NeedsInstall`.
+//!
 //! # Controls
 //!
 //! The kernel creates a pair with [`ExecControls::new`]: the [`ExecControls`] half goes to
