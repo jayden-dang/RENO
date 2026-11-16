@@ -42,7 +42,28 @@ pub(crate) fn wait_until(
     }
 }
 
+/// The window tests run one at a time. Each starts its own GPUI test app and a two-worker
+/// tokio runtime for the fake daemon; dozens of them at once, on a machine other work also
+/// loads, starve the fake daemon's tasks for seconds (seen as 8 s+ stalls) and the real-time
+/// waits lose. Taking this lock in the fixture serialises them; the guard lives in the test's
+/// own thread and is released when the test ends, passed or failed.
+pub(crate) fn one_window_test_at_a_time() {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+    static SERIAL: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+    HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        if held.is_none() {
+            *held = Some(SERIAL.lock().unwrap_or_else(PoisonError::into_inner));
+        }
+    });
+}
+
 pub(crate) fn fake_store(cx: &mut TestAppContext) -> Entity<Store> {
+    one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     cx.new(|cx| {
         let mut store = Store::connecting();
@@ -204,6 +225,7 @@ fn a_disconnected_daemon_shows_the_not_running_state(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn no_daemon_at_the_socket_says_how_to_start_one(cx: &mut TestAppContext) {
+    one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     let store = cx.new(|cx| {
         let mut store = Store::connecting();
@@ -786,6 +808,7 @@ fn a_daemon_that_will_not_start_is_explained_in_the_banner(cx: &mut TestAppConte
 
     use reno_client::launcher::{DaemonKeeper, FakeLaunchctl, KeeperConfig, Launcher};
 
+    one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");

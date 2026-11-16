@@ -19,6 +19,7 @@ use crate::vm::runs::RunFilter;
 use crate::vm::{Section, inbox, settings, triggers};
 
 fn store_with(cx: &mut TestAppContext, mut config: FakeConfig) -> Entity<Store> {
+    crate::tests::one_window_test_at_a_time();
     cx.update(gpui_tokio::init);
     config.step = std::time::Duration::ZERO;
     cx.new(|cx| {
