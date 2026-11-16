@@ -215,3 +215,65 @@ impl ServerHandler for RenoMcp {
             .with_instructions(INSTRUCTIONS)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use reno_proto::ErrorObject;
+
+    use super::*;
+
+    fn text(result: &CallToolResult) -> String {
+        result.content[0]
+            .as_text()
+            .expect("text content")
+            .text
+            .clone()
+    }
+
+    #[test]
+    fn a_token_file_is_read_without_its_whitespace_and_an_empty_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "rnt_abc\n").unwrap();
+        assert_eq!(read_token(&file).unwrap(), "rnt_abc");
+        std::fs::write(&file, " \n").unwrap();
+        assert!(read_token(&file).unwrap_err().to_string().contains("empty"));
+        assert!(read_token(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn every_missing_variable_is_named_and_nothing_is_started() {
+        let args = |run: Option<&str>, file: Option<&str>| McpArgs {
+            run: run.map(|r| r.parse().unwrap()),
+            token_file: file.map(PathBuf::from),
+        };
+        let socket = Some(PathBuf::from("/s"));
+        let message = |args, socket| run(args, socket).unwrap_err().to_string();
+        assert!(message(args(Some("run_a"), Some("/t")), None).contains(ENV_SOCKET));
+        assert!(message(args(None, Some("/t")), socket.clone()).contains(ENV_RUN_ID));
+        assert!(message(args(Some("run_a"), None), socket).contains(ENV_TOKEN_FILE));
+    }
+
+    #[test]
+    fn a_daemon_refusal_reaches_the_model_as_a_tool_error_and_a_stale_write_brings_the_entry() {
+        let refused = ClientError::Remote(Box::new(ErrorObject::new(
+            ErrorCode::Unauthorized,
+            "the run token is not valid",
+        )));
+        let result = explain(&refused);
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(text(&result), "the run token is not valid");
+
+        let mut stale = ErrorObject::new(ErrorCode::Conflict, "the entry changed");
+        stale.data = Some(serde_json::json!({"current": {"key": "k", "value": "v"}}));
+        let result = explain(&ClientError::Remote(Box::new(stale)));
+        assert!(text(&result).starts_with("the entry changed\n{"));
+        assert!(text(&result).contains("\"value\":\"v\""));
+
+        let gone = explain(&ClientError::Disconnected);
+        assert_eq!(gone.is_error, Some(true));
+        assert!(text(&gone).contains("not reachable"));
+    }
+}

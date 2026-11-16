@@ -20,7 +20,6 @@ futures.workspace = true
 notify.workspace = true
 rmcp.workspace = true
 rustix = { workspace = true, features = ["process"] }
-schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "macros", "sync"] }

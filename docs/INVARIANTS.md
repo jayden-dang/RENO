@@ -52,7 +52,8 @@ its ports:
 - `Watch` — file and ref changes;
 - `WakeSignal` — the system woke from sleep (a handle the daemon raises; the kernel only listens);
 - `Definitions` — the definitions repository;
-- `Secrets` — the Keychain.
+- `Secrets` — the Keychain;
+- `RunLink` — a run's token file and the `reno mcp` server that reads it.
 
 The ports are implemented outside the kernel and faked in tests. The kernel never reads the
 system clock, spawns a process, or opens a file itself.

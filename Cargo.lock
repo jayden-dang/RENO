@@ -5103,7 +5103,6 @@ dependencies = [
  "reno-proto",
  "rmcp",
  "rustix",
- "schemars",
  "serde",
  "serde_json",
  "tempfile",

@@ -236,6 +236,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_board_write_carries_the_entry_as_it_stands() {
+        let entry = reno_proto::BoardEntry {
+            key: "plan".into(),
+            value: Some("v1".into()),
+            version: 3,
+            size: 2,
+            updated_at_ms: 9,
+        };
+        let object = kernel_error(&KernelError::BoardStale {
+            current: Some(Box::new(entry.clone())),
+        });
+        assert_eq!(object.code, ErrorCode::Conflict);
+        let data: reno_proto::BoardConflict =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!(data.current, Some(entry));
+        // A key that does not exist yet says so.
+        let object = kernel_error(&KernelError::BoardStale { current: None });
+        let data: reno_proto::BoardConflict =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!(data.current, None);
+    }
+
+    #[test]
+    fn every_refused_token_reads_the_same() {
+        let object = kernel_error(&KernelError::AgentDenied);
+        assert_eq!(object.code, ErrorCode::Unauthorized);
+        assert!(object.data.is_none());
+    }
+
+    #[test]
     fn a_budget_refusal_carries_its_typed_payload() {
         let stop = reno_proto::BudgetStop {
             kind: reno_proto::BudgetKind::Tokens,
