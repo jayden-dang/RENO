@@ -73,14 +73,21 @@ pub(crate) async fn run(shared: Arc<Shared>) {
             biased;
             () = shared.root.cancelled() => break,
             () = shared.wake.notified() => {}
-            () = sleep_for(wait) => {}
+            () = sleep_for(&shared, wait) => {}
         }
     }
 }
 
-async fn sleep_for(wait: Option<Duration>) {
+async fn sleep_for(shared: &Shared, wait: Option<Duration>) {
     match wait {
-        Some(wait) => sleep(wait).await,
+        Some(wait) => {
+            let timer = sleep(wait);
+            #[cfg(test)]
+            shared.db.armed(crate::db::Armed::Dispatcher);
+            #[cfg(not(test))]
+            let _ = shared;
+            timer.await;
+        }
         None => std::future::pending().await,
     }
 }

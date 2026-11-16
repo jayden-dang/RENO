@@ -255,7 +255,13 @@ mod tests {
         }
     }
 
-    /// Real files and the real watcher, so the waits are real and short.
+    /// A hang detector, not an expected latency: a wait for a change returns the moment the event
+    /// arrives. The platform's event daemon (`fseventsd` on macOS) is shared by the whole
+    /// machine and can lag by seconds when it is busy, so a short bound here only measures the
+    /// load. The waits that expect silence stay short: they only have to outlast the debounce.
+    const FAILSAFE: Duration = Duration::from_secs(60);
+
+    /// Real files and the real watcher.
     async fn changed(stream: &mut WatchStream, within: Duration) -> bool {
         tokio::time::timeout(within, stream.changes.recv())
             .await
@@ -275,7 +281,7 @@ mod tests {
         for n in 0..5 {
             fs::write(inbox.join(format!("a{n}.txt")), "x").unwrap();
         }
-        assert!(changed(&mut stream, Duration::from_secs(10)).await);
+        assert!(changed(&mut stream, FAILSAFE).await);
         assert!(
             !changed(&mut stream, Duration::from_millis(400)).await,
             "one burst, one signal"
@@ -299,7 +305,7 @@ mod tests {
             .unwrap();
         fs::create_dir(&later).unwrap();
         fs::write(later.join("f"), "x").unwrap();
-        assert!(changed(&mut stream, Duration::from_secs(10)).await);
+        assert!(changed(&mut stream, FAILSAFE).await);
         drop(stream);
         port.shutdown().await;
     }

@@ -38,6 +38,7 @@ use reno_store::Store;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
+use crate::db::Armed;
 use crate::{
     DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock, RunLink, Workspace,
 };
@@ -395,6 +396,13 @@ impl Fx {
             (stable >= 5).then_some(now)
         })
         .await
+    }
+
+    /// Wait until a deadline timer of `kind` has been armed more than `past` times. Paused time
+    /// may only be advanced once the timer it is meant to fire exists: the store's writer is a
+    /// real thread, so no number of yields proves a task has got past its store calls.
+    pub(super) async fn wait_armed(&self, kind: Armed, past: u64) {
+        until(async || (self.kernel.armed_count(kind) > past).then_some(())).await;
     }
 
     /// The run's journal once it ends in a `Done`: the state commits first, the `Done` follows.

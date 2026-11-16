@@ -230,6 +230,8 @@ impl Supervisor {
             });
         }
         self.wall = Some(Box::pin(sleep(self.info.wall_time)));
+        #[cfg(test)]
+        self.shared.db.armed(crate::db::Armed::WallTime);
         let period = self.shared.config.heartbeat_period();
         let mut beat = Box::pin(sleep(period));
         let mut grace: Option<Pin<Box<Sleep>>> = None;

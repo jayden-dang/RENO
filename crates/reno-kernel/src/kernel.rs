@@ -795,6 +795,12 @@ impl Kernel {
     pub(crate) fn store_writes(&self) -> u64 {
         self.shared.db.writes()
     }
+
+    /// Deadline timers of `kind` armed so far (for tests that advance paused time).
+    #[cfg(test)]
+    pub(crate) fn armed_count(&self, kind: crate::db::Armed) -> u64 {
+        self.shared.db.armed_count(kind)
+    }
 }
 
 /// A task as a caller states it, before the router has chosen its executor.
