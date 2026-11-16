@@ -17,6 +17,7 @@
 //! - `runs`: tasks and runs, claims, fences and transitions.
 //! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
 //! - `triggers`: the scheduler's state and firings, fired atomically with the run they start.
+//! - `executor_health`: the latest probe of each executor.
 //! - `workspaces`: the worktree of each write run, recorded before it is made.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
@@ -31,6 +32,7 @@ pub mod approvals;
 pub mod db;
 pub mod definitions;
 pub mod error;
+mod executor_health;
 pub mod events;
 pub mod journal;
 mod migrations;
@@ -53,6 +55,8 @@ pub use writer::StoreConfig;
 mod approval_tests;
 #[cfg(test)]
 mod definition_tests;
+#[cfg(test)]
+mod executor_health_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
