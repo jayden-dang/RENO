@@ -5,6 +5,11 @@
 //! [`WatchStream`]: one `()` for each burst of changes after it has settled. The port is
 //! implemented outside the kernel (`renod` uses `notify`) and faked in tests.
 //!
+//! Starting a watch can fail for reasons that pass (the platform refuses a new stream while the
+//! machine is out of them). The scheduler then shows the trigger as failed and tries again after
+//! a [`WatchBackoff`] delay, longer each time. That is a retry-on-error timer, armed only while
+//! a start is failing; it never asks whether files changed (ARCH-10).
+//!
 //! Dropping the stream stops the watch. Each message means "something under these paths
 //! changed"; the channel is small and bounded, and a change that arrives while one is pending
 //! is the same signal.
@@ -15,6 +20,34 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
+
+/// How long to wait before trying to start a failed watch again: `initial` after the first
+/// failure, doubling after each, never more than `max`. A deadline that exists only while a
+/// start is failing, not a poll (ARCH-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchBackoff {
+    /// The wait after the first failure.
+    pub initial: Duration,
+    /// The longest wait.
+    pub max: Duration,
+}
+
+impl Default for WatchBackoff {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(30),
+        }
+    }
+}
+
+impl WatchBackoff {
+    /// The wait after `failures` failures in a row (at least 1).
+    pub fn delay(&self, failures: u32) -> Duration {
+        let factor = 2u32.saturating_pow(failures.saturating_sub(1));
+        self.initial.saturating_mul(factor).min(self.max)
+    }
+}
 
 /// What to watch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +88,27 @@ impl fmt::Debug for WatchStream {
 
 /// The `Watch` port: file changes, event-driven (ARCH-10).
 pub trait Watch: Send + Sync + fmt::Debug {
-    /// Starts watching. An error is a path that cannot be watched; the trigger is then shown as
-    /// failed, with the message, until its definition changes.
+    /// Starts watching. An error is a path that cannot be watched, or a platform that refuses;
+    /// the trigger is then shown as failed, with the message, and the start is tried again with
+    /// backoff ([`WatchBackoff`]) until it works or the definition changes.
     fn watch(&self, spec: &WatchSpec) -> Result<WatchStream>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_backoff_doubles_to_its_ceiling_and_never_overflows() {
+        let backoff = WatchBackoff {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(30),
+        };
+        let secs = |failures| backoff.delay(failures).as_millis();
+        assert_eq!(
+            [secs(0), secs(1), secs(2), secs(3), secs(8), secs(9)],
+            [250, 250, 500, 1_000, 30_000, 30_000]
+        );
+        assert_eq!(backoff.delay(u32::MAX), Duration::from_secs(30));
+    }
 }

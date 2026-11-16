@@ -52,6 +52,7 @@ use crate::link::{FsRunLink, resolve_reno};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
 use crate::power::{self, PowerWatch};
+use crate::watcher::{NotifyWatchers, WatcherFactory};
 use crate::worktrees::GitWorkspace;
 
 /// How long connections get, after the kernel has stopped, to finish what they are owed before
@@ -102,6 +103,12 @@ pub struct DaemonConfig {
     /// secret store (tests): `secret.*` answers unavailable, and a bot that lists a secret
     /// cannot run. The binary sets the login Keychain.
     pub secrets: Option<Arc<dyn Secrets>>,
+    /// How the platform file watchers (the definitions', and those of `fs` triggers) are
+    /// started. Tests that do not exercise file watching give [`NoWatchers`], because the
+    /// machine has only a few watch streams.
+    ///
+    /// [`NoWatchers`]: crate::watcher::NoWatchers
+    pub watchers: Arc<dyn WatcherFactory>,
 }
 
 impl DaemonConfig {
@@ -118,6 +125,7 @@ impl DaemonConfig {
             reno_bin: None,
             system_wake: false,
             secrets: None,
+            watchers: Arc::new(NotifyWatchers),
         }
     }
 
@@ -201,6 +209,7 @@ impl Daemon {
             system_wake,
             secrets,
             reno_bin,
+            watchers,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -239,8 +248,12 @@ impl Daemon {
         defs::bootstrap(&paths.defs_dir, git_init)
             .await
             .map_err(defs_error)?;
-        let fs_defs =
-            Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
+        let fs_defs = Arc::new(
+            FsDefinitions::open(&paths.defs_dir, defs_debounce)
+                .map_err(defs_error)?
+                .with_watchers(Arc::clone(&watchers))
+                .with_retry(kernel.watch_retry),
+        );
 
         kernel.owner = format!("renod-{}", std::process::id());
         if kernel.default_executors.is_empty() {
@@ -260,7 +273,7 @@ impl Daemon {
         kernel.home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from);
-        let fs_watch = Arc::new(FsWatch::new());
+        let fs_watch = Arc::new(FsWatch::with_watchers(watchers));
         let wake = WakeSignal::new();
         let mut setup = DefsSetup::new(fs_defs.clone(), context)
             .with_watch(fs_watch.clone())
@@ -323,6 +336,7 @@ impl Daemon {
             default_cwd: scratch,
             stop: stop.clone(),
             secrets,
+            fs_defs: Arc::clone(&fs_defs),
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));
         drop(ctx);

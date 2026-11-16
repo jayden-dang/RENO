@@ -722,7 +722,7 @@ pub(crate) fn budget_lines(status: &reno_proto::BudgetStatusResult) -> Vec<Strin
 /// The text of `reno daemon status` for a running daemon.
 pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> String {
     let executors: Vec<_> = info.executors.iter().map(|e| e.as_str()).collect();
-    format!(
+    let mut text = format!(
         "running: pid {}, renod {}, up {}\nruns: {} active, {} queued\nexecutors: {}\nsocket: {}",
         info.pid,
         info.version,
@@ -735,7 +735,13 @@ pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> 
             executors.join(", ")
         },
         socket.display()
-    )
+    );
+    if let Some(problem) = &info.definitions_watch {
+        text.push_str(&format!(
+            "\nwarning: edits to the definitions are not being noticed ({problem}); the daemon is retrying"
+        ));
+    }
+    text
 }
 
 #[cfg(test)]

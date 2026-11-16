@@ -81,6 +81,7 @@ fn toy_router(probes: Arc<Probes>) -> Router {
                 active_runs: 0,
                 queued_runs: 0,
                 executors: vec![],
+                definitions_watch: None,
             })
         })
         .method::<RunGet, _, _>(|p, _| async move {
@@ -717,6 +718,7 @@ async fn a_guard_sees_the_state_a_handler_set_and_refuses_on_that_connection_onl
                 active_runs: 0,
                 queued_runs: 0,
                 executors: vec![],
+                definitions_watch: None,
             })
         })
         .method::<RunGet, _, _>(|_, _| async move {

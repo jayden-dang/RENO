@@ -14,6 +14,7 @@
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
+//! - [`watcher`]: how the platform watcher is started (a factory), and a count of live ones for tests.
 //! - [`secrets`]: the `Secrets` port over the macOS Keychain, behind a `Keychain` trait with an
 //!   in-memory fake.
 //! - [`link`]: the `RunLink` port: each run's token file and the `reno mcp` server that reads it.
@@ -39,6 +40,7 @@ pub mod logging;
 pub mod paths;
 pub mod power;
 pub mod secrets;
+pub mod watcher;
 pub mod worktrees;
 
 pub use daemon::{
@@ -48,6 +50,7 @@ pub use defs::{Bootstrapped, FsDefinitions, GitInit, GitOutcome};
 pub use executors::ExecutorSet;
 pub use fswatch::FsWatch;
 pub use paths::Paths;
+pub use watcher::WatcherFactory;
 pub use worktrees::GitWorkspace;
 
 /// Held by the tests that rely on the platform's real file events, so they run one at a time:

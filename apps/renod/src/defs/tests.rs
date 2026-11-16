@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use notify::event::{AccessKind, CreateKind, Event, Flag};
@@ -629,4 +630,120 @@ async fn a_second_watch_is_refused() {
     let _first = fs_defs.watch().unwrap();
     assert!(fs_defs.watch().is_err());
     fs_defs.shutdown().await;
+}
+
+// ---- a watch that cannot start ------------------------------------------------------------
+
+use std::sync::Arc;
+
+use crate::watcher::{Counting, FailingFirst, Handler, WatcherFactory, WatcherGuard};
+
+/// A watcher that starts nothing real and keeps the handlers, so a test can raise the events
+/// itself. No platform stream is used, so nothing here depends on the machine's few.
+#[derive(Default)]
+struct Captured {
+    handlers: Mutex<Vec<Handler>>,
+}
+
+impl std::fmt::Debug for Captured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Captured")
+    }
+}
+
+impl Captured {
+    fn raise(&self, event: Event) {
+        for handler in self.handlers.lock().unwrap().iter_mut() {
+            handler(Ok(event.clone()));
+        }
+    }
+}
+
+impl WatcherFactory for Captured {
+    fn start(&self, _roots: &[PathBuf], handler: Handler) -> Result<WatcherGuard, String> {
+        self.handlers.lock().unwrap().push(handler);
+        Ok(WatcherGuard::new(()))
+    }
+}
+
+fn quick() -> WatchBackoff {
+    WatchBackoff {
+        initial: Duration::from_millis(5),
+        max: Duration::from_millis(20),
+    }
+}
+
+#[tokio::test]
+async fn a_watch_that_cannot_start_is_reported_retried_and_then_reloads_edits() {
+    let (_dir, root) = temp_root();
+    bootstrap(&root, fixed(GitOutcome::Unavailable))
+        .await
+        .unwrap();
+    let captured = Arc::new(Captured::default());
+    let flaky = Arc::new(FailingFirst::new(Arc::clone(&captured), 3));
+    let fs_defs = FsDefinitions::open(&root, Duration::from_millis(5))
+        .unwrap()
+        .with_watchers(flaky.clone())
+        .with_retry(quick());
+
+    // The first start fails at once: `watch` still answers, the condition is shown, and the last
+    // good files keep being readable.
+    let mut changes = fs_defs.watch().unwrap();
+    let problem = fs_defs.watch_problem().expect("the failure is shown");
+    assert!(
+        problem.contains("unable to start FSEvent stream"),
+        "{problem}"
+    );
+    assert!(!fs_defs.snapshot().await.unwrap().files.is_empty());
+
+    // It is retried until it works, and the start is itself a reason to read again: edits made
+    // meanwhile were not seen.
+    next_signal(&mut changes).await;
+    assert_eq!(fs_defs.watch_problem(), None);
+    assert_eq!(
+        flaky.attempts(),
+        4,
+        "three refusals, then the start that worked"
+    );
+
+    // From then on an edit is reported as usual.
+    write(&root, "bots/late.toml", "name = \"late\"\n");
+    captured.raise(
+        Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("bots/late.toml")),
+    );
+    until_snapshot(&fs_defs, &mut changes, |s| {
+        names(s).contains(&(DefKind::Bot, "late"))
+    })
+    .await;
+    assert_eq!(flaky.attempts(), 4, "a working watch is not started again");
+    fs_defs.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_ends_the_retries_and_a_dropped_port_lets_go_of_its_stream() {
+    let (_dir, root) = temp_root();
+    bootstrap(&root, fixed(GitOutcome::Unavailable))
+        .await
+        .unwrap();
+
+    // Never starts: shutdown ends the retry task.
+    let flaky = Arc::new(FailingFirst::new(Arc::new(Captured::default()), u32::MAX));
+    let stuck = FsDefinitions::open(&root, Duration::from_millis(5))
+        .unwrap()
+        .with_watchers(flaky)
+        .with_retry(quick());
+    let _changes = stuck.watch().unwrap();
+    tokio::time::timeout(FAILSAFE, stuck.shutdown())
+        .await
+        .expect("the retry task ends with the port");
+
+    // Started, then dropped without a shutdown: the stream goes with it.
+    let counting = Arc::new(Counting::new(Arc::new(Captured::default())));
+    let held = FsDefinitions::open(&root, Duration::from_millis(5))
+        .unwrap()
+        .with_watchers(counting.clone());
+    let _changes = held.watch().unwrap();
+    assert_eq!(counting.live(), 1);
+    drop(held);
+    assert_eq!(counting.live(), 0, "dropping the port stopped its watcher");
 }
