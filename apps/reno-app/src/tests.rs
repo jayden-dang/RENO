@@ -151,6 +151,20 @@ fn approving_through_the_view_model_removes_the_approval(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn a_home_approval_card_hands_a_wider_answer_to_the_inbox(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let first = store.read_with(vcx, |s, _| s.state().approvals()[0].clone());
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    click(vcx, &format!("more-{}", first.id));
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Inbox);
+    // Nothing was decided on the way: the Inbox card holds the scope choice.
+    assert_eq!(approvals(vcx, &store), 2);
+}
+
+#[gpui::test]
 fn a_disconnected_daemon_shows_the_not_running_state(cx: &mut TestAppContext) {
     let store = cx.new(|_| Store::connecting());
     store.update(cx, |s, cx| {
