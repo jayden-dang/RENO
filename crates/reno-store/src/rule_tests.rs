@@ -141,9 +141,7 @@ async fn a_decision_and_its_rule_commit_together_or_not_at_all() {
     store
         .resolve_approval_remembering(
             &id,
-            ApprovalOutcome::Denied,
-            ResolvedBy::Human,
-            None,
+            (ApprovalOutcome::Denied, ResolvedBy::Human, None),
             rule(
                 1,
                 StandingScope::Run { run: run_id(0) },
@@ -166,9 +164,7 @@ async fn a_decision_and_its_rule_commit_together_or_not_at_all() {
     let again = store
         .resolve_approval_remembering(
             &id,
-            ApprovalOutcome::Approved,
-            ResolvedBy::Human,
-            None,
+            (ApprovalOutcome::Approved, ResolvedBy::Human, None),
             rule(2, StandingScope::Always, StandingEffect::Allow, None),
             1,
             30,
@@ -182,9 +178,7 @@ async fn a_decision_and_its_rule_commit_together_or_not_at_all() {
     let stale = store
         .resolve_approval_remembering(
             &pending(3, 0).id,
-            ApprovalOutcome::Approved,
-            ResolvedBy::Human,
-            None,
+            (ApprovalOutcome::Approved, ResolvedBy::Human, None),
             rule(3, StandingScope::Always, StandingEffect::Allow, None),
             7,
             50,

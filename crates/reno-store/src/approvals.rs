@@ -521,15 +521,14 @@ impl Store {
         .await
     }
 
-    /// [`Self::resolve_approval`] and, in the same transaction, the standing rule the answer
+    /// [`Self::resolve_approval`] (its `outcome`, `by` and `message` come as one tuple) and, in
+    /// the same transaction, the standing rule the answer
     /// makes (`rule.created`); neither happens without the other. `rule.source_approval` is
     /// set to `id`.
     pub async fn resolve_approval_remembering(
         &self,
         id: &ApprovalId,
-        outcome: ApprovalOutcome,
-        by: ResolvedBy,
-        message: Option<String>,
+        (outcome, by, message): (ApprovalOutcome, ResolvedBy, Option<String>),
         mut rule: crate::rules::NewRule,
         fence: u64,
         now: i64,

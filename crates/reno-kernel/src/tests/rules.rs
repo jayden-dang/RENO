@@ -158,7 +158,7 @@ async fn a_run_rule_covers_the_rest_of_that_run_and_no_other_run() {
     let rules = rig.fx.kernel.list_rules(false).await.unwrap();
     assert_eq!(rules[0].scope, StandingScope::Run { run: first.clone() });
     assert_eq!(rules[0].effect, StandingEffect::Allow);
-    assert_eq!(rules[0].source_approval.is_some(), true);
+    assert!(rules[0].source_approval.is_some());
 
     // A later run asks again.
     let second = rig.run_as("keeper").await;

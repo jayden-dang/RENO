@@ -396,7 +396,6 @@ impl Db {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn resolve_approval_remembering(
         &self,
         id: &ApprovalId,
@@ -408,7 +407,7 @@ impl Db {
     ) -> Result<()> {
         self.wrote();
         self.store
-            .resolve_approval_remembering(id, outcome, by, message, rule, fence, self.now_ms())
+            .resolve_approval_remembering(id, (outcome, by, message), rule, fence, self.now_ms())
             .await
     }
 
