@@ -401,7 +401,7 @@ case "$turnline" in
   if has "$a1" '"decision":"accept"'; then first=accept; else first=decline; fi
   # The file change shape of the 0.164.0 schema: the request names only the item; its paths
   # came with the item's own started notification.
-  emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","status":"inProgress","changes":[{"path":"/tmp/a.rs","kind":"update"}]}}}'
+  emit '{"method":"item/started","params":{"item":{"id":"f1","type":"fileChange","status":"inProgress","changes":[{"path":"/tmp/a.rs","diff":"","kind":{"type":"update"}}]}}}'
   emit '{"id":102,"method":"item/fileChange/requestApproval","params":{"threadId":"th-1","turnId":"t-1","itemId":"f1","startedAtMs":2,"reason":"write outside the sandbox"}}'
   read -r a2 || exit 1
   has "$a2" '"id":102' || { say "lost 102"; exit 0; }
@@ -740,8 +740,8 @@ case "$turnline" in
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","turnId":"t-1","itemId":"m1","delta":"conf-hello"}}'
   emit '{"method":"item/started","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"c1","type":"commandExecution","command":"ls -la"}}}'
   emit '{"method":"item/completed","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"c1","type":"commandExecution","command":"ls -la","status":"completed","exitCode":0,"aggregatedOutput":"ok\n"}}}'
-  emit '{"method":"item/started","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
-  emit '{"method":"item/completed","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","kind":"add"}]}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","changes":[{"path":"/tmp/new.rs","diff":"","kind":{"type":"add"}}]}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","turnId":"t-1","item":{"id":"f1","type":"fileChange","status":"completed","changes":[{"path":"/tmp/new.rs","diff":"","kind":{"type":"add"}}]}}}'
   say "conf-done"
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
