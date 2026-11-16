@@ -942,3 +942,65 @@ async fn a_failed_run_with_a_session_resumes_and_other_runs_are_refused_with_a_r
         NotResumed::NoSession
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_fake_keeps_a_remembered_answer_as_a_rule_that_can_be_listed_and_revoked() {
+    use reno_proto::{Remember, RememberScope, StandingEffect, StandingScope};
+    let client = FakeDaemon::spawn().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_RULES));
+    let demo = client.list_rules(false).await.unwrap();
+    assert!(demo.len() >= 3, "the demo world has rules to show");
+
+    // keeper's push is held; allow it for the bot.
+    client
+        .decide_remembering(
+            &appr("keeperpush"),
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember {
+                scope: RememberScope::Bot,
+                expires_in_secs: Some(3600),
+            }),
+        )
+        .await
+        .unwrap();
+    let rules = client.list_rules(false).await.unwrap();
+    assert_eq!(rules.len(), demo.len() + 1);
+    let new = &rules[0];
+    assert_eq!(new.effect, StandingEffect::Allow);
+    assert_eq!(
+        new.scope,
+        StandingScope::Bot {
+            bot: "keeper".into()
+        }
+    );
+    assert_eq!(new.source_approval, Some(appr("keeperpush")));
+    assert!(new.expires_at_ms.is_some());
+    let record = &client.approval_history(None, None).await.unwrap()[0];
+    assert_eq!(record.subject_digest.as_deref(), Some(record.subject.digest().as_str()));
+
+    client.revoke_rule(&new.id).await.unwrap();
+    client.revoke_rule(&new.id).await.unwrap();
+    assert_eq!(client.list_rules(false).await.unwrap().len(), demo.len());
+    let all = client.list_rules(true).await.unwrap();
+    assert!(all[0].revoked_at_ms.is_some());
+    let unknown = reno_proto::RuleId::from_suffix("nope").unwrap();
+    let missing = client.revoke_rule(&unknown).await.unwrap_err();
+    assert_eq!(missing.code(), Some(reno_proto::ErrorCode::NotFound));
+
+    // An expiry outside the range is refused, and the approval stays held.
+    let bad = client
+        .decide_remembering(
+            &appr("scoutfetch"),
+            ApprovalDecision::Deny,
+            None,
+            Some(Remember {
+                scope: RememberScope::Always,
+                expires_in_secs: Some(0),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code(), Some(reno_proto::ErrorCode::InvalidParams));
+    assert_eq!(client.list_approvals().await.unwrap().len(), 1);
+}

@@ -25,6 +25,7 @@ pub(super) struct Extras {
     pub(super) defs: DefsSnapshot,
     pub(super) records: Vec<DefRecord>,
     pub(super) history: Vec<ApprovalRecord>,
+    pub(super) rules: Vec<reno_proto::StandingRule>,
 }
 
 /// The bot of each seeded trigger and the prompt it fires.
@@ -120,6 +121,7 @@ fn decided(
         id: ApprovalId::from_suffix(id)?,
         run_id: RunId::from_suffix(run)?,
         request_id: format!("req-{id}"),
+        subject_digest: Some(subject.digest()),
         subject,
         status,
         decided_by: Some(by),
@@ -250,6 +252,7 @@ pub(super) fn seed() -> Result<Extras, IdError> {
         )?,
     ];
     Ok(Extras {
+        rules: rules()?,
         executors: executors()?,
         triggers,
         defs: DefsSnapshot {
@@ -259,6 +262,58 @@ pub(super) fn seed() -> Result<Extras, IdError> {
         records,
         history,
     })
+}
+
+/// The demo standing rules: one of each scope and effect, one that expires, one revoked.
+fn rules() -> Result<Vec<reno_proto::StandingRule>, IdError> {
+    use reno_proto::{RuleId, RuleMatcher, StandingEffect, StandingRule, StandingScope};
+    let make = |id: &str,
+                scope: StandingScope,
+                effect: StandingEffect,
+                subject: &reno_proto::ApprovalSubject,
+                age: u64,
+                expires_in: Option<u64>|
+     -> Result<StandingRule, IdError> {
+        Ok(StandingRule {
+            id: RuleId::from_suffix(id)?,
+            scope,
+            effect,
+            matcher: RuleMatcher::derive(subject, std::path::Path::new("/work")),
+            created_by: "human".to_owned(),
+            created_at_ms: NOW_MS - age,
+            expires_at_ms: expires_in.map(|secs| NOW_MS - age + secs * 1_000),
+            revoked_at_ms: None,
+            source_approval: Some(ApprovalId::from_suffix("hist3")?),
+        })
+    };
+    Ok(vec![
+        make(
+            "demo1",
+            StandingScope::Bot {
+                bot: "builder".to_owned(),
+            },
+            StandingEffect::Allow,
+            &data::command_subject("cargo test --workspace"),
+            3 * HOUR,
+            None,
+        )?,
+        make(
+            "demo2",
+            StandingScope::Always,
+            StandingEffect::Deny,
+            &data::command_subject("git push --force"),
+            26 * HOUR,
+            None,
+        )?,
+        make(
+            "demo3",
+            StandingScope::Always,
+            StandingEffect::Allow,
+            &data::network_subject("https://registry.example.org/index.json"),
+            2 * HOUR,
+            Some(24 * 3_600),
+        )?,
+    ])
 }
 
 /// The demo executors: one healthy, one signed out, one with a newer CLI than the adapter was
