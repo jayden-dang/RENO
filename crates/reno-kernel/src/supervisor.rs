@@ -46,7 +46,7 @@ use reno_harness::exec::{ExecHandle, SteerRejected};
 use reno_proto::{BudgetKind, BudgetStop, ExecEvent, RunId, RunStatus, Seq, StopReason};
 use reno_store::{JournalWriter, StoreError, Tokens};
 use tokio::sync::mpsc::{self, error::TrySendError};
-use tokio::time::{Instant, Sleep, sleep};
+use tokio::time::{Sleep, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
@@ -124,8 +124,6 @@ pub(crate) struct Supervisor {
     /// Fires when the run has used its wall time; `None` once it has, or once the run is
     /// stopping for another budget.
     wall: Option<Pin<Box<Sleep>>>,
-    /// When the supervisor started, on the same (pausable) timer the wall deadline runs on.
-    started: Instant,
     /// The budget that stopped the run, which becomes the diagnostic of its `Done` when the
     /// executor ends because of the cancel.
     budget: Option<BudgetStop>,
@@ -192,7 +190,6 @@ impl Supervisor {
             fatal: None,
             lost: false,
             wall: None,
-            started: Instant::now(),
             budget: None,
             _slot: slot,
         }
@@ -200,7 +197,6 @@ impl Supervisor {
 
     pub(crate) async fn run(mut self) {
         self.open_journal().await;
-        self.started = Instant::now();
         self.wall = Some(Box::pin(sleep(self.info.wall_time)));
         let period = self.shared.config.heartbeat_period();
         let mut beat = Box::pin(sleep(period));
@@ -341,7 +337,8 @@ impl Supervisor {
         self.stop_for_budget(BudgetStop {
             kind: BudgetKind::WallTime,
             limit: ms(self.info.wall_time),
-            used: ms(self.started.elapsed()),
+            // The deadline is the measure: the run has had exactly its limit.
+            used: ms(self.info.wall_time),
         });
     }
 

@@ -1,10 +1,15 @@
 //! The dispatcher actor: claims queued runs while a slot is free and starts them.
 //!
-//! It waits on exactly two things (ARCH-10): a `Notify` that `submit` and every run's end ring,
-//! and the next lease-expiry deadline of a run that someone else leased, because that run
-//! becomes claimable when its lease runs out. With nothing queued and nothing leased it sleeps
-//! until woken and makes no store call. The only other timer is the retry after a store
-//! failure, which exists only while the store is failing.
+//! It waits on exactly these things (ARCH-10): a `Notify` that `submit`, `resume` and every run's
+//! end ring (the end of a run is also what frees a bot's concurrency slot), the next lease-expiry
+//! deadline of a run that someone else leased, because that run becomes claimable when its lease
+//! runs out, and, only while a bot has queued runs held back by its daily token ceiling, the next
+//! local midnight. With nothing queued and nothing leased it sleeps until woken and makes no
+//! store call; while everything is paused it makes no claim at all. The only other timer is the
+//! retry after a store failure, which exists only while the store is failing.
+//!
+//! Budgets (T1.7) are applied in the claim (`reno_store::ClaimFilter`), so a bot at its limit or
+//! paused never hides the runs behind it. See `budget` for what each limit does.
 //!
 //! Per claim it moves the run `leased` to `running`, starts the executor with `ExecControls`
 //! whose cancel token is a child of the root token, and hands the stream to a run supervisor.

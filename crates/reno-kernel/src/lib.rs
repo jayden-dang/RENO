@@ -15,6 +15,8 @@
 //! - `defs`: the `Definitions` port and the validated set in force; loading, storing versions
 //!   and publishing, with the last good set kept when files do not validate.
 //! - `dispatcher`: claims runs and starts them.
+//! - `budget`: the kill switch, `budget.status`, and the refusal of a bot out of tokens; what each
+//!   limit of a bot's `budget` does and where it is enforced.
 //! - `router`: the pure router: filter, rules, the decision, and the fallback step.
 //! - `health`: what the last probe found about each executor, when probes run, and how the
 //!   findings keep an ineligible executor from being started.
