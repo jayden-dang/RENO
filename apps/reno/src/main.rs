@@ -15,6 +15,7 @@ mod env;
 mod follow;
 mod policy;
 mod render;
+mod secret;
 
 use std::io;
 use std::process::ExitCode;
@@ -59,6 +60,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Workspace(command) => commands::workspace(env, command).await,
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
+        Command::Secret(command) => secret::run(env, command).await,
         Command::Policy(command) => policy::run(env, command),
         Command::Approve(args) => commands::decide(env, args, ApprovalDecision::ApproveOnce).await,
         Command::Deny(args) => commands::decide(env, args, ApprovalDecision::Deny).await,
