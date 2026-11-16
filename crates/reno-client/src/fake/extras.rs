@@ -346,6 +346,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     deterministic_turn_end: true,
                     plan_mode: false,
                     models: health.models.models.clone(),
+                    isolates_user_config: false,
                 },
             },
             health: Some(health),

@@ -89,6 +89,9 @@ pub enum CaseId {
     OutputSchema,
     /// A claimed plan mode is exercised.
     PlanMode,
+    /// A claimed isolation from the owner's personal config is applied by default and lifted by
+    /// an opt-in.
+    UserConfig,
     /// Frames the wire did not recognise are counted, and a clean run counts none.
     UnknownFrames,
     /// Every capability the descriptor claims was proven by a passing case (ARCH-15).
@@ -97,7 +100,7 @@ pub enum CaseId {
 
 impl CaseId {
     /// Every case, in the order the suite runs them.
-    pub const ALL: [CaseId; 19] = [
+    pub const ALL: [CaseId; 20] = [
         Self::Probe,
         Self::Lifecycle,
         Self::ToolClasses,
@@ -115,6 +118,7 @@ impl CaseId {
         Self::SandboxLevels,
         Self::OutputSchema,
         Self::PlanMode,
+        Self::UserConfig,
         Self::UnknownFrames,
         Self::Claims,
     ];
@@ -139,6 +143,7 @@ impl CaseId {
             Self::SandboxLevels => "sandbox-levels",
             Self::OutputSchema => "output-schema",
             Self::PlanMode => "plan-mode",
+            Self::UserConfig => "user-config",
             Self::UnknownFrames => "unknown-frames",
             Self::Claims => "claims",
         }
@@ -186,6 +191,9 @@ impl CaseId {
                 "an output schema is refused unless structured output is claimed and exercised"
             }
             Self::PlanMode => "a claimed plan mode is exercised (ExecSpec cannot request one yet)",
+            Self::UserConfig => {
+                "a claimed isolation from the owner's personal config reaches the harness by default and is lifted when the run opts in"
+            }
             Self::UnknownFrames => {
                 "a clean run counts no unrecognised frames and a made-up frame is counted by name"
             }
@@ -390,6 +398,18 @@ pub struct ModeRun {
     pub expect: Vec<Expect>,
 }
 
+/// A run that shows whether the owner's personal config reaches the harness: the same scenario
+/// is run isolated (the default) and opted in, and each must show its own expectations.
+#[derive(Debug, Clone)]
+pub struct UserConfigPlan {
+    /// The run. Against a fake it reports what the harness was given.
+    pub scenario: Scenario,
+    /// What the isolated run (the default) must show.
+    pub isolated: Vec<Expect>,
+    /// What the run of a bot that inherits the owner's config must show.
+    pub inherited: Vec<Expect>,
+}
+
 /// A run that makes the wire layer see one frame it does not know.
 #[derive(Debug, Clone)]
 pub struct UnknownFramePlan {
@@ -423,6 +443,9 @@ pub struct Plan {
     pub output_schema: Option<Scenario>,
     /// A run that makes the wire see an unknown frame.
     pub unknown_frames: Option<UnknownFramePlan>,
+    /// A run that shows the owner's personal config is kept out (only for an executor that
+    /// claims `isolates_user_config`).
+    pub user_config: Option<UserConfigPlan>,
     /// Runs that show what an access mode or sandbox level does. They stand in for the plain run
     /// of the lifecycle scenario under that mode when the target is not exhaustive.
     pub mode_runs: Vec<ModeRun>,
@@ -449,6 +472,8 @@ impl Plan {
         .count();
         let approvals = if self.approval.is_some() { 2 } else { 0 };
         let unknown = usize::from(self.unknown_frames.is_some());
+        // The user-config case runs its scenario twice.
+        let unknown = unknown + 2 * usize::from(self.user_config.is_some());
         // The access-mode and sandbox cases each run the lifecycle scenario once at its own
         // mode, when there is a lifecycle scenario.
         let baselines = if self.lifecycle.is_some() { 2 } else { 0 };

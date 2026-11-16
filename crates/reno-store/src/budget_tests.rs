@@ -25,6 +25,7 @@ fn filter(day: &str) -> ClaimFilter {
     ClaimFilter {
         day: day.to_owned(),
         paused_bots: Vec::new(),
+        ..ClaimFilter::default()
     }
 }
 
@@ -207,7 +208,11 @@ async fn tokens_add_up_per_bot_per_day_and_per_run() {
     let f = filter("2026-11-16");
     claim(&store, 100, &f).await.unwrap();
     claim(&store, 100, &f).await.unwrap();
-    let add = |input, output| Tokens { input, output };
+    let add = |input, output| Tokens {
+        input,
+        output,
+        ..Tokens::default()
+    };
 
     let total = store
         .record_usage(&a, 1, Some("keeper"), "2026-11-16", add(10, 5), 200)
@@ -234,7 +239,7 @@ async fn tokens_add_up_per_bot_per_day_and_per_run() {
     assert_eq!(store.run_usage(&b).await.unwrap(), add(1, 2));
     let day = store.bot_usage("2026-11-16").await.unwrap();
     assert_eq!(day.get("keeper"), Some(&add(15, 7)));
-    assert_eq!(day["keeper"].total(), 22);
+    assert_eq!(day["keeper"].all(), 22);
     assert_eq!(
         store.bot_usage("2026-11-17").await.unwrap()["keeper"],
         add(3, 3)
@@ -256,6 +261,7 @@ async fn usage_of_a_run_with_no_bot_counts_for_the_run_only() {
             Tokens {
                 input: 2,
                 output: 3,
+                ..Tokens::default()
             },
             200,
         )
@@ -265,7 +271,8 @@ async fn usage_of_a_run_with_no_bot_counts_for_the_run_only() {
         total,
         Tokens {
             input: 2,
-            output: 3
+            output: 3,
+            ..Tokens::default()
         }
     );
     assert!(store.bot_usage("d").await.unwrap().is_empty());
@@ -285,6 +292,7 @@ async fn usage_is_fenced_and_leaves_an_event() {
             Tokens {
                 input: 1,
                 output: 1,
+                ..Tokens::default()
             },
             200,
         )
@@ -302,6 +310,7 @@ async fn usage_is_fenced_and_leaves_an_event() {
             Tokens {
                 input: 1,
                 output: 1,
+                ..Tokens::default()
             },
             201,
         )
@@ -315,7 +324,7 @@ async fn usage_is_fenced_and_leaves_an_event() {
         .map(|e| e.kind)
         .collect();
     assert!(kinds.contains(&"run.usage".to_owned()), "{kinds:?}");
-    assert_eq!(store.run_usage(&run).await.unwrap().total(), 2);
+    assert_eq!(store.run_usage(&run).await.unwrap().all(), 2);
 }
 
 #[tokio::test]
@@ -335,6 +344,7 @@ async fn a_bot_at_its_token_ceiling_is_passed_over_until_the_day_changes() {
             Tokens {
                 input: 60,
                 output: 39,
+                ..Tokens::default()
             },
             150,
         )
@@ -343,7 +353,7 @@ async fn a_bot_at_its_token_ceiling_is_passed_over_until_the_day_changes() {
     // 99 of 100: still allowed.
     assert!(
         store
-            .token_blocked_bots("2026-11-16")
+            .token_blocked_bots("2026-11-16", 100)
             .await
             .unwrap()
             .is_empty()
@@ -357,6 +367,7 @@ async fn a_bot_at_its_token_ceiling_is_passed_over_until_the_day_changes() {
             Tokens {
                 input: 0,
                 output: 1,
+                ..Tokens::default()
             },
             151,
         )
@@ -365,7 +376,7 @@ async fn a_bot_at_its_token_ceiling_is_passed_over_until_the_day_changes() {
     // At the ceiling exactly: refused.
     assert_eq!(claim(&store, 152, &day).await, None);
     assert_eq!(
-        store.token_blocked_bots("2026-11-16").await.unwrap(),
+        store.token_blocked_bots("2026-11-16", 100).await.unwrap(),
         ["keeper"]
     );
     // Tomorrow is another day.
@@ -478,6 +489,7 @@ async fn the_local_day_boundary_splits_the_tokens_across_midnight_and_dst() {
     let add = Tokens {
         input: 1,
         output: 1,
+        ..Tokens::default()
     };
     // One minute before and after local midnight, a spring-forward day and a fall-back day.
     let moments = [
@@ -515,7 +527,123 @@ async fn the_local_day_boundary_splits_the_tokens_across_midnight_and_dst() {
             "2024-03-10" | "2024-11-03" => 4, // both sides of the day's own change: 2 events
             _ => 2,
         };
-        assert_eq!(used["keeper"].total(), expect, "{day}");
+        assert_eq!(used["keeper"].all(), expect, "{day}");
     }
-    assert_eq!(store.run_usage(&run).await.unwrap().total(), 20);
+    assert_eq!(store.run_usage(&run).await.unwrap().all(), 20);
+}
+
+// ---- cache tokens -------------------------------------------------------------------------
+
+#[test]
+fn a_ceiling_counts_cache_writes_in_full_and_cache_reads_at_the_weight() {
+    // The shape of a long run: almost all of the input came from the cache.
+    let long_run = Tokens {
+        input: 16,
+        output: 9_120,
+        cache_read: 1_270_554,
+        cache_write: 48_213,
+    };
+    // 16 + 9120 + 48213 + 127055 (a tenth of the reads, rounded down)
+    assert_eq!(long_run.counted(100), 184_404);
+    assert_eq!(long_run.counted(0), 57_349, "a zero weight ignores reads");
+    assert_eq!(
+        long_run.counted(1000),
+        long_run.all(),
+        "a full weight counts all"
+    );
+    assert_eq!(long_run.all(), 1_327_903);
+    // Nothing overflows.
+    let huge = Tokens {
+        input: u64::MAX,
+        output: u64::MAX,
+        cache_read: u64::MAX,
+        cache_write: u64::MAX,
+    };
+    assert_eq!(huge.counted(1000), u64::MAX);
+}
+
+#[tokio::test]
+async fn cache_tokens_are_stored_apart_and_add_up_per_bot_per_day_and_per_run() {
+    let (_d, store) = open().await;
+    let v = put_bot(&store, "keeper", Some(4), None).await;
+    let a = queue(&store, "a1", Some(("keeper", v)), 10).await;
+    claim(&store, 100, &filter("2026-11-16")).await.unwrap();
+    let add = |cache_read, cache_write| Tokens {
+        input: 1,
+        output: 2,
+        cache_read,
+        cache_write,
+    };
+    store
+        .record_usage(&a, 1, Some("keeper"), "2026-11-16", add(500, 40), 200)
+        .await
+        .unwrap();
+    let total = store
+        .record_usage(&a, 1, Some("keeper"), "2026-11-16", add(300, 0), 201)
+        .await
+        .unwrap();
+    assert_eq!(
+        total,
+        Tokens {
+            input: 2,
+            output: 4,
+            cache_read: 800,
+            cache_write: 40
+        }
+    );
+    assert_eq!(store.run_usage(&a).await.unwrap(), total);
+    assert_eq!(
+        store.bot_usage("2026-11-16").await.unwrap()["keeper"],
+        total
+    );
+    // The journal carries them too.
+    let usage_events: Vec<_> = store
+        .events_since(Seq(0), 1000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "run.usage")
+        .collect();
+    assert_eq!(usage_events.len(), 2);
+    assert_eq!(usage_events[0].data["cacheReadTokens"], 500);
+    assert_eq!(usage_events[0].data["cacheWriteTokens"], 40);
+}
+
+#[tokio::test]
+async fn the_claim_and_the_blocked_list_agree_on_what_the_ceiling_counts() {
+    let (_d, store) = open().await;
+    let v = put_bot(&store, "keeper", Some(4), Some(1_000)).await;
+    let first = queue(&store, "a1", Some(("keeper", v)), 10).await;
+    let second = queue(&store, "a2", Some(("keeper", v)), 11).await;
+    assert_eq!(claim(&store, 100, &filter("d")).await, Some(first.clone()));
+    // 5_300 raw tokens, but counted at a tenth of the reads: 100 + 100 + 100 + 500 = 800 of 1_000.
+    store
+        .record_usage(
+            &first,
+            1,
+            Some("keeper"),
+            "d",
+            Tokens {
+                input: 100,
+                output: 100,
+                cache_read: 5_000,
+                cache_write: 100,
+            },
+            150,
+        )
+        .await
+        .unwrap();
+    assert!(store.token_blocked_bots("d", 100).await.unwrap().is_empty());
+    // At a full weight the same day is over the ceiling: the weight is the caller's, applied
+    // when it reads.
+    assert_eq!(
+        store.token_blocked_bots("d", 1000).await.unwrap(),
+        ["keeper"]
+    );
+    let full = ClaimFilter {
+        cache_read_permille: 1000,
+        ..filter("d")
+    };
+    assert_eq!(claim(&store, 152, &full).await, None);
+    assert_eq!(claim(&store, 153, &filter("d")).await, Some(second));
 }

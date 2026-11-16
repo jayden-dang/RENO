@@ -48,6 +48,7 @@ fn executor() -> CodexExecutor {
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: prompt.into(),
         cwd: PathBuf::from("/tmp"),
         model: None,
@@ -328,6 +329,8 @@ async fn happy_path_maps_notifications_to_exec_events() {
             ExecEvent::Usage {
                 input_tokens: 42,
                 output_tokens: 7,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
             ExecEvent::Done {
                 stop: StopReason::Completed,

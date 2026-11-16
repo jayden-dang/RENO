@@ -112,6 +112,9 @@ impl Cx<'_> {
             CaseId::Resume if !caps.resume => Some("claims no resume"),
             CaseId::Mcp if !caps.mcp_injection => Some("claims no MCP injection"),
             CaseId::PlanMode if !caps.plan_mode => Some("claims no plan mode"),
+            CaseId::UserConfig if !caps.isolates_user_config => {
+                Some("claims no isolation from the owner's personal config")
+            }
             CaseId::UnknownFrames if !self.target.profile.counts_unknown_frames => {
                 Some("does not count unrecognised frames")
             }
@@ -166,6 +169,7 @@ impl Cx<'_> {
                  exercise it: never declare what a caller cannot use (ARCH-15)"
                     .into(),
             )),
+            CaseId::UserConfig => self.user_config().await,
             CaseId::UnknownFrames => self.unknown_frames().await,
             CaseId::Claims => self.claims(),
         }
@@ -487,6 +491,35 @@ impl Cx<'_> {
         require_expectations(&log, scenario)
     }
 
+    async fn user_config(&mut self) -> CaseResultOf {
+        let plan = self.need(&self.target.plan.user_config, "user-config")?;
+        for (inherit, expect) in [(false, &plan.isolated), (true, &plan.inherited)] {
+            if expect.is_empty() {
+                return Err(Failure::Unplanned(
+                    "the user-config scenario declares no expectation, so nothing shows whether the \
+                     owner's config reached the harness"
+                        .into(),
+                ));
+            }
+            let mut spec = self.target.spec(&plan.scenario)?;
+            spec.inherit_user_config = inherit;
+            let log = self.target.drive(spec, Behaviour::Passive).await?;
+            require_one_done(&log)?;
+            match log.done() {
+                Some((StopReason::Completed, _, _)) => {}
+                other => {
+                    return Err(format!(
+                        "the run (inherit_user_config = {inherit}) should complete, but ended {other:?}"
+                    )
+                    .into());
+                }
+            }
+            log.check_all(expect)
+                .map_err(|why| format!("with inherit_user_config = {inherit}: {why}"))?;
+        }
+        Ok(Outcome::Pass)
+    }
+
     // -- refusals ------------------------------------------------------------------------
 
     async fn access_modes(&mut self) -> CaseResultOf {
@@ -736,6 +769,9 @@ impl Cx<'_> {
         if caps.access_modes.contains(&AccessMode::Supervised) {
             claims.push(("approvals (allow)".into(), CaseId::ApprovalAllow));
             claims.push(("approvals (deny)".into(), CaseId::ApprovalDeny));
+        }
+        if caps.isolates_user_config {
+            claims.push(("user-config isolation".into(), CaseId::UserConfig));
         }
         if !caps.models.is_empty() {
             claims.push(("models".into(), CaseId::Probe));

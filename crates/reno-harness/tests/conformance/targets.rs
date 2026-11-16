@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reno_harness::conformance::{
     ApprovalPlan, DENY_MESSAGE, Expect, Limits, Plan, Profile, Scenario, Target, UnknownFramePlan,
+    UserConfigPlan,
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
 use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, RegistryAgent};
@@ -164,6 +165,12 @@ fn script(prompt: &str) -> Vec<MockStep> {
             MockStep::text("conf-mcp"),
             MockStep::done(StopReason::Completed),
         ],
+        // A harness that claims to isolate and lets the owner's config through whatever is asked.
+        "mock:user-config-ignored" => vec![
+            started(),
+            MockStep::text("user-config:inherited"),
+            MockStep::done(StopReason::Completed),
+        ],
         _ => vec![MockStep::done(StopReason::Error)],
     }
 }
@@ -241,6 +248,7 @@ pub(crate) fn mock_target_for(executor: Arc<dyn Executor>) -> Target {
         output_schema: None,
         mode_runs: Vec::new(),
         unknown_frames: None,
+        user_config: None,
     };
     Target::new(
         "mock",
@@ -328,6 +336,11 @@ pub(crate) fn claude_target() -> Target {
                 .expect(Expect::ResultContains("unknown-done".into())),
             keys: vec!["type:zz_future_frame".into()],
         }),
+        user_config: Some(UserConfigPlan {
+            scenario: Scenario::new("scenario:user-config"),
+            isolated: vec![Expect::ResultContains("user-config:isolated".into())],
+            inherited: vec![Expect::ResultContains("user-config:inherited".into())],
+        }),
     };
     Target::new(
         "claude-code",
@@ -407,6 +420,7 @@ pub(crate) fn codex_target() -> Target {
                 .expect(Expect::ResultContains("unknown-done".into())),
             keys: vec!["method:zz/futureNotification".into()],
         }),
+        user_config: None,
     };
     Target::new(
         "codex",
@@ -476,6 +490,7 @@ fn acp_plan() -> Plan {
                 "method:some/unknownNotification".into(),
             ],
         }),
+        user_config: None,
     }
 }
 

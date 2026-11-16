@@ -218,6 +218,7 @@ impl Target {
             env: scenario.env.clone(),
             output_schema: None,
             instructions: None,
+            inherit_user_config: false,
         })
     }
 

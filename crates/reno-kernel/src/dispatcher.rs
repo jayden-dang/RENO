@@ -106,6 +106,7 @@ async fn fill(shared: &Arc<Shared>) -> Result<(), StoreError> {
         let filter = ClaimFilter {
             day: shared.db.today(),
             paused_bots: pauses.bots.iter().cloned().collect(),
+            cache_read_permille: shared.config.cache_read_permille(),
         };
         let Some(claim) = shared
             .db
@@ -137,7 +138,11 @@ async fn next_day_start(shared: &Arc<Shared>) -> Option<Duration> {
     }
     let now = shared.db.now_ms();
     let zone = shared.db.zone();
-    let blocked = shared.db.token_blocked_bots(&zone.day_of(now)).await.ok()?;
+    let blocked = shared
+        .db
+        .token_blocked_bots(&zone.day_of(now), shared.config.cache_read_permille())
+        .await
+        .ok()?;
     if blocked.is_empty() {
         return None;
     }
@@ -161,6 +166,7 @@ async fn next_lease_expiry(shared: &Arc<Shared>) -> Option<Duration> {
     let filter = ClaimFilter {
         day: shared.db.today(),
         paused_bots: pauses.bots.iter().cloned().collect(),
+        cache_read_permille: shared.config.cache_read_permille(),
     };
     // Only leases a claim would take once they run out: a run the filter passes over is woken
     // by what lifts the filter (a resume, a run's end, midnight), not by its lease.
@@ -194,6 +200,10 @@ struct LaunchSettings {
     /// The secrets the pinned bot version lists: the names its run receives as environment
     /// variables.
     secrets: Vec<String>,
+    /// Whether the pinned bot opted in to the owner's personal harness config.
+    inherit_user_config: bool,
+    /// The model the pinned bot asks for, for a run whose task did not fix one.
+    model: Option<String>,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -208,6 +218,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             token_ceiling: None,
             bot: None,
             secrets: Vec::new(),
+            inherit_user_config: false,
+            model: None,
         });
     };
     let stored = shared
@@ -236,6 +248,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         token_ceiling: bot.budget.daily_token_ceiling,
         bot: Some(pin.name.clone()),
         secrets: bot.secrets,
+        inherit_user_config: bot.inherit_user_config,
+        model: bot.model,
     })
 }
 
@@ -323,6 +337,9 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         .get("model")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+        // A run made before models were pinned at submit: the pinned bot's, then the one the
+        // harness reported (a resumed run continues on it).
+        .or_else(|| settings.model.clone())
         .or_else(|| row.model.clone());
     let resume = row.session_ref.clone().map(SessionRef);
     let prompt = match &resume {
@@ -346,6 +363,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         // Reno's own variables for the run; the bot's secrets join them at launch.
         env: run_env(&row.id, settings.bot.as_deref()),
         output_schema: None,
+        inherit_user_config: settings.inherit_user_config,
     })
 }
 

@@ -40,6 +40,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
 
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: "hello".into(),
         cwd: dir.path().to_path_buf(),
         model: None,

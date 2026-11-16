@@ -151,6 +151,11 @@ pub struct RoutingDecision {
     pub fallbacks: Vec<FallbackStep>,
     /// When the decision was made, in milliseconds since the Unix epoch.
     pub at_ms: u64,
+    /// Things worth a person's attention that did not stop the run: the model the bot pins is
+    /// not in the chosen executor's model list (a list that may be curated and incomplete, so
+    /// the run still starts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl RejectReason {

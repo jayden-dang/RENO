@@ -294,7 +294,16 @@ pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<St
             step.from, step.reason
         ));
     }
+    for warning in &decision.warnings {
+        lines.push(format!("  warning: {warning}"));
+    }
     lines
+}
+
+/// The model a run asks for (a task's, else its bot's) or reports, for `run show`; `None` when
+/// the executor's default applies and it has not started.
+pub(crate) fn model_line(run: &RunSummary) -> Option<String> {
+    run.model.as_ref().map(|model| format!("model: {model}"))
 }
 
 /// One run on one line: `id  status  executor  title`.
@@ -661,13 +670,14 @@ pub(crate) fn resume_line(bot: Option<&str>, result: &reno_proto::BudgetResumeRe
 /// `reno budget`: the state of the kill switch, then one line per bot.
 pub(crate) fn budget_lines(status: &reno_proto::BudgetStatusResult) -> Vec<String> {
     let mut lines = vec![format!(
-        "{}; tokens counted for {} (local day); runs with no bot may take {}",
+        "{}; tokens counted for {} (local day), cache reads at {}%; runs with no bot may take {}",
         if status.paused {
             "PAUSED: nothing new starts"
         } else {
             "running"
         },
         status.day,
+        f64::from(status.cache_read_weight_permille) / 10.0,
         duration(status.default_wall_time_ms / 1000),
     )];
     for bot in &status.bots {
@@ -675,8 +685,16 @@ pub(crate) fn budget_lines(status: &reno_proto::BudgetStatusResult) -> Vec<Strin
             || "no ceiling".to_owned(),
             |ceiling| format!("of {ceiling}"),
         );
+        let cache = if bot.cache_read_tokens_today + bot.cache_write_tokens_today > 0 {
+            format!(
+                ", cache {} read / {} written",
+                bot.cache_read_tokens_today, bot.cache_write_tokens_today
+            )
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "{}{}: {}/{} live, {} queued, {} tokens today ({ceiling}), runs may take {}",
+            "{}{}: {}/{} live, {} queued, {} tokens today ({ceiling}{cache}), runs may take {}",
             bot.bot,
             if bot.paused { " (paused)" } else { "" },
             bot.live_runs,
@@ -710,6 +728,34 @@ pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn budget_lines_show_what_the_ceiling_counted_and_the_cache_behind_it() {
+        let status: reno_proto::BudgetStatusResult = serde_json::from_value(serde_json::json!({
+            "paused": false, "day": "2026-11-16", "dayEndsAtMs": 1, "defaultWallTimeMs": 14_400_000,
+            "cacheReadWeightPermille": 100,
+            "bots": [
+                {"bot": "keeper", "liveRuns": 1, "maxConcurrentRuns": 2, "queuedRuns": 0,
+                 "tokensToday": 530, "cacheReadTokensToday": 5000, "cacheWriteTokensToday": 10,
+                 "dailyTokenCeiling": 1000, "maxWallTimeMs": 2_700_000, "paused": false},
+                {"bot": "scribe", "liveRuns": 0, "maxConcurrentRuns": 1, "queuedRuns": 0,
+                 "tokensToday": 0, "maxWallTimeMs": 60_000, "paused": false}
+            ]
+        }))
+        .unwrap();
+        let lines = super::budget_lines(&status);
+        assert!(lines[0].contains("cache reads at 10%"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("530 tokens today (of 1000, cache 5000 read / 10 written)"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("0 tokens today (no ceiling)"),
+            "{}",
+            lines[2]
+        );
+    }
+
     fn executor(health: Option<reno_proto::ExecutorHealth>) -> ExecutorInfo {
         ExecutorInfo {
             descriptor: serde_json::from_value(serde_json::json!({
@@ -945,7 +991,34 @@ mod tests {
             },
             fallbacks: vec![],
             at_ms: 0,
+            warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_routing_warning_is_shown_under_the_decision() {
+        let mut decision = bot_routing();
+        decision.warnings = vec!["model \"x\" is not in claude-code's model list".into()];
+        let lines = routing_lines(&decision, false);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("  warning: model \"x\" is not in claude-code's model list")
+        );
+    }
+
+    #[test]
+    fn the_model_a_run_asks_for_is_a_line_of_run_show() {
+        let mut run: RunSummary = serde_json::from_value(serde_json::json!({
+            "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
+            "status": "queued", "attempt": 1, "title": "t", "createdAtMs": 1, "updatedAtMs": 1
+        }))
+        .unwrap();
+        assert_eq!(model_line(&run), None);
+        run.model = Some("claude-sonnet-4-6".into());
+        assert_eq!(
+            model_line(&run).as_deref(),
+            Some("model: claude-sonnet-4-6")
+        );
     }
 
     #[test]

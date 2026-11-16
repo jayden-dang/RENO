@@ -364,6 +364,7 @@ mod tests {
             rule_matched: RuleMatched::Default,
             fallbacks: vec![],
             at_ms: 1,
+            warnings: Vec::new(),
         }
     }
 

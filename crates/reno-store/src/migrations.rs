@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards; migration 12 adds why a run stopped and whether it was resumed; migration 13 adds standing rules. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards; migration 12 adds why a run stopped and whether it was resumed; migration 13 adds standing rules; migration 14 adds cache token counts. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -378,6 +378,18 @@ CREATE TRIGGER standing_rules_are_kept BEFORE DELETE ON standing_rules
 BEGIN SELECT RAISE(ABORT, 'a standing rule is never deleted'); END;
 ";
 
+/// Migration 14 (cache token accounting): the input a harness served from or wrote to its prompt
+/// cache is counted apart from `input_tokens` (which excludes it), per bot per day and per run. A
+/// ceiling counts input, output, cache writes and a weighted share of cache reads (see
+/// `ClaimFilter::cache_read_permille`); the raw counts are what is stored. Rows that predate it
+/// carry 0, which is what an executor that did not report them would have said.
+const V14: &str = "
+ALTER TABLE bot_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0);
+ALTER TABLE bot_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0);
+ALTER TABLE run_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0);
+ALTER TABLE run_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0);
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -394,6 +406,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V11),
         M::up(V12),
         M::up(V13),
+        M::up(V14),
     ])
 }
 
@@ -442,7 +455,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -735,6 +748,54 @@ mod tests {
         .unwrap();
         assert!(
             conn.execute("UPDATE runs SET stop = 'not json'", [])
+                .is_err()
+        );
+    }
+
+    /// A database written before cache token counts (schema 13) keeps its usage rows and reads
+    /// 0 cache tokens from them; the new columns accept counts and refuse negative ones.
+    #[test]
+    fn upgrade_from_a_version_thirteen_database_adds_zero_cache_counts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 13).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);
+             INSERT INTO run_usage (run_id, input_tokens, output_tokens, updated_at)
+             VALUES ('run_a', 16, 90, 3);
+             INSERT INTO bot_usage (bot, day, input_tokens, output_tokens)
+             VALUES ('keeper', '2026-05-01', 16, 90);",
+        )
+        .unwrap();
+        assert!(
+            conn.prepare("SELECT cache_read_tokens FROM bot_usage")
+                .is_err()
+        );
+        run(&mut conn).unwrap();
+        let counts: (i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT b.input_tokens, b.cache_read_tokens, b.cache_write_tokens,
+                        r.output_tokens, r.cache_read_tokens, r.cache_write_tokens
+                 FROM bot_usage b, run_usage r",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (16, 0, 0, 90, 0, 0));
+        conn.execute_batch("UPDATE run_usage SET cache_read_tokens = 5, cache_write_tokens = 6")
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE bot_usage SET cache_read_tokens = -1", [])
                 .is_err()
         );
     }

@@ -67,8 +67,20 @@ fn exec_event_every_variant() {
             ExecEvent::Usage {
                 input_tokens: 10,
                 output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
             json!({"type": "usage", "inputTokens": 10, "outputTokens": 20}),
+        ),
+        (
+            ExecEvent::Usage {
+                input_tokens: 16,
+                output_tokens: 9120,
+                cache_read_tokens: 1_270_554,
+                cache_write_tokens: 48_213,
+            },
+            json!({"type": "usage", "inputTokens": 16, "outputTokens": 9120,
+                   "cacheReadTokens": 1_270_554, "cacheWriteTokens": 48_213}),
         ),
         (
             ExecEvent::NeedsInput {
@@ -197,6 +209,7 @@ fn exec_event_every_variant() {
 fn exec_spec() {
     let full = ExecSpec {
         run_id: run_id(),
+        inherit_user_config: true,
         prompt: "fix it".into(),
         cwd: "/work/tree".into(),
         model: Some("opus".into()),
@@ -221,12 +234,14 @@ fn exec_spec() {
             "effort": "high", "access": "auto_accept_edits", "sandbox": "workspace_write",
             "resume": "sess-1",
             "mcp": [{"name": "reno", "command": "reno", "args": ["mcp"], "env": {"K": "V"}}],
-            "env": {"PATH": "/usr/bin"}, "outputSchema": {"type": "object"}
+            "env": {"PATH": "/usr/bin"}, "outputSchema": {"type": "object"},
+            "inheritUserConfig": true
         }),
     );
 
     let minimal = ExecSpec {
         run_id: run_id(),
+        inherit_user_config: false,
         prompt: "p".into(),
         cwd: "/w".into(),
         model: None,
@@ -1164,6 +1179,8 @@ fn executor_health_on_the_wire() {
     }))
     .unwrap();
     assert!(info.health.is_none());
+    // Caps from a daemon that predates user-config isolation claim none.
+    assert!(!info.descriptor.caps.isolates_user_config);
     assert!(serde_json::to_value(&info).unwrap().get("health").is_none());
 }
 

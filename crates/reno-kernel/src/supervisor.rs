@@ -356,11 +356,15 @@ impl Supervisor {
         if let ExecEvent::Usage {
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
         } = event
         {
             self.charge(Tokens {
                 input: input_tokens,
                 output: output_tokens,
+                cache_read: cache_read_tokens,
+                cache_write: cache_write_tokens,
             })
             .await;
         }
@@ -405,13 +409,14 @@ impl Supervisor {
             .await;
         match total {
             Ok(total) => {
+                let counted = total.counted(self.shared.config.cache_read_permille());
                 if let Some(limit) = self.info.token_ceiling
-                    && total.total() >= limit
+                    && counted >= limit
                 {
                     self.stop_for_budget(BudgetStop {
                         kind: BudgetKind::Tokens,
                         limit,
-                        used: total.total(),
+                        used: counted,
                     });
                 }
             }

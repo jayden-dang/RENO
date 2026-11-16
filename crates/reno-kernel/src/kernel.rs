@@ -273,13 +273,16 @@ impl Kernel {
             &self.shared,
             request.bot.as_deref(),
             request.executor.clone(),
+            request.model.as_deref(),
         )?;
         let cwd = request
             .cwd
             .to_str()
             .ok_or_else(|| KernelError::Invalid("the working directory is not UTF-8".into()))?
             .to_owned();
-        let mut spec = serde_json::json!({ "cwd": cwd, "model": request.model });
+        // The model the run asks for, fixed now with the bot version it is pinned to: the
+        // task's own, else the bot's, else none (the executor's default).
+        let mut spec = serde_json::json!({ "cwd": cwd, "model": planned.model });
         if request.in_place {
             spec["inPlace"] = serde_json::Value::Bool(true);
         }
@@ -358,6 +361,7 @@ impl Kernel {
             &self.shared,
             request.bot.as_deref(),
             request.executor.clone(),
+            request.model.as_deref(),
         )?
         .decision)
     }
@@ -920,6 +924,9 @@ pub(crate) struct Planned {
     /// anyway so that it can fail at launch with the reason.
     pub(crate) executor: ExecutorId,
     pub(crate) pin: Option<BotPin>,
+    /// The model the run asks for: the task's, else its bot's; `None` leaves the executor's
+    /// default.
+    pub(crate) model: Option<String>,
 }
 
 /// Routes a task: the access, sandbox and preference of its bot (else the kernel's defaults),
@@ -928,8 +935,9 @@ pub(crate) fn plan_route(
     shared: &Shared,
     bot: Option<&str>,
     explicit: Option<ExecutorId>,
+    task_model: Option<&str>,
 ) -> Result<Planned> {
-    let (access, sandbox, preference, pin) = match bot {
+    let (access, sandbox, preference, pin, bot_model) = match bot {
         Some(name) => {
             let current = shared.current_defs();
             let def = current
@@ -947,10 +955,24 @@ pub(crate) fn plan_route(
                 name: name.to_owned(),
                 version: stored.version,
             };
-            (def.access, def.sandbox, Some(preference), Some(pin))
+            (
+                def.access,
+                def.sandbox,
+                Some(preference),
+                Some(pin),
+                def.model.clone(),
+            )
         }
-        None => (shared.config.access, shared.config.sandbox, None, None),
+        None => (
+            shared.config.access,
+            shared.config.sandbox,
+            None,
+            None,
+            None,
+        ),
     };
+    // Precedence: the task's own model, then the bot's; the executor's default is "none".
+    let model = task_model.map(str::to_owned).or(bot_model);
     let candidates: Vec<Candidate> = shared
         .executors
         .ids()
@@ -962,7 +984,7 @@ pub(crate) fn plan_route(
         })
         .collect();
     let at_ms = u64::try_from(shared.db.now_ms()).unwrap_or(0);
-    let decision = router::route(
+    let mut decision = router::route(
         &RouteRequest {
             access,
             sandbox,
@@ -993,23 +1015,60 @@ pub(crate) fn plan_route(
                 .cloned(),
         })
         .ok_or_else(|| KernelError::NoExecutor(bot.unwrap_or("(any)").to_owned()))?;
+    // A model the executor's list lacks is a warning, never a refusal: the list may be curated
+    // and incomplete, and an executor that really does not know the model fails the run itself.
+    if let Some(model) = &model
+        && let Some(warning) = unlisted_model_warning(&candidates, &executor, model)
+    {
+        tracing::warn!(%executor, %model, "{warning}");
+        decision.warnings.push(warning);
+    }
     Ok(Planned {
         decision,
         executor,
         pin,
+        model,
     })
 }
 
-/// What a trigger's run starts with: the executor, the bot pin and the routing decision.
+/// The warning for `model` when the models `executor` lists (the live list its last probe
+/// found, else the adapter's curated one) do not include it. `None` when it is listed, or
+/// when nothing is listed to check against.
+fn unlisted_model_warning(
+    candidates: &[Candidate],
+    executor: &ExecutorId,
+    model: &str,
+) -> Option<String> {
+    let candidate = candidates
+        .iter()
+        .find(|candidate| &candidate.descriptor.id == executor)?;
+    let live = candidate
+        .health
+        .as_ref()
+        .map(|health| health.models.models.as_slice())
+        .filter(|models| !models.is_empty());
+    let listed = live.unwrap_or(candidate.descriptor.caps.models.as_slice());
+    if listed.is_empty() || listed.iter().any(|known| known.id == model) {
+        return None;
+    }
+    let names: Vec<&str> = listed.iter().map(|known| known.id.as_str()).collect();
+    Some(format!(
+        "model {model:?} is not in {executor}'s model list ({}); the run asks for it anyway",
+        names.join(", ")
+    ))
+}
+
+/// What a trigger's run starts with: the executor, the bot pin, the routing decision and the
+/// model the bot asks for.
 pub(crate) fn bot_launch(
     shared: &Shared,
     bot: &str,
-) -> Result<(ExecutorId, BotPin, RoutingDecision)> {
-    let planned = plan_route(shared, Some(bot), None)?;
+) -> Result<(ExecutorId, BotPin, RoutingDecision, Option<String>)> {
+    let planned = plan_route(shared, Some(bot), None, None)?;
     let pin = planned
         .pin
         .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-    Ok((planned.executor, pin, planned.decision))
+    Ok((planned.executor, pin, planned.decision, planned.model))
 }
 
 /// Mint an id until it parses (it always does: the suffix is hex).

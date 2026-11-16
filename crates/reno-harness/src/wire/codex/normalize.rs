@@ -310,9 +310,17 @@ pub(crate) fn usage_event(params: &Value) -> Option<ExecEvent> {
             .and_then(Value::as_u64)
             .unwrap_or_default()
     };
+    // Codex's `inputTokens` is the whole input: `cachedInputTokens` and `cacheWriteInputTokens`
+    // are subsets of it (the Responses API's `input_tokens_details`). `Usage.input_tokens` is
+    // the uncached remainder, so the cached parts come out of it and nothing is counted twice.
+    let cache_read = count(&["cachedInputTokens", "cached_input_tokens"]);
+    let cache_write = count(&["cacheWriteInputTokens", "cache_write_input_tokens"]);
+    let input = count(&["inputTokens", "input_tokens"]);
     Some(ExecEvent::Usage {
-        input_tokens: count(&["inputTokens", "input_tokens"]),
+        input_tokens: input.saturating_sub(cache_read.saturating_add(cache_write)),
         output_tokens: count(&["outputTokens", "output_tokens"]),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
     })
 }
 
@@ -1251,19 +1259,52 @@ mod tests {
     }
 
     #[test]
+    fn cached_input_is_a_subset_of_codex_input_and_is_taken_out_of_it() {
+        // The 0.169 `TokenUsageBreakdown`: `inputTokens` already holds the cached and the
+        // cache-written parts, and `totalTokens` is input plus output.
+        let params = json!({"threadId": "th", "turnId": "t", "tokenUsage": {
+            "total": {"totalTokens": 99999, "inputTokens": 90000, "cachedInputTokens": 80000, "cacheWriteInputTokens": 0, "outputTokens": 9999, "reasoningOutputTokens": 100},
+            "last": {"totalTokens": 11000, "inputTokens": 10000, "cachedInputTokens": 7000, "cacheWriteInputTokens": 500, "outputTokens": 1000, "reasoningOutputTokens": 50},
+            "modelContextWindow": 272000}});
+        assert_eq!(
+            usage_event(&params),
+            Some(ExecEvent::Usage {
+                input_tokens: 2500,
+                output_tokens: 1000,
+                cache_read_tokens: 7000,
+                cache_write_tokens: 500,
+            })
+        );
+        // A report whose cached count exceeds its input (never expected) cannot go negative.
+        let odd = json!({"tokenUsage": {"last": {"inputTokens": 5, "cachedInputTokens": 9, "outputTokens": 1}}});
+        assert!(matches!(
+            usage_event(&odd),
+            Some(ExecEvent::Usage {
+                input_tokens: 0,
+                cache_read_tokens: 9,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn usage_reads_last_snapshot_under_both_spellings() {
         assert_eq!(
             usage_event(&json!({"tokenUsage": {"last": {"inputTokens": 42, "outputTokens": 7}}})),
             Some(ExecEvent::Usage {
                 input_tokens: 42,
-                output_tokens: 7
+                output_tokens: 7,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(
             usage_event(&json!({"token_usage": {"last": {"input_tokens": 1, "output_tokens": 2}}})),
             Some(ExecEvent::Usage {
                 input_tokens: 1,
-                output_tokens: 2
+                output_tokens: 2,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(usage_event(&json!({})), None);
@@ -1472,6 +1513,8 @@ mod tests {
         let usage = ExecEvent::Usage {
             input_tokens: 3,
             output_tokens: 4,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         };
         let usage_params = json!({"tokenUsage": {"last": {"inputTokens": 3, "outputTokens": 4}}});
         let turn = |status: &str| json!({"turn": {"id": "t", "status": status}});

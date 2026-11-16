@@ -1449,3 +1449,47 @@ fn an_omitted_trigger_cwd_leaves_the_content_hash_alone() {
     assert!(with.canonical().contains("cwd"));
     assert_ne!(with.hash(), plain.hash());
 }
+
+// ---- inherit_user_config and model --------------------------------------------------------
+
+#[test]
+fn a_bot_without_inherit_user_config_or_model_keeps_its_hash_and_canonical_form() {
+    let a = hash_of_bot(&bot_with(""));
+    // Spelling the default out changes nothing, and the canonical form has neither key.
+    assert_eq!(hash_of_bot(&bot_with("inherit_user_config = false")), a);
+    let set = load(&[file(DefKind::Bot, "keeper", &bot_with(""))]).unwrap();
+    let canonical = set.bot("keeper").unwrap().canonical();
+    assert!(!canonical.contains("inherit_user_config"), "{canonical}");
+    assert!(!canonical.contains("model"), "{canonical}");
+}
+
+#[test]
+fn opting_in_to_user_config_or_pinning_a_model_changes_the_hash() {
+    let a = hash_of_bot(&bot_with(""));
+    let opted = hash_of_bot(&bot_with("inherit_user_config = true"));
+    let pinned = hash_of_bot(&bot_with("model = \"claude-sonnet-4-6\""));
+    assert_ne!(opted, a);
+    assert_ne!(pinned, a);
+    assert_ne!(opted, pinned);
+    let set = load(&[file(
+        DefKind::Bot,
+        "keeper",
+        &bot_with("model = \"claude-sonnet-4-6\"\ninherit_user_config = true"),
+    )])
+    .unwrap();
+    let bot = set.bot("keeper").unwrap();
+    assert_eq!(bot.model.as_deref(), Some("claude-sonnet-4-6"));
+    assert!(bot.inherit_user_config);
+}
+
+#[test]
+fn a_blank_or_malformed_model_is_refused() {
+    for bad in ["\"\"", "\"  \"", "\"two words\"", "\"line\\nbreak\""] {
+        let errors = bot_errors(&bot_with(&format!("model = {bad}")));
+        assert!(
+            errors.iter().any(|e| e.contains("model")),
+            "{bad}: {errors:?}"
+        );
+    }
+    assert!(bot_errors(&bot_with("model = \"gpt-5.5-codex\"")).is_empty());
+}

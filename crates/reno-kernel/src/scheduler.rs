@@ -776,7 +776,7 @@ impl Scheduler {
                 stop,
             });
         }
-        let (executor, bot, routing) = bot_launch(&self.shared, &plan.def.target.bot)?;
+        let (executor, bot, routing, model) = bot_launch(&self.shared, &plan.def.target.bot)?;
         // The definition's directory when it names one (checked when the run starts), else the
         // daemon's scratch workspace.
         let named = match plan
@@ -799,7 +799,7 @@ impl Scheduler {
                 KernelError::Invalid("the trigger working directory is not UTF-8".into())
             })?
             .to_owned();
-        let mut spec = serde_json::json!({ "cwd": cwd, "model": null, "trigger": name });
+        let mut spec = serde_json::json!({ "cwd": cwd, "model": model, "trigger": name });
         if named.is_some() {
             spec[crate::workspaces::CWD_NAMED] = true.into();
         }

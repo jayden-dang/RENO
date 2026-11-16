@@ -58,6 +58,8 @@ fn usage(input_tokens: u64, output_tokens: u64) -> MockStep {
     MockStep::Emit(ExecEvent::Usage {
         input_tokens,
         output_tokens,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     })
 }
 
@@ -272,11 +274,8 @@ async fn a_run_that_crosses_the_ceiling_is_stopped_and_the_bot_is_refused_after(
     );
     // The day's count and the run's own count are kept.
     let day = fx.clock.zone().day_of(fx.clock.now_ms());
-    assert_eq!(
-        fx.store.bot_usage(&day).await.unwrap()["keeper"].total(),
-        110
-    );
-    assert_eq!(fx.store.run_usage(&run).await.unwrap().total(), 110);
+    assert_eq!(fx.store.bot_usage(&day).await.unwrap()["keeper"].all(), 110);
+    assert_eq!(fx.store.run_usage(&run).await.unwrap().all(), 110);
 
     // A new run of the bot is refused, typed, before anything is created.
     let runs_before = fx.store.list_runs(None).await.unwrap().len();
@@ -393,7 +392,7 @@ async fn tokens_are_counted_on_the_local_day_of_the_clocks_zone() {
     assert_eq!(tz.day_of(fx.clock.now_ms()), "2023-11-14");
     let new_york = fx.store.bot_usage("2023-11-14").await.unwrap();
     assert_eq!(
-        new_york["scribe"].total(),
+        new_york["scribe"].all(),
         2 * (10 + 2),
         "both runs fall on New York's 14th"
     );
@@ -697,4 +696,133 @@ async fn an_expired_lease_the_claim_would_pass_over_does_not_wake_the_dispatcher
     // Resuming the bot is what lets the claim take the run over.
     fx.kernel.resume(Some("keeper")).await.unwrap();
     fx.wait_status(&run, RunStatus::Succeeded).await;
+}
+
+// ---- cache tokens -----------------------------------------------------------------------
+
+/// A `Usage` with cache counts.
+fn cached_usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> MockStep {
+    MockStep::Emit(ExecEvent::Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ceiling_counts_cache_reads_at_a_tenth_and_status_shows_what_it_counted() {
+    let fx = fx_with(
+        "max_concurrent_runs = 2\ndaily_token_ceiling = 1000",
+        [
+            // 10 + 10 + 10 + 5_000 / 10 = 530 of 1_000, though 5_030 tokens moved.
+            cached_usage(10, 10, 5_000, 10),
+            MockStep::Sleep(secs(3600)),
+        ],
+        config(8),
+    )
+    .await;
+    let run = as_bot(&fx, "keeper").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    // The usage is recorded by the run's own task: wait for the day's count to show it.
+    let status = until(async || {
+        let status = fx.kernel.budget_status().await.unwrap();
+        let counted = status.bots.iter().find(|b| b.bot == "keeper")?.tokens_today;
+        (counted > 0).then_some(status)
+    })
+    .await;
+    step(&fx, 1_000).await;
+    // Still running: the raw count is far past the ceiling, the counted one is not.
+    assert_eq!(fx.status(&run).await, RunStatus::Running);
+    assert_eq!(status.cache_read_weight_permille, 100);
+    let keeper = status.bots.iter().find(|b| b.bot == "keeper").unwrap();
+    assert_eq!(keeper.tokens_today, 530, "what the ceiling counts");
+    assert_eq!(keeper.cache_read_tokens_today, 5_000);
+    assert_eq!(keeper.cache_write_tokens_today, 10);
+    assert_eq!(keeper.daily_token_ceiling, Some(1_000));
+    // The run's own total keeps all four kinds apart.
+    let own = fx.store.run_usage(&run).await.unwrap();
+    assert_eq!(
+        (own.input, own.output, own.cache_read, own.cache_write),
+        (10, 10, 5_000, 10)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_whose_counted_tokens_cross_the_ceiling_is_stopped_with_the_counted_figure() {
+    let fx = fx_with(
+        "max_concurrent_runs = 2\ndaily_token_ceiling = 1000",
+        [
+            cached_usage(10, 10, 5_000, 10),
+            MockStep::Sleep(secs(1)),
+            // 530 + 300 + 200 writes = 1_030 counted.
+            cached_usage(0, 300, 0, 200),
+            MockStep::Sleep(secs(3600)),
+        ],
+        config(8),
+    )
+    .await;
+    let run = as_bot(&fx, "keeper").await;
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    let (_, budget) = ended_by_budget(&fx, &run).await;
+    assert_eq!(
+        budget,
+        Some(BudgetStop {
+            kind: BudgetKind::Tokens,
+            limit: 1000,
+            used: 1_030
+        })
+    );
+    // A new run is refused on the same count.
+    let refused = fx
+        .kernel
+        .submit_for_bot("keeper", "again", None, PathBuf::from("/work"), None)
+        .await;
+    assert!(
+        matches!(refused, Err(KernelError::BudgetExhausted { .. })),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_cache_read_weight_is_a_kernel_knob() {
+    let mut cfg = config(8);
+    cfg.cache_read_weight_permille = 1000;
+    let fx = fx_with(
+        "max_concurrent_runs = 2\ndaily_token_ceiling = 1000",
+        [
+            // At a full weight the same 5_030 tokens are over the ceiling at once.
+            cached_usage(10, 10, 5_000, 10),
+            MockStep::Sleep(secs(3600)),
+        ],
+        cfg,
+    )
+    .await;
+    let run = as_bot(&fx, "keeper").await;
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    let (_, budget) = ended_by_budget(&fx, &run).await;
+    assert_eq!(
+        budget,
+        Some(BudgetStop {
+            kind: BudgetKind::Tokens,
+            limit: 1000,
+            used: 5_030
+        })
+    );
+    assert_eq!(
+        fx.kernel
+            .budget_status()
+            .await
+            .unwrap()
+            .cache_read_weight_permille,
+        1000
+    );
+}
+
+#[test]
+fn a_weight_past_a_full_one_is_clamped_to_a_full_one() {
+    let mut cfg = config(1);
+    cfg.cache_read_weight_permille = 5_000;
+    assert_eq!(cfg.cache_read_permille(), 1000);
+    assert_eq!(config(1).cache_read_permille(), 100);
 }

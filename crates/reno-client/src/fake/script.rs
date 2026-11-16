@@ -177,6 +177,8 @@ async fn work(script: &Script, prompt: &str) -> bool {
                     ExecEvent::Usage {
                         input_tokens: 1200,
                         output_tokens: 340,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
                     },
                 );
                 true

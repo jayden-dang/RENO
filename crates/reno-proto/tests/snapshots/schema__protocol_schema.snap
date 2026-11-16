@@ -96,7 +96,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nsecrets = [\"GITHUB_TOKEN\"]             # optional: Keychain secrets its runs get as env vars\nresume = \"auto\"                        # optional: \"auto\" (default) or \"never\"\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
+      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nsecrets = [\"GITHUB_TOKEN\"]             # optional: Keychain secrets its runs get as env vars\nresume = \"auto\"                        # optional: \"auto\" (default) or \"never\"\nmodel = \"claude-sonnet-4-6\"            # optional: the executor's default when left out\ninherit_user_config = false            # optional: true loads the owner's personal config\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
       "properties": {
         "access": {
           "$ref": "#/$defs/AccessMode",
@@ -122,9 +122,20 @@ expression: protocol_schema()
           "description": "Let this bot's write runs work directly in the directory they target when it is not a git\nrepository. Off by default: a write run on a non-git directory is refused, because there\nis no worktree to isolate it in. A git repository is never written in place.",
           "type": "boolean"
         },
+        "inherit_user_config": {
+          "description": "Let this bot's runs load the owner's personal configuration for their harness. Off by\ndefault: a run is isolated from it, so the owner's own hooks, plugins, memory and\ninstructions do not reach the bot. Only executors that declare\n`isolates_user_config` (Claude Code) can isolate; the others load it either way, and say\nso on their descriptor. Reno's own MCP server and its policy apply in both modes.",
+          "type": "boolean"
+        },
         "instructions": {
           "description": "What the bot is for and how it works. Sent with every run.",
           "type": "string"
+        },
+        "model": {
+          "description": "The model this bot's runs ask for, as its executor names models (`claude-sonnet-4-6`).\nLeft out, the executor's own default applies. A task that names a model wins over it. The\nname is checked against the executor's model list only as a warning, since a list can be\ncurated and incomplete; a model the executor does not know fails when the run starts.\nIt is passed to whichever executor the run goes to, so a bot that lists executors of\ndifferent vendors should leave it out.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The bot's name; it must equal the file stem.",
@@ -1197,6 +1208,13 @@ expression: protocol_schema()
               "ruleMatched": {
                 "$ref": "#/$defs/RuleMatched",
                 "description": "The rule that ordered `ranked`."
+              },
+              "warnings": {
+                "description": "Things worth a person's attention that did not stop the run: the model the bot pins is\nnot in the chosen executor's model list (a list that may be curated and incomplete, so\nthe run still starts).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -1380,7 +1398,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -2315,6 +2333,13 @@ expression: protocol_schema()
               "ruleMatched": {
                 "$ref": "#/$defs/RuleMatched",
                 "description": "The rule that ordered `ranked`."
+              },
+              "warnings": {
+                "description": "Things worth a person's attention that did not stop the run: the model the bot pins is\nnot in the chosen executor's model list (a list that may be curated and incomplete, so\nthe run still starts).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -2845,6 +2870,13 @@ expression: protocol_schema()
               "ruleMatched": {
                 "$ref": "#/$defs/RuleMatched",
                 "description": "The rule that ordered `ranked`."
+              },
+              "warnings": {
+                "description": "Things worth a person's attention that did not stop the run: the model the bot pins is\nnot in the chosen executor's model list (a list that may be curated and incomplete, so\nthe run still starts).",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -2975,6 +3007,20 @@ expression: protocol_schema()
                 "description": "The bot.",
                 "type": "string"
               },
+              "cacheReadTokensToday": {
+                "default": 0,
+                "description": "Of what its runs read today, the input served from the prompt cache, as the harnesses\nreported it (unweighted). `tokens_today` counts only a share of it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cacheWriteTokensToday": {
+                "default": 0,
+                "description": "Of what its runs sent today, the input written to the prompt cache (unweighted; counted\nin full by `tokens_today`).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "dailyTokenCeiling": {
                 "description": "The most it may use per day; absent for no ceiling.",
                 "format": "uint64",
@@ -3013,7 +3059,7 @@ expression: protocol_schema()
                 "type": "integer"
               },
               "tokensToday": {
-                "description": "Tokens (input and output) its runs have used today.",
+                "description": "The tokens its runs have used today as the ceiling counts them: input, output and cache\nwrites in full, plus the cache reads at the weight in\n`BudgetStatusResult::cache_read_weight_permille`.",
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
@@ -3040,6 +3086,13 @@ expression: protocol_schema()
               "$ref": "#/$defs/BotBudgetStatus"
             },
             "type": "array"
+          },
+          "cacheReadWeightPermille": {
+            "default": 0,
+            "description": "How much of a cache read counts toward a daily token ceiling, in thousandths (100 means a\ntenth). Cache reads are about a tenth of the price of input, so they weigh that much.\nAbsent from a daemon that predates the weight, which counted no cache tokens at all.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "day": {
             "description": "The local day the token counts are for, `YYYY-MM-DD`.",
@@ -3290,7 +3343,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -6353,6 +6406,11 @@ expression: protocol_schema()
                 "description": "Whether the end of a turn is reported deterministically.",
                 "type": "boolean"
               },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
+                "type": "boolean"
+              },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
@@ -6943,6 +7001,11 @@ expression: protocol_schema()
                 "description": "Whether the end of a turn is reported deterministically.",
                 "type": "boolean"
               },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
+                "type": "boolean"
+              },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
@@ -7527,6 +7590,11 @@ expression: protocol_schema()
               },
               "deterministicTurnEnd": {
                 "description": "Whether the end of a turn is reported deterministically.",
+                "type": "boolean"
+              },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
               },
               "mcpInjection": {
@@ -8744,7 +8812,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -8880,10 +8948,22 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "Tokens used since the previous `Usage` of the run (executors report per turn, or once at\nthe end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.",
+                "description": "Tokens used since the previous `Usage` of the run (executors report per turn, or once at\nthe end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.\n\nThe four counts are disjoint: `input_tokens` is the input that was neither read from nor\nwritten to the prompt cache, so the whole input of a call is\n`input_tokens + cache_read_tokens + cache_write_tokens`.",
                 "properties": {
+                  "cacheReadTokens": {
+                    "description": "Input tokens served from the prompt cache (about a tenth of the price of input).\nAbsent means 0, as does an executor that does not report it.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "cacheWriteTokens": {
+                    "description": "Input tokens written to the prompt cache. Absent means 0.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
                   "inputTokens": {
-                    "description": "Input tokens.",
+                    "description": "Input tokens that were not served from or written to the prompt cache.",
                     "format": "uint64",
                     "minimum": 0,
                     "type": "integer"
@@ -9533,7 +9613,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -10696,6 +10776,11 @@ expression: protocol_schema()
               },
               "deterministicTurnEnd": {
                 "description": "Whether the end of a turn is reported deterministically.",
+                "type": "boolean"
+              },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
               },
               "mcpInjection": {

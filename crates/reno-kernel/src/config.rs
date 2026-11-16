@@ -63,6 +63,11 @@ pub struct KernelConfig {
     /// How many attempts (claims) a run may have made for the daemon to resume it on its own
     /// after another interruption. A person can still resume it past this. At least 1.
     pub max_attempts: u32,
+    /// How much of a cache read counts toward a bot's `daily_token_ceiling`, in thousandths:
+    /// 100 (the default) counts a tenth, because a cache read costs about a tenth of an input
+    /// token. Input, output and cache writes always count in full. Past 1000 it is taken as
+    /// 1000 (a full weight). Applied when usage is read, so changing it re-prices the whole day.
+    pub cache_read_weight_permille: u32,
 }
 
 impl Default for KernelConfig {
@@ -87,11 +92,17 @@ impl Default for KernelConfig {
             default_executors: Vec::new(),
             default_wall_time: Duration::from_secs(4 * 60 * 60),
             max_attempts: 3,
+            cache_read_weight_permille: reno_store::DEFAULT_CACHE_READ_PERMILLE,
         }
     }
 }
 
 impl KernelConfig {
+    /// The cache-read weight in force: [`Self::cache_read_weight_permille`] up to a full weight.
+    pub fn cache_read_permille(&self) -> u32 {
+        self.cache_read_weight_permille.min(1000)
+    }
+
     /// The lease in milliseconds, as the store takes it.
     pub(crate) fn lease_ms(&self) -> u64 {
         u64::try_from(self.lease.as_millis()).unwrap_or(u64::MAX)

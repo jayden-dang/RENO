@@ -431,6 +431,11 @@ impl Normalizer {
                 let usage = ExecEvent::Usage {
                     input_tokens: f.usage.input_tokens,
                     output_tokens: f.usage.output_tokens,
+                    // The CLI's `input_tokens` leaves the cached input out: read from and
+                    // written to the cache are separate counts, so nothing is counted twice.
+                    // Only the result's usage is read, never a per-message one.
+                    cache_read_tokens: f.usage.cache_read_input_tokens,
+                    cache_write_tokens: f.usage.cache_creation_input_tokens,
                 };
                 let failure = (f.subtype == "success" && !interrupted && !aborted(&f))
                     .then(|| api_failure(&f))
@@ -772,7 +777,9 @@ mod tests {
             vec![
                 ExecEvent::Usage {
                     input_tokens: 3,
-                    output_tokens: 4
+                    output_tokens: 4,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 },
                 ExecEvent::Done {
                     stop: StopReason::Completed,
@@ -781,6 +788,23 @@ mod tests {
                     reason: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_real_shaped_result_counts_cache_reads_and_writes_apart_from_input() {
+        // The shape of a long CLI run's result: `input_tokens` is only the uncached remainder.
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s","total_cost_usd":1.9,"usage":{"input_tokens":16,"cache_creation_input_tokens":48213,"cache_read_input_tokens":1270554,"output_tokens":9120,"server_tool_use":{"web_search_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":48213}},"modelUsage":{"claude-opus-5-5":{"inputTokens":16,"outputTokens":9120,"cacheReadInputTokens":1270554,"cacheCreationInputTokens":48213}}}"#,
+        );
+        assert_eq!(
+            events[0],
+            ExecEvent::Usage {
+                input_tokens: 16,
+                output_tokens: 9120,
+                cache_read_tokens: 1_270_554,
+                cache_write_tokens: 48_213,
+            }
         );
     }
 

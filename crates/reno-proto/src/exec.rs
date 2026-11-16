@@ -121,6 +121,12 @@ pub struct ExecSpec {
     /// JSON Schema the final result must satisfy, when the executor supports structured output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+    /// Let the harness load the owner's personal configuration (user-level settings, hooks,
+    /// plugins, memory, instructions). Off by default: a run is isolated from it where the
+    /// executor can enforce that (`ExecutorCaps::isolates_user_config`), and runs as it always
+    /// did where it cannot. Reno's own injected MCP server and the run's policy apply either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_user_config: bool,
 }
 
 impl std::fmt::Debug for ExecSpec {
@@ -143,8 +149,13 @@ impl std::fmt::Debug for ExecSpec {
             .field("mcp", &self.mcp)
             .field("env", &env)
             .field("output_schema", &self.output_schema)
+            .field("inherit_user_config", &self.inherit_user_config)
             .finish()
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A tool invocation as far as Reno needs to know it.
@@ -333,11 +344,22 @@ pub enum ExecEvent {
     },
     /// Tokens used since the previous `Usage` of the run (executors report per turn, or once at
     /// the end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.
+    ///
+    /// The four counts are disjoint: `input_tokens` is the input that was neither read from nor
+    /// written to the prompt cache, so the whole input of a call is
+    /// `input_tokens + cache_read_tokens + cache_write_tokens`.
     Usage {
-        /// Input tokens.
+        /// Input tokens that were not served from or written to the prompt cache.
         input_tokens: u64,
         /// Output tokens.
         output_tokens: u64,
+        /// Input tokens served from the prompt cache (about a tenth of the price of input).
+        /// Absent means 0, as does an executor that does not report it.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        cache_read_tokens: u64,
+        /// Input tokens written to the prompt cache. Absent means 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        cache_write_tokens: u64,
     },
     /// The harness asks a human questions.
     NeedsInput {
@@ -458,6 +480,12 @@ pub struct ExecutorCaps {
     pub plan_mode: bool,
     /// Models on offer.
     pub models: Vec<ModelInfo>,
+    /// Whether a run is kept from loading the owner's personal configuration for that harness
+    /// (its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in
+    /// (`inherit_user_config`). Only claimed where the driver enforces it; false means a run
+    /// loads whatever the owner's own CLI would (ARCH-15).
+    #[serde(default)]
+    pub isolates_user_config: bool,
 }
 
 /// An installed harness and what it can do.

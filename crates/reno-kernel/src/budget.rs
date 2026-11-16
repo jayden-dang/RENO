@@ -9,7 +9,12 @@
 //! | `daily_token_ceiling` | at submit and at fire (typed refusal), in the claim (a queued run is passed over), and in the supervisor on each `Usage` | a run that crosses it is cancelled like a wall-time stop |
 //!
 //! Tokens are summed from `ExecEvent::Usage` (see its doc) per bot per local day, the day being
-//! the one the `Clock`'s zone says. A day's row is never reset, so there is nothing to do at
+//! the one the `Clock`'s zone says. What the ceiling counts is
+//! `input + output + cache_write + cache_read * w`, where `w` is
+//! `KernelConfig::cache_read_weight_permille` (default 100, a tenth: a cache read costs about a
+//! tenth of an input token). The four counts are kept raw; `w` is applied when they are read, in
+//! the claim's SQL and in `reno_store::Tokens::counted` alike, and `budget.status` shows both
+//! the counted figure (`tokensToday`) and the raw cache counts. A day's row is never reset, so there is nothing to do at
 //! midnight except wake the dispatcher: while a bot has queued runs held back by its ceiling, the
 //! dispatcher arms one deadline at the next local midnight (ARCH-10).
 //!
@@ -177,7 +182,9 @@ pub(crate) async fn token_refusal(shared: &Shared, bot: &str) -> Result<Option<B
         .bot_usage(&day)
         .await?
         .get(bot)
-        .map_or(0, |tokens| tokens.total());
+        .map_or(0, |tokens| {
+            tokens.counted(shared.config.cache_read_permille())
+        });
     Ok((used >= limit).then_some(BudgetStop {
         kind: BudgetKind::Tokens,
         limit,
@@ -195,6 +202,7 @@ pub(crate) async fn status(shared: &Shared) -> Result<BudgetStatusResult> {
     let occupancy = shared.db.occupancy().await?;
     let current = shared.current_defs();
     let ms = |wall: Duration| u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);
+    let weight = shared.config.cache_read_permille();
 
     let mut names: BTreeSet<&str> = current.set().bots().keys().map(String::as_str).collect();
     names.extend(pauses.bots.iter().map(String::as_str));
@@ -209,7 +217,9 @@ pub(crate) async fn status(shared: &Shared) -> Result<BudgetStatusResult> {
                 live_runs: busy.live,
                 max_concurrent_runs: budget.max_concurrent_runs,
                 queued_runs: busy.queued,
-                tokens_today: usage.get(name).map_or(0, |tokens| tokens.total()),
+                tokens_today: usage.get(name).map_or(0, |tokens| tokens.counted(weight)),
+                cache_read_tokens_today: usage.get(name).map_or(0, |tokens| tokens.cache_read),
+                cache_write_tokens_today: usage.get(name).map_or(0, |tokens| tokens.cache_write),
                 daily_token_ceiling: budget.daily_token_ceiling,
                 max_wall_time_ms: ms(wall_time(budget, shared.config.default_wall_time)),
                 paused: pauses.bots.contains(name),
@@ -221,6 +231,7 @@ pub(crate) async fn status(shared: &Shared) -> Result<BudgetStatusResult> {
         day,
         day_ends_at_ms: u64::try_from(zone.next_day_start_ms(now)).unwrap_or(0),
         default_wall_time_ms: ms(shared.config.default_wall_time),
+        cache_read_weight_permille: weight,
         bots,
     })
 }

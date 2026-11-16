@@ -77,6 +77,7 @@ fn server(name: &str, command: &Path, tool: &str) -> McpServerSpec {
 fn spec(prompt: &str, cwd: &Path, env: &[(&str, &str)], mcp: Vec<McpServerSpec>) -> ExecSpec {
     ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: prompt.into(),
         cwd: cwd.to_path_buf(),
         model: None,
