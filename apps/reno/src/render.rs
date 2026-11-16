@@ -540,7 +540,8 @@ pub(crate) fn executor_line(info: &ExecutorInfo) -> String {
     line
 }
 
-/// One trigger on one line: name, kind, status, then what is known of its timing.
+/// One trigger on one line: name, kind, status, bot and the working directory it names, then
+/// what is known of its timing.
 pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
     let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
     let mut line = format!(
@@ -550,6 +551,9 @@ pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
         status_text_of(trigger.status),
         trigger.bot
     );
+    if let Some(cwd) = &trigger.cwd {
+        line.push_str(&format!("  cwd {cwd}"));
+    }
     if let Some(next) = trigger.next_due_at_ms {
         line.push_str(&format!("  next {}", at(next)));
     }
@@ -1003,6 +1007,22 @@ mod tests {
         assert_eq!(
             lines.last().map(String::as_str),
             Some("  warning: model \"x\" is not in claude-code's model list")
+        );
+    }
+
+    #[test]
+    fn a_trigger_line_shows_the_working_directory_it_names() {
+        let mut trigger: TriggerInfo = serde_json::from_value(serde_json::json!({
+            "name": "nightly", "kind": "cron", "bot": "tester", "version": 1,
+            "status": "scheduled", "failures": 0
+        }))
+        .unwrap();
+        assert!(!trigger_line(&trigger).contains("cwd"));
+        trigger.cwd = Some("~/code/app".into());
+        assert!(
+            trigger_line(&trigger).contains("bot tester  cwd ~/code/app"),
+            "{}",
+            trigger_line(&trigger)
         );
     }
 

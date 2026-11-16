@@ -850,7 +850,7 @@ fn trigger_list_and_fire_through_the_cli() {
     write_def(
         &world.defs_dir(),
         "triggers/nightly.toml",
-        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"UTC\"\n[target]\nbot = \"tester\"\nprompt = \"nightly\"\n",
+        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"UTC\"\n[target]\nbot = \"tester\"\nprompt = \"nightly\"\ncwd = \"~/code/app\"\n",
     );
     world.start_daemon();
 
@@ -865,6 +865,8 @@ fn trigger_list_and_fire_through_the_cli() {
         shown.contains("poke") && shown.contains("manual"),
         "{shown}"
     );
+    assert!(shown.contains("cwd ~/code/app"), "{shown}");
+    assert_eq!(shown.matches("cwd").count(), 1, "only nightly names one: {shown}");
 
     let fired = world.reno(&["trigger", "fire", "poke"]);
     assert!(fired.status.success(), "{}", text(&fired.stderr));
