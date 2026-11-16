@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn entries_cover_every_destination_and_the_actions() {
         let all = entries();
-        assert_eq!(all.len(), 14);
+        assert_eq!(all.len(), 15);
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleTheme));
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleSidebar));
         assert_eq!(all[0].action, PaletteAction::Go(Nav::Home));

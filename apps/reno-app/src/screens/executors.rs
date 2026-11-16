@@ -184,25 +184,23 @@ impl ExecutorsScreen {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Label over value: the column is narrow at the window's minimum width, and a value
+        // such as "Unrestricted" must never break inside a word.
         let kv = |label: &'static str, value: String| {
             div()
                 .flex()
-                .items_start()
-                .gap(px(8.0))
-                .line_height(px(19.0))
+                .flex_col()
                 .child(
                     div()
-                        .flex_none()
-                        .w(px(58.0))
-                        .text_size(px(12.0))
+                        .text_size(px(11.5))
                         .text_color(theme.faint)
                         .child(label),
                 )
                 .child(
                     div()
-                        .flex_1()
                         .min_w_0()
                         .text_size(px(12.5))
+                        .line_height(px(18.0))
                         .text_color(theme.muted)
                         .child(SharedString::from(value)),
                 )
@@ -220,7 +218,7 @@ impl ExecutorsScreen {
             .items_start()
             .child(
                 div()
-                    .map(|d| page::cell(d, Some(180.0)))
+                    .map(|d| page::cell(d, Some(150.0)))
                     .flex()
                     .flex_col()
                     .gap(px(5.0))
@@ -334,9 +332,9 @@ impl Render for ExecutorsScreen {
                         .child(page::table_head(
                             &theme,
                             &[
-                                ("Executor", Some(180.0)),
+                                ("Executor", Some(150.0)),
                                 ("Health", None),
-                                ("Can do", Some(200.0)),
+                                ("Can do", Some(230.0)),
                                 ("", Some(110.0)),
                             ],
                         ))
