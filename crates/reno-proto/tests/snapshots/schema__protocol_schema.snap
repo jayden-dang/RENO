@@ -645,7 +645,8 @@ expression: protocol_schema()
     "agent",
     "run.resume",
     "run.stop_detail",
-    "secrets"
+    "secrets",
+    "executor.frames"
   ],
   "methods": [
     {
@@ -7645,6 +7646,113 @@ expression: protocol_schema()
           "executor"
         ],
         "title": "ExecutorInstallResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.frames",
+      "params": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.frames`.",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ExecutorId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The executor to report; every executor when absent."
+          }
+        },
+        "title": "ExecutorFramesParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorFrameCounts": {
+            "description": "The unrecognised frames of one executor.",
+            "properties": {
+              "cliVersion": {
+                "description": "The CLI version of the executor's last probe, when it had one: the version the kinds\nbelow were first seen under.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "frames": {
+                "description": "The kinds, by name. Bounded: a harness cannot grow the list without limit.",
+                "items": {
+                  "$ref": "#/$defs/UnknownFrameKind"
+                },
+                "type": "array"
+              },
+              "id": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor."
+              }
+            },
+            "required": [
+              "id",
+              "frames"
+            ],
+            "type": "object"
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "UnknownFrameKind": {
+            "description": "One kind of frame an executor's wire layer did not recognise.",
+            "properties": {
+              "count": {
+                "description": "How many frames of this kind arrived since the daemon started.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "firstSeenMs": {
+                "description": "When the daemon first saw this kind under the executor's current CLI version, in\nmilliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "description": "The kind, as the driver names it (`type:foo`, `method:bar`).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "count",
+              "firstSeenMs"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.frames`.",
+        "properties": {
+          "executors": {
+            "description": "One entry per executor, by id. An executor that never saw an unknown frame has an empty\n`frames`.",
+            "items": {
+              "$ref": "#/$defs/ExecutorFrameCounts"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "executors"
+        ],
+        "title": "ExecutorFramesResult",
         "type": "object"
       }
     },

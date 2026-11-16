@@ -397,6 +397,51 @@ pub struct ExecutorListResult {
     pub executors: Vec<ExecutorInfo>,
 }
 
+/// Params of `executor.frames`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorFramesParams {
+    /// The executor to report; every executor when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<ExecutorId>,
+}
+
+/// One kind of frame an executor's wire layer did not recognise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnknownFrameKind {
+    /// The kind, as the driver names it (`type:foo`, `method:bar`).
+    pub kind: String,
+    /// How many frames of this kind arrived since the daemon started.
+    pub count: u64,
+    /// When the daemon first saw this kind under the executor's current CLI version, in
+    /// milliseconds since the Unix epoch.
+    pub first_seen_ms: u64,
+}
+
+/// The unrecognised frames of one executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorFrameCounts {
+    /// The executor.
+    pub id: ExecutorId,
+    /// The CLI version of the executor's last probe, when it had one: the version the kinds
+    /// below were first seen under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// The kinds, by name. Bounded: a harness cannot grow the list without limit.
+    pub frames: Vec<UnknownFrameKind>,
+}
+
+/// Result of `executor.frames`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorFramesResult {
+    /// One entry per executor, by id. An executor that never saw an unknown frame has an empty
+    /// `frames`.
+    pub executors: Vec<ExecutorFrameCounts>,
+}
+
 /// Params of the `executors.watch` subscription.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExecutorsWatchParams {}

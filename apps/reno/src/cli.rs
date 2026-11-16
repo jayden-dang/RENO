@@ -247,6 +247,16 @@ pub(crate) enum ExecutorCommand {
     /// one, wait for the probe that follows and show the result. The only step that installs:
     /// runs never do. It can take a while, and needs the network.
     Install(ExecutorInstall),
+    /// Show the frames each executor's wire layer did not recognise since the daemon started,
+    /// by kind, and when each kind was first seen. A rising number is the early sign that a
+    /// harness CLI moved: see docs/KEEPING-UP.md.
+    Frames(ExecutorFrames),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorFrames {
+    /// The executor, as `reno executor list` shows it [default: all of them].
+    pub(crate) id: Option<ExecutorId>,
 }
 
 #[derive(Debug, Args)]

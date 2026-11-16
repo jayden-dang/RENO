@@ -294,7 +294,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames"],
                "pid": 4242}),
     );
 }
@@ -984,6 +984,28 @@ fn executor_health_on_the_wire() {
         json!({"id": "acp.hermes"}),
     );
     assert_eq!(<ExecutorsWatch as Subscription>::NAME, "executors.watch");
+
+    assert_eq!(<ExecutorFrames as Method>::NAME, "executor.frames");
+    assert_eq!(FEATURE_EXECUTOR_FRAMES, "executor.frames");
+    golden(&ExecutorFramesParams { id: None }, json!({}));
+    golden(
+        &ExecutorFramesResult {
+            executors: vec![ExecutorFrameCounts {
+                id: "codex".parse().unwrap(),
+                cli_version: Some("0.170.0".into()),
+                frames: vec![UnknownFrameKind {
+                    kind: "method:thread/new".into(),
+                    count: 3,
+                    first_seen_ms: 1_800_000_000_000,
+                }],
+            }],
+        },
+        json!({"executors": [{
+            "id": "codex",
+            "cliVersion": "0.170.0",
+            "frames": [{"kind": "method:thread/new", "count": 3, "firstSeenMs": 1_800_000_000_000_u64}]
+        }]}),
+    );
 
     golden(
         &ExecutorHealth {

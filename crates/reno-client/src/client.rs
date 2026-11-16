@@ -387,6 +387,20 @@ impl Client {
             .executors)
     }
 
+    /// `executor.frames`: the frames each executor's wire layer did not recognise (every executor
+    /// when `id` is `None`), by kind. Needs feature `executor.frames`.
+    pub async fn executor_frames(
+        &self,
+        id: Option<reno_proto::ExecutorId>,
+    ) -> Result<Vec<reno_proto::ExecutorFrameCounts>, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_FRAMES)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorFrames>(reno_proto::ExecutorFramesParams { id })
+            .await?
+            .executors)
+    }
+
     /// `executor.install`: fetches and verifies the managed adapter of an executor whose last
     /// probe said it needs one, waits for the probe that follows and returns the executor. Can
     /// take minutes. Needs feature `executor.install`.

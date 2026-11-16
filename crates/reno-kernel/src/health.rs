@@ -24,14 +24,15 @@
 //! A probe that cannot finish in time keeps the previous health (or, with none, records
 //! `ProbeFailed`, which is not a reason to refuse a run).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::join_all;
 use reno_proto::{
-    ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog, NotInstalledReason,
+    ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog,
+    NotInstalledReason, UnknownFrameKind,
 };
 use tokio::sync::{Semaphore, watch};
 
@@ -66,6 +67,16 @@ pub(crate) struct HealthBoard {
     gates: Mutex<HashMap<ExecutorId, Arc<Gate>>>,
     /// Executors with a background probe queued, so a burst of failures is one probe.
     queued: Mutex<HashSet<ExecutorId>>,
+    /// The unrecognised frame kinds seen so far, per executor (T1.14).
+    frames: Mutex<HashMap<ExecutorId, FrameBook>>,
+}
+
+/// When each unrecognised frame kind of one executor was first seen under one CLI version. The
+/// kinds are bounded by the executor's own counter, so this is too (ARCH-11).
+#[derive(Default)]
+struct FrameBook {
+    version: Option<String>,
+    first_seen_ms: BTreeMap<String, u64>,
 }
 
 impl HealthBoard {
@@ -76,6 +87,7 @@ impl HealthBoard {
             permits: Semaphore::new(PROBE_CONCURRENCY),
             gates: Mutex::new(HashMap::new()),
             queued: Mutex::new(HashSet::new()),
+            frames: Mutex::new(HashMap::new()),
         }
     }
 
@@ -303,6 +315,78 @@ impl Shared {
             return self.health.live(id);
         }
         Some(stored)
+    }
+
+    /// Looks at the frames `id`'s wire layer has not recognised so far and logs a warning for
+    /// every kind not seen before under the CLI version of the executor's last probe. Called
+    /// when a run ends and when the counts are asked for; costs a map lookup and does nothing
+    /// when nothing new arrived.
+    pub(crate) fn note_unknown_frames(&self, id: &ExecutorId) {
+        let _ = self.unknown_frames_of(id);
+    }
+
+    /// What `executor.frames` answers for `id`: its counters, with when each kind was first
+    /// seen. `None` for an executor that is not registered.
+    fn unknown_frames_of(&self, id: &ExecutorId) -> Option<ExecutorFrameCounts> {
+        let executor = self.executors.get(id)?;
+        let counts = executor.unknown_frames();
+        let version = self
+            .health
+            .entries()
+            .get(id)
+            .and_then(|entry| entry.health.installed.version().map(str::to_owned));
+        let now = u64::try_from(self.db.now_ms()).unwrap_or(0);
+        let mut books = self
+            .health
+            .frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let book = books.entry(id.clone()).or_default();
+        if book.version != version {
+            // A new CLI version: its kinds are new news again.
+            book.version = version;
+            book.first_seen_ms.clear();
+        }
+        let mut frames = Vec::with_capacity(counts.len());
+        for (kind, count) in counts {
+            let first_seen_ms = *book.first_seen_ms.entry(kind.clone()).or_insert_with(|| {
+                tracing::warn!(
+                    executor = %id,
+                    cli_version = book.version.as_deref().unwrap_or("unknown"),
+                    kind = %kind,
+                    "a frame kind this driver does not recognise: the CLI may have moved"
+                );
+                now
+            });
+            frames.push(UnknownFrameKind {
+                kind,
+                count,
+                first_seen_ms,
+            });
+        }
+        Some(ExecutorFrameCounts {
+            id: id.clone(),
+            cli_version: book.version.clone(),
+            frames,
+        })
+    }
+
+    /// The unrecognised frames of `id`, or of every executor by id.
+    pub(crate) fn executor_frames(
+        &self,
+        id: Option<&ExecutorId>,
+    ) -> Result<Vec<ExecutorFrameCounts>> {
+        let mut ids: Vec<ExecutorId> = match id {
+            Some(id) => vec![id.clone()],
+            None => self.executors.ids().cloned().collect(),
+        };
+        ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        ids.iter()
+            .map(|id| {
+                self.unknown_frames_of(id)
+                    .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))
+            })
+            .collect()
     }
 
     /// The health a probe of this process found for `id`, or `None` when it has not probed it.

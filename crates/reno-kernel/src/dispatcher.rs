@@ -687,7 +687,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         let refusal = StartRefusal::Invalid;
         return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
     }
-    let info = RunInfo {
+    let mut info = RunInfo {
+        executor: row.executor.clone(),
         cwd: spec.cwd.clone(),
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         wall_time: settings.wall_time,
@@ -808,6 +809,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
             run: run_id.clone(),
         })
         .await;
+    info.executor = current;
     let supervisor = Supervisor::new(
         Arc::clone(shared),
         run_id,
