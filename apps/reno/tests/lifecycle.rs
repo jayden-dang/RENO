@@ -243,9 +243,42 @@ fn logs_follow_prints_new_lines_when_the_file_changes() {
         }
     });
 
+    // Wait until the follower is following. It may start after any given write, so append a
+    // numbered marker every half second until one comes out: that one was written after the
+    // follower began, and so is everything the daemon writes from here on.
+    let log = world.data_dir.join("logs/renod.log");
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut n = 0;
+    let ready = 'wait: loop {
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        n += 1;
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+            writeln!(
+                file,
+                "{{\"level\":\"INFO\",\"fields\":{{\"message\":\"follow-test marker {n}\"}}}}"
+            )
+            .unwrap();
+        }
+        while let Ok(line) = received.recv_timeout(Duration::from_millis(500)) {
+            let done = line.contains("follow-test marker");
+            seen.push(line);
+            if done {
+                break 'wait true;
+            }
+        }
+    };
+    assert!(
+        ready,
+        "the follower never showed an appended line: {seen:?}"
+    );
+
     // Stopping the daemon logs "shutting down" and "stopped".
     world.ok(&["daemon", "stop"]);
-    let mut seen = Vec::new();
     let found = loop {
         match received.recv_timeout(Duration::from_secs(60)) {
             Ok(line) => {

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use notify::{RecursiveMode, Watcher};
-use reno_client::launcher::logs::{recent_trouble, render_line, tail_lines};
+use reno_client::launcher::logs::{recent_trouble, render_line, tail_lines_before};
 use reno_client::launcher::{LABEL, Launcher, Started};
 use reno_client::{Client, ClientError};
 use reno_proto::DaemonStatusInfo;
@@ -346,7 +346,15 @@ async fn status(env: &Env) -> anyhow::Result<ExitCode> {
 async fn logs(env: &Env, args: &DaemonLogs) -> anyhow::Result<ExitCode> {
     let launcher = env.launcher()?;
     let paths = launcher.logs();
-    let lines = tail_lines(&paths.log, args.lines)
+    // The follower takes its place first; the lines shown end exactly where it starts, so a
+    // line written meanwhile is shown once, by the follower, and never lost.
+    let follower = if args.follow {
+        Some(Follower::from_end(&paths.log)?)
+    } else {
+        None
+    };
+    let end = follower.as_ref().map_or(u64::MAX, Follower::offset);
+    let lines = tail_lines_before(&paths.log, args.lines, end)
         .with_context(|| format!("cannot read {}", paths.log.display()))?;
     if lines.is_empty() && !args.follow && !env.json {
         print_line(format_args!("no log lines yet in {}", paths.log.display()))?;
@@ -354,13 +362,9 @@ async fn logs(env: &Env, args: &DaemonLogs) -> anyhow::Result<ExitCode> {
     for line in &lines {
         print_log_line(env, line)?;
     }
-    if !args.follow {
+    let Some(mut follower) = follower else {
         return Ok(ExitCode::SUCCESS);
-    }
-
-    // Opened before the watch starts, at the end of what was just shown, so that nothing
-    // written in between is lost or shown twice.
-    let mut follower = Follower::from_end(&paths.log)?;
+    };
     let (wake, mut changed) = tokio::sync::mpsc::channel::<()>(1);
     let mut watcher = notify::recommended_watcher(move |_event| {
         // One pending wake-up is enough: the follower reads everything that is there.

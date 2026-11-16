@@ -40,6 +40,11 @@ impl Follower {
         Ok(follower)
     }
 
+    /// Bytes of the file already consumed: where the next read starts.
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
+    }
+
     /// The complete lines appended since the last call.
     pub(crate) fn read_new(&mut self) -> io::Result<Vec<String>> {
         let mut lines = Vec::new();

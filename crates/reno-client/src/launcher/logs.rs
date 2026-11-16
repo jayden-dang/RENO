@@ -41,16 +41,23 @@ impl LogPaths {
 
 /// The last `count` non-empty lines of the file at `path`. A missing file has none.
 pub fn tail_lines(path: &Path, count: usize) -> io::Result<Vec<String>> {
+    tail_lines_before(path, count, u64::MAX)
+}
+
+/// The last `count` complete lines that end at or before byte `end` of `path` (the whole file
+/// when `end` is past its length). A follower that starts at `end` then continues exactly where
+/// these lines stop: nothing written in between is lost or shown twice.
+pub fn tail_lines_before(path: &Path, count: usize, end: u64) -> io::Result<Vec<String>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let len = file.metadata()?.len();
+    let len = file.metadata()?.len().min(end);
     let start = len.saturating_sub(TAIL_WINDOW);
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
-    file.take(TAIL_WINDOW).read_to_end(&mut bytes)?;
+    file.take(len - start).read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text
         .lines()
