@@ -731,7 +731,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     }) {
         let why = format!(
             "NoEligibleExecutor: no default executor can take the task ({}); {NAME_ONE}",
-            left_out.explain()
+            left_out.explain_verbose()
         );
         let account = Some(StartFailure::NoEligibleExecutor);
         let refusal = StartRefusal::NoEligibleExecutor;

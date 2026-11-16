@@ -154,7 +154,7 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
     }
     match &routing {
         Some(decision) => {
-            for line in render::routing_lines(decision) {
+            for line in render::routing_lines(decision, args.verbose) {
                 print_line(line)?;
             }
         }

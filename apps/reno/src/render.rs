@@ -251,19 +251,38 @@ fn shorten(text: &str, width: usize) -> String {
     cut
 }
 
-/// A routing decision as lines for `run show`: who was chosen and by which rule, then every
-/// executor that was passed over with its reason, then the fallback walk.
-pub(crate) fn routing_lines(decision: &RoutingDecision) -> Vec<String> {
-    let mut lines = vec![format!("routing: {}", decision.explain())];
+/// A routing decision as lines for `run show`: who was chosen and by which rule, then the
+/// executors that were passed over with their reasons, then the fallback walk.
+///
+/// Executors the task or its bot leaves out are one line per reason (`6 others not listed by bot
+/// keeper`) unless `verbose`, which names each of them.
+pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<String> {
+    let summary = if verbose {
+        decision.explain_verbose()
+    } else {
+        decision.explain()
+    };
+    let mut lines = vec![format!("routing: {summary}")];
     if !decision.ranked.is_empty() {
         let ranked: Vec<&str> = decision.ranked.iter().map(|id| id.as_str()).collect();
         lines.push(format!("  ranked: {}", ranked.join(", ")));
     }
     for rejection in &decision.rejected {
-        lines.push(format!(
-            "  rejected: {}: {}",
-            rejection.executor, rejection.reason
-        ));
+        let left_out = matches!(rejection.reason, reno_proto::RejectReason::Excluded { .. });
+        if verbose || !left_out {
+            lines.push(format!(
+                "  rejected: {}: {}",
+                rejection.executor, rejection.reason
+            ));
+        }
+    }
+    if !verbose {
+        lines.extend(
+            decision
+                .left_out_lines()
+                .into_iter()
+                .map(|line| format!("  {line}")),
+        );
     }
     for step in &decision.fallbacks {
         let to = step.to.as_ref().map_or("nothing left", |id| id.as_str());
@@ -895,6 +914,66 @@ mod tests {
                 "type": "approval_resolved", "requestId": "r",
                 "decision": "denied", "by": {"type": "expired"}
             }})
+        );
+    }
+
+    fn bot_routing() -> RoutingDecision {
+        use reno_proto::{Rejection, RuleMatched};
+        let unlisted = |name: &str| Rejection {
+            executor: name.parse().unwrap(),
+            reason: reno_proto::RejectReason::unlisted_by_bot("keeper"),
+        };
+        RoutingDecision {
+            chosen: Some("claude-code".parse().unwrap()),
+            ranked: vec!["claude-code".parse().unwrap(), "codex".parse().unwrap()],
+            rejected: vec![
+                unlisted("gemini"),
+                Rejection {
+                    executor: "opencode".parse().unwrap(),
+                    reason: reno_proto::RejectReason::SignedOut {
+                        hint: "run `opencode auth`".into(),
+                    },
+                },
+                unlisted("acp.a"),
+                unlisted("acp.b"),
+            ],
+            rule_matched: RuleMatched::BotPreference {
+                bot: "keeper".into(),
+            },
+            fallbacks: vec![],
+            at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn the_routing_summary_names_the_choice_the_fallback_and_collapses_unlisted_executors() {
+        assert_eq!(
+            routing_lines(&bot_routing(), false),
+            [
+                "routing: claude-code (bot keeper prefers it; fallback codex); not opencode: signed out (run `opencode auth`)",
+                "  ranked: claude-code, codex",
+                "  rejected: opencode: signed out (run `opencode auth`)",
+                "  3 others not listed by bot keeper",
+            ]
+        );
+        let verbose = routing_lines(&bot_routing(), true);
+        assert_eq!(verbose.len(), 2 + 4, "{verbose:?}");
+        assert!(verbose[0].contains("not gemini: excluded (bot keeper does not list it)"));
+        assert!(
+            verbose
+                .contains(&"  rejected: gemini: excluded (bot keeper does not list it)".to_owned())
+        );
+        // Nothing left out: no collapsed line, and the summary is just the choice.
+        let plain = RoutingDecision {
+            rejected: vec![],
+            ..bot_routing()
+        };
+        assert_eq!(
+            routing_lines(&plain, false),
+            [
+                "routing: claude-code (bot keeper prefers it; fallback codex)",
+                "  ranked: claude-code, codex"
+            ]
         );
     }
 

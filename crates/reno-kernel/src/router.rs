@@ -185,7 +185,7 @@ fn excluded(request: &RouteRequest, id: &ExecutorId) -> Option<RejectReason> {
     } else {
         match request.bot.as_ref() {
             Some(bot) if bot.executors.contains(id) => return None,
-            Some(bot) => format!("bot {} does not list it", bot.name),
+            Some(bot) => return Some(RejectReason::unlisted_by_bot(&bot.name)),
             None if request.defaults.contains(id) => return None,
             None => "not a default executor: name it, or use a bot that lists it".to_owned(),
         }
