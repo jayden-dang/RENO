@@ -39,7 +39,8 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, FiringOutcome, RunId, RunListParams, RunStatus, TaskRunParams,
+    ApprovalDecision, ApprovalId, ExecutorId, FiringOutcome, RunId, RunListParams, RunStatus,
+    TaskRunParams,
 };
 
 use crate::summary;
@@ -58,6 +59,8 @@ pub(crate) enum StoreEvent {
         outcome: FiringOutcome,
         run: Option<RunId>,
     },
+    /// An executor's adapter was installed and probed again.
+    ExecutorInstalled(String),
     Failed(String),
 }
 
@@ -73,6 +76,10 @@ pub(crate) struct Store {
     deciding: BTreeSet<ApprovalId>,
     /// Triggers being fired by hand (their buttons are disabled).
     firing: BTreeSet<String>,
+    /// Executors being probed again: `None` is all of them (their buttons are disabled).
+    checking: BTreeSet<Option<ExecutorId>>,
+    /// Executors being installed.
+    installing: BTreeSet<ExecutorId>,
     /// Filters whose page request is in flight.
     paging: BTreeSet<Vec<RunStatus>>,
     /// Runs being fetched with `run.get`.
@@ -103,6 +110,8 @@ impl Store {
             socket: None,
             deciding: BTreeSet::new(),
             firing: BTreeSet::new(),
+            checking: BTreeSet::new(),
+            installing: BTreeSet::new(),
             paging: BTreeSet::new(),
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
@@ -145,6 +154,16 @@ impl Store {
         self.firing.contains(name)
     }
 
+    /// Whether a probe of this executor (`None`: of all of them) was asked for and has not
+    /// answered.
+    pub(crate) fn is_checking(&self, id: Option<&ExecutorId>) -> bool {
+        self.checking.contains(&id.cloned())
+    }
+
+    pub(crate) fn is_installing(&self, id: &ExecutorId) -> bool {
+        self.installing.contains(id)
+    }
+
     pub(crate) fn is_paging(&self, statuses: &[RunStatus]) -> bool {
         self.paging.contains(&filter_key(statuses))
     }
@@ -175,6 +194,7 @@ impl Store {
             || changed.runs
             || changed.approvals
             || changed.triggers
+            || changed.executors
             || changed.defs
             || changed.history
             || changed.feeds
@@ -434,6 +454,17 @@ impl Store {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
+        self.decide_with_message(id, decision, None, cx);
+    }
+
+    /// [`Store::decide`] with the reason for a denial, which reaches the harness.
+    pub(crate) fn decide_with_message(
+        &mut self,
+        id: ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.client().is_none() || !self.deciding.insert(id.clone()) {
             return;
         }
@@ -442,7 +473,7 @@ impl Store {
         let err_id = id.clone();
         self.call(
             "Could not send the decision",
-            move |client| async move { client.decide(&id, decision).await },
+            move |client| async move { client.decide_with_message(&id, decision, message).await },
             cx,
             D {
                 ok: Box::new(move |store, (), cx| {
@@ -451,6 +482,60 @@ impl Store {
                 }),
                 err: Box::new(move |store, cx| {
                     store.deciding.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+    }
+
+    /// `executor.refresh`: probes one executor (`None`: all) again. The answer is applied at
+    /// once; `executors.watch` says the same.
+    pub(crate) fn refresh_executors(&mut self, id: Option<ExecutorId>, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.checking.insert(id.clone()) {
+            return;
+        }
+        cx.notify();
+        let (ok_id, err_id) = (id.clone(), id.clone());
+        self.call(
+            "Could not check the executor",
+            move |client| async move { client.refresh_executors(id).await },
+            cx,
+            D {
+                ok: Box::new(move |store, list, cx| {
+                    store.checking.remove(&ok_id);
+                    store.apply(Update::Executors(list), cx);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.checking.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+    }
+
+    /// `executor.install`: fetches the executor's adapter. It waits for the daemon, which can
+    /// take minutes; the new health arrives through `executors.watch`.
+    pub(crate) fn install_executor(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.installing.insert(id.clone()) {
+            return;
+        }
+        cx.notify();
+        let (ok_id, err_id, request_id) = (id.clone(), id.clone(), id);
+        self.call(
+            "Could not install the executor",
+            move |client| async move { client.install_executor(&request_id).await },
+            cx,
+            D {
+                ok: Box::new(move |store, _, cx| {
+                    store.installing.remove(&ok_id);
+                    cx.emit(StoreEvent::ExecutorInstalled(ok_id.to_string()));
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.installing.remove(&err_id);
                     cx.notify();
                 }),
                 quiet: false,

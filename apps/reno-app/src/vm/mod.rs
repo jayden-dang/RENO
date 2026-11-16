@@ -4,6 +4,7 @@
 //! screen can be in (loading, empty, offline, failed, live) is a unit test here, and the screens
 //! only draw what these return.
 
+pub(crate) mod executors;
 pub(crate) mod inbox;
 pub(crate) mod runs;
 pub(crate) mod settings;

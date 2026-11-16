@@ -377,3 +377,280 @@ fn the_app_reconnects_after_the_daemon_drops(cx: &mut TestAppContext) {
             .is_none()
     });
 }
+
+// --- Executors -------------------------------------------------------------------------------
+
+fn executors_live(cx: &mut TestAppContext, store: &Entity<Store>) {
+    connected(cx, store);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state().feed(Feed::Executors) == FeedState::Live
+        })
+    });
+}
+
+fn executor_view(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+) -> crate::vm::executors::ExecutorsView {
+    root.read_with(vcx, |r, cx| r.executors().read(cx).view(cx))
+}
+
+#[gpui::test]
+fn executors_load_before_the_daemon_answers(cx: &mut TestAppContext) {
+    let store = cx.new(|_| Store::connecting());
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    let view = executor_view(vcx, &root);
+    assert_eq!(view.rows, Section::Loading);
+    assert!(view.banner.is_some());
+}
+
+#[gpui::test]
+fn executors_lead_with_what_needs_you_and_check_again_probes(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "check-codex"));
+    let view = executor_view(vcx, &root);
+    let order: Vec<&str> = view.rows.rows().iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        order,
+        ["codex", "acp.grok", "acp.hermes", "claude-code", "mock"],
+        "signed out, too old, needs install, then the ready ones"
+    );
+    assert_eq!(view.lede, "3 executors need you");
+    assert!(
+        painted(vcx, "install-acp.hermes"),
+        "only one can be installed"
+    );
+    assert!(!painted(vcx, "install-codex"));
+
+    // "Check again" probes that executor and nothing else.
+    let stamp = |vcx: &mut VisualTestContext, id: &str| {
+        store.read_with(vcx, |s, _| {
+            s.state()
+                .executors()
+                .iter()
+                .find(|e| e.descriptor.id.as_str() == id)
+                .and_then(|e| e.health.as_ref())
+                .map(|h| h.checked_at_ms)
+        })
+    };
+    let (codex, mock) = (stamp(vcx, "codex"), stamp(vcx, "mock"));
+    click(vcx, "check-codex");
+    wait_drawn(vcx, |vcx| stamp(vcx, "codex") > codex);
+    assert_eq!(stamp(vcx, "mock"), mock);
+    wait_drawn(vcx, |vcx| {
+        !store.read_with(vcx, |s, _| s.is_checking(Some(&"codex".parse().unwrap())))
+    });
+
+    // "Check all again" probes every one.
+    click(vcx, "check-all");
+    wait_drawn(vcx, |vcx| stamp(vcx, "mock") > mock);
+    wait_drawn(vcx, |vcx| !store.read_with(vcx, |s, _| s.is_checking(None)));
+}
+
+#[gpui::test]
+fn installing_an_executor_fetches_its_adapter_and_it_leaves_the_needs_list(
+    cx: &mut TestAppContext,
+) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "install-acp.hermes"));
+    click(vcx, "install-acp.hermes");
+    wait_drawn(vcx, |vcx| {
+        let view = executor_view(vcx, &root);
+        view.needing == 2 && !painted(vcx, "install-acp.hermes")
+    });
+    let view = executor_view(vcx, &root);
+    let hermes = view
+        .rows
+        .rows()
+        .iter()
+        .find(|r| r.id == "acp.hermes")
+        .unwrap();
+    assert_eq!(hermes.installed.text, "Installed");
+    assert!(!store.read_with(vcx, |s, _| s.is_installing(&"acp.hermes".parse().unwrap())));
+}
+
+#[gpui::test]
+fn a_failed_install_keeps_the_screen_and_its_button_usable(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    daemon(cx, &store).fail(
+        "executor.install",
+        ErrorObject::new(ErrorCode::Unavailable, "registry unreachable"),
+    );
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "install-acp.hermes"));
+    click(vcx, "install-acp.hermes");
+    wait_drawn(vcx, |vcx| {
+        !store.read_with(vcx, |s, _| s.is_installing(&"acp.hermes".parse().unwrap()))
+    });
+    assert_eq!(
+        executor_view(vcx, &root).needing,
+        3,
+        "nothing was installed"
+    );
+    assert!(painted(vcx, "install-acp.hermes"));
+}
+
+#[gpui::test]
+fn executors_unavailable_and_empty(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_EXECUTORS.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    let view = store.read_with(cx, |s, _| {
+        crate::vm::executors::build(s.state(), s.now_ms())
+    });
+    assert_eq!(view.rows, Section::Unavailable);
+
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    daemon(cx, &store).set_executors(vec![]);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.state().executors().is_empty())
+    });
+    let view = store.read_with(cx, |s, _| {
+        crate::vm::executors::build(s.state(), s.now_ms())
+    });
+    assert_eq!(view.rows, Section::Empty);
+}
+
+#[gpui::test]
+fn a_run_refused_for_its_executor_shows_the_executors_health(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    store.update(vcx, |s, cx| s.run_task("/refused".into(), "codex", cx));
+    wait_drawn(vcx, |vcx| painted(vcx, "run-open-executors"));
+    // The signed-out reason is on the run's own screen, with the way to the Executors screen.
+    assert!(painted(vcx, "run-check-executor"));
+    click(vcx, "run-open-executors");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Executors);
+}
+
+// --- Deny with a reason ----------------------------------------------------------------------
+
+fn history_of(
+    store: &Entity<Store>,
+    cx: &TestAppContext,
+    id: &str,
+) -> Option<reno_proto::ApprovalRecord> {
+    store.read_with(cx, |s, _| {
+        s.state()
+            .approval_history()
+            .iter()
+            .find(|r| r.id.as_str() == id)
+            .cloned()
+    })
+}
+
+#[gpui::test]
+fn deny_asks_for_a_reason_and_enter_sends_it(cx: &mut TestAppContext) {
+    cx.update(crate::ui::composer::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_scoutfetch"));
+    assert!(
+        root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx))
+            .reasons
+    );
+
+    // Deny opens the field and decides nothing yet.
+    click(vcx, "deny-appr_scoutfetch");
+    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_scoutfetch"));
+    assert_eq!(crate::tests::approvals(vcx, &store), 2);
+
+    let input = root
+        .read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().cloned())
+        .expect("the reason field is open");
+    input.update_in(vcx, |c, window, cx| {
+        c.fill("not from that host, use the mirror", window, cx);
+    });
+    vcx.simulate_keystrokes("enter");
+    wait_drawn(vcx, |vcx| {
+        history_of(&store, vcx, "appr_scoutfetch")
+            .is_some_and(|r| r.message.as_deref() == Some("not from that host, use the mirror"))
+    });
+    assert_eq!(crate::tests::approvals(vcx, &store), 1);
+    assert!(
+        root.read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().is_none()),
+        "the field closed"
+    );
+    // The Decided list shows the reason.
+    wait_drawn(vcx, |vcx| {
+        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
+        v.history
+            .rows()
+            .iter()
+            .any(|h| h.message.as_deref() == Some("not from that host, use the mirror"))
+    });
+}
+
+#[gpui::test]
+fn a_blank_reason_denies_without_one_and_escape_cancels(cx: &mut TestAppContext) {
+    cx.update(crate::ui::composer::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_keeperpush"));
+
+    // Escape: the field closes and the action is still held.
+    click(vcx, "deny-appr_keeperpush");
+    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_keeperpush"));
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(root.read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().is_none()));
+    assert_eq!(crate::tests::approvals(vcx, &store), 2);
+
+    // Enter with nothing typed: denied, with no message.
+    click(vcx, "deny-appr_keeperpush");
+    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_keeperpush"));
+    vcx.simulate_keystrokes("enter");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        history_of(&store, vcx, "appr_keeperpush").is_some()
+    });
+    let record = history_of(&store, vcx, "appr_keeperpush").unwrap();
+    assert_eq!(record.status, reno_proto::ApprovalStatus::Denied);
+    assert_eq!(record.message, None);
+}
+
+#[gpui::test]
+fn on_an_older_daemon_deny_is_one_click(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_APPROVAL_MESSAGE.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_scoutfetch"));
+    assert!(
+        !root
+            .read_with(vcx, |r, cx| r.inbox().read(cx).view(cx))
+            .reasons
+    );
+    click(vcx, "deny-appr_scoutfetch");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+}

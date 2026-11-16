@@ -75,6 +75,7 @@ pub(crate) fn record(row: &StoredApproval) -> ApprovalRecord {
         created_at_ms: to_ms(row.created_at),
         decided_at_ms: row.decided_at.map(to_ms),
         expires_at_ms: to_ms(row.expires_at),
+        message: row.message.clone(),
     }
 }
 

@@ -331,8 +331,9 @@ pub enum ExecEvent {
         decision: ApprovalOutcome,
         /// Who or what decided.
         by: ResolvedBy,
-        /// For a denial by a rule, the rule's message. The harness's own decision type carries no
-        /// text, so this is where the reason is kept.
+        /// For a denial, the reason: a rule's message, or the one a human gave with
+        /// `approval.decide`. It also goes to the harness where the harness can take text; the
+        /// harness's own decision type carries none, so this is where the reason is kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },

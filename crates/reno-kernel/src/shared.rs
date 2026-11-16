@@ -45,6 +45,8 @@ pub(crate) enum SupCmd {
     Decide {
         approval: ApprovalId,
         decision: Decision,
+        /// The reason, for a denial.
+        message: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
     /// Queue a steering prompt for the executor.

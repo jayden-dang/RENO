@@ -22,9 +22,14 @@ async fn daemon(server_end: tokio::io::DuplexStream, gaps: u32) {
         let out = match frame["method"].as_str() {
             Some("daemon.hello") => vec![json!({"jsonrpc": "2.0", "id": id, "result": {
                 "serverVersion": "t", "protocolVersion": PROTOCOL_VERSION,
-                "features": [], "pid": 1}})],
-            Some("runs.watch") => {
+                "features": ["executors"], "pid": 1}})],
+            Some(method @ ("runs.watch" | "executors.watch")) => {
                 watches += 1;
+                let items = if method == "runs.watch" {
+                    json!({"runs": []})
+                } else {
+                    json!({"executors": []})
+                };
                 let sub = format!("sub_w{watches}");
                 let ack = json!({"jsonrpc": "2.0", "id": id, "result": {"subscription": sub}});
                 let next = if watches <= gaps {
@@ -32,7 +37,7 @@ async fn daemon(server_end: tokio::io::DuplexStream, gaps: u32) {
                            "params": {"subscription": sub, "resumeFrom": 1}})
                 } else {
                     json!({"jsonrpc": "2.0", "method": "sub.item",
-                           "params": {"subscription": sub, "item": {"runs": []}}})
+                           "params": {"subscription": sub, "item": items}})
                 };
                 vec![ack, next]
             }
@@ -61,6 +66,16 @@ async fn a_gap_on_a_watch_resubscribes_and_delivers_the_current_value() {
     let mut watch = client.watch_runs().await.unwrap();
     let first = watch.next().await.unwrap().unwrap();
     assert!(first.runs.is_empty());
+    cancel.cancel();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_gap_on_the_executors_watch_resubscribes_too() {
+    let (client, cancel, server) = connect(2).await;
+    let mut watch = client.watch_executors().await.unwrap();
+    let first = watch.next().await.unwrap().unwrap();
+    assert!(first.executors.is_empty());
     cancel.cancel();
     server.abort();
 }

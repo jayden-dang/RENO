@@ -46,6 +46,8 @@ pub(crate) struct HistoryRow {
     /// "you", "rule: never reset hard", "nobody in time", "repeat of a denial".
     pub(crate) by: String,
     pub(crate) when: String,
+    /// The reason given with a denial.
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +58,9 @@ pub(crate) struct Inbox {
     pub(crate) detail: String,
     pub(crate) held: Section<HeldRow>,
     pub(crate) history: Section<HistoryRow>,
+    /// Whether the daemon takes a reason with a denial (`approval.message`): Deny then asks for
+    /// one, and without it Deny is a single click.
+    pub(crate) reasons: bool,
 }
 
 fn run_bot(state: &State, run: &RunId) -> (Option<String>, Option<String>, String) {
@@ -126,6 +131,7 @@ fn history_row(state: &State, record: &ApprovalRecord, now_ms: u64) -> Option<Hi
         verdict,
         by: who(record.decided_by.as_ref(), record.status),
         when: summary::ago_label(now_ms.saturating_sub(decided)),
+        message: record.message.clone(),
     })
 }
 
@@ -169,6 +175,7 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
         detail,
         held: Section::of(state.feed(Feed::Approvals), held),
         history: Section::of(state.feed(Feed::ApprovalHistory), history),
+        reasons: state.supports(reno_proto::FEATURE_APPROVAL_MESSAGE),
     }
 }
 
@@ -213,6 +220,7 @@ mod tests {
             created_at_ms: NOW - 3 * HOUR,
             decided_at_ms: Some(NOW - 2 * HOUR),
             expires_at_ms: NOW,
+            message: None,
         }
     }
 
@@ -291,6 +299,44 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].when, "2h ago");
+    }
+
+    #[test]
+    fn a_denial_shows_the_reason_that_was_given() {
+        let mut state = State::new();
+        let mut denied = record("a", ApprovalStatus::Denied, Some(ResolvedBy::Human));
+        denied.message = Some("use the staging bucket".into());
+        state.apply(Update::ApprovalHistory(vec![
+            denied,
+            record("b", ApprovalStatus::Denied, Some(ResolvedBy::Human)),
+        ]));
+        let inbox = build(&state, NOW);
+        let rows = inbox.history.rows();
+        assert_eq!(rows[0].message.as_deref(), Some("use the staging bucket"));
+        assert_eq!(rows[1].message, None);
+    }
+
+    #[test]
+    fn a_reason_is_asked_for_only_when_the_daemon_takes_one() {
+        use reno_proto::{HelloResult, PROTOCOL_VERSION};
+        let hello = |features: &[&str]| reno_client::DaemonInfo {
+            hello: HelloResult {
+                server_version: "t".into(),
+                protocol_version: PROTOCOL_VERSION,
+                features: features.iter().map(|f| (*f).to_owned()).collect(),
+                pid: 1,
+            },
+            status: None,
+        };
+        let mut state = State::new();
+        assert!(!build(&state, NOW).reasons, "no daemon yet");
+        state.apply(Update::Daemon(hello(&["approvals"])));
+        assert!(
+            !build(&state, NOW).reasons,
+            "an older daemon: Deny is one click"
+        );
+        state.apply(Update::Daemon(hello(&["approvals", "approval.message"])));
+        assert!(build(&state, NOW).reasons);
     }
 
     #[test]

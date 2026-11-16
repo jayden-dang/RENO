@@ -99,6 +99,26 @@ pub(super) async fn run_new(shared: Arc<Shared>, run: RunId, prompt: String) {
 
 async fn work(script: &Script, prompt: &str) -> bool {
     let scenario = Scenario::of(prompt);
+    if scenario == Scenario::Refused {
+        // Failure goes the way every failure does: through `evaluating`.
+        return script.status(RunStatus::Leased).await
+            && script.status(RunStatus::Running).await
+            && script.status(RunStatus::Evaluating).await
+            && script
+                .step(|w, run| {
+                    let executor = w
+                        .run(run)
+                        .map(|r| r.summary.executor.to_string())
+                        .unwrap_or_default();
+                    let why = format!(
+                        "NoEligibleExecutor: executor {executor} is not usable: not signed in: \
+                         run its login command"
+                    );
+                    let done = data::done(StopReason::Error, None, Some(&why));
+                    w.finish(run, RunStatus::Failed, done)
+                })
+                .await;
+    }
     let opened = script.status(RunStatus::Leased).await
         && script
             .step(|w, run| {
@@ -135,6 +155,7 @@ async fn work(script: &Script, prompt: &str) -> bool {
     }
     match scenario {
         Scenario::Plain => script.succeed("The task is complete.").await,
+        Scenario::Refused => false,
         Scenario::Long => {
             let steered = script
                 .shared

@@ -15,8 +15,8 @@ use reno_proto::{
 use serde::Serialize;
 
 use crate::cli::{
-    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorRefresh, RunCancel,
-    RunCommand, RunList, RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire,
+    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorInstall, ExecutorRefresh,
+    RunCancel, RunCommand, RunList, RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire,
     WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line};
@@ -47,6 +47,7 @@ pub(crate) async fn executor(env: &Env, command: ExecutorCommand) -> anyhow::Res
     match command {
         ExecutorCommand::List => executor_list(env).await,
         ExecutorCommand::Refresh(args) => executor_refresh(env, args).await,
+        ExecutorCommand::Install(args) => executor_install(env, args).await,
     }
 }
 
@@ -241,6 +242,20 @@ async fn executor_refresh(env: &Env, args: ExecutorRefresh) -> anyhow::Result<Ex
         executors.retain(|info| &info.descriptor.id == id);
     }
     print_executors(env, executors)
+}
+
+async fn executor_install(env: &Env, args: ExecutorInstall) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let executor = client
+        .install_executor(&args.id)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&reno_proto::ExecutorInstallResult { executor })?;
+    } else {
+        print_line(render::executor_line(&executor))?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_executors(

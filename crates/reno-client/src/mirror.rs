@@ -427,6 +427,7 @@ fn spawn_bootstrap(shared: &Arc<Shared>, session: &Session) {
         for (feed, feature) in [
             (Feed::Approvals, reno_proto::FEATURE_APPROVALS),
             (Feed::Triggers, reno_proto::FEATURE_TRIGGERS),
+            (Feed::Executors, reno_proto::FEATURE_EXECUTORS),
             (Feed::Defs, reno_proto::FEATURE_DEFS),
             (Feed::ApprovalHistory, reno_proto::FEATURE_APPROVAL_HISTORY),
         ] {
@@ -506,6 +507,16 @@ fn spawn_feeds(shared: &Arc<Shared>, session: &Session) {
             None,
             async move { client.watch_triggers().await },
             |s| Update::Triggers(s.triggers),
+        );
+    }
+    if session.client.supports(reno_proto::FEATURE_EXECUTORS) {
+        let client = session.client.clone();
+        feed(
+            session,
+            Feed::Executors,
+            None,
+            async move { client.watch_executors().await },
+            |s| Update::Executors(s.executors),
         );
     }
     if session.client.supports(reno_proto::FEATURE_DEFS) {

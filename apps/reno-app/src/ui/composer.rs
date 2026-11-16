@@ -9,16 +9,20 @@
 //! composition, Enter to send, Shift+Enter for a newline, auto-grow up to [`MAX_ROWS`].
 //! Gaps: no undo, no word-wise movement or deletion, Up/Down move by logical line not by wrapped
 //! row, and no scrolling past [`MAX_ROWS`] (the caret can leave the visible rows).
+//!
+//! [`Mode::Reason`] is the small variant the Inbox opens under a held action when the human
+//! denies it: no chips, no send button, one row; Enter and Escape are reported as a
+//! [`ReasonEvent`] for the card to act on.
 
 use std::ops::Range;
 
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Render, SharedString,
-    Style, Subscription, TextAlign, TextRun, TextStyle, UTF16Selection, UnderlineStyle, Window,
-    WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, SharedString, Style, Subscription, TextAlign, TextRun, TextStyle, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use reno_client::ConnectionStatus;
 use reno_proto::RunId;
@@ -54,6 +58,7 @@ actions!(
         Copy,
         Cut,
         Submit,
+        Cancel,
         Newline,
         ShowCharacterPalette,
     ]
@@ -91,6 +96,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, ctx),
         KeyBinding::new("cmd-x", Cut, ctx),
         KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
     ]);
@@ -103,7 +109,20 @@ pub(crate) enum Mode {
     Home,
     /// The Run screen: steers this run while it is live; a follow-up once it has finished.
     Steer(RunId),
+    /// An Inbox card's reason for a denial: Enter and Escape are emitted as [`ReasonEvent`]s.
+    Reason,
 }
+
+/// What a [`Mode::Reason`] composer reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReasonEvent {
+    /// Enter: deny, with this reason (`None` when it was left blank).
+    Submitted(Option<String>),
+    /// Escape: do not deny after all.
+    Cancelled,
+}
+
+impl EventEmitter<ReasonEvent> for Composer {}
 
 pub(crate) struct Composer {
     store: Entity<Store>,
@@ -140,6 +159,13 @@ impl Composer {
             layout: None,
             selecting: false,
         }
+    }
+
+    /// The small reason input of a denial.
+    pub(crate) fn reason(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
+        let mut composer = Self::new(store, cx);
+        composer.mode = Mode::Reason;
+        composer
     }
 
     /// A composer that steers `run`.
@@ -180,7 +206,7 @@ impl Composer {
     /// Steering needs a live run; Phase 0 has no follow-up once it has finished.
     fn target_live(&self, cx: &App) -> bool {
         match &self.mode {
-            Mode::Home => true,
+            Mode::Home | Mode::Reason => true,
             Mode::Steer(run) => self
                 .store
                 .read(cx)
@@ -198,7 +224,18 @@ impl Composer {
     /// draft is kept and a notice says why.
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Enter belongs to the IME while it is composing.
-        if self.model.marked().is_some() || !self.model.can_submit() || !self.target_live(cx) {
+        if self.model.marked().is_some() {
+            return;
+        }
+        if self.mode == Mode::Reason {
+            // A blank reason is fine: the denial goes without one.
+            let reason = self.model.text().trim().to_owned();
+            cx.emit(ReasonEvent::Submitted(
+                (!reason.is_empty()).then_some(reason),
+            ));
+            return;
+        }
+        if !self.model.can_submit() || !self.target_live(cx) {
             return;
         }
         if !self.connected(cx) {
@@ -222,6 +259,7 @@ impl Composer {
                     self.store
                         .update(cx, |store, cx| store.steer(run, prompt, cx));
                 }
+                Mode::Reason => {}
             }
             window.notify_text_input_changed(&self.focus_handle);
             cx.notify();
@@ -240,6 +278,15 @@ impl Composer {
 
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         self.submit(window, cx);
+    }
+
+    fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == Mode::Reason {
+            cx.emit(ReasonEvent::Cancelled);
+        } else {
+            // Escape is somebody else's outside a reason input.
+            cx.propagate();
+        }
     }
 
     fn on_newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -686,11 +733,16 @@ impl Element for TextArea {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (text, marked) = {
+        let (text, marked, min_rows) = {
             let composer = self.composer.read(cx);
             (
                 SharedString::from(composer.model.text().to_owned()),
                 composer.model.marked(),
+                if composer.mode == Mode::Reason {
+                    1
+                } else {
+                    MIN_ROWS
+                },
             )
         };
         let style = window.text_style();
@@ -704,7 +756,7 @@ impl Element for TextArea {
                 _ => None,
             });
             let lines = shape(window, &style, &text, color, marked.as_ref(), width);
-            let rows = row_count(&lines).clamp(MIN_ROWS, MAX_ROWS);
+            let rows = row_count(&lines).clamp(min_rows, MAX_ROWS);
             size(width.unwrap_or_default(), line_height * rows)
         });
         (id, ())
@@ -860,6 +912,7 @@ impl Render for Composer {
 
         let placeholder: SharedString = match &self.mode {
             Mode::Home => "What should Reno orchestrate?".into(),
+            Mode::Reason => "Why? The agent reads this. Optional.".into(),
             Mode::Steer(run) => {
                 let state = self.store.read(cx);
                 let summary = state.state().run(run);
@@ -874,14 +927,19 @@ impl Render for Composer {
             }
         };
 
+        let reason = self.mode == Mode::Reason;
         let text_area = div()
             .w_full()
-            .px(px(22.0))
-            .pt(px(18.0))
+            .px(px(if reason { 14.0 } else { 22.0 }))
+            .pt(px(if reason { 9.0 } else { 18.0 }))
             .cursor(CursorStyle::IBeam)
-            .font_weight(FontWeight::MEDIUM)
-            .text_size(px(15.0))
-            .line_height(px(23.0))
+            .font_weight(if reason {
+                FontWeight::NORMAL
+            } else {
+                FontWeight::MEDIUM
+            })
+            .text_size(px(if reason { 13.5 } else { 15.0 }))
+            .line_height(px(if reason { 20.0 } else { 23.0 }))
             .text_color(theme.text)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -970,6 +1028,12 @@ impl Render for Composer {
                         .child(why),
                 )
                 .child(send),
+            Mode::Reason => div()
+                .px(px(14.0))
+                .pb(px(8.0))
+                .text_size(px(12.0))
+                .text_color(theme.faint)
+                .child("Enter to deny \u{b7} Esc to cancel"),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
                 let summary = store.state().run(run);
@@ -998,6 +1062,7 @@ impl Render for Composer {
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_backspace))
             .on_action(cx.listener(Self::on_delete))
@@ -1021,8 +1086,8 @@ impl Render for Composer {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .rounded(px(26.0))
+            .gap(px(if reason { 4.0 } else { 10.0 }))
+            .rounded(px(if reason { 12.0 } else { 26.0 }))
             .bg(theme.surface)
             .border_1()
             .border_color(if focused {

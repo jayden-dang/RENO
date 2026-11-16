@@ -1,27 +1,37 @@
 //! Inbox: what needs the human, longest-waiting first, then what was decided.
 //!
 //! Live through `approvals.watch`: a card leaves when the daemon reports the new list, never on
-//! click. Approve and Deny are the only actions a held action has on the wire
-//! (`approval.decide` carries no message), so the cards offer exactly those two.
+//! click. Approve and Deny are the only actions a held action has. Approve is one click. Deny
+//! opens a small reason field under the card (optional: Enter denies, Escape cancels) when the
+//! daemon takes a reason, and the harness is told it; on an older daemon Deny is one click.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, Render,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
-use reno_proto::ApprovalDecision;
+use reno_proto::{ApprovalDecision, ApprovalId};
 
 use super::ScreenEvent;
 use crate::store::Store;
+use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
 use crate::vm::inbox::{self, HeldRow, HistoryRow, Verdict};
 
+/// The reason field open under one card.
+struct Reason {
+    approval: ApprovalId,
+    input: Entity<Composer>,
+    _events: Subscription,
+}
+
 pub(crate) struct InboxScreen {
     store: Entity<Store>,
+    reason: Option<Reason>,
     _store: Subscription,
 }
 
@@ -32,7 +42,65 @@ impl InboxScreen {
         Self {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
+            reason: None,
         }
+    }
+
+    /// Deny: opens (or closes) the reason field under the card; without one to offer, denies.
+    pub(crate) fn deny(&mut self, row: &HeldRow, window: &mut Window, cx: &mut Context<Self>) {
+        let reasons = {
+            let store = self.store.read(cx);
+            store.state().supports(reno_proto::FEATURE_APPROVAL_MESSAGE)
+        };
+        if !reasons {
+            self.decide(row, ApprovalDecision::Deny, cx);
+            return;
+        }
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|open| open.approval == row.approval.id)
+        {
+            self.reason = None;
+            cx.notify();
+            return;
+        }
+        let store = self.store.clone();
+        let input = cx.new(|cx| Composer::reason(store, cx));
+        let events = cx.subscribe_in(&input, window, Self::on_reason);
+        window.focus(&input.focus_handle(cx), cx);
+        self.reason = Some(Reason {
+            approval: row.approval.id.clone(),
+            input,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Enter in the reason field denies with it; Escape closes the field.
+    fn on_reason(
+        &mut self,
+        _: &Entity<Composer>,
+        event: &ReasonEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.reason.take() else {
+            return;
+        };
+        if let ReasonEvent::Submitted(message) = event {
+            let id = open.approval;
+            let message = message.clone();
+            self.store.update(cx, |store, cx| {
+                store.decide_with_message(id, ApprovalDecision::Deny, message, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reason_input(&self) -> Option<&Entity<Composer>> {
+        self.reason.as_ref().map(|open| &open.input)
     }
 
     /// Called when the screen is shown: the history has no watch, so it is read now.
@@ -61,8 +129,13 @@ impl InboxScreen {
         let id = row.approval.id.to_string();
         let deny = {
             let row = row.clone();
-            cx.listener(move |this, _, _, cx| this.decide(&row, ApprovalDecision::Deny, cx))
+            cx.listener(move |this, _, window, cx| this.deny(&row, window, cx))
         };
+        let reason_input = self
+            .reason
+            .as_ref()
+            .filter(|open| open.approval == row.approval.id)
+            .map(|open| open.input.clone());
         let approve = {
             let row = row.clone();
             cx.listener(move |this, _, _, cx| {
@@ -195,7 +268,17 @@ impl InboxScreen {
                                     .child(deny_button)
                                     .child(approve_button),
                             ),
-                    ),
+                    )
+                    .children(reason_input.map(|input| {
+                        div()
+                            .id(SharedString::from(format!("reason-{id}")))
+                            .debug_selector({
+                                let id = id.clone();
+                                move || format!("reason-{id}")
+                            })
+                            .w_full()
+                            .child(input)
+                    })),
             )
             .into_any_element()
     }
@@ -240,10 +323,24 @@ impl InboxScreen {
             .child(
                 div()
                     .map(|d| page::cell(d, None))
-                    .truncate()
-                    .font_family(MONO)
-                    .text_size(px(12.5))
-                    .child(SharedString::from(row.line.clone())),
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(px(12.5))
+                            .child(SharedString::from(row.line.clone())),
+                    )
+                    .when_some(row.message.clone(), |d, message| {
+                        d.child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(theme.muted)
+                                .child(SharedString::from(format!("\u{201c}{message}\u{201d}"))),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -278,6 +375,16 @@ impl Render for InboxScreen {
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
 
+        // A card that left (decided somewhere else) takes its reason field with it.
+        if self.reason.as_ref().is_some_and(|open| {
+            !view
+                .held
+                .rows()
+                .iter()
+                .any(|row| row.approval.id == open.approval)
+        }) {
+            self.reason = None;
+        }
         let held: Vec<AnyElement> = view
             .held
             .rows()

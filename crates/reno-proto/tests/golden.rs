@@ -280,7 +280,8 @@ fn daemon_hello() {
         },
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
-                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors"],
+                            "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
+                            "executor.install", "approval.message"],
                "pid": 4242}),
     );
 }
@@ -363,6 +364,7 @@ fn approval_decide() {
         &ApprovalDecideParams {
             approval_id: "appr_01K1".parse().unwrap(),
             decision: ApprovalDecision::ApproveOnce,
+            message: None,
         },
         json!({"approvalId": "appr_01K1", "decision": "approve_once"}),
     );
@@ -370,8 +372,18 @@ fn approval_decide() {
         &ApprovalDecideParams {
             approval_id: "appr_01K1".parse().unwrap(),
             decision: ApprovalDecision::Deny,
+            message: None,
         },
         json!({"approvalId": "appr_01K1", "decision": "deny"}),
+    );
+    golden(
+        &ApprovalDecideParams {
+            approval_id: "appr_01K1".parse().unwrap(),
+            decision: ApprovalDecision::Deny,
+            message: Some("use the staging bucket".into()),
+        },
+        json!({"approvalId": "appr_01K1", "decision": "deny",
+               "message": "use the staging bucket"}),
     );
     assert!(
         serde_json::from_value::<ApprovalDecision>(json!("approve_always")).is_err(),
@@ -400,6 +412,7 @@ fn approval_history() {
         created_at_ms: 1_794_700_000_000,
         decided_at_ms: Some(1_794_700_060_000),
         expires_at_ms: 1_794_701_800_000,
+        message: None,
     };
     let wire = json!({
         "id": "appr_01K1",
@@ -413,6 +426,13 @@ fn approval_history() {
         "expiresAtMs": 1_794_701_800_000u64
     });
     golden(&decided, wire.clone());
+    let denied = ApprovalRecord {
+        status: ApprovalStatus::Denied,
+        message: Some("not on main".into()),
+        ..decided.clone()
+    };
+    let value = serde_json::to_value(&denied).unwrap();
+    assert_eq!(value["message"], "not on main");
     let pending = ApprovalRecord {
         status: ApprovalStatus::Pending,
         decided_by: None,
@@ -935,6 +955,14 @@ fn workspace_types_on_the_wire() {
 fn executor_health_on_the_wire() {
     assert_eq!(<ExecutorList as Method>::NAME, "executor.list");
     assert_eq!(<ExecutorRefresh as Method>::NAME, "executor.refresh");
+    assert_eq!(<ExecutorInstall as Method>::NAME, "executor.install");
+    assert_eq!(FEATURE_EXECUTOR_INSTALL, "executor.install");
+    golden(
+        &ExecutorInstallParams {
+            id: "acp.hermes".parse().unwrap(),
+        },
+        json!({"id": "acp.hermes"}),
+    );
     assert_eq!(<ExecutorsWatch as Subscription>::NAME, "executors.watch");
 
     golden(

@@ -23,7 +23,8 @@ use crate::defs::{
 };
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::health::{
-    ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatchParams,
+    ExecutorInstallParams, ExecutorInstallResult, ExecutorListResult, ExecutorRefreshParams,
+    ExecutorsSnapshot, ExecutorsWatchParams,
 };
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::run::{RunStatus, StopReason};
@@ -76,6 +77,11 @@ pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
 pub const FEATURE_RUN_STEER: &str = "run.steer";
 /// Feature: `executor.list`, `executor.refresh` and the `executors.watch` subscription exist.
 pub const FEATURE_EXECUTORS: &str = "executors";
+/// Feature: `executor.install` exists.
+pub const FEATURE_EXECUTOR_INSTALL: &str = "executor.install";
+/// Feature: `approval.decide` takes a `message` with a denial, which reaches the harness and is
+/// journalled and shown in `approval.history`.
+pub const FEATURE_APPROVAL_MESSAGE: &str = "approval.message";
 /// Feature: `daemon.shutdown` exists.
 pub const FEATURE_DAEMON_SHUTDOWN: &str = "daemon.shutdown";
 
@@ -92,6 +98,8 @@ pub const FEATURES: &[&str] = &[
     FEATURE_TRIGGERS,
     FEATURE_WORKSPACES,
     FEATURE_EXECUTORS,
+    FEATURE_EXECUTOR_INSTALL,
+    FEATURE_APPROVAL_MESSAGE,
 ];
 
 /// A request with a single reply.
@@ -390,7 +398,16 @@ pub struct ApprovalDecideParams {
     pub approval_id: ApprovalId,
     /// The answer.
     pub decision: ApprovalDecision,
+    /// Why, for a denial: it reaches the harness (as a rule's message does), is journalled in
+    /// `ApprovalResolved.message` and shows in `approval.history`. Refused with an approval.
+    /// At most [`APPROVAL_MESSAGE_MAX_CHARS`] characters; blank counts as absent. Needs feature
+    /// `approval.message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
+
+/// The longest `message` of `approval.decide`, in characters.
+pub const APPROVAL_MESSAGE_MAX_CHARS: usize = 1000;
 
 /// Result of `approval.decide`: empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -435,6 +452,10 @@ pub struct ApprovalRecord {
     pub decided_at_ms: Option<u64>,
     /// The deadline after which an undecided approval is denied as expired.
     pub expires_at_ms: u64,
+    /// The reason a human gave with a denial. Only daemons that negotiate `approval.message`
+    /// fill it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Params of `approval.history`.
@@ -589,6 +610,13 @@ method!(
     ExecutorRefresh, "executor.refresh", ExecutorRefreshParams => ExecutorListResult
 );
 method!(
+    /// `executor.install`: fetches and verifies the managed adapter (or pinned release archive)
+    /// of an executor whose last probe said it needs one, probes it again and answers with the
+    /// result. The one place a harness is installed: a run never installs. Needs feature
+    /// `executor.install`.
+    ExecutorInstall, "executor.install", ExecutorInstallParams => ExecutorInstallResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -696,6 +724,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<WorkspaceClean>(),
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
+            method_entry::<ExecutorInstall>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),

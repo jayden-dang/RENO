@@ -206,11 +206,12 @@ impl Db {
         id: &ApprovalId,
         outcome: ApprovalOutcome,
         by: ResolvedBy,
+        message: Option<String>,
         fence: u64,
     ) -> Result<()> {
         self.wrote();
         self.store
-            .resolve_approval(id, outcome, by, fence, self.now_ms())
+            .resolve_approval(id, outcome, by, message, fence, self.now_ms())
             .await
     }
 

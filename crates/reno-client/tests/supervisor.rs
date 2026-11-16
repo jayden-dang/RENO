@@ -68,8 +68,15 @@ async fn the_mirror_loads_every_feed() {
     assert_eq!(state.connection(), ConnectionStatus::Connected);
     assert!(state.offline().is_none());
     assert_eq!(state.triggers().len(), 4);
+    assert_eq!(state.executors().len(), 5);
     assert_eq!(state.defs().defs.len(), 10);
-    for feed in [Feed::Runs, Feed::Approvals, Feed::Triggers, Feed::Defs] {
+    for feed in [
+        Feed::Runs,
+        Feed::Approvals,
+        Feed::Triggers,
+        Feed::Defs,
+        Feed::Executors,
+    ] {
         assert_eq!(state.feed(feed), FeedState::Live, "{feed:?}");
     }
     // The history is fetched on demand, never by the mirror.
@@ -85,6 +92,7 @@ async fn a_missing_feature_is_unavailable_not_loading() {
             without_features: vec![
                 reno_proto::FEATURE_DEFS.to_owned(),
                 reno_proto::FEATURE_TRIGGERS.to_owned(),
+                reno_proto::FEATURE_EXECUTORS.to_owned(),
             ],
             ..FakeConfig::default()
         })
@@ -95,6 +103,7 @@ async fn a_missing_feature_is_unavailable_not_loading() {
     drain(&mut rx, &mut state).await;
     assert_eq!(state.feed(Feed::Defs), FeedState::Unavailable);
     assert_eq!(state.feed(Feed::Triggers), FeedState::Unavailable);
+    assert_eq!(state.feed(Feed::Executors), FeedState::Unavailable);
     assert_eq!(state.feed(Feed::Runs), FeedState::Live);
     mirror.shutdown().await;
 }
