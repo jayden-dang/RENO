@@ -10,6 +10,7 @@
 //! | `run.routing` | `run_routing` |
 //! | `route.preview` | `preview_route` |
 //! | `run.cancel` | `cancel` |
+//! | `run.resume` | `resume_run` |
 //! | `budget.status` | `budget_status` |
 //! | `budget.pause`, `budget.resume` | `pause`, `resume` |
 //! | `run.steer` | `get_run`, `steer` |
@@ -59,8 +60,9 @@ use reno_proto::{
     DaemonShutdownResult, DaemonStatus, DaemonStatusInfo, ErrorCode, ErrorObject, ExecutorId,
     FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams,
     RunCancelResult, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunList,
-    RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult, RunSummary,
-    RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
+    RunListParams, RunListResult, RunResume, RunResumeParams, RunResumeResult, RunStatus, RunSteer,
+    RunSteerParams, RunSteerResult, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun,
+    TaskRunParams, TaskRunResult,
 };
 use reno_proto::{
     BudgetPause, BudgetPauseParams, BudgetPauseResult, BudgetResume, BudgetResumeParams,
@@ -139,6 +141,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<BudgetResume, _, _>(bind(ctx, budget_resume))
         .method::<RunList, _, _>(bind(ctx, run_list))
         .method::<RunCancel, _, _>(bind(ctx, run_cancel))
+        .method::<RunResume, _, _>(bind(ctx, run_resume))
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
@@ -393,6 +396,20 @@ async fn run_cancel(ctx: Arc<Ctx>, p: RunCancelParams) -> Reply<RunCancelResult>
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(RunCancelResult { status })
+}
+
+async fn run_resume(ctx: Arc<Ctx>, p: RunResumeParams) -> Reply<RunResumeResult> {
+    tracing::info!(run = %p.run_id, "resume requested");
+    let prompt = p.prompt.filter(|prompt| !prompt.trim().is_empty());
+    let attempt = ctx
+        .kernel
+        .resume_run(&p.run_id, prompt)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(RunResumeResult {
+        status: RunStatus::Queued,
+        attempt,
+    })
 }
 
 async fn run_steer(ctx: Arc<Ctx>, p: RunSteerParams) -> Reply<RunSteerResult> {

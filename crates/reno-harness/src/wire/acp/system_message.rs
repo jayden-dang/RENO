@@ -213,6 +213,7 @@ mod tests {
             stop: reno_proto::StopReason::Completed,
             result: None,
             diagnostic: None,
+            reason: None,
         };
         assert_eq!(
             filter.apply(done.clone()),

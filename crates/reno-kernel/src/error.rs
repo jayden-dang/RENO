@@ -1,7 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, BudgetStop, ExecutorId, RunId, RunStatus, Seq};
+use reno_proto::{ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;
@@ -25,6 +25,14 @@ pub enum KernelError {
         run: RunId,
         /// Its status.
         status: RunStatus,
+    },
+    /// The run cannot be resumed, for the reason given.
+    #[error("run {run} cannot be resumed: {why}")]
+    NotResumable {
+        /// The run.
+        run: RunId,
+        /// Why not.
+        why: NotResumed,
     },
     /// The run's steering queue is full; try again once the executor has taken some.
     #[error("run {0} has too many steering prompts queued")]

@@ -95,6 +95,7 @@ fn script(prompt: &str) -> Vec<MockStep> {
                 stop: StopReason::Completed,
                 result: Some("conf-done".into()),
                 diagnostic: None,
+                reason: None,
             }),
         ],
         "mock:approval" => vec![
@@ -144,6 +145,7 @@ fn script(prompt: &str) -> Vec<MockStep> {
                 stop: StopReason::Error,
                 result: None,
                 diagnostic: Some("the scripted harness crashed".into()),
+                reason: None,
             }),
         ],
         "mock:resume" => vec![

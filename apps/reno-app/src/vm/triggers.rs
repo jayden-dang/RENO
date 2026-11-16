@@ -301,6 +301,9 @@ mod tests {
             bot: None,
             created_at_ms: 1,
             updated_at_ms: 2,
+            stop: None,
+            not_resumed: None,
+            session: None,
         }));
         let view = build(&state, NOW);
         assert_eq!(

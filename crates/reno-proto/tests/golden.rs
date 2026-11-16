@@ -166,6 +166,7 @@ fn exec_event_every_variant() {
                 stop: StopReason::MaxTokens,
                 result: Some("partial".into()),
                 diagnostic: None,
+                reason: None,
             },
             json!({"type": "done", "stop": "max_tokens", "result": "partial"}),
         ),
@@ -174,6 +175,7 @@ fn exec_event_every_variant() {
                 stop: StopReason::Error,
                 result: None,
                 diagnostic: Some("boom".into()),
+                reason: None,
             },
             json!({"type": "done", "stop": "error", "diagnostic": "boom"}),
         ),
@@ -283,7 +285,8 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message", "routing", "attachments", "budget"],
+                            "executor.install", "approval.message", "routing", "attachments", "budget",
+                            "run.resume", "run.stop_detail"],
                "pid": 4242}),
     );
 }
@@ -542,6 +545,9 @@ fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
         bot: None,
         created_at_ms: 10,
         updated_at_ms: 20,
+        stop: None,
+        not_resumed: None,
+        session: None,
     }
 }
 
@@ -1115,4 +1121,193 @@ fn task_run_attachments() {
         "\n\nAttached files:\n- /tmp/shot.png (shot.png, image/png)\n- /tmp/notes.txt (notes)\n"
     );
     assert_eq!(Attachment::prompt_suffix(&[]), "");
+}
+
+// --- resume and the typed stop reason (T1.10) ---------------------------------------------------
+
+#[test]
+fn done_carries_a_typed_reason_beside_its_diagnostic() {
+    let reasons = [
+        (
+            StopDetail::BudgetExceeded {
+                kind: BudgetKind::WallTime,
+                limit: 60_000,
+                used: 61_000,
+            },
+            json!({"type": "budget_exceeded", "kind": "wall_time", "limit": 60000, "used": 61000}),
+        ),
+        (
+            StopDetail::StartRefused {
+                failure: StartRefusal::NotSignedIn,
+                detail: "executor codex is not signed in".into(),
+            },
+            json!({"type": "start_refused", "failure": "not_signed_in",
+                   "detail": "executor codex is not signed in"}),
+        ),
+        (
+            StopDetail::Cancelled {
+                by: CancelledBy::User,
+            },
+            json!({"type": "cancelled", "by": "user"}),
+        ),
+        (StopDetail::Shutdown, json!({"type": "shutdown"})),
+        (StopDetail::Crashed, json!({"type": "crashed"})),
+        (
+            StopDetail::ExecutorStopped,
+            json!({"type": "executor_stopped"}),
+        ),
+    ];
+    for (reason, wire) in reasons {
+        golden(&reason, wire.clone());
+        golden(
+            &ExecEvent::Done {
+                stop: StopReason::Interrupted,
+                result: None,
+                diagnostic: Some("words".into()),
+                reason: Some(reason),
+            },
+            json!({"type": "done", "stop": "interrupted", "diagnostic": "words", "reason": wire}),
+        );
+    }
+}
+
+#[test]
+fn a_done_without_a_reason_still_parses() {
+    // An older daemon, and every executor's own `Done`, send none.
+    let event: ExecEvent =
+        serde_json::from_value(json!({"type": "done", "stop": "completed"})).unwrap();
+    assert!(matches!(event, ExecEvent::Done { reason: None, .. }));
+}
+
+#[test]
+fn a_resume_is_journaled_with_the_attempt_it_continues() {
+    golden(
+        &ExecEvent::Resumed {
+            from_attempt: 1,
+            session: SessionRef("sess-1".into()),
+        },
+        json!({"type": "resumed", "fromAttempt": 1, "session": "sess-1"}),
+    );
+}
+
+#[test]
+fn run_resume_wire_shapes() {
+    assert_eq!(<RunResume as Method>::NAME, "run.resume");
+    assert_eq!(FEATURE_RUN_RESUME, "run.resume");
+    assert_eq!(FEATURE_STOP_DETAIL, "run.stop_detail");
+    assert!(FEATURES.contains(&FEATURE_RUN_RESUME) && FEATURES.contains(&FEATURE_STOP_DETAIL));
+    golden(
+        &RunResumeParams {
+            run_id: run_id(),
+            prompt: None,
+        },
+        json!({"runId": "run_01HZX9"}),
+    );
+    golden(
+        &RunResumeParams {
+            run_id: run_id(),
+            prompt: Some("go on".into()),
+        },
+        json!({"runId": "run_01HZX9", "prompt": "go on"}),
+    );
+    golden(
+        &RunResumeResult {
+            status: RunStatus::Queued,
+            attempt: 2,
+        },
+        json!({"status": "queued", "attempt": 2}),
+    );
+}
+
+#[test]
+fn why_a_run_was_not_resumed_is_typed() {
+    let cases = [
+        (NotResumed::Cancelled, json!({"type": "cancelled"})),
+        (NotResumed::BudgetStopped, json!({"type": "budget_stopped"})),
+        (NotResumed::NoSession, json!({"type": "no_session"})),
+        (
+            NotResumed::ExecutorCannotResume {
+                executor: "codex".parse().unwrap(),
+            },
+            json!({"type": "executor_cannot_resume", "executor": "codex"}),
+        ),
+        (
+            NotResumed::BotForbids {
+                bot: "keeper".into(),
+            },
+            json!({"type": "bot_forbids", "bot": "keeper"}),
+        ),
+        (
+            NotResumed::AttemptsExhausted {
+                attempts: 3,
+                max: 3,
+            },
+            json!({"type": "attempts_exhausted", "attempts": 3, "max": 3}),
+        ),
+        (
+            NotResumed::WallTimeSpent { limit_ms: 60_000 },
+            json!({"type": "wall_time_spent", "limitMs": 60000}),
+        ),
+        (
+            NotResumed::WrongStatus {
+                status: RunStatus::Running,
+            },
+            json!({"type": "wrong_status", "status": "running"}),
+        ),
+    ];
+    for (why, wire) in cases {
+        golden(&why, wire.clone());
+        golden(
+            &NotResumable {
+                run_id: run_id(),
+                why,
+            },
+            json!({"runId": "run_01HZX9", "why": wire}),
+        );
+    }
+}
+
+#[test]
+fn a_summary_carries_its_stop_and_session() {
+    let mut summary = run_summary(None, None);
+    summary.status = RunStatus::Interrupted;
+    summary.stop = Some(StopDetail::Shutdown);
+    summary.not_resumed = Some(NotResumed::AttemptsExhausted {
+        attempts: 3,
+        max: 3,
+    });
+    summary.session = Some(SessionRef("sess-1".into()));
+    golden(
+        &summary,
+        json!({"runId": "run_01HZX9", "taskId": "task_01HZX8", "executor": "mock",
+               "status": "interrupted", "attempt": 1, "title": "first line",
+               "stop": {"type": "shutdown"},
+               "notResumed": {"type": "attempts_exhausted", "attempts": 3, "max": 3},
+               "session": "sess-1",
+               "createdAtMs": 10, "updatedAtMs": 20}),
+    );
+}
+
+#[test]
+fn a_bot_without_a_resume_setting_keeps_its_hash() {
+    use reno_proto::defs::{BotDef, ResumePolicy, content_hash};
+    let toml = "name = \"k\"\ninstructions = \"x\"\nexecutors = [\"mock\"]\n";
+    let plain: BotDef = toml::from_str(toml).unwrap();
+    assert_eq!(plain.resume, ResumePolicy::Auto);
+    let explicit: BotDef = toml::from_str(&format!("{toml}resume = \"auto\"\n")).unwrap();
+    let never: BotDef = toml::from_str(&format!("{toml}resume = \"never\"\n")).unwrap();
+    let hash = |bot: &BotDef| content_hash(&serde_json::to_value(bot).unwrap());
+    assert_eq!(
+        hash(&plain),
+        hash(&explicit),
+        "auto is the default and is never written"
+    );
+    assert_ne!(hash(&plain), hash(&never));
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("resume")
+            .is_none()
+    );
+    assert_eq!(serde_json::to_value(&never).unwrap()["resume"], "never");
 }

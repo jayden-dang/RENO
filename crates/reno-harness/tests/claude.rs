@@ -164,6 +164,7 @@ fn done(events: &[ExecEvent]) -> (StopReason, Option<String>, Option<String>) {
             stop,
             result,
             diagnostic,
+            ..
         }) => (*stop, result.clone(), diagnostic.clone()),
         other => panic!("the stream did not end with Done: {other:?} in {events:?}"),
     }
@@ -268,6 +269,7 @@ async fn happy_path_maps_frames_to_exec_events_and_drops_subagent_traffic() {
             stop: StopReason::Completed,
             result: Some("done!".into()),
             diagnostic: None,
+            reason: None,
         })
     );
     assert_eq!(dones(&events), 1);
@@ -874,6 +876,7 @@ async fn cancel_escalates_to_sigterm_and_ends_with_an_interrupted_done() {
             stop: StopReason::Interrupted,
             result: None,
             diagnostic: None,
+            reason: None,
         })
     );
     assert_eq!(dones(&events), 1);

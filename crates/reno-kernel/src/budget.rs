@@ -39,7 +39,7 @@ use std::time::Duration;
 use reno_proto::defs::{Budget, DefKind, parse_duration};
 use reno_proto::{
     BotBudgetStatus, BudgetKind, BudgetPauseResult, BudgetResumeResult, BudgetStatusResult,
-    BudgetStop,
+    BudgetStop, CancelledBy, StopDetail,
 };
 use reno_store::GLOBAL_PAUSE;
 
@@ -123,8 +123,10 @@ pub(crate) async fn pause(
     });
     let mut stopped = Vec::new();
     if stop_live {
-        for (run, cancel) in shared.live_of(bot) {
-            cancel.cancel();
+        for (run, stopper) in shared.live_of(bot) {
+            stopper.stop(StopDetail::Cancelled {
+                by: CancelledBy::Pause,
+            });
             stopped.push(run);
         }
         stopped.sort();

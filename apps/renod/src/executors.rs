@@ -97,6 +97,7 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
             stop: StopReason::Completed,
             result: Some("mock run complete".into()),
             diagnostic: None,
+            reason: None,
         }),
     ]);
     steps

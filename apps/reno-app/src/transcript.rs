@@ -99,6 +99,8 @@ pub(crate) enum Row {
         stop: StopReason,
         result: Option<String>,
         diagnostic: Option<String>,
+        /// The typed reason the daemon gave, which the line shows in words.
+        reason: Option<reno_proto::StopDetail>,
     },
 }
 
@@ -140,6 +142,8 @@ pub(crate) struct Facts {
     pub(crate) model: Option<String>,
     /// Why the run failed, when `Done` says so in words.
     pub(crate) diagnostic: Option<String>,
+    /// The typed reason `Done` gave.
+    pub(crate) reason: Option<reno_proto::StopDetail>,
 }
 
 /// Puts the routing card after the prompt (first, when the prompt is not known), if there is a
@@ -306,15 +310,29 @@ pub(crate) fn build_rows(
                 stop,
                 result,
                 diagnostic,
+                reason,
             } => {
+                built.facts.reason.clone_from(reason);
                 built.facts.diagnostic.clone_from(diagnostic);
                 built.rows.push(Row::Done {
                     key,
                     stop: *stop,
                     result: result.clone(),
                     diagnostic: diagnostic.clone(),
+                    reason: reason.clone(),
                 });
-                break;
+            }
+            // A `Done` ends one attempt; a resumed run goes on below it.
+            ExecEvent::Resumed { from_attempt, .. } => {
+                built.facts.reason = None;
+                built.facts.diagnostic = None;
+                built.rows.push(Row::Asked {
+                    key,
+                    line: format!(
+                        "Resumed: attempt {} continues the session",
+                        from_attempt.saturating_add(1)
+                    ),
+                });
             }
         }
     }
@@ -760,6 +778,7 @@ mod tests {
                     stop: StopReason::Completed,
                     result: Some("fine".into()),
                     diagnostic: None,
+                    reason: None,
                 },
                 text("ignored"),
                 bash("t9", "ls"),
@@ -803,6 +822,7 @@ mod tests {
                     stop: StopReason::Error,
                     result: None,
                     diagnostic: Some("boom".into()),
+                    reason: None,
                 },
             ],
             &[],

@@ -97,6 +97,33 @@ pub(super) async fn run_new(shared: Arc<Shared>, run: RunId, prompt: String) {
     let _ = work(&script, &prompt).await;
 }
 
+/// The script of a run that `run.resume` queued again: it continues its session and finishes.
+pub(super) async fn run_resumed(shared: Arc<Shared>, run: RunId) {
+    let Some(script) = Script::new(shared, run) else {
+        return;
+    };
+    let _ = script.status(RunStatus::Leased).await
+        && script
+            .step(|w, run| {
+                w.set_status(run, RunStatus::Running) && {
+                    let session = w.run(run).and_then(|r| r.summary.session.clone());
+                    if let Some(session) = session {
+                        w.push(
+                            run,
+                            ExecEvent::Started {
+                                session,
+                                model: data::MODEL.to_owned(),
+                            },
+                        );
+                    }
+                    true
+                }
+            })
+            .await
+        && script.say("Picking up where I left off.").await
+        && script.succeed("The resumed task is complete.").await;
+}
+
 async fn work(script: &Script, prompt: &str) -> bool {
     let scenario = Scenario::of(prompt);
     if scenario == Scenario::Refused {
@@ -114,7 +141,12 @@ async fn work(script: &Script, prompt: &str) -> bool {
                         "NoEligibleExecutor: executor {executor} is not usable: not signed in: \
                          run its login command"
                     );
-                    let done = data::done(StopReason::Error, None, Some(&why));
+                    let reason = reno_proto::StopDetail::StartRefused {
+                        failure: reno_proto::StartRefusal::NotSignedIn,
+                        detail: why.clone(),
+                    };
+                    let done =
+                        data::done_because(StopReason::Error, None, Some(&why), Some(reason));
                     w.finish(run, RunStatus::Failed, done)
                 })
                 .await;

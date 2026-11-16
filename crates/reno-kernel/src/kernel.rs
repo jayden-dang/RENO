@@ -26,11 +26,12 @@ use reno_proto::defs::{
 };
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
-    Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget,
-    ExecutorId, ExecutorInfo, RoutingDecision, RunEventItem, RunId, RunStatus, RunSummary, Seq,
-    TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
+    Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
+    CleanTarget, ExecutorId, ExecutorInfo, RoutingDecision, RunEventItem, RunId, RunStatus,
+    RunSummary, Seq, StopDetail, TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo,
+    WorkspaceStatus,
 };
-use reno_store::{NewTask, StoreError};
+use reno_store::{NewTask, Note, StoreError};
 use tokio::sync::{oneshot, watch};
 use tokio::time::timeout;
 
@@ -46,6 +47,7 @@ use crate::events;
 use crate::health;
 use crate::recovery;
 use crate::registry::ExecutorRegistry;
+use crate::resume;
 use crate::router::{self, BotPreference, Candidate, RouteRequest};
 use crate::scheduler::{self, SchedCmd};
 use crate::shared::{Shared, SupCmd};
@@ -444,8 +446,10 @@ impl Kernel {
     pub async fn cancel(&self, run: &RunId) -> Result<RunStatus> {
         let mut last = RunStatus::Queued;
         for _ in 0..3 {
-            if let Some(token) = self.shared.live_cancel_token(run) {
-                token.cancel();
+            if let Some(stopper) = self.shared.live_stopper(run) {
+                stopper.stop(StopDetail::Cancelled {
+                    by: CancelledBy::User,
+                });
                 return Ok(self.shared.run_record(run).await?.status);
             }
             let row = self.shared.run_record(run).await?;
@@ -455,7 +459,17 @@ impl Kernel {
                     match self
                         .shared
                         .db
-                        .transition(run, row.lease_fence, RunStatus::Cancelled)
+                        .transition_noted(
+                            run,
+                            row.lease_fence,
+                            RunStatus::Cancelled,
+                            Note {
+                                stop: Some(StopDetail::Cancelled {
+                                    by: CancelledBy::User,
+                                }),
+                                not_resumed: None,
+                            },
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -481,6 +495,14 @@ impl Kernel {
             run: run.clone(),
             status: last,
         })
+    }
+
+    /// Resume `run`: an `interrupted` run, or a `failed` one that has a session, is queued again
+    /// to continue its harness session, with `prompt` (or the standard continue prompt). The run
+    /// keeps its id, and its next attempt is the number returned. Not resumable (the status, no
+    /// session, an executor that cannot): [`KernelError::NotResumable`].
+    pub async fn resume_run(&self, run: &RunId, prompt: Option<String>) -> Result<u32> {
+        resume::manual(&self.shared, run, prompt).await
     }
 
     /// The workspace of `run`, when it has one: it ran, or runs, in a worktree.

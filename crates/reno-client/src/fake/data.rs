@@ -43,7 +43,7 @@ pub const KEEPER_PUSH: &str = "git push -u origin reno/keeper/deps-1115";
 pub const SCOUT_FETCH_URL: &str = "https://advisories.example.org/feeds/web-console.json";
 
 /// Model every demo run reports.
-const MODEL: &str = "opus-5.5";
+pub(super) const MODEL: &str = "opus-5.5";
 
 /// One seeded run and its journal so far.
 pub(super) struct SeedRun {
@@ -87,6 +87,9 @@ fn summary(
         }),
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
+        stop: None,
+        not_resumed: None,
+        session: None,
     })
 }
 
@@ -125,10 +128,21 @@ pub(super) fn tool_ok(id: &str, summary: &str) -> ExecEvent {
 }
 
 pub(super) fn done(stop: StopReason, result: Option<&str>, diagnostic: Option<&str>) -> ExecEvent {
+    done_because(stop, result, diagnostic, None)
+}
+
+/// Like [`done`], with the typed reason the daemon gives.
+pub(super) fn done_because(
+    stop: StopReason,
+    result: Option<&str>,
+    diagnostic: Option<&str>,
+    reason: Option<reno_proto::StopDetail>,
+) -> ExecEvent {
     ExecEvent::Done {
         stop,
         result: result.map(str::to_owned),
         diagnostic: diagnostic.map(str::to_owned),
+        reason,
     }
 }
 

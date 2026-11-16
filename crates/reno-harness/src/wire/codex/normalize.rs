@@ -631,6 +631,7 @@ impl TurnEnd {
             stop: self.stop,
             result: self.result,
             diagnostic: self.diagnostic,
+            reason: None,
         }
     }
 }
@@ -1563,7 +1564,8 @@ mod tests {
             ExecEvent::Done {
                 stop: StopReason::Completed,
                 result: None,
-                diagnostic: None
+                diagnostic: None,
+                reason: None,
             },
             TurnEnd {
                 usage: None,

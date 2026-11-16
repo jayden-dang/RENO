@@ -11,13 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, ResolvedBy,
-    RoutingDecision, RunId, RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
+    RoutingDecision, RunId, RunStatus, SessionRef, TaskId, WorkspaceChanges, WorkspaceInfo,
+    WorkspaceStatus,
 };
 use reno_store::{
     Applied, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired, FireResult, Journals,
-    NewApproval, NewDefinition, NewFiring, NewTask, Occupancy, RunRecord, Store, StoreError,
-    StoredApproval, Tokens, TriggerRow,
+    NewApproval, NewDefinition, NewFiring, NewTask, Note, Occupancy, Resumed, RunRecord, Store,
+    StoreError, StoredApproval, Tokens, TriggerRow,
 };
 
 use crate::clock::Clock;
@@ -242,6 +243,56 @@ impl Db {
     pub(crate) async fn transition(&self, run: &RunId, fence: u64, to: RunStatus) -> Result<()> {
         self.wrote();
         self.store.transition(run, fence, to, self.now_ms()).await
+    }
+
+    /// A transition that also records why the run stopped (and will not be resumed).
+    pub(crate) async fn transition_noted(
+        &self,
+        run: &RunId,
+        fence: u64,
+        to: RunStatus,
+        note: Note,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .transition_noted(run, fence, to, note, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn record_session(
+        &self,
+        run: &RunId,
+        fence: u64,
+        session: &SessionRef,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .record_session(run, fence, session, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn resume_run(
+        &self,
+        run: &RunId,
+        fence: u64,
+        prompt: Option<String>,
+    ) -> Result<Resumed> {
+        self.wrote();
+        self.store
+            .resume_run(run, fence, prompt, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn set_not_resumed(
+        &self,
+        run: &RunId,
+        fence: u64,
+        why: &NotResumed,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .set_not_resumed(run, fence, why, self.now_ms())
+            .await
     }
 
     pub(crate) async fn record_process(

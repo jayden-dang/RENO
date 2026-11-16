@@ -2,8 +2,8 @@
 //! takes. Every step is one fenced store transition, so each is atomic with its event row
 //! (ARCH-8) and each is checked against `RunStatus::can_transition_to`.
 
-use reno_proto::{ExecEvent, RunId, RunStatus, StopReason};
-use reno_store::StoreError;
+use reno_proto::{ExecEvent, RunId, RunStatus, StopDetail, StopReason};
+use reno_store::{Note, StoreError};
 
 use crate::db::Db;
 
@@ -23,23 +23,34 @@ fn evaluated(stop: StopReason) -> RunStatus {
 /// - Every other stop reason passes through `evaluating`; there is no edge from a waiting state
 ///   to `evaluating`, so a waiting run first goes back to `running`. Phase 0 has no evaluators,
 ///   so evaluation passes at once: `Completed` becomes `succeeded`, the rest `failed`.
+///
+/// `reason` is the typed reason the run stopped. It is stored with the last transition, in the
+/// same transaction, and an interrupted run whose reason forbids resuming it also stores why.
 pub(crate) async fn end_run(
     db: &Db,
     run: &RunId,
     fence: u64,
     from: RunStatus,
     stop: StopReason,
+    reason: Option<&StopDetail>,
 ) -> Result<RunStatus, StoreError> {
     let end = evaluated(stop);
+    let note = Note {
+        stop: reason.cloned(),
+        not_resumed: reason
+            .filter(|_| end == RunStatus::Interrupted)
+            .and_then(StopDetail::forbids_auto_resume),
+    };
     if end == RunStatus::Interrupted {
-        db.transition(run, fence, RunStatus::Interrupted).await?;
+        db.transition_noted(run, fence, RunStatus::Interrupted, note)
+            .await?;
         return Ok(end);
     }
     if from != RunStatus::Running {
         db.transition(run, fence, RunStatus::Running).await?;
     }
     db.transition(run, fence, RunStatus::Evaluating).await?;
-    db.transition(run, fence, end).await?;
+    db.transition_noted(run, fence, end, note).await?;
     Ok(end)
 }
 

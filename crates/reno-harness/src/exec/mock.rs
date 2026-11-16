@@ -62,6 +62,7 @@ impl MockStep {
             stop,
             result: None,
             diagnostic: None,
+            reason: None,
         })
     }
 }
@@ -232,6 +233,7 @@ impl Run {
             stop,
             result: None,
             diagnostic,
+            reason: None,
         })
     }
 
@@ -378,6 +380,7 @@ mod tests {
             stop,
             result: None,
             diagnostic: None,
+            reason: None,
         }
     }
 
@@ -426,6 +429,7 @@ mod tests {
                 stop: StopReason::Error,
                 result: None,
                 diagnostic: Some("boom".into()),
+                reason: None,
             }),
             MockStep::text("never"),
             MockStep::done(StopReason::Completed),
@@ -443,7 +447,8 @@ mod tests {
             ExecEvent::Done {
                 stop: StopReason::Error,
                 result: None,
-                diagnostic: Some("boom".into())
+                diagnostic: Some("boom".into()),
+                reason: None,
             }
         );
     }

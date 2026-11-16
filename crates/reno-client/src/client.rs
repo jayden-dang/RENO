@@ -233,6 +233,27 @@ impl Client {
         Ok(self.rpc.call::<RunCancel>(params).await?.status)
     }
 
+    /// `run.resume`: queues an `interrupted` run (or a `failed` one that has a session) to
+    /// continue its harness session, with `prompt` when given. Returns the attempt it will be.
+    /// A run that cannot be resumed is a `Conflict` error whose `data` is a
+    /// [`reno_proto::NotResumable`]. Needs feature `run.resume`.
+    pub async fn resume_run(
+        &self,
+        run_id: &RunId,
+        prompt: Option<String>,
+    ) -> Result<u32, ClientError> {
+        self.require(reno_proto::FEATURE_RUN_RESUME)?;
+        let params = reno_proto::RunResumeParams {
+            run_id: run_id.clone(),
+            prompt,
+        };
+        Ok(self
+            .rpc
+            .call::<reno_proto::RunResume>(params)
+            .await?
+            .attempt)
+    }
+
     /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
     pub async fn steer(&self, run_id: &RunId, prompt: String) -> Result<(), ClientError> {
         self.require(reno_proto::FEATURE_RUN_STEER)?;

@@ -510,6 +510,7 @@ fn done(stop: StopReason, result: Option<String>, diagnostic: Option<String>) ->
         stop,
         result,
         diagnostic,
+        reason: None,
     }
 }
 
@@ -537,6 +538,7 @@ mod tests {
                 stop,
                 result,
                 diagnostic,
+                ..
             }) => (*stop, result.clone(), diagnostic.clone()),
             other => panic!("no done: {other:?}"),
         }
@@ -776,6 +778,7 @@ mod tests {
                     stop: StopReason::Completed,
                     result: Some("ok".into()),
                     diagnostic: None,
+                    reason: None,
                 },
             ]
         );

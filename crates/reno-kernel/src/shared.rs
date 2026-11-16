@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use reno_harness::exec::Decision;
 use reno_proto::defs::ValidationContext;
 use reno_proto::{
     ApprovalId, ExecEvent, PROMPT_SUMMARY_CHARS, RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT, RunId,
-    RunStatus, RunSummary, Seq, StopReason, TriggerInfo,
+    RunStatus, RunSummary, Seq, SessionRef, StopDetail, StopReason, TriggerInfo,
 };
 use reno_store::{RunRecord, StoreError};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
@@ -68,6 +68,42 @@ pub(crate) struct Subscription {
     pub(crate) overflow: Arc<AtomicU64>,
 }
 
+/// Why a live run was told to stop, written before its token is cancelled so the run's end can
+/// say who stopped it. The first reason wins.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StopCause(Arc<OnceLock<StopDetail>>);
+
+impl Stopper {
+    fn of(live: &LiveRun) -> Self {
+        Self {
+            cancel: live.cancel.clone(),
+            cause: live.cause.clone(),
+        }
+    }
+}
+
+impl StopCause {
+    /// The reason, if one was given.
+    pub(crate) fn get(&self) -> Option<StopDetail> {
+        self.0.get().cloned()
+    }
+}
+
+/// What stops a live run, with the reason it is stopped for.
+#[derive(Debug, Clone)]
+pub(crate) struct Stopper {
+    cancel: CancellationToken,
+    cause: StopCause,
+}
+
+impl Stopper {
+    /// Records `why` (unless an earlier reason stands) and cancels the run.
+    pub(crate) fn stop(&self, why: StopDetail) {
+        let _ = self.cause.0.set(why);
+        self.cancel.cancel();
+    }
+}
+
 /// A run that holds a slot: claimed, and not yet ended.
 #[derive(Debug)]
 pub(crate) struct LiveRun {
@@ -75,6 +111,8 @@ pub(crate) struct LiveRun {
     /// cancelling it is `ExecHandle::cancel`, and it works from the claim on, before the
     /// executor has started.
     pub(crate) cancel: CancellationToken,
+    /// Why the token was cancelled, when something other than the shutdown did it.
+    pub(crate) cause: StopCause,
     pub(crate) cmd: mpsc::Sender<SupCmd>,
     /// The bot the run is pinned to, which a bot's pause (`stop_live`) is matched against.
     pub(crate) bot: Option<String>,
@@ -257,16 +295,16 @@ impl Shared {
         self.live_changed.send_modify(|n| *n += 1);
     }
 
-    pub(crate) fn live_cancel_token(&self, run: &RunId) -> Option<CancellationToken> {
-        self.live_lock().get(run).map(|live| live.cancel.clone())
+    pub(crate) fn live_stopper(&self, run: &RunId) -> Option<Stopper> {
+        self.live_lock().get(run).map(Stopper::of)
     }
 
-    /// The cancel tokens of the live runs of `bot` (every live run when `None`), with their ids.
-    pub(crate) fn live_of(&self, bot: Option<&str>) -> Vec<(RunId, CancellationToken)> {
+    /// The stoppers of the live runs of `bot` (every live run when `None`), with their ids.
+    pub(crate) fn live_of(&self, bot: Option<&str>) -> Vec<(RunId, Stopper)> {
         self.live_lock()
             .iter()
             .filter(|(_, live)| bot.is_none_or(|name| live.bot.as_deref() == Some(name)))
-            .map(|(run, live)| (run.clone(), live.cancel.clone()))
+            .map(|(run, live)| (run.clone(), Stopper::of(live)))
             .collect()
     }
 
@@ -403,6 +441,12 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         prompt: Some(row.goal.clone()),
         model: row.model.clone().or_else(|| requested_model(&row.spec)),
         stop_reason,
+        stop: row.stop.clone(),
+        not_resumed: row
+            .not_resumed
+            .clone()
+            .filter(|_| row.status == RunStatus::Interrupted),
+        session: row.session_ref.clone().map(SessionRef),
         bot: row.bot.clone(),
         created_at_ms: u64::try_from(row.created_at).unwrap_or(0),
         updated_at_ms: u64::try_from(row.updated_at).unwrap_or(0),

@@ -64,6 +64,7 @@ fn done(stop: StopReason) -> ExecEvent {
         stop,
         result: Some("ok".into()),
         diagnostic: None,
+        reason: None,
     }
 }
 

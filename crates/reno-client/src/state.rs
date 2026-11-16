@@ -610,6 +610,9 @@ mod tests {
             bot: None,
             created_at_ms: created,
             updated_at_ms: created,
+            stop: None,
+            not_resumed: None,
+            session: None,
         }
     }
 

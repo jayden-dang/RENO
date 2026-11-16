@@ -51,7 +51,7 @@ pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOu
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
-pub use runs::{Claim, NewTask, RunRecord};
+pub use runs::{Claim, NewTask, Note, Resumed, RunRecord};
 pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};
 pub use writer::StoreConfig;
 
@@ -63,6 +63,8 @@ mod budget_tests;
 mod definition_tests;
 #[cfg(test)]
 mod executor_health_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]

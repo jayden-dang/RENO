@@ -93,7 +93,8 @@ async fn a_run_succeeds_and_the_journal_and_the_live_subscriber_agree() {
         ExecEvent::Done {
             stop: StopReason::Completed,
             result: None,
-            diagnostic: None
+            diagnostic: None,
+            reason: None,
         }
     );
     assert_eq!(

@@ -167,6 +167,10 @@ pub(crate) enum RunCommand {
     Show(RunShow),
     /// Stop a run.
     Cancel(RunCancel),
+    /// Continue an interrupted run (or a failed one that has a session) in its harness session.
+    /// The daemon already does this on its own after a restart when the run's executor and bot
+    /// allow it; this is for the ones it left alone.
+    Resume(RunResume),
 }
 
 #[derive(Debug, Args)]
@@ -192,6 +196,16 @@ pub(crate) struct RunTail {
     /// First event to show, counted from 1. Inclusive.
     #[arg(long, value_name = "SEQ")]
     pub(crate) from: Option<Seq>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunResume {
+    /// The run.
+    pub(crate) run: RunId,
+    /// What to tell the harness as the session continues; the daemon's standard "continue"
+    /// prompt by default.
+    #[arg(long)]
+    pub(crate) prompt: Option<String>,
 }
 
 #[derive(Debug, Args)]
