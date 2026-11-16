@@ -526,16 +526,53 @@ impl Client {
         decision: ApprovalDecision,
         message: Option<String>,
     ) -> Result<(), ClientError> {
+        self.decide_remembering(approval_id, decision, message, None)
+            .await
+    }
+
+    /// `approval.decide` that also keeps the answer as a standing rule (`remember`), whose
+    /// matcher the daemon derives from the approval's own subject. A `remember` needs feature
+    /// `rules`.
+    pub async fn decide_remembering(
+        &self,
+        approval_id: &reno_proto::ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+        remember: Option<reno_proto::Remember>,
+    ) -> Result<(), ClientError> {
         self.require(reno_proto::FEATURE_APPROVALS)?;
         if message.is_some() {
             self.require(reno_proto::FEATURE_APPROVAL_MESSAGE)?;
+        }
+        if remember.is_some() {
+            self.require(reno_proto::FEATURE_RULES)?;
         }
         let params = ApprovalDecideParams {
             approval_id: approval_id.clone(),
             decision,
             message,
+            remember,
         };
         self.rpc.call::<ApprovalDecide>(params).await?;
+        Ok(())
+    }
+
+    /// `rule.list`: the standing rules, newest first; with `include_inactive` also the revoked
+    /// and expired ones. Needs feature `rules`.
+    pub async fn list_rules(
+        &self,
+        include_inactive: bool,
+    ) -> Result<Vec<reno_proto::StandingRule>, ClientError> {
+        self.require(reno_proto::FEATURE_RULES)?;
+        let params = reno_proto::RuleListParams { include_inactive };
+        Ok(self.rpc.call::<reno_proto::RuleList>(params).await?.rules)
+    }
+
+    /// `rule.revoke`: stops a standing rule applying, for good. Needs feature `rules`.
+    pub async fn revoke_rule(&self, id: &reno_proto::RuleId) -> Result<(), ClientError> {
+        self.require(reno_proto::FEATURE_RULES)?;
+        let params = reno_proto::RuleRevokeParams { id: id.clone() };
+        self.rpc.call::<reno_proto::RuleRevoke>(params).await?;
         Ok(())
     }
 

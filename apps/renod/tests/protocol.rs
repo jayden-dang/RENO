@@ -542,3 +542,80 @@ daemon_test! {
         within(daemon.wait()).await.unwrap();
     }
 }
+
+daemon_test! {
+    async fn a_remembered_answer_is_a_rule_the_next_run_meets_until_it_is_revoked() {
+        use reno_proto::{ApprovalStatus, Remember, RememberScope, ResolvedBy, StandingEffect, StandingScope};
+        let fx = Fixture::start().await;
+        assert!(fx.client.supports(reno_proto::FEATURE_RULES));
+        assert!(within(fx.client.list_rules(true)).await.unwrap().is_empty());
+
+        let mut watch = within(fx.client.watch_approvals()).await.unwrap();
+        let _ = within(watch.next()).await;
+        let first = fx.run("mock-approval", "delete the build").await;
+        let pending = loop {
+            let snapshot = within(watch.next()).await.unwrap().unwrap();
+            if let Some(approval) = snapshot.approvals.first() {
+                break approval.clone();
+            }
+        };
+        // A scope that cannot be kept (the run has no bot) is refused and the approval stays held.
+        let refused = within(fx.client.decide_remembering(
+            &pending.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember { scope: RememberScope::Bot, expires_in_secs: None }),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(code(&refused), ErrorCode::InvalidParams);
+        assert_eq!(within(fx.client.list_approvals()).await.unwrap().len(), 1);
+
+        within(fx.client.decide_remembering(
+            &pending.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember { scope: RememberScope::Always, expires_in_secs: Some(3600) }),
+        ))
+        .await
+        .unwrap();
+        let _ = fx.events(&first, None).await;
+        let rules = within(fx.client.list_rules(false)).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        let rule = rules[0].clone();
+        assert_eq!((rule.scope.clone(), rule.effect), (StandingScope::Always, StandingEffect::Allow));
+        assert_eq!(rule.source_approval, Some(pending.id.clone()));
+        assert_eq!(rule.matcher.tool, approval_subject().tool);
+
+        // The same action in the next run is answered by the rule: nobody is held.
+        let second = fx.run("mock-approval", "delete the build again").await;
+        let events = fx.events(&second, None).await;
+        assert!(is_done(&events.last().unwrap().event, StopReason::Completed));
+        assert!(within(fx.client.list_approvals()).await.unwrap().is_empty());
+        let history = within(fx.client.approval_history(Some(second.clone()), None)).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            history[0].decided_by,
+            Some(ResolvedBy::Rule { name: format!("standing:{}", rule.id) })
+        );
+        assert_eq!(history[0].subject_digest.as_deref(), Some(approval_subject().digest().as_str()));
+
+        // Revoked, it no longer answers: the third run is held again.
+        within(fx.client.revoke_rule(&rule.id)).await.unwrap();
+        assert!(within(fx.client.list_rules(false)).await.unwrap().is_empty());
+        assert!(within(fx.client.list_rules(true)).await.unwrap()[0].revoked_at_ms.is_some());
+        let unknown = reno_proto::RuleId::from_suffix("nope").unwrap();
+        let missing = within(fx.client.revoke_rule(&unknown)).await.unwrap_err();
+        assert_eq!(code(&missing), ErrorCode::NotFound);
+        let third = fx.run("mock-approval", "delete the build a third time").await;
+        let held = loop {
+            let snapshot = within(watch.next()).await.unwrap().unwrap();
+            if let Some(approval) = snapshot.approvals.first() {
+                break approval.clone();
+            }
+        };
+        assert_eq!(held.run_id, third);
+        fx.stop().await;
+    }
+}

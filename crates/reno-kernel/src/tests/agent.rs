@@ -545,6 +545,44 @@ async fn a_request_still_waiting_when_the_run_ends_is_denied_as_expired() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_approval_the_run_asked_for_itself_cannot_be_kept_as_a_standing_rule() {
+    use reno_proto::{Remember, RememberScope};
+    let rig = Rig::new(hold(), config(1)).await;
+    let (_, session) = rig.live(None).await;
+    let asked = ask(&rig, &session, approval("git push"));
+    let held = pending(&rig).await;
+    let refused = rig
+        .fx
+        .kernel
+        .decide_remembering(
+            &held.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember {
+                scope: RememberScope::Always,
+                expires_in_secs: None,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(KernelError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert!(rig.fx.kernel.list_rules(true).await.unwrap().is_empty());
+    // It is still held, and a plain answer goes through.
+    assert_eq!(pending(&rig).await.id, held.id);
+    rig.fx
+        .kernel
+        .decide(&held.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    assert_eq!(
+        asked.await.unwrap().unwrap().decision,
+        ApprovalOutcome::Approved
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_policy_rule_answers_a_request_without_a_human() {
     let policy = r#"
 default = "ask"
@@ -653,15 +691,63 @@ async fn judged(subject: ApprovalSubject, policy: Option<&str>) -> (ApprovalOutc
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human() {
+async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human_and_without_a_journal_pair()
+ {
     for tool in ["report", "request_approval", "board_read", "board_write"] {
-        let (decision, by) = judged(mcp_call(&format!("mcp__reno__{tool}")), None).await;
-        assert_eq!(decision, ApprovalOutcome::Approved, "{tool}");
+        let name = format!("mcp__reno__{tool}");
+        let steps = vec![
+            MockStep::started("s", "mock-1"),
+            MockStep::Emit(ExecEvent::NeedsApproval {
+                request_id: "r1".into(),
+                subject: mcp_call(&name),
+            }),
+            MockStep::AwaitAnswer {
+                request_id: "r1".into(),
+            },
+            MockStep::text("after"),
+        ];
+        let rig = Rig::with_policy(steps, config(1), None).await;
+        let run = rig
+            .fx
+            .kernel
+            .submit_for_bot("keeper", "go", None, "/work".into(), None)
+            .await
+            .unwrap();
+        // The harness got its answer: the text after the wait is journaled.
+        until(async || {
+            rig.fx
+                .journal(&run)
+                .iter()
+                .any(|(_, event)| matches!(event, ExecEvent::Text { .. }))
+                .then_some(())
+        })
+        .await;
+        let journal = rig.fx.journal(&run);
+        assert!(
+            !journal.iter().any(|(_, event)| matches!(
+                event,
+                ExecEvent::NeedsApproval { .. } | ExecEvent::ApprovalResolved { .. }
+            )),
+            "{tool}: the call is in the approval history only, not the journal: {journal:?}"
+        );
+        let history = rig
+            .fx
+            .kernel
+            .approval_history(Some(&run), None)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1, "{tool}");
+        assert_eq!(history[0].subject, mcp_call(&name));
         assert_eq!(
-            by,
-            ResolvedBy::Rule {
+            history[0].subject_digest.as_deref(),
+            Some(mcp_call(&name).digest().as_str())
+        );
+        assert_eq!(history[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            history[0].decided_by,
+            Some(ResolvedBy::Rule {
                 name: "builtin:reno-mcp".into()
-            }
+            })
         );
     }
 }

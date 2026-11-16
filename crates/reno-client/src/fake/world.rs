@@ -62,6 +62,8 @@ pub(super) struct World {
     pub(super) defs: DefsSnapshot,
     records: Vec<DefRecord>,
     history: Vec<ApprovalRecord>,
+    /// The standing rules, oldest first.
+    rules: Vec<reno_proto::StandingRule>,
     /// Everything is paused (`budget.pause` with no bot).
     paused: bool,
     /// Bots paused by themselves.
@@ -104,6 +106,7 @@ impl World {
             defs: seed.extras.defs,
             records: seed.extras.records,
             history: seed.extras.history,
+            rules: seed.extras.rules,
             paused: false,
             paused_bots: std::collections::BTreeSet::new(),
             secrets: std::collections::BTreeSet::new(),
@@ -445,19 +448,76 @@ impl World {
     }
 
     /// Removes a pending approval and records how it was decided.
+    ///
+    /// With `remember` the answer also becomes a standing rule (the fake never judges anything
+    /// by it; the list is for clients to show and revoke). `Err(Some(why))` for a request the
+    /// real daemon refuses, `Err(None)` for an approval that is not pending.
     pub(super) fn take_approval(
         &mut self,
         id: &ApprovalId,
         decision: ApprovalDecision,
         message: Option<String>,
-    ) -> Option<Approval> {
-        let at = self.approvals.iter().position(|a| &a.id == id)?;
+        remember: Option<reno_proto::Remember>,
+    ) -> Result<Approval, Option<String>> {
+        use reno_proto::{
+            RULE_MAX_EXPIRY_SECS, RememberScope, RuleId, RuleMatcher, StandingEffect, StandingRule,
+            StandingScope,
+        };
+        let at = self
+            .approvals
+            .iter()
+            .position(|a| &a.id == id)
+            .ok_or(None)?;
+        let rule_scope = match &remember {
+            None => None,
+            Some(remember) => {
+                if remember
+                    .expires_in_secs
+                    .is_some_and(|secs| !(1..=RULE_MAX_EXPIRY_SECS).contains(&secs))
+                {
+                    return Err(Some("a rule's expiry is out of range".to_owned()));
+                }
+                Some(match remember.scope {
+                    RememberScope::Run => StandingScope::Run {
+                        run: self.approvals[at].run_id.clone(),
+                    },
+                    RememberScope::Bot => StandingScope::Bot {
+                        bot: self
+                            .run(&self.approvals[at].run_id)
+                            .and_then(|r| r.summary.bot.as_ref().map(|b| b.name.clone()))
+                            .ok_or_else(|| Some("this run has no bot".to_owned()))?,
+                    },
+                    RememberScope::Always => StandingScope::Always,
+                })
+            }
+        };
         let approval = self.approvals.remove(at);
         let now = self.tick();
+        if let (Some(scope), Some(remember)) = (rule_scope, &remember) {
+            let n = self.next_id;
+            self.next_id += 1;
+            if let Ok(rule_id) = RuleId::from_suffix(&format!("fake{n}")) {
+                self.rules.push(StandingRule {
+                    id: rule_id,
+                    scope,
+                    effect: match decision {
+                        ApprovalDecision::ApproveOnce => StandingEffect::Allow,
+                        ApprovalDecision::Deny => StandingEffect::Deny,
+                    },
+                    matcher: RuleMatcher::derive(&approval.subject, std::path::Path::new("/work")),
+                    created_by: "human".to_owned(),
+                    created_at_ms: now,
+                    expires_at_ms: remember.expires_in_secs.map(|s| now + s * 1_000),
+                    revoked_at_ms: None,
+                    source_approval: Some(approval.id.clone()),
+                });
+            }
+        }
         self.history.push(ApprovalRecord {
             id: approval.id.clone(),
             run_id: approval.run_id.clone(),
             request_id: format!("req-{}", approval.id),
+            subject_digest: Some(approval.subject.digest()),
             subject: approval.subject.clone(),
             status: match decision {
                 ApprovalDecision::ApproveOnce => ApprovalStatus::Approved,
@@ -471,7 +531,32 @@ impl World {
                 .map(|text| text.trim().to_owned())
                 .filter(|text| !text.is_empty()),
         });
-        Some(approval)
+        Ok(approval)
+    }
+
+    /// `rule.list`: newest first; only the ones in force unless `all`.
+    pub(super) fn rules(&self, all: bool) -> Vec<reno_proto::StandingRule> {
+        let now = self.now_ms;
+        let mut rules: Vec<_> = self
+            .rules
+            .iter()
+            .filter(|r| all || r.is_active(now))
+            .cloned()
+            .collect();
+        rules.reverse();
+        rules
+    }
+
+    /// `rule.revoke`. `false` when there is no such rule.
+    pub(super) fn revoke_rule(&mut self, id: &reno_proto::RuleId) -> bool {
+        let now = self.tick();
+        match self.rules.iter_mut().find(|r| &r.id == id) {
+            Some(rule) => {
+                rule.revoked_at_ms.get_or_insert(now);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Decided approvals, newest decision first, optionally of one run.

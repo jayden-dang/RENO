@@ -18,6 +18,9 @@ pub enum KernelError {
     /// No such pending approval: it was decided already, or its run ended.
     #[error("approval {0} not found")]
     ApprovalNotFound(ApprovalId),
+    /// No such standing rule.
+    #[error("standing rule {0} not found")]
+    RuleNotFound(reno_proto::RuleId),
     /// The run is in a state that has nothing to cancel.
     #[error("run {run} cannot be cancelled while {status:?}")]
     NotCancellable {

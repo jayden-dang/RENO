@@ -51,6 +51,8 @@ pub(crate) enum SupCmd {
         decision: Decision,
         /// The reason, for a denial.
         message: Option<String>,
+        /// Keep the answer as a standing rule.
+        remember: Option<reno_proto::Remember>,
         reply: oneshot::Sender<Result<()>>,
     },
     /// Queue a steering prompt for the executor.

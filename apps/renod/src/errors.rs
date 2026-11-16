@@ -15,6 +15,7 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
     match error {
         KernelError::RunNotFound(_)
         | KernelError::ApprovalNotFound(_)
+        | KernelError::RuleNotFound(_)
         | KernelError::TriggerNotFound(_)
         | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
         KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
@@ -165,6 +166,10 @@ mod tests {
         let cases: Vec<(KernelError, ErrorCode)> = vec![
             (KernelError::RunNotFound(run()), ErrorCode::NotFound),
             (KernelError::ApprovalNotFound(approval), ErrorCode::NotFound),
+            (
+                KernelError::RuleNotFound(reno_proto::RuleId::from_suffix("a").expect("id")),
+                ErrorCode::NotFound,
+            ),
             (
                 KernelError::NotCancellable {
                     run: run(),

@@ -215,7 +215,7 @@ fn matcher(glob: &str) -> Option<GlobMatcher> {
 /// Characters that end one simple command and start another.
 const COMMAND_BREAKS: &[char] = &[';', '&', '|', '\n', '\r', '`', '(', ')'];
 
-fn command_holds(effect: PolicyEffect, glob: &str, line: &str) -> bool {
+pub(crate) fn command_holds(effect: PolicyEffect, glob: &str, line: &str) -> bool {
     let Some(glob) = matcher(glob) else {
         return false;
     };
@@ -247,18 +247,32 @@ enum Located {
 }
 
 fn paths_hold(effect: PolicyEffect, glob: &str, cwd: &Path, paths: &[PathBuf]) -> bool {
-    let Ok(built) = GlobBuilder::new(glob).literal_separator(true).build() else {
-        return false;
-    };
-    let glob_is_outside = glob.starts_with('/');
-    let matcher = built.compile_matcher();
-    let one = |path: &PathBuf| match locate(cwd, path) {
-        Located::Inside(relative) => !glob_is_outside && matcher.is_match(&relative),
-        Located::Outside(absolute) => glob_is_outside && matcher.is_match(&absolute),
-    };
+    let one = |path: &PathBuf| path_matches(glob, cwd, path);
     match effect {
         PolicyEffect::Allow => !paths.is_empty() && paths.iter().all(one),
         PolicyEffect::Deny | PolicyEffect::Ask => paths.iter().any(one),
+    }
+}
+
+/// Whether one path is matched by a path glob, by the rules of "Paths" above. `cwd` must already
+/// be [`lexical`].
+pub(crate) fn path_matches(glob: &str, cwd: &Path, path: &Path) -> bool {
+    let Ok(built) = GlobBuilder::new(glob).literal_separator(true).build() else {
+        return false;
+    };
+    let matcher = built.compile_matcher();
+    match locate(cwd, path) {
+        Located::Inside(relative) => !glob.starts_with('/') && matcher.is_match(&relative),
+        Located::Outside(absolute) => glob.starts_with('/') && matcher.is_match(&absolute),
+    }
+}
+
+/// Where `path` is relative to the worktree `cwd` (already [`lexical`]): the path relative to it
+/// for an inside path, else the normalised absolute path. Returns `(is_inside, text)`.
+pub(crate) fn locate_text(cwd: &Path, path: &Path) -> (bool, String) {
+    match locate(cwd, path) {
+        Located::Inside(text) => (true, text),
+        Located::Outside(text) => (false, text),
     }
 }
 
@@ -289,7 +303,7 @@ fn locate(cwd: &Path, path: &Path) -> Located {
 }
 
 /// `path` with `.` removed and `..` resolved against the component before it, lexically.
-fn lexical(path: &Path) -> PathBuf {
+pub(crate) fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {

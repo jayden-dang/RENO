@@ -538,6 +538,30 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let rule_list = move |p: reno_proto::RuleListParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "rule.list")?;
+            Ok(reno_proto::RuleListResult {
+                rules: s.read(|w| w.rules(p.include_inactive)),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let rule_revoke = move |p: reno_proto::RuleRevokeParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "rule.revoke")?;
+            if s.with(|w| w.revoke_rule(&p.id)) {
+                Ok(reno_proto::RuleRevokeResult {})
+            } else {
+                Err(not_found("rule"))
+            }
+        }
+    };
+
+    let s = Arc::clone(shared);
     let secret_list = move |_: NoParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -710,8 +734,11 @@ fn router(shared: &Arc<Shared>) -> Router {
         async move {
             injected(&s, "approval.decide")?;
             let approval = s
-                .with(|w| w.take_approval(&p.approval_id, p.decision, p.message))
-                .ok_or_else(|| not_found("approval"))?;
+                .with(|w| w.take_approval(&p.approval_id, p.decision, p.message, p.remember))
+                .map_err(|why| match why {
+                    Some(why) => ErrorObject::new(ErrorCode::InvalidParams, why),
+                    None => not_found("approval"),
+                })?;
             s.tracker
                 .spawn(script::resume(Arc::clone(&s), approval.run_id, p.decision));
             Ok(ApprovalDecideResult {})
@@ -964,6 +991,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunGet, _, _>(run_get)
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
+        .method::<reno_proto::RuleList, _, _>(rule_list)
+        .method::<reno_proto::RuleRevoke, _, _>(rule_revoke)
         .method::<reno_proto::SecretList, _, _>(secret_list)
         .method::<reno_proto::SecretSet, _, _>(secret_set)
         .method::<reno_proto::SecretDelete, _, _>(secret_delete)

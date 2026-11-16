@@ -2,25 +2,52 @@
 //!
 //! # The flow
 //!
-//! On `NeedsApproval` the supervisor judges the subject, in this order:
+//! On `NeedsApproval` the supervisor judges the subject, in this order. The first step that
+//! applies answers; nothing after it is consulted.
 //!
-//! 1. The policy in force **now** is evaluated for this run's bot and worktree
-//!    (`reno_proto::defs::evaluate`). A policy reload therefore changes the answer for requests
-//!    that come after it and never for one already waiting.
-//! 2. **Deny** by a rule: the harness is told no, with the rule named. Nobody is asked.
-//! 3. A subject whose digest was already refused in this run, by a person, by a rule or by
-//!    running out of time (no answer means deny), is denied again, unasked (**repeat denial**).
-//!    This overrides an allow rule and an ask, so a refusal stands for the rest of the run, and
-//!    a harness that retries an unanswered action is not held for another full time limit; a
-//!    deny rule keeps its own name.
-//! 4. **Allow** by a rule: the harness is told yes. Nobody is asked.
-//! 5. **Ask**: a pending record is stored with a deadline, the run waits in
-//!    `waiting_approval`, and the pending list is published. A human's `decide` answers it; if
-//!    none comes by the deadline, it is denied as expired.
+//! 1. **Policy deny.** The policy in force **now** (`reno_proto::defs::evaluate`, for this run's
+//!    bot and worktree) denies it, by a rule of `policy.toml` or by the policy's default. The
+//!    harness is told no, with the rule named. An explicit deny in the file therefore beats
+//!    everything below, standing rules included, and so does a default of `deny` (a person is
+//!    never asked, so there is nothing for a standing rule to answer). A policy reload changes the
+//!    answer for requests that come after it and never for one already waiting.
+//! 2. **Standing deny.** A standing rule of effect `deny` that is in force and matches the
+//!    subject (`reno_proto::rules`; scope: this run, this run's bot, or everything). A standing
+//!    deny beats a standing allow whatever their scopes, and beats a policy `allow` or `ask`.
+//!    The decision is named `standing:<rule id>`.
+//! 3. **Repeat denial.** A subject whose digest was already refused in this run, by a person, by
+//!    a rule or by running out of time (no answer means deny), is denied again, unasked. This
+//!    overrides an allow rule, a standing allow and an ask, so a refusal stands for the rest of
+//!    the run, and a harness that retries an unanswered action is not held for another full time
+//!    limit; a deny keeps its own name.
+//! 4. **Policy allow.** A rule of the policy allows it (or the policy's default does).
+//! 5. **Standing allow.** A standing rule of effect `allow` that is in force and matches.
+//! 6. **Reno's own tools.** Under `ask`, a call to a tool of Reno's own MCP server is allowed as
+//!    `builtin:reno-mcp`. This one is **not journaled** as a `NeedsApproval`/`ApprovalResolved`
+//!    pair: it is recorded in the approval history (the `approvals` row and its
+//!    `approval.decided` event, which name the exact tool and the digest), and the journal stays
+//!    free of a pair per `report` or board call. If the record cannot be written the request is
+//!    journaled first and then refused, like any other.
+//! 7. **Ask.** A pending record is stored with a deadline, the run waits in `waiting_approval`,
+//!    and the pending list is published. A human's `decide` answers it; if none comes by the
+//!    deadline, it is denied as expired.
+//!
+//! A standing rule is in force when it is not revoked and `now < expires_at`; expiry is read
+//! against the clock at the time of judging, with no timer. A rule that is revoked while a
+//! request is being judged may still answer that request.
 //!
 //! Allow, deny and repeat-denial never change the run's status and never appear in the pending
-//! list: the human does not see them. Every outcome is stored and journaled as
+//! list: the human does not see them. Every outcome except step 6 is stored and journaled as
 //! `ExecEvent::ApprovalResolved`, after the `NeedsApproval` it answers.
+//!
+//! # Remembering a decision
+//!
+//! `decide` may carry a [`Remember`]. The rule is made from the open approval's own subject
+//! (`RuleMatcher::derive`, never broader than it) and is committed in the same transaction as the
+//! decision, so a rule exists only for a decision that was made. Its effect is the decision's.
+//! A person's approval is `approve once` for the request and `allow` for the rule. An approval the
+//! run asked for itself through `request_approval` cannot be remembered (`Invalid`): its tool is
+//! constant and what distinguishes it is free text the run wrote.
 //!
 //! # Order of effects
 //!
@@ -48,9 +75,10 @@ use reno_harness::exec::Decision;
 use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, RuleRef, evaluate};
 use reno_proto::{
     ActionClass, ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, MCP_SERVER_NAME,
-    MCP_TOOLS, ResolvedBy, RunStatus,
+    MCP_TOOLS, Remember, RememberScope, ResolvedBy, RuleId, RuleMatcher, RunStatus, StandingEffect,
+    StandingRule, StandingScope, standing_rule_name,
 };
-use reno_store::{ExpireScope, NewApproval, StoreError};
+use reno_store::{ExpireScope, NewApproval, NewRule, StoreError};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, sleep_until};
 
@@ -62,6 +90,8 @@ use crate::shared::AgentDecision;
 #[derive(Debug)]
 pub(super) struct Open {
     id: ApprovalId,
+    /// What was asked, which a remembered answer is derived from.
+    subject: ApprovalSubject,
     /// The harness's id, which the answer is sent against.
     request_id: String,
     /// When it expires, in `tokio::time`.
@@ -76,6 +106,9 @@ enum Verdict {
         outcome: ApprovalOutcome,
         by: ResolvedBy,
         message: Option<String>,
+        /// Whether the journal shows the request and its answer. False only for Reno's own
+        /// tools (`builtin:reno-mcp`), which the approval history alone records.
+        journal: bool,
     },
     /// Ask a human, who has `ttl` to answer.
     Ask { ttl: Duration },
@@ -103,6 +136,12 @@ fn named(rule: Option<RuleRef>) -> ResolvedBy {
             || reno_proto::defs::DEFAULT_RULE.to_owned(),
             |rule| rule.name,
         ),
+    }
+}
+
+fn standing_by(rule: &StandingRule) -> ResolvedBy {
+    ResolvedBy::Rule {
+        name: standing_rule_name(&rule.id),
     }
 }
 
@@ -170,9 +209,14 @@ impl Supervisor {
                 outcome,
                 by,
                 message,
+                journal,
             }) => {
-                self.publish(&event);
-                self.settle(request_id, subject, outcome, by, message).await;
+                if journal {
+                    self.publish(&event);
+                }
+                let request = (!journal).then_some(&event);
+                self.settle(request_id, subject, (outcome, by, message), request)
+                    .await;
             }
             Err(error) => {
                 self.publish(&event);
@@ -196,48 +240,74 @@ impl Supervisor {
             },
             subject,
         );
-        let asked = match decision {
-            PolicyDecision::Deny { rule, message } => {
-                return Ok(Verdict::Auto {
-                    outcome: ApprovalOutcome::Denied,
-                    by: named(rule),
-                    message: Some(message),
-                });
-            }
-            PolicyDecision::Allow { rule } => Verdict::Auto {
-                outcome: ApprovalOutcome::Approved,
-                by: named(rule),
-                message: None,
-            },
-            // Reno's own tools need no second question: where one is an approval, it raises its
-            // own, and the rest touch only the run's own board and journal (ARCHITECTURE 8). A
-            // rule that denies them still wins, above.
-            PolicyDecision::Ask { .. } if is_reno_tool(subject) => Verdict::Auto {
-                outcome: ApprovalOutcome::Approved,
-                by: ResolvedBy::Rule {
-                    name: RENO_TOOL_RULE.to_owned(),
-                },
-                message: None,
-            },
-            PolicyDecision::Ask { .. } => Verdict::Ask {
-                ttl: policy
-                    .approval_ttl()
-                    .unwrap_or(self.shared.config.approval_ttl),
-            },
+        let auto = |outcome, by, message| Verdict::Auto {
+            outcome,
+            by,
+            message,
+            journal: true,
         };
+        // 1. The policy's own denials come first and are final.
+        if let PolicyDecision::Deny { rule, message } = decision {
+            return Ok(auto(ApprovalOutcome::Denied, named(rule), Some(message)));
+        }
+        // 2. Standing denials.
+        let standing = self
+            .shared
+            .db
+            .active_rules(&self.run, self.info.bot.as_deref())
+            .await?;
+        let of_effect = |effect: StandingEffect| {
+            standing.iter().find(|rule| {
+                rule.effect == effect && rule.matcher.matches(effect, &self.info.cwd, subject)
+            })
+        };
+        if let Some(rule) = of_effect(StandingEffect::Deny) {
+            return Ok(auto(
+                ApprovalOutcome::Denied,
+                standing_by(rule),
+                Some(format!("denied by a standing rule ({})", rule.id)),
+            ));
+        }
+        // 3. A refusal in this run stands.
         if self
             .shared
             .db
             .was_denied(&self.run, &subject.digest())
             .await?
         {
+            return Ok(auto(
+                ApprovalOutcome::Denied,
+                ResolvedBy::RepeatDenial,
+                None,
+            ));
+        }
+        // 4. The policy allows it.
+        if let PolicyDecision::Allow { rule } = decision {
+            return Ok(auto(ApprovalOutcome::Approved, named(rule), None));
+        }
+        // 5. A standing allow.
+        if let Some(rule) = of_effect(StandingEffect::Allow) {
+            return Ok(auto(ApprovalOutcome::Approved, standing_by(rule), None));
+        }
+        // 6. Reno's own tools need no second question: where one is an approval, it raises its
+        // own, and the rest touch only the run's own board and journal (ARCHITECTURE 8). A rule
+        // that denies them still wins, above.
+        if is_reno_tool(subject) {
             return Ok(Verdict::Auto {
-                outcome: ApprovalOutcome::Denied,
-                by: ResolvedBy::RepeatDenial,
+                outcome: ApprovalOutcome::Approved,
+                by: ResolvedBy::Rule {
+                    name: RENO_TOOL_RULE.to_owned(),
+                },
                 message: None,
+                journal: false,
             });
         }
-        Ok(asked)
+        // 7. Ask.
+        Ok(Verdict::Ask {
+            ttl: policy
+                .approval_ttl()
+                .unwrap_or(self.shared.config.approval_ttl),
+        })
     }
 
     fn mint(&self) -> std::result::Result<ApprovalId, String> {
@@ -282,6 +352,7 @@ impl Supervisor {
             .map_err(|error| error.to_string())?;
         self.open_approvals.push(Open {
             id,
+            subject: subject.clone(),
             request_id: request_id.to_owned(),
             deadline,
         });
@@ -291,13 +362,16 @@ impl Supervisor {
     }
 
     /// Record a decision that needs no human, tell the harness, and journal it.
+    ///
+    /// With `quiet` (the request) neither the request nor its answer is journaled: the approval
+    /// history holds them. The one exception is a decision that cannot be recorded: the request
+    /// is then journaled first, so the refusal that follows has its request.
     async fn settle(
         &mut self,
         request_id: &str,
         subject: &ApprovalSubject,
-        outcome: ApprovalOutcome,
-        by: ResolvedBy,
-        message: Option<String>,
+        (outcome, by, message): (ApprovalOutcome, ResolvedBy, Option<String>),
+        quiet: Option<&ExecEvent>,
     ) {
         let recorded = match self.mint() {
             Ok(id) => {
@@ -311,6 +385,9 @@ impl Supervisor {
             Err(why) => Err(why),
         };
         if let Err(why) = recorded {
+            if let Some(request) = quiet {
+                self.publish(request);
+            }
             self.refuse_unrecorded(request_id, &why).await;
             return;
         }
@@ -319,12 +396,14 @@ impl Supervisor {
             .clone()
             .filter(|_| outcome == ApprovalOutcome::Denied);
         self.answer(request_id, outcome, for_harness, &by).await;
-        self.publish(&ExecEvent::ApprovalResolved {
-            request_id: request_id.to_owned(),
-            decision: outcome,
-            by,
-            message,
-        });
+        if quiet.is_none() {
+            self.publish(&ExecEvent::ApprovalResolved {
+                request_id: request_id.to_owned(),
+                decision: outcome,
+                by,
+                message,
+            });
+        }
     }
 
     /// The decision could not be put on record, so it is not made: the harness is told no, and
@@ -383,6 +462,7 @@ impl Supervisor {
         approval: ApprovalId,
         decision: Decision,
         message: Option<String>,
+        remember: Option<Remember>,
     ) -> Result<()> {
         let Some(at) = self.open_approvals.iter().position(|o| o.id == approval) else {
             return Err(KernelError::ApprovalNotFound(approval));
@@ -392,19 +472,52 @@ impl Supervisor {
             Decision::Deny => ApprovalOutcome::Denied,
         };
         let message = message.filter(|_| outcome == ApprovalOutcome::Denied);
+        let rule = match &remember {
+            Some(_)
+                if self
+                    .agent_waiters
+                    .contains_key(&self.open_approvals[at].request_id) =>
+            {
+                // The run wrote this subject itself: its tool is always `request_approval` and
+                // the part that says why is free text, so a rule derived from it would cover
+                // everything the run might ask for next.
+                return Err(KernelError::Invalid(
+                    "an approval the run asked for itself cannot be kept as a rule; answer it once"
+                        .to_owned(),
+                ));
+            }
+            Some(remember) => Some(self.rule_from(&self.open_approvals[at], outcome, remember)?),
+            None => None,
+        };
         // On record first; only then does the harness hear it.
-        match self
-            .shared
-            .db
-            .resolve_approval(
-                &approval,
-                outcome,
-                ResolvedBy::Human,
-                message.clone(),
-                self.fence,
-            )
-            .await
-        {
+        let recorded = match rule {
+            Some(rule) => {
+                self.shared
+                    .db
+                    .resolve_approval_remembering(
+                        &approval,
+                        outcome,
+                        ResolvedBy::Human,
+                        message.clone(),
+                        rule,
+                        self.fence,
+                    )
+                    .await
+            }
+            None => {
+                self.shared
+                    .db
+                    .resolve_approval(
+                        &approval,
+                        outcome,
+                        ResolvedBy::Human,
+                        message.clone(),
+                        self.fence,
+                    )
+                    .await
+            }
+        };
+        match recorded {
             Ok(()) => {}
             Err(StoreError::NotFound { .. }) => {
                 // Decided already by something else (recovery or shutdown); forget it here.
@@ -438,6 +551,49 @@ impl Supervisor {
         } else {
             Err(KernelError::RunEnded(self.run.clone()))
         }
+    }
+
+    /// The standing rule that remembering `outcome` for `open` makes: effect of the answer,
+    /// matcher derived from the subject, scope and expiry as asked.
+    fn rule_from(
+        &self,
+        open: &Open,
+        outcome: ApprovalOutcome,
+        remember: &Remember,
+    ) -> Result<NewRule> {
+        let scope = match remember.scope {
+            RememberScope::Run => StandingScope::Run {
+                run: self.run.clone(),
+            },
+            RememberScope::Bot => StandingScope::Bot {
+                bot: self.info.bot.clone().ok_or_else(|| {
+                    KernelError::Invalid(
+                        "this run has no bot, so a rule cannot be kept for its bot".to_owned(),
+                    )
+                })?,
+            },
+            RememberScope::Always => StandingScope::Always,
+        };
+        let suffix = self.shared.mint.suffix(self.shared.db.now_ms());
+        let id = RuleId::from_suffix(&suffix)
+            .map_err(|error| KernelError::Invalid(format!("cannot mint a rule id: {error}")))?;
+        let expires_at = remember.expires_in_secs.map(|secs| {
+            self.shared
+                .db
+                .now_ms()
+                .saturating_add(i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX))
+        });
+        Ok(NewRule {
+            id,
+            scope,
+            effect: match outcome {
+                ApprovalOutcome::Approved => StandingEffect::Allow,
+                ApprovalOutcome::Denied => StandingEffect::Deny,
+            },
+            matcher: RuleMatcher::derive(&open.subject, &self.info.cwd),
+            expires_at,
+            source_approval: None,
+        })
     }
 
     /// The deadline fired: deny every open approval that is due.

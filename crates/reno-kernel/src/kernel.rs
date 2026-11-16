@@ -27,9 +27,9 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
-    CleanTarget, ExecutorId, ExecutorInfo, RoutingDecision, RunEventItem, RunId, RunStatus,
-    RunSummary, Seq, StopDetail, TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo,
-    WorkspaceStatus,
+    CleanTarget, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision, RuleId,
+    RunEventItem, RunId, RunStatus, RunSummary, Seq, StandingRule, StopDetail, TaskId,
+    TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{NewTask, Note, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -723,6 +723,29 @@ impl Kernel {
         decision: ApprovalDecision,
         message: Option<String>,
     ) -> Result<()> {
+        self.decide_remembering(approval, decision, message, None)
+            .await
+    }
+
+    /// [`Self::decide_with_message`], and with `remember` the answer is also kept as a standing
+    /// rule (see `reno_proto::rules`), in the same transaction as the decision. The rule's
+    /// matcher is derived from the approval's own subject; its scope is the run, the run's bot or
+    /// everything. `Invalid` for scope `bot` on a run with no bot, and for an expiry of zero or
+    /// beyond [`RULE_MAX_EXPIRY_SECS`]; nothing is decided in that case.
+    pub async fn decide_remembering(
+        &self,
+        approval: &ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+        remember: Option<Remember>,
+    ) -> Result<()> {
+        if let Some(secs) = remember.as_ref().and_then(|r| r.expires_in_secs)
+            && !(1..=RULE_MAX_EXPIRY_SECS).contains(&secs)
+        {
+            return Err(KernelError::Invalid(format!(
+                "a rule's expiry is between 1 and {RULE_MAX_EXPIRY_SECS} seconds"
+            )));
+        }
         let message = message
             .map(|text| text.trim().to_owned())
             .filter(|text| !text.is_empty());
@@ -759,11 +782,26 @@ impl Kernel {
                     ApprovalDecision::Deny => Decision::Deny,
                 },
                 message,
+                remember,
                 reply,
             })
             .await
             .map_err(|_| KernelError::RunEnded(run.clone()))?;
         answer.await.map_err(|_| KernelError::RunEnded(run))?
+    }
+
+    /// The standing rules, newest first: only those in force now unless `include_inactive`.
+    pub async fn list_rules(&self, include_inactive: bool) -> Result<Vec<StandingRule>> {
+        Ok(self.shared.db.list_rules(include_inactive).await?)
+    }
+
+    /// Revoke a standing rule for good. `RuleNotFound` for an unknown id; revoking a revoked
+    /// rule is a no-op. A run that is judging a request at this moment may still see the rule.
+    pub async fn revoke_rule(&self, id: &RuleId) -> Result<()> {
+        match self.shared.db.revoke_rule(id).await {
+            Err(StoreError::NotFound { .. }) => Err(KernelError::RuleNotFound(id.clone())),
+            other => Ok(other?),
+        }
     }
 
     /// Stop: no more claims, every live run cancelled (each ends `interrupted`), then wait up to

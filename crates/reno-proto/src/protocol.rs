@@ -35,6 +35,7 @@ use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
 };
+use crate::rules::{Remember, RuleListParams, RuleListResult, RuleRevokeParams, RuleRevokeResult};
 use crate::run::{NotResumed, RunStatus, StopDetail, StopReason};
 use crate::secrets::{
     SecretDeleteParams, SecretDeleteResult, SecretListResult, SecretSetParams, SecretSetResult,
@@ -141,6 +142,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_STOP_DETAIL,
     FEATURE_SECRETS,
     FEATURE_EXECUTOR_FRAMES,
+    crate::rules::FEATURE_RULES,
 ];
 
 /// A request with a single reply.
@@ -543,6 +545,11 @@ pub struct ApprovalDecideParams {
     /// `approval.message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Keep this answer as a standing rule: the rule's matcher is derived from the approval's
+    /// subject and is never broader than it. Absent is "once": this one request only. Refused
+    /// with scope `bot` for a run that has no bot. Needs feature `rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remember: Option<Remember>,
 }
 
 /// The longest `message` of `approval.decide`, in characters.
@@ -579,6 +586,10 @@ pub struct ApprovalRecord {
     pub request_id: String,
     /// Exactly what was asked.
     pub subject: ApprovalSubject,
+    /// The subject's digest (SHA-256, 64 lowercase hex digits): what repeat-denial and an
+    /// exact-match comparison go by. Absent from daemons that predate feature `rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_digest: Option<String>,
     /// Where it stands.
     pub status: ApprovalStatus,
     /// Who or what decided. Absent while the approval is pending.
@@ -783,6 +794,15 @@ method!(
     SecretDelete, "secret.delete", SecretDeleteParams => SecretDeleteResult
 );
 method!(
+    /// `rule.list`: the standing rules, newest first. Needs feature `rules`.
+    RuleList, "rule.list", RuleListParams => RuleListResult
+);
+method!(
+    /// `rule.revoke`: stops a standing rule applying, for good; it stays in `rule.list
+    /// {includeInactive}` and in the audit trail. Needs feature `rules`.
+    RuleRevoke, "rule.revoke", RuleRevokeParams => RuleRevokeResult
+);
+method!(
     /// `executor.list`: every executor with its descriptor and last health. Needs feature
     /// `executors`.
     ExecutorList, "executor.list", NoParams => ExecutorListResult
@@ -921,6 +941,8 @@ pub fn protocol_schema() -> Value {
             method_entry::<SecretList>(),
             method_entry::<SecretSet>(),
             method_entry::<SecretDelete>(),
+            method_entry::<RuleList>(),
+            method_entry::<RuleRevoke>(),
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),

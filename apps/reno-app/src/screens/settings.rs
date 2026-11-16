@@ -14,6 +14,7 @@ use crate::store::Store;
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
+use crate::vm::rules;
 use crate::vm::settings::{self, DaemonView, DefRow, DefsView, PolicyView};
 use crate::vm::{Banner, Section};
 
@@ -62,6 +63,9 @@ impl SettingsScreen {
         self.tab = tab;
         if tab == Tab::Daemon {
             self.shown(cx);
+        }
+        if tab == Tab::Policy {
+            self.store.update(cx, |store, cx| store.load_rules(cx));
         }
         cx.notify();
     }
@@ -294,7 +298,132 @@ impl SettingsScreen {
         out
     }
 
-    fn policy_tab(&self, view: Option<&PolicyView>, theme: &Theme) -> Vec<AnyElement> {
+    /// The standing rules: answers kept from the Inbox (or `reno approve --remember`), each
+    /// holding exactly the action it came from. The policy file's own deny rules always win over
+    /// them.
+    fn standing_rules(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let section = {
+            let store = self.store.read(cx);
+            let supported = store.state().supports(reno_proto::FEATURE_RULES);
+            rules::rows(store.rules(), supported, store.now_ms())
+        };
+        let rows = section.rows();
+        let count = rows.len();
+        let rendered: Vec<AnyElement> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let busy = self.store.read(cx).is_revoking(&row.id);
+                let id = row.id.clone();
+                let button = kit::pill_button(
+                    theme,
+                    format!("revoke-{}", row.id),
+                    if busy { "Revoking\u{2026}" } else { "Revoke" },
+                    Tone::Quiet,
+                );
+                let button = if busy {
+                    button.opacity(0.4)
+                } else {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.store.update(cx, |store, cx| store.revoke_rule(id, cx));
+                    }))
+                };
+                let tone = match row.effect {
+                    reno_proto::StandingEffect::Allow => theme.success,
+                    reno_proto::StandingEffect::Deny => theme.danger,
+                };
+                let word = match row.effect {
+                    reno_proto::StandingEffect::Allow => "allow",
+                    reno_proto::StandingEffect::Deny => "deny",
+                };
+                page::table_row(theme, i + 1 == count)
+                    .id(SharedString::from(format!("rule-{}", row.id)))
+                    .debug_selector({
+                        let id = row.id.clone();
+                        move || format!("rule-{id}")
+                    })
+                    .child(
+                        div()
+                            .map(|d| page::cell(d, Some(70.0)))
+                            .child(kit::tag(tone, word)),
+                    )
+                    .child(
+                        div()
+                            .map(|d| page::cell(d, None))
+                            // What the rule holds is the point of the row: it wraps rather than
+                            // being cut, so the exact command is always readable.
+                            .font_family(MONO)
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .child(row.matches.clone()),
+                    )
+                    .child(
+                        div()
+                            .map(|d| page::cell(d, Some(120.0)))
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(row.scope.clone()),
+                    )
+                    .child(
+                        div()
+                            .map(|d| page::cell(d, Some(90.0)))
+                            .text_color(if row.expired {
+                                theme.warning
+                            } else {
+                                theme.muted
+                            })
+                            .child(row.ends.clone()),
+                    )
+                    .child(div().flex_none().child(button))
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .id("standing-rules")
+            .debug_selector(|| "standing-rules".to_owned())
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(page::section_label(theme, "YOUR STANDING RULES"))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(19.0))
+                    .text_color(theme.muted)
+                    .child(
+                        "Answers you kept from the Inbox. Each holds exactly the action it came from, and a deny rule in the policy file always wins over it.",
+                    ),
+            )
+            .when_some(
+                page::note(theme, &section, "No standing rules. Choose a scope on a held action to make one."),
+                ParentElement::child,
+            )
+            .when(!rendered.is_empty(), |d| {
+                d.child(
+                    page::table_frame(theme, page::table())
+                        .child(page::table_head(
+                            theme,
+                            &[
+                                ("Effect", Some(70.0)),
+                                ("Holds", None),
+                                ("Applies to", Some(120.0)),
+                                ("Ends", Some(90.0)),
+                                ("", Some(80.0)),
+                            ],
+                        ))
+                        .children(rendered),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn policy_tab(
+        &self,
+        view: Option<&PolicyView>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let Some(view) = view else {
             return vec![
                 page::lede(
@@ -303,6 +432,7 @@ impl SettingsScreen {
                     "Without a policy every action asks a human, and an unanswered ask is denied.",
                 )
                 .into_any_element(),
+                self.standing_rules(theme, cx),
             ];
         };
         let ttl = view.ttl.as_ref().map_or_else(String::new, |t| {
@@ -370,6 +500,7 @@ impl SettingsScreen {
                 .children(rows)
                 .into_any_element(),
         );
+        out.push(self.standing_rules(theme, cx));
         out
     }
 
@@ -463,7 +594,7 @@ impl Render for SettingsScreen {
             Tab::Definitions => self.definitions(&defs, &theme, cx),
             Tab::Policy => {
                 let policy = settings::policy(self.store.read(cx).state());
-                self.policy_tab(policy.as_ref(), &theme)
+                self.policy_tab(policy.as_ref(), &theme, cx)
             }
             Tab::Daemon => {
                 let view = self.daemon_view(cx);

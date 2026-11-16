@@ -16,8 +16,21 @@
 //! | `edit`, `delete`, `move` | `Edit` | `paths` from `locations` |
 //! | `fetch` | `Network` | |
 //! | `read`, `search` | `Read` | `paths` from `locations` |
+//! | `other` or no kind, titled as one of Reno's own MCP tools (see below) | `McpTool`, tool `mcp__reno__<tool>` | |
 //! | `think` | `Other`: nothing in [`ActionClass`] fits, and it is never asked (see below) | |
 //! | `other`, `switch_mode`, an unknown kind, no kind | `Other` | |
+//!
+//! # Reno's own tools
+//!
+//! ACP has no `mcp_tool` kind: an agent reports a call to an MCP tool as `kind: "other"` (or no
+//! kind) and names it in `title`. A call whose kind says nothing and whose whole title is the
+//! name of one of Reno's own tools, as `mcp__reno__<tool>` or `reno__<tool>` (`<tool>` one of
+//! [`MCP_TOOLS`]), is `McpTool` with the tool normalised to `mcp__reno__<tool>`, so the
+//! supervisor's `builtin:reno-mcp` allowance applies to it as it does under the other drivers.
+//! Nothing else is reclassified: another server's tool, a title with anything around the name,
+//! and a call of any other kind (an `execute` titled `mcp__reno__report` stays a command) are
+//! unchanged. Which spellings real agents use is not verified (no recorded fixture holds one);
+//! these two are the ones the other drivers and the tool naming of `reno mcp` produce.
 //!
 //! Every subject also names the tool and keeps the whole request as the agent sent it (`raw`).
 //!
@@ -44,7 +57,7 @@
 
 use std::path::PathBuf;
 
-use reno_proto::{AccessMode, ActionClass, ApprovalSubject, Question};
+use reno_proto::{AccessMode, ActionClass, ApprovalSubject, MCP_SERVER_NAME, MCP_TOOLS, Question};
 use serde_json::{Value, json};
 
 use crate::exec::InputAnswer;
@@ -57,6 +70,27 @@ pub(crate) fn action_class(kind: Option<&str>) -> ActionClass {
         Some("fetch") => ActionClass::Network,
         Some("read" | "search") => ActionClass::Read,
         _ => ActionClass::Other,
+    }
+}
+
+/// The name of Reno's own MCP tool a call with no kind is titled as, as the other drivers write
+/// it (`mcp__reno__report`). Whole-title equality against the known tools, nothing looser.
+fn reno_tool(tool_call: &Value) -> Option<String> {
+    if !matches!(kind_of(tool_call), None | Some("other")) {
+        return None;
+    }
+    let title = tool_call.get("title")?.as_str()?.trim();
+    MCP_TOOLS.iter().find_map(|tool| {
+        let full = format!("mcp__{MCP_SERVER_NAME}__{tool}");
+        (title == full || title == format!("{MCP_SERVER_NAME}__{tool}")).then_some(full)
+    })
+}
+
+/// The class and the name of a tool call, as an approval or a reported call carries them.
+pub(crate) fn classify(tool_call: &Value) -> (ActionClass, String) {
+    match reno_tool(tool_call) {
+        Some(name) => (ActionClass::McpTool, name),
+        None => (action_class(kind_of(tool_call)), tool_name(tool_call)),
     }
 }
 
@@ -128,10 +162,10 @@ fn locations(tool_call: &Value) -> Vec<PathBuf> {
 /// kept as `raw` for the audit record.
 pub(crate) fn subject(params: &Value) -> ApprovalSubject {
     let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
-    let action = action_class(kind_of(tool_call));
+    let (action, tool) = classify(tool_call);
     ApprovalSubject {
         action,
-        tool: tool_name(tool_call),
+        tool,
         command: (action == ActionClass::Command)
             .then(|| command_of(tool_call))
             .flatten(),
@@ -276,6 +310,53 @@ mod tests {
             assert_eq!(action_class(Some(kind)), class, "{kind}");
         }
         assert_eq!(action_class(None), ActionClass::Other);
+    }
+
+    #[test]
+    fn a_call_titled_as_one_of_renos_tools_is_an_mcp_tool_under_its_full_name() {
+        for kind in [Some("other"), None] {
+            for title in [
+                "mcp__reno__report",
+                "reno__report",
+                " mcp__reno__board_write ",
+            ] {
+                let mut call = json!({ "toolCallId": "t", "title": title });
+                if let Some(kind) = kind {
+                    call["kind"] = json!(kind);
+                }
+                let (class, name) = classify(&call);
+                assert_eq!(class, ActionClass::McpTool, "{title:?} {kind:?}");
+                assert_eq!(
+                    name,
+                    format!("mcp__reno__{}", title.trim().rsplit("__").next().unwrap())
+                );
+                let subject = subject(&request(call));
+                assert_eq!(
+                    (subject.action, subject.tool.as_str()),
+                    (class, name.as_str())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_whole_title_naming_a_known_tool_of_renos_is_reclassified() {
+        for (kind, title) in [
+            // Another server, a tool Reno does not have, a look-alike server, prose around it.
+            ("other", "mcp__github__create_issue"),
+            ("other", "mcp__reno__rm_everything"),
+            ("other", "mcp__reno2__report"),
+            ("other", "reno__rm_everything"),
+            ("other", "call mcp__reno__report now"),
+            ("other", "Mcp__reno__report"),
+            // A kind that says something is believed over a title.
+            ("execute", "mcp__reno__report"),
+            ("edit", "reno__report"),
+            ("fetch", "mcp__reno__report"),
+        ] {
+            let (class, _) = classify(&json!({ "kind": kind, "title": title }));
+            assert_ne!(class, ActionClass::McpTool, "{kind} {title}");
+        }
     }
 
     #[test]

@@ -646,7 +646,8 @@ expression: protocol_schema()
     "run.resume",
     "run.stop_detail",
     "secrets",
-    "executor.frames"
+    "executor.frames",
+    "rules"
   ],
   "methods": [
     {
@@ -4332,6 +4333,48 @@ expression: protocol_schema()
           "ApprovalId": {
             "pattern": "^appr_[A-Za-z0-9]{1,64}$",
             "type": "string"
+          },
+          "Remember": {
+            "description": "What `approval.decide` may add: keep this decision as a standing rule.",
+            "properties": {
+              "expiresInSecs": {
+                "description": "The rule stops applying this many seconds after it is made. Absent: it holds until\nrevoked (a `run` rule ends with its run in any case). At most [`RULE_MAX_EXPIRY_SECS`];\nzero is refused.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/RememberScope",
+                "description": "How far the rule reaches."
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "type": "object"
+          },
+          "RememberScope": {
+            "description": "How far a person's answer reaches. `once` is a plain answer with no `remember`.",
+            "oneOf": [
+              {
+                "const": "run",
+                "description": "Every later matching action of this run.",
+                "type": "string"
+              },
+              {
+                "const": "bot",
+                "description": "Every later matching action of any run of this run's bot. Refused for a run with no bot.",
+                "type": "string"
+              },
+              {
+                "const": "always",
+                "description": "Every later matching action, whatever the run or bot.",
+                "type": "string"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4351,6 +4394,17 @@ expression: protocol_schema()
               "string",
               "null"
             ]
+          },
+          "remember": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Remember"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Keep this answer as a standing rule: the rule's matcher is derived from the approval's\nsubject and is never broader than it. Absent is \"once\": this one request only. Refused\nwith scope `bot` for a run that has no bot. Needs feature `rules`."
           }
         },
         "required": [
@@ -4505,6 +4559,13 @@ expression: protocol_schema()
               "subject": {
                 "$ref": "#/$defs/ApprovalSubject",
                 "description": "Exactly what was asked."
+              },
+              "subjectDigest": {
+                "description": "The subject's digest (SHA-256, 64 lowercase hex digits): what repeat-denial and an\nexact-match comparison go by. Absent from daemons that predate feature `rules`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -4597,7 +4658,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -5902,6 +5963,335 @@ expression: protocol_schema()
           "deleted"
         ],
         "title": "SecretDeleteResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "rule.list",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `rule.list`.",
+        "properties": {
+          "includeInactive": {
+            "default": false,
+            "description": "Also return revoked and expired rules. Default: only the ones in force.",
+            "type": "boolean"
+          }
+        },
+        "title": "RuleListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          },
+          "ApprovalId": {
+            "pattern": "^appr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "CommandPattern": {
+            "description": "How a rule matches a command line.",
+            "oneOf": [
+              {
+                "description": "The line, character for character. What a rule derived from a subject holds.",
+                "properties": {
+                  "command": {
+                    "description": "The command line.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "exact",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A policy `command` glob (`cargo *`), read by the policy's compound-command rules. Only a\nperson who edits a rule gets one; nothing derives it.",
+                "properties": {
+                  "pattern": {
+                    "description": "The glob.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "glob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "pattern"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RuleId": {
+            "pattern": "^rule_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "RuleMatcher": {
+            "description": "What a standing rule matches. See the module docs for what each part means and what leaving\none out means.",
+            "properties": {
+              "action": {
+                "$ref": "#/$defs/ActionClass",
+                "description": "The action class, equal."
+              },
+              "command": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CommandPattern"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The command; absent means the subject has no command."
+              },
+              "paths": {
+                "default": [],
+                "description": "Path globs; empty means the subject has no paths.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "tool": {
+                "description": "The tool name, equal.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "tool"
+            ],
+            "type": "object"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "StandingEffect": {
+            "description": "What a standing rule does when it matches.",
+            "oneOf": [
+              {
+                "const": "allow",
+                "description": "The harness is told yes, unasked.",
+                "type": "string"
+              },
+              {
+                "const": "deny",
+                "description": "The harness is told no, unasked.",
+                "type": "string"
+              }
+            ]
+          },
+          "StandingRule": {
+            "description": "A standing rule as stored and as `rule.list` returns it.",
+            "properties": {
+              "createdAtMs": {
+                "description": "When, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "createdBy": {
+                "description": "Who made it: `human`.",
+                "type": "string"
+              },
+              "effect": {
+                "$ref": "#/$defs/StandingEffect",
+                "description": "What it does."
+              },
+              "expiresAtMs": {
+                "description": "When it stops applying. Absent: when revoked.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "id": {
+                "$ref": "#/$defs/RuleId",
+                "description": "The rule's id, as `rule.revoke` refers to it."
+              },
+              "matcher": {
+                "$ref": "#/$defs/RuleMatcher",
+                "description": "What it matches."
+              },
+              "revokedAtMs": {
+                "description": "When it was revoked. Absent while it is not.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/StandingScope",
+                "description": "Where it applies."
+              },
+              "sourceApproval": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ApprovalId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The approval whose answer it came from."
+              }
+            },
+            "required": [
+              "id",
+              "scope",
+              "effect",
+              "matcher",
+              "createdBy",
+              "createdAtMs"
+            ],
+            "type": "object"
+          },
+          "StandingScope": {
+            "description": "Where a standing rule applies.",
+            "oneOf": [
+              {
+                "description": "One run.",
+                "properties": {
+                  "run": {
+                    "$ref": "#/$defs/RunId",
+                    "description": "The run."
+                  },
+                  "type": {
+                    "const": "run",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "run"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Every run of one bot.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot's name.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Every run.",
+                "properties": {
+                  "type": {
+                    "const": "always",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `rule.list`.",
+        "properties": {
+          "rules": {
+            "description": "Newest first.",
+            "items": {
+              "$ref": "#/$defs/StandingRule"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules"
+        ],
+        "title": "RuleListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "rule.revoke",
+      "params": {
+        "$defs": {
+          "RuleId": {
+            "pattern": "^rule_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `rule.revoke`.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/RuleId",
+            "description": "The rule to revoke."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "RuleRevokeParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `rule.revoke`: empty.",
+        "title": "RuleRevokeResult",
         "type": "object"
       }
     },
@@ -7989,7 +8379,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -8777,7 +9167,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",

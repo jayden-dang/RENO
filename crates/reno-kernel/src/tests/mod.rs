@@ -22,6 +22,7 @@ mod queue;
 mod recovery;
 mod resume;
 mod routing;
+mod rules;
 mod runs;
 mod secrets;
 mod triggers;

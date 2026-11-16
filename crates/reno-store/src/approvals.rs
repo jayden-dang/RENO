@@ -389,7 +389,7 @@ fn tx_record(
     )
 }
 
-fn tx_resolve(
+pub(crate) fn tx_resolve(
     conn: &Connection,
     id: &ApprovalId,
     outcome: ApprovalOutcome,
@@ -517,6 +517,27 @@ impl Store {
         let id = id.clone();
         self.write(Durability::Full, move |c| {
             tx_resolve(c, &id, outcome, &by, message.as_deref(), fence, now)
+        })
+        .await
+    }
+
+    /// [`Self::resolve_approval`] (its `outcome`, `by` and `message` come as one tuple) and, in
+    /// the same transaction, the standing rule the answer
+    /// makes (`rule.created`); neither happens without the other. `rule.source_approval` is
+    /// set to `id`.
+    pub async fn resolve_approval_remembering(
+        &self,
+        id: &ApprovalId,
+        (outcome, by, message): (ApprovalOutcome, ResolvedBy, Option<String>),
+        mut rule: crate::rules::NewRule,
+        fence: u64,
+        now: i64,
+    ) -> Result<()> {
+        let id = id.clone();
+        rule.source_approval = Some(id.clone());
+        self.write(Durability::Full, move |c| {
+            tx_resolve(c, &id, outcome, &by, message.as_deref(), fence, now)?;
+            crate::rules::tx_create(c, &rule, now)
         })
         .await
     }

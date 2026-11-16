@@ -108,6 +108,11 @@ pub(crate) struct Store {
     fetching_defs: BTreeSet<(DefKind, String, u32)>,
     /// Definitions being validated.
     validating: BTreeSet<(DefKind, String)>,
+    /// The standing rules, as `rule.list` last said; `None` until it has. They have no watch, so
+    /// they are read when Settings opens and after a decision that makes one or a revoke.
+    rules: Option<Result<Vec<reno_proto::StandingRule>, String>>,
+    /// Rules being revoked (their buttons are disabled).
+    revoking: BTreeSet<reno_proto::RuleId>,
     /// Ages use the system clock (a real daemon) or the state's newest timestamp (the fake).
     system_clock: bool,
     /// The clock reading when the last `daemon.status` arrived, to carry its uptime forward.
@@ -140,6 +145,8 @@ impl Store {
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
             validating: BTreeSet::new(),
+            rules: None,
+            revoking: BTreeSet::new(),
             system_clock: false,
             status_seen_at_ms: 0,
             open: None,
@@ -474,6 +481,9 @@ impl Store {
             self.load_history(cx);
         }
         self.ensure_def_records(cx);
+        if self.rules.is_some() {
+            self.load_rules(cx);
+        }
         if let Some(run) = self.open.clone() {
             // The follow resumes by itself; the summary of a run outside the window needs `run.get`.
             self.ensure_run(&run, cx);
@@ -600,19 +610,40 @@ impl Store {
         message: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.decide_remembering(id, decision, message, None, cx);
+    }
+
+    /// [`Store::decide_with_message`] that also keeps the answer as a standing rule when
+    /// `remember` is given. The rule list is read again once the daemon has taken the answer.
+    pub(crate) fn decide_remembering(
+        &mut self,
+        id: ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+        remember: Option<reno_proto::Remember>,
+        cx: &mut Context<Self>,
+    ) {
         if self.client().is_none() || !self.deciding.insert(id.clone()) {
             return;
         }
         cx.notify();
         let ok_id = id.clone();
         let err_id = id.clone();
+        let remembered = remember.is_some();
         self.call(
             "Could not send the decision",
-            move |client| async move { client.decide_with_message(&id, decision, message).await },
+            move |client| async move {
+                client
+                    .decide_remembering(&id, decision, message, remember)
+                    .await
+            },
             cx,
             D {
                 ok: Box::new(move |store, (), cx| {
                     store.deciding.remove(&ok_id);
+                    if remembered {
+                        store.load_rules(cx);
+                    }
                     cx.notify();
                 }),
                 err: Box::new(move |store, cx| {
@@ -836,6 +867,67 @@ impl Store {
                     );
                 }),
                 quiet: true,
+            },
+        );
+    }
+
+    /// The standing rules as `rule.list` last said (`None` before it has).
+    pub(crate) fn rules(&self) -> Option<&Result<Vec<reno_proto::StandingRule>, String>> {
+        self.rules.as_ref()
+    }
+
+    /// Whether a revoke of this rule is in flight.
+    pub(crate) fn is_revoking(&self, id: &reno_proto::RuleId) -> bool {
+        self.revoking.contains(id)
+    }
+
+    /// `rule.list`: the rules in force. A daemon without them leaves the list unread.
+    pub(crate) fn load_rules(&mut self, cx: &mut Context<Self>) {
+        if !self.state.supports(reno_proto::FEATURE_RULES) {
+            return;
+        }
+        self.call(
+            "Could not load the standing rules",
+            move |client| async move { client.list_rules(false).await },
+            cx,
+            D {
+                ok: Box::new(|store, rules, cx| {
+                    store.rules = Some(Ok(rules));
+                    cx.notify();
+                }),
+                err: Box::new(|store, cx| {
+                    if store.rules.is_none() {
+                        store.rules = Some(Err("the request failed".to_owned()));
+                    }
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+    }
+
+    /// `rule.revoke`, then the list is read again.
+    pub(crate) fn revoke_rule(&mut self, id: reno_proto::RuleId, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.revoking.insert(id.clone()) {
+            return;
+        }
+        cx.notify();
+        let (ok_id, err_id) = (id.clone(), id.clone());
+        self.call(
+            "Could not revoke the rule",
+            move |client| async move { client.revoke_rule(&id).await },
+            cx,
+            D {
+                ok: Box::new(move |store, (), cx| {
+                    store.revoking.remove(&ok_id);
+                    store.load_rules(cx);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.revoking.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
             },
         );
     }

@@ -18,6 +18,7 @@
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
 //! | `approval.history` | `approval_history` |
+//! | `rule.list`, `rule.revoke` | `list_rules`, `revoke_rule` |
 //! | `approvals.watch` | `watch_approvals` |
 //! | `def.list` | `current_defs` |
 //! | `def.get` | `get_definition` |
@@ -93,6 +94,7 @@ use reno_proto::{
     ExecutorsWatchParams,
 };
 use reno_proto::{
+    RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams, RuleRevokeResult,
     SECRET_VALUE_MAX, SecretDelete, SecretDeleteParams, SecretDeleteResult, SecretInfo, SecretList,
     SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
 };
@@ -180,6 +182,8 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
         .method::<ApprovalHistory, _, _>(bind(ctx, approval_history))
+        .method::<RuleList, _, _>(bind(ctx, rule_list))
+        .method::<RuleRevoke, _, _>(bind(ctx, rule_revoke))
         .method::<DefList, _, _>(bind(ctx, def_list))
         .method::<DefGet, _, _>(bind(ctx, def_get))
         .method::<DefValidate, _, _>(bind(ctx, def_validate))
@@ -621,10 +625,28 @@ async fn approval_history(ctx: Arc<Ctx>, p: ApprovalHistoryParams) -> Reply<Appr
 
 async fn approval_decide(ctx: Arc<Ctx>, p: ApprovalDecideParams) -> Reply<ApprovalDecideResult> {
     ctx.kernel
-        .decide_with_message(&p.approval_id, p.decision, p.message)
+        .decide_remembering(&p.approval_id, p.decision, p.message, p.remember)
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(ApprovalDecideResult {})
+}
+
+async fn rule_list(ctx: Arc<Ctx>, p: RuleListParams) -> Reply<RuleListResult> {
+    Ok(RuleListResult {
+        rules: ctx
+            .kernel
+            .list_rules(p.include_inactive)
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
+}
+
+async fn rule_revoke(ctx: Arc<Ctx>, p: RuleRevokeParams) -> Reply<RuleRevokeResult> {
+    ctx.kernel
+        .revoke_rule(&p.id)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(RuleRevokeResult {})
 }
 
 async fn def_list(ctx: Arc<Ctx>, p: DefListParams) -> Reply<DefsSnapshot> {

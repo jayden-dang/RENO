@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use reno_proto::defs::DefKind;
 use reno_proto::{ApprovalId, ExecutorId, RunId, Seq, WorkspaceStatus};
 
@@ -67,6 +67,10 @@ pub(crate) enum Command {
     /// Reno's own MCP server on stdio, for one run. Reno starts it when it launches a run; it is
     /// not for people.
     Mcp(crate::mcp::McpArgs),
+    /// List and revoke the standing rules: answers you kept (`reno approve --remember bot`) so
+    /// the same action is not asked again.
+    #[command(subcommand)]
+    Rule(RuleCommand),
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -403,6 +407,46 @@ pub(crate) struct PolicyCheck {
 pub(crate) struct Decide {
     /// The approval, as `reno approval list` shows it.
     pub(crate) approval: ApprovalId,
+    /// Keep this answer as a standing rule for this run, this run's bot, or everything. The rule
+    /// holds exactly this action (this tool, this command line, these paths), nothing broader.
+    /// Without it the answer is for this one request.
+    #[arg(long, value_enum, value_name = "SCOPE")]
+    pub(crate) remember: Option<RememberArg>,
+    /// With --remember: the rule stops applying after this many seconds [default: never].
+    #[arg(long, value_name = "SECONDS", requires = "remember")]
+    pub(crate) expires_in: Option<u64>,
+}
+
+/// How far a remembered answer reaches.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum RememberArg {
+    /// This run.
+    Run,
+    /// Every run of this run's bot.
+    Bot,
+    /// Every run.
+    Always,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RuleCommand {
+    /// List the standing rules in force, newest first.
+    List(RuleList),
+    /// Stop a standing rule applying, for good.
+    Revoke(RuleRevoke),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RuleList {
+    /// Also list rules that were revoked or have expired.
+    #[arg(long)]
+    pub(crate) all: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RuleRevoke {
+    /// The rule, as `reno rule list` shows it.
+    pub(crate) id: reno_proto::RuleId,
 }
 
 #[derive(Debug, Subcommand)]

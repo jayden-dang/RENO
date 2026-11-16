@@ -94,12 +94,13 @@ impl Normalizer {
         let id = str_field(update, "toolCallId").to_owned();
         let mut events = Vec::new();
         if self.announced.insert(id.clone()) {
+            let (class, name) = permission::classify(update);
             events.push(ExecEvent::Tool {
                 id: id.clone(),
                 call: ToolCall::new(
-                    permission::tool_name(update),
+                    name,
                     update.get("rawInput").cloned().unwrap_or(Value::Null),
-                    permission::action_class(permission::kind_of(update)),
+                    class,
                 ),
             });
         }

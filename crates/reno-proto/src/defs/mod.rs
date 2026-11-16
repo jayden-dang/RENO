@@ -74,6 +74,7 @@ use crate::ids::ExecutorId;
 
 pub use bot::{BotDef, Budget, ResumePolicy};
 pub use eval::{DEFAULT_RULE, EvalContext, PolicyDecision, RuleRef, evaluate};
+pub(crate) use eval::{command_holds, lexical, locate_text, path_matches};
 pub use hash::{canonical_json, content_hash};
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
 pub use time::{

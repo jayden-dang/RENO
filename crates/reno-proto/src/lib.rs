@@ -19,6 +19,8 @@
 //! - [`routing`]: the routing decision (which executor, and why), `route.preview`, `run.routing`.
 //! - [`triggers`]: the state of triggers on the wire (`trigger.list`, `trigger.fire`).
 //! - [`workspace`]: the worktree a write run works in (`workspace.list`, `workspace.clean`).
+//! - [`rules`]: standing rules a person makes from an approval, and the matcher that holds them to
+//!   the exact action (`rule.list`, `rule.revoke`).
 //! - [`secrets`]: named secrets (`secret.list`, `secret.set`, `secret.delete`) and the rule for a
 //!   secret's name.
 //! - [`agent`]: the `agent.*` methods a run's own `reno mcp` process calls, and the run token digest.
@@ -59,6 +61,7 @@ pub mod health;
 pub mod ids;
 pub mod protocol;
 pub mod routing;
+pub mod rules;
 pub mod run;
 pub mod secrets;
 pub mod triggers;
@@ -72,6 +75,7 @@ pub use health::*;
 pub use ids::*;
 pub use protocol::*;
 pub use routing::*;
+pub use rules::*;
 pub use run::*;
 pub use secrets::*;
 pub use triggers::*;
