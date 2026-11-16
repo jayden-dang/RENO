@@ -20,6 +20,7 @@
 //! - `triggers`: the scheduler's state and firings, fired atomically with the run they start.
 //! - `executor_health`: the latest probe of each executor.
 //! - `routing`: the routing decision of each run, replaced by a fenced fallback.
+//! - `rules`: standing rules, created with the decision that made them and only ever revoked.
 //! - `workspaces`: the worktree of each write run, recorded before it is made.
 //! - `events`: the global event log.
 //! - `journal`: per-run JSONL journals and their repair.
@@ -41,6 +42,7 @@ mod executor_health;
 pub mod journal;
 mod migrations;
 mod routing;
+pub mod rules;
 pub mod runs;
 pub mod triggers;
 mod workspaces;
@@ -54,6 +56,7 @@ pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOu
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
+pub use rules::NewRule;
 pub use runs::{Claim, NewTask, Note, Resumed, RunRecord};
 pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};
 pub use writer::StoreConfig;
@@ -70,6 +73,8 @@ mod definition_tests;
 mod executor_health_tests;
 #[cfg(test)]
 mod resume_tests;
+#[cfg(test)]
+mod rule_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]

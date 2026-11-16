@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards; migration 12 adds why a run stopped and whether it was resumed. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards; migration 12 adds why a run stopped and whether it was resumed; migration 13 adds standing rules. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -336,6 +336,48 @@ ALTER TABLE runs ADD COLUMN not_resumed TEXT CHECK (not_resumed IS NULL OR json_
 ALTER TABLE runs ADD COLUMN resume_prompt TEXT;
 ";
 
+/// Migration 13 (T1.6b, standing rules): decisions a person kept beyond one action.
+///
+/// A rule has a scope (`run`: one run, named in `scope_run`; `bot`: every run of the bot named in
+/// `scope_bot`; `global`), an effect, and a `matcher` (the wire type's JSON, derived from the
+/// structured subject of the approval it came from, which `source_approval` names). It is never
+/// edited and never deleted: the only change a row takes is `revoked_at`, set once. `expires_at`
+/// is a time the evaluation compares with the clock; no sweeper closes it. `created_by` is
+/// `human`; nothing else may make a rule.
+const V13: &str = "
+CREATE TABLE standing_rules (
+    id              TEXT PRIMARY KEY,
+    scope           TEXT NOT NULL CHECK (scope IN ('run', 'bot', 'global')),
+    scope_run       TEXT REFERENCES runs (id),
+    scope_bot       TEXT,
+    effect          TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+    matcher         TEXT NOT NULL CHECK (json_valid(matcher)),
+    created_by      TEXT NOT NULL CHECK (created_by = 'human'),
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER,
+    revoked_at      INTEGER,
+    source_approval TEXT REFERENCES approvals (id),
+    CHECK ((scope = 'run') = (scope_run IS NOT NULL)),
+    CHECK ((scope = 'bot') = (scope_bot IS NOT NULL)),
+    CHECK (expires_at IS NULL OR expires_at > created_at)
+);
+CREATE INDEX standing_rules_in_force ON standing_rules (scope, created_at) WHERE revoked_at IS NULL;
+CREATE INDEX standing_rules_run ON standing_rules (scope_run) WHERE scope_run IS NOT NULL;
+
+CREATE TRIGGER standing_rules_only_revoke BEFORE UPDATE ON standing_rules
+WHEN OLD.revoked_at IS NOT NULL
+  OR NEW.revoked_at IS NULL
+  OR NEW.id IS NOT OLD.id OR NEW.scope IS NOT OLD.scope OR NEW.scope_run IS NOT OLD.scope_run
+  OR NEW.scope_bot IS NOT OLD.scope_bot OR NEW.effect IS NOT OLD.effect
+  OR NEW.matcher IS NOT OLD.matcher OR NEW.created_by IS NOT OLD.created_by
+  OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
+  OR NEW.source_approval IS NOT OLD.source_approval
+BEGIN SELECT RAISE(ABORT, 'a standing rule changes only by being revoked, once'); END;
+
+CREATE TRIGGER standing_rules_are_kept BEFORE DELETE ON standing_rules
+BEGIN SELECT RAISE(ABORT, 'a standing rule is never deleted'); END;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -351,6 +393,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V10),
         M::up(V11),
         M::up(V12),
+        M::up(V13),
     ])
 }
 
@@ -399,7 +442,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
