@@ -340,6 +340,9 @@ pub(super) enum Scenario {
     /// too old, signed out): a `NoEligibleExecutor` diagnostic and nothing run. Prompt:
     /// `/refused`. For tests of what the Run screen says about the executor.
     Refused,
+    /// Work, then fail after the harness reported a session: the run `run.resume` can take back.
+    /// Prompt: `/fails`.
+    Fails,
 }
 
 impl Scenario {
@@ -347,6 +350,9 @@ impl Scenario {
         let lower = prompt.to_lowercase();
         if lower.starts_with("/refused") {
             return Self::Refused;
+        }
+        if lower.starts_with("/fails") {
+            return Self::Fails;
         }
         if lower.starts_with("/long") {
             return Self::Long;

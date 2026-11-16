@@ -187,6 +187,15 @@ async fn work(script: &Script, prompt: &str) -> bool {
     }
     match scenario {
         Scenario::Plain => script.succeed("The task is complete.").await,
+        Scenario::Fails => {
+            script.status(RunStatus::Evaluating).await
+                && script
+                    .step(|w, run| {
+                        let done = data::done(StopReason::Error, None, Some("the harness crashed"));
+                        w.finish(run, RunStatus::Failed, done)
+                    })
+                    .await
+        }
         Scenario::Refused => false,
         Scenario::Long => {
             let steered = script
