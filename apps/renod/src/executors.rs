@@ -62,9 +62,12 @@ impl ExecutorSet {
     }
 }
 
-/// The mock executor: the canned script, or the hold script when `hold` is set.
+/// The mock executor: the canned script, or the hold script when `hold` is set. It keeps no log
+/// of what it received, which would grow with every run the daemon plays.
 pub fn mock_executor(hold: bool) -> Result<MockExecutor, IdError> {
-    Ok(MockExecutor::new(MOCK_ID.parse()?).with_steps(mock_script(hold)))
+    Ok(MockExecutor::new(MOCK_ID.parse()?)
+        .with_steps(mock_script(hold))
+        .without_log())
 }
 
 /// The mock's script.

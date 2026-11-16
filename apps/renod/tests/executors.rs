@@ -256,3 +256,28 @@ daemon_test! {
         fx.stop().await;
     }
 }
+
+daemon_test! {
+    async fn the_daemons_mock_keeps_no_record_of_the_runs_it_played() {
+        // The daemon's mock plays every run for as long as the daemon lives; a log of what it
+        // received grew by a few KiB per run (the bench's memory budget caught it).
+        let fx = Fixture::start().await;
+        for _ in 0..3 {
+            let run = within(fx.client.run_task(TaskRunParams {
+                prompt: "go".into(),
+                executor: Some(id("mock")),
+                bot: None,
+                cwd: None,
+                model: None,
+                in_place: false,
+                attachments: Vec::new(),
+            }))
+            .await
+            .unwrap();
+            let events = fx.events(&run, None).await;
+            assert!(matches!(events.last().map(|e| &e.event), Some(ExecEvent::Done { .. })));
+        }
+        assert_eq!(fx.executors.mock.log(), reno_harness::exec::MockLog::default());
+        fx.stop().await;
+    }
+}

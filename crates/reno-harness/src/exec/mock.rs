@@ -88,6 +88,8 @@ pub struct MockExecutor {
     descriptor: ExecutorDescriptor,
     steps: Vec<MockStep>,
     log: Arc<Mutex<MockLog>>,
+    /// Whether `log` is written. A long-lived daemon turns it off: the log grows with every run.
+    recording: bool,
 }
 
 impl MockExecutor {
@@ -98,6 +100,7 @@ impl MockExecutor {
             descriptor: Self::default_descriptor(id),
             steps: Vec::new(),
             log: Arc::default(),
+            recording: true,
         }
     }
 
@@ -152,6 +155,14 @@ impl MockExecutor {
         self
     }
 
+    /// Stop recording what the mock receives: [`Self::log`] stays empty. For a mock that lives in
+    /// a daemon, where the log would hold every run's spec for as long as the daemon runs.
+    #[must_use]
+    pub fn without_log(mut self) -> Self {
+        self.recording = false;
+        self
+    }
+
     /// A snapshot of what this mock (and its clones) received so far.
     pub fn log(&self) -> MockLog {
         lock(&self.log).clone()
@@ -191,11 +202,14 @@ impl Executor for MockExecutor {
         if spec.output_schema.is_some() && !self.descriptor.caps.structured_output {
             return Err(ExecError::UnsupportedOutputSchema);
         }
-        lock(&self.log).specs.push(spec);
+        if self.recording {
+            lock(&self.log).specs.push(spec);
+        }
         let run = Run {
             steps: self.steps.iter().cloned().collect(),
             controls,
             log: Arc::clone(&self.log),
+            recording: self.recording,
             stashed_answers: Vec::new(),
             finished: false,
         };
@@ -219,6 +233,7 @@ struct Run {
     steps: VecDeque<MockStep>,
     controls: ExecControls,
     log: Arc<Mutex<MockLog>>,
+    recording: bool,
     stashed_answers: Vec<ExecAnswer>,
     finished: bool,
 }
@@ -299,7 +314,9 @@ impl Run {
             let Some(answer) = received else {
                 return Waited::Closed;
             };
-            lock(&self.log).answers.push(answer.clone());
+            if self.recording {
+                lock(&self.log).answers.push(answer.clone());
+            }
             if answer.request_id == request_id {
                 return Waited::Got;
             }
@@ -325,7 +342,9 @@ impl Run {
         };
         match received {
             Some(prompt) => {
-                lock(&self.log).steers.push(prompt);
+                if self.recording {
+                    lock(&self.log).steers.push(prompt);
+                }
                 Waited::Got
             }
             None => Waited::Closed,
@@ -384,6 +403,26 @@ mod tests {
             diagnostic: None,
             reason: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_mock_without_a_log_keeps_nothing_across_runs() {
+        // A daemon's mock plays every run for as long as the daemon lives: its log must not
+        // grow with them (it held a copy of each run's spec, a leak of a few KiB per run).
+        let mock = MockExecutor::new(id("mock"))
+            .with_steps([MockStep::started("s1", "mock-1"), MockStep::text("hi")])
+            .without_log();
+        for _ in 0..50 {
+            let (controls, _handle) = ExecControls::new(4);
+            let events: Vec<_> = mock
+                .start(spec(AccessMode::Supervised), controls)
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            assert_eq!(events.len(), 3, "the script still plays");
+        }
+        assert_eq!(mock.log(), MockLog::default());
     }
 
     #[tokio::test(start_paused = true)]
