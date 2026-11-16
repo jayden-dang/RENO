@@ -31,6 +31,7 @@ fn task(prompt: &str) -> TaskRunParams {
         cwd: None,
         model: None,
         in_place: false,
+        attachments: Vec::new(),
     }
 }
 

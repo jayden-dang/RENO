@@ -283,7 +283,7 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message", "routing"],
+                            "executor.install", "approval.message", "routing", "attachments"],
                "pid": 4242}),
     );
 }
@@ -624,6 +624,7 @@ fn task_run_params_old_and_new_shapes() {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         },
         json!({"prompt": "go", "executor": "mock"}),
     );
@@ -635,6 +636,7 @@ fn task_run_params_old_and_new_shapes() {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         },
         json!({"prompt": "go", "bot": "keeper"}),
     );
@@ -1076,4 +1078,41 @@ fn executor_health_on_the_wire() {
     .unwrap();
     assert!(info.health.is_none());
     assert!(serde_json::to_value(&info).unwrap().get("health").is_none());
+}
+
+#[test]
+fn task_run_attachments() {
+    assert_eq!(FEATURE_ATTACHMENTS, "attachments");
+    assert!(FEATURES.contains(&FEATURE_ATTACHMENTS));
+    assert_eq!(ATTACHMENTS_MAX_COUNT, 10);
+    assert_eq!(ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024);
+
+    let attachments = vec![
+        Attachment {
+            path: "/tmp/shot.png".into(),
+            name: "shot.png".into(),
+            mime: Some("image/png".into()),
+        },
+        Attachment {
+            path: "/tmp/notes.txt".into(),
+            name: "notes".into(),
+            mime: None,
+        },
+    ];
+    golden(
+        &TaskRunParams {
+            prompt: "look".into(),
+            attachments: attachments.clone(),
+            ..TaskRunParams::default()
+        },
+        json!({"prompt": "look", "attachments": [
+            {"path": "/tmp/shot.png", "name": "shot.png", "mime": "image/png"},
+            {"path": "/tmp/notes.txt", "name": "notes"},
+        ]}),
+    );
+    assert_eq!(
+        Attachment::prompt_suffix(&attachments),
+        "\n\nAttached files:\n- /tmp/shot.png (shot.png, image/png)\n- /tmp/notes.txt (notes)\n"
+    );
+    assert_eq!(Attachment::prompt_suffix(&[]), "");
 }

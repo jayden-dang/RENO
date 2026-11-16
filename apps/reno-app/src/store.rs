@@ -561,6 +561,7 @@ impl Store {
             cwd: None,
             model: None,
             in_place: false,
+            attachments: Vec::new(),
         };
         self.call(
             "Could not start the task",

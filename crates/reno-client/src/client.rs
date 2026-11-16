@@ -167,6 +167,9 @@ impl Client {
         if params.bot.is_some() {
             self.require(reno_proto::FEATURE_DEFS)?;
         }
+        if !params.attachments.is_empty() {
+            self.require(reno_proto::FEATURE_ATTACHMENTS)?;
+        }
         if params.in_place || (params.executor.is_none() && params.bot.is_none()) {
             self.require(reno_proto::FEATURE_ROUTING)?;
         }

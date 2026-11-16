@@ -104,6 +104,7 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
             cwd: Some(cwd),
             model: args.model,
             in_place: args.in_place,
+            attachments: Vec::new(),
         })
         .await
         .map_err(|e| env.explain(e))?;

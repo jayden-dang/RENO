@@ -90,6 +90,7 @@ async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
         cwd: Some(cwd.to_path_buf()),
         model: None,
         in_place: false,
+        attachments: Vec::new(),
     }))
     .await
     .expect("task.run")
@@ -275,6 +276,7 @@ async fn a_bot_less_task_opts_in_to_in_place_writes_and_a_repository_is_still_ne
         cwd: Some(cwd.to_path_buf()),
         model: None,
         in_place: true,
+        attachments: Vec::new(),
     };
 
     // Opted in: the run works where it is, with no worktree.

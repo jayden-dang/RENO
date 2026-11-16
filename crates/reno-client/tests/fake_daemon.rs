@@ -22,6 +22,7 @@ fn task(prompt: &str) -> TaskRunParams {
         cwd: None,
         model: None,
         in_place: false,
+        attachments: Vec::new(),
     }
 }
 
@@ -709,4 +710,54 @@ async fn the_fake_previews_routes_and_keeps_each_runs_decision() {
     assert_eq!(stored, submitted.routing);
     let missing = client.run_routing(&run("nowhere")).await.unwrap_err();
     assert_eq!(missing.code(), Some(reno_proto::ErrorCode::NotFound));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_demo_router_follows_a_bots_order_and_reports_the_signed_out_one() {
+    use reno_proto::{RejectReason, RuleMatched};
+    let daemon = FakeDaemon::start(FakeConfig::default()).unwrap();
+    let client = daemon.connect().await.unwrap();
+    let mut reviewer = task("review it");
+    reviewer.executor = None;
+    reviewer.bot = Some("reviewer".to_owned());
+    let preview = client.route_preview(reviewer.clone()).await.unwrap();
+    // The reviewer prefers Codex, which is signed out in the demo.
+    assert_eq!(
+        preview.rule_matched,
+        RuleMatched::BotPreference {
+            bot: "reviewer".into()
+        }
+    );
+    assert_eq!(preview.chosen, Some("claude-code".parse().unwrap()));
+    assert_eq!(preview.rejected.len(), 1);
+    assert_eq!(preview.rejected[0].executor.as_str(), "codex");
+    assert!(matches!(
+        preview.rejected[0].reason,
+        RejectReason::SignedOut { .. }
+    ));
+    assert_eq!(daemon.route_previews(), [reviewer]);
+
+    let mut stranger = task("x");
+    stranger.executor = None;
+    stranger.bot = Some("nobody".to_owned());
+    assert!(client.run_task(stranger).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn attachments_are_listed_in_the_prompt_the_fake_stores() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    let mut with_files = task("look at this");
+    with_files.attachments = vec![reno_proto::Attachment {
+        path: "/tmp/shot.png".into(),
+        name: "shot.png".into(),
+        mime: Some("image/png".into()),
+    }];
+    let id = client.run_task(with_files.clone()).await.unwrap();
+    let prompt = client.get_run(&id).await.unwrap().prompt.unwrap();
+    assert_eq!(
+        prompt,
+        "look at this\n\nAttached files:\n- /tmp/shot.png (shot.png, image/png)\n"
+    );
+    with_files.attachments[0].path = "relative.png".into();
+    assert!(client.run_task(with_files).await.is_err());
 }

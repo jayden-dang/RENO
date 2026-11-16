@@ -613,7 +613,8 @@ expression: protocol_schema()
     "executors",
     "executor.install",
     "approval.message",
-    "routing"
+    "routing",
+    "attachments"
   ],
   "methods": [
     {
@@ -771,6 +772,31 @@ expression: protocol_schema()
       "name": "task.run",
       "params": {
         "$defs": {
+          "Attachment": {
+            "description": "A file attached to a task: a path on the daemon's machine, with the name to show for it.",
+            "properties": {
+              "mime": {
+                "description": "The media type, when known (`image/png`).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The name to show: usually the file name.",
+                "type": "string"
+              },
+              "path": {
+                "description": "Absolute path of a readable regular file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -779,6 +805,13 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of `task.run`.",
         "properties": {
+          "attachments": {
+            "description": "Files the task refers to. The daemon checks that each is a readable file, within\n[`ATTACHMENTS_MAX_COUNT`] and [`ATTACHMENT_MAX_BYTES`], and appends an \"Attached files:\"\nlist of their paths to the prompt; the executor reads them from disk. Needs feature\n`attachments`.",
+            "items": {
+              "$ref": "#/$defs/Attachment"
+            },
+            "type": "array"
+          },
           "bot": {
             "description": "The bot to run it as. The run is pinned to the version of the bot's definition that is\ncurrent when the task is submitted. Needs feature `defs`.",
             "type": [
@@ -1940,6 +1973,31 @@ expression: protocol_schema()
       "name": "route.preview",
       "params": {
         "$defs": {
+          "Attachment": {
+            "description": "A file attached to a task: a path on the daemon's machine, with the name to show for it.",
+            "properties": {
+              "mime": {
+                "description": "The media type, when known (`image/png`).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The name to show: usually the file name.",
+                "type": "string"
+              },
+              "path": {
+                "description": "Absolute path of a readable regular file.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "name"
+            ],
+            "type": "object"
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -1947,6 +2005,13 @@ expression: protocol_schema()
           "TaskRunParams": {
             "description": "Params of `task.run`.",
             "properties": {
+              "attachments": {
+                "description": "Files the task refers to. The daemon checks that each is a readable file, within\n[`ATTACHMENTS_MAX_COUNT`] and [`ATTACHMENT_MAX_BYTES`], and appends an \"Attached files:\"\nlist of their paths to the prompt; the executor reads them from disk. Needs feature\n`attachments`.",
+                "items": {
+                  "$ref": "#/$defs/Attachment"
+                },
+                "type": "array"
+              },
               "bot": {
                 "description": "The bot to run it as. The run is pinned to the version of the bot's definition that is\ncurrent when the task is submitted. Needs feature `defs`.",
                 "type": [
