@@ -660,6 +660,16 @@ fn steering_appends_the_message_and_a_reply(cx: &mut TestAppContext) {
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
 
+    // The fake's `/long` run opens with a few paced steps (a message, a tool call and its
+    // result). Steer once the last of them is in: before that, the run is still talking, and
+    // its own rows land around the steer and its reply.
+    wait_drawn(vcx, |vcx| {
+        rows_of(vcx, &root).iter().any(|r| {
+            matches!(r, Row::Tools { calls, .. }
+                if calls.last().is_some_and(|c| matches!(c.outcome, Outcome::Ok(_))))
+        })
+    });
+
     // Greyed while empty.
     assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
     steer.update_in(vcx, |c, window, cx| c.fill("use fewer words", window, cx));
