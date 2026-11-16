@@ -452,8 +452,18 @@ daemon_test! {
         let e = first.unwrap().unwrap_err();
         assert_eq!(code(&e), ErrorCode::NotFound);
 
-        // A run that is over has nothing to cancel or steer.
-        let e = within(fx.client.cancel_run(&done, None)).await.unwrap_err();
+        // A run that is over has nothing to cancel or steer. Its journal ends with `Done` a
+        // moment before the daemon lets go of the run, and a cancel that lands in between is
+        // still accepted, so ask until the daemon has.
+        let e = within(async {
+            loop {
+                match fx.client.cancel_run(&done, None).await {
+                    Ok(_) => tokio::task::yield_now().await,
+                    Err(error) => return error,
+                }
+            }
+        })
+        .await;
         assert_eq!(code(&e), ErrorCode::Conflict);
         let e = within(fx.client.steer(&done, "late".into())).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::Conflict);
