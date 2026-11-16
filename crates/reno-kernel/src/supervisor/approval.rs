@@ -299,7 +299,15 @@ impl Supervisor {
     }
 
     /// A human's answer to one of this run's open approvals.
-    pub(super) async fn decide(&mut self, approval: ApprovalId, decision: Decision) -> Result<()> {
+    ///
+    /// A denial's `message` is recorded with the decision, reaches the harness as a rule's
+    /// message does, and is journalled; an approval has none.
+    pub(super) async fn decide(
+        &mut self,
+        approval: ApprovalId,
+        decision: Decision,
+        message: Option<String>,
+    ) -> Result<()> {
         let Some(at) = self.open_approvals.iter().position(|o| o.id == approval) else {
             return Err(KernelError::ApprovalNotFound(approval));
         };
@@ -307,11 +315,18 @@ impl Supervisor {
             Decision::Allow => ApprovalOutcome::Approved,
             Decision::Deny => ApprovalOutcome::Denied,
         };
+        let message = message.filter(|_| outcome == ApprovalOutcome::Denied);
         // On record first; only then does the harness hear it.
         match self
             .shared
             .db
-            .resolve_approval(&approval, outcome, ResolvedBy::Human, self.fence)
+            .resolve_approval(
+                &approval,
+                outcome,
+                ResolvedBy::Human,
+                message.clone(),
+                self.fence,
+            )
             .await
         {
             Ok(()) => {}
@@ -325,7 +340,9 @@ impl Supervisor {
         }
         let open = self.open_approvals.remove(at);
         self.rearm();
-        let delivered = self.answer(&open.request_id, outcome, None).await;
+        let delivered = self
+            .answer(&open.request_id, outcome, message.clone())
+            .await;
         // State before visibility, as when raising: commit `running`, then drop it from the list.
         self.resolve_wait().await;
         self.refresh_view().await;
@@ -333,7 +350,7 @@ impl Supervisor {
             request_id: open.request_id,
             decision: outcome,
             by: ResolvedBy::Human,
-            message: None,
+            message,
         });
         if delivered {
             Ok(())
@@ -360,6 +377,7 @@ impl Supervisor {
                     &open.id,
                     ApprovalOutcome::Denied,
                     ResolvedBy::Expired,
+                    None,
                     self.fence,
                 )
                 .await

@@ -25,10 +25,10 @@ use reno_proto::defs::{
     BotPin, DefKind, DefRecord, DefValidateResult, ValidationContext, validate_body,
 };
 use reno_proto::{
-    APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, Approval, ApprovalDecision,
-    ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget, ExecutorId, ExecutorInfo,
-    RunEventItem, RunId, RunStatus, RunSummary, Seq, TaskId, TriggerFireResult, TriggerInfo,
-    WorkspaceInfo, WorkspaceStatus,
+    APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
+    Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget,
+    ExecutorId, ExecutorInfo, RunEventItem, RunId, RunStatus, RunSummary, Seq, TaskId,
+    TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -561,6 +561,34 @@ impl Kernel {
     /// Answer a pending approval. The decision is stored (decided by a human), the executor gets
     /// it, then the run goes back to `running`.
     pub async fn decide(&self, approval: &ApprovalId, decision: ApprovalDecision) -> Result<()> {
+        self.decide_with_message(approval, decision, None).await
+    }
+
+    /// [`Self::decide`] with the reason for a denial. The reason is trimmed (blank is none),
+    /// stored with the decision, journalled in `ApprovalResolved.message`, and sent to the
+    /// harness the way a rule's message is. `Invalid` for a reason with an approval, or one
+    /// longer than [`APPROVAL_MESSAGE_MAX_CHARS`] characters.
+    pub async fn decide_with_message(
+        &self,
+        approval: &ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+    ) -> Result<()> {
+        let message = message
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
+        if let Some(text) = &message {
+            if decision != ApprovalDecision::Deny {
+                return Err(KernelError::Invalid(
+                    "only a denial takes a message".to_owned(),
+                ));
+            }
+            if text.chars().count() > APPROVAL_MESSAGE_MAX_CHARS {
+                return Err(KernelError::Invalid(format!(
+                    "a denial message is at most {APPROVAL_MESSAGE_MAX_CHARS} characters"
+                )));
+            }
+        }
         let row = self
             .shared
             .db
@@ -581,6 +609,7 @@ impl Kernel {
                     ApprovalDecision::ApproveOnce => Decision::Allow,
                     ApprovalDecision::Deny => Decision::Deny,
                 },
+                message,
                 reply,
             })
             .await

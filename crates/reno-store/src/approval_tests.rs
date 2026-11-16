@@ -139,6 +139,7 @@ async fn creating_is_a_normal_write_and_decisions_are_durable_writes() {
             &appr(1),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             1,
             20,
         )
@@ -175,6 +176,7 @@ async fn a_human_decision_updates_the_row_and_writes_its_event_once() {
             &appr(1),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             1,
             20,
         )
@@ -194,14 +196,28 @@ async fn a_human_decision_updates_the_row_and_writes_its_event_once() {
 
     // A decision is made once.
     let again = store
-        .resolve_approval(&appr(1), ApprovalOutcome::Denied, ResolvedBy::Human, 1, 30)
+        .resolve_approval(
+            &appr(1),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            None,
+            1,
+            30,
+        )
         .await;
     assert!(
         matches!(again, Err(StoreError::NotFound { .. })),
         "{again:?}"
     );
     let missing = store
-        .resolve_approval(&appr(9), ApprovalOutcome::Denied, ResolvedBy::Human, 1, 30)
+        .resolve_approval(
+            &appr(9),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            None,
+            1,
+            30,
+        )
         .await;
     assert!(
         matches!(missing, Err(StoreError::NotFound { .. })),
@@ -258,6 +274,7 @@ async fn an_expiry_is_status_expired_and_counts_as_a_refusal_for_the_repeat_rule
             &appr(1),
             ApprovalOutcome::Denied,
             ResolvedBy::Expired,
+            None,
             1,
             20,
         )
@@ -289,7 +306,14 @@ async fn was_denied_is_per_run_and_per_digest_and_counts_every_kind_of_denial() 
     // Human denial.
     store.create_approval(new(1, 0, "a"), 1, 10).await.unwrap();
     store
-        .resolve_approval(&appr(1), ApprovalOutcome::Denied, ResolvedBy::Human, 1, 11)
+        .resolve_approval(
+            &appr(1),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            None,
+            1,
+            11,
+        )
         .await
         .unwrap();
     // Rule denial.
@@ -321,6 +345,7 @@ async fn was_denied_is_per_run_and_per_digest_and_counts_every_kind_of_denial() 
             &appr(4),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             1,
             15,
         )
@@ -347,6 +372,7 @@ async fn expire_pending_closes_all_or_one_runs_requests_and_reports_them() {
             &appr(3),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             1,
             13,
         )
@@ -425,6 +451,7 @@ async fn a_stale_fence_is_refused_and_writes_nothing() {
             &appr(1),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             2,
             20,
         )
@@ -505,13 +532,21 @@ async fn history_is_decided_rows_newest_first_filtered_by_run_and_limited() {
             &appr(2),
             ApprovalOutcome::Approved,
             ResolvedBy::Human,
+            None,
             1,
             20,
         )
         .await
         .unwrap();
     store
-        .resolve_approval(&appr(1), ApprovalOutcome::Denied, ResolvedBy::Human, 1, 21)
+        .resolve_approval(
+            &appr(1),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            None,
+            1,
+            21,
+        )
         .await
         .unwrap();
     store
@@ -553,7 +588,14 @@ async fn a_decided_row_is_final_and_no_row_is_ever_deleted() {
     let (_d, store) = claimed(1).await;
     store.create_approval(new(1, 0, "a"), 1, 10).await.unwrap();
     store
-        .resolve_approval(&appr(1), ApprovalOutcome::Denied, ResolvedBy::Human, 1, 20)
+        .resolve_approval(
+            &appr(1),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            None,
+            1,
+            20,
+        )
         .await
         .unwrap();
     let tamper = store

@@ -340,9 +340,10 @@ impl Supervisor {
             SupCmd::Decide {
                 approval,
                 decision,
+                message,
                 reply,
             } => {
-                let outcome = self.decide(approval, decision).await;
+                let outcome = self.decide(approval, decision, message).await;
                 // The caller may have gone away; the decision stands either way.
                 let _ = reply.send(outcome);
             }

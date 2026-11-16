@@ -449,6 +449,92 @@ async fn a_human_can_deny() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_humans_deny_message_reaches_the_executor_the_journal_and_the_history() {
+    let rig = Rig::new(
+        "default = \"ask\"\n",
+        script(vec![("r1", command("curl evil.example"))]),
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    let pending = rig.pending().await;
+    // Blank space around it is trimmed.
+    rig.fx
+        .kernel
+        .decide_with_message(
+            &pending.id,
+            ApprovalDecision::Deny,
+            Some("  use the mirror instead \n".into()),
+        )
+        .await
+        .unwrap();
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(
+        rig.mock.log().answers[0].answer,
+        Answer::Decision(Decision::Deny, Some("use the mirror instead".into()))
+    );
+    assert_eq!(
+        resolved(&rig.fx.journal_with_done(&run).await),
+        [(
+            "r1".into(),
+            ApprovalOutcome::Denied,
+            ResolvedBy::Human,
+            Some("use the mirror instead".into())
+        )]
+    );
+    let history = rig.history(&run).await;
+    assert_eq!(history[0].status, ApprovalStatus::Denied);
+    assert_eq!(
+        history[0].message.as_deref(),
+        Some("use the mirror instead")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_blank_deny_message_is_none_and_an_approval_takes_no_message() {
+    let rig = Rig::new(
+        "default = \"ask\"\n",
+        script(vec![
+            ("r1", command("curl evil.example")),
+            ("r2", command("curl other.example")),
+        ]),
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    let first = rig.pending().await;
+    // A reason with an approval, or an over-long one, is refused and the approval stays open.
+    for (decision, text) in [
+        (ApprovalDecision::ApproveOnce, "because".to_owned()),
+        (ApprovalDecision::Deny, "x".repeat(1001)),
+    ] {
+        assert!(matches!(
+            rig.fx
+                .kernel
+                .decide_with_message(&first.id, decision, Some(text))
+                .await,
+            Err(KernelError::Invalid(_))
+        ));
+    }
+    rig.fx
+        .kernel
+        .decide_with_message(&first.id, ApprovalDecision::Deny, Some("   ".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.mock.log().answers[0].answer,
+        Answer::Decision(Decision::Deny, None)
+    );
+    let second = rig.pending().await;
+    rig.fx
+        .kernel
+        .decide_with_message(&second.id, ApprovalDecision::ApproveOnce, Some(" ".into()))
+        .await
+        .unwrap();
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    let history = rig.history(&run).await;
+    assert!(history.iter().all(|record| record.message.is_none()));
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_approval_nobody_answers_is_denied_and_expired_at_its_deadline() {
     let rig = Rig::new(
         "default = \"ask\"\n",

@@ -372,6 +372,23 @@ pub struct ExecutorRefreshParams {
     pub id: Option<ExecutorId>,
 }
 
+/// Params of `executor.install`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorInstallParams {
+    /// The executor whose managed adapter or release archive is to be fetched and verified. Its
+    /// last probe must say `needs_install`.
+    pub id: ExecutorId,
+}
+
+/// Result of `executor.install`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorInstallResult {
+    /// The executor after the install and the probe that followed it.
+    pub executor: ExecutorInfo,
+}
+
 /// Result of `executor.list` and `executor.refresh`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -68,6 +68,8 @@ pub struct StoredApproval {
     pub decided_at: Option<i64>,
     /// When an undecided request expires.
     pub expires_at: i64,
+    /// The reason given with the decision, read from its `approval.decided` event.
+    pub message: Option<String>,
 }
 
 /// A pending request that was expired, so the caller can tell the run and its journal.
@@ -161,7 +163,10 @@ fn principal_of(by: &ResolvedBy) -> String {
 }
 
 const COLUMNS: &str = "id, run_id, request_id, subject, subject_digest, status, decided_by, rule, \
-     created_at, decided_at, expires_at";
+     created_at, decided_at, expires_at, \
+     (SELECT json_extract(e.data, '$.message') FROM events e
+       WHERE e.subject_type = 'approval' AND e.subject_id = approvals.id
+         AND e.kind = 'approval.decided' LIMIT 1)";
 
 fn from_row(row: &Row<'_>) -> rusqlite::Result<Result<StoredApproval>> {
     let id: String = row.get(0)?;
@@ -175,6 +180,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Result<StoredApproval>> {
     let created_at = row.get(8)?;
     let decided_at = row.get(9)?;
     let expires_at = row.get(10)?;
+    let message = row.get(11)?;
     Ok((|| {
         Ok(StoredApproval {
             id: id
@@ -192,6 +198,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Result<StoredApproval>> {
             created_at,
             decided_at,
             expires_at,
+            message,
         })
     })())
 }
@@ -304,6 +311,8 @@ struct Decided<'a> {
     run: &'a RunId,
     request_id: &'a str,
     digest: &'a str,
+    /// The reason given with the decision, if any.
+    message: Option<&'a str>,
 }
 
 fn decided_event(
@@ -313,19 +322,23 @@ fn decided_event(
     status: ApprovalStatus,
     by: &ResolvedBy,
 ) -> Result<()> {
+    let mut data = json!({
+        "run": of.run,
+        "requestId": of.request_id,
+        "digest": of.digest,
+        "status": status,
+        "decidedBy": by,
+    });
+    if let (Some(message), Some(map)) = (of.message, data.as_object_mut()) {
+        map.insert("message".to_owned(), json!(message));
+    }
     events::insert(
         conn,
         now,
         "approval.decided",
         ("approval", of.id.as_str()),
         Some(&principal_of(by)),
-        &json!({
-            "run": of.run,
-            "requestId": of.request_id,
-            "digest": of.digest,
-            "status": status,
-            "decidedBy": by,
-        }),
+        &data,
     )
 }
 
@@ -369,6 +382,7 @@ fn tx_record(
             run: &new.run_id,
             request_id: &new.request_id,
             digest: &digest,
+            message: None,
         },
         status,
         by,
@@ -380,6 +394,7 @@ fn tx_resolve(
     id: &ApprovalId,
     outcome: ApprovalOutcome,
     by: &ResolvedBy,
+    message: Option<&str>,
     fence: u64,
     now: i64,
 ) -> Result<()> {
@@ -405,6 +420,7 @@ fn tx_resolve(
             run: &row.run_id,
             request_id: &row.request_id,
             digest: &row.subject_digest,
+            message,
         },
         status,
         by,
@@ -444,6 +460,7 @@ fn tx_expire(conn: &Connection, scope: &ExpireScope, now: i64) -> Result<Vec<Exp
                 run: &row.run_id,
                 request_id: &row.request_id,
                 digest: &row.subject_digest,
+                message: None,
             },
             ApprovalStatus::Expired,
             &by,
@@ -486,18 +503,20 @@ impl Store {
     /// Decides a pending request as `outcome` by `by`, with its `approval.decided` event. The
     /// status becomes `expired` when `by` is [`ResolvedBy::Expired`], else `approved` or
     /// `denied`. Fails with `NotFound` when the request is not pending, so a decision is made
-    /// once. A [`Durability::Full`] write.
+    /// once. `message` is the reason given with the decision; it goes into the event and comes
+    /// back with the row. A [`Durability::Full`] write.
     pub async fn resolve_approval(
         &self,
         id: &ApprovalId,
         outcome: ApprovalOutcome,
         by: ResolvedBy,
+        message: Option<String>,
         fence: u64,
         now: i64,
     ) -> Result<()> {
         let id = id.clone();
         self.write(Durability::Full, move |c| {
-            tx_resolve(c, &id, outcome, &by, fence, now)
+            tx_resolve(c, &id, outcome, &by, message.as_deref(), fence, now)
         })
         .await
     }

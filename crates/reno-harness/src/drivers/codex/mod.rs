@@ -1605,14 +1605,14 @@ impl Run {
         match self.requests.resolve(answer) {
             Resolved::Decision(payload, decision, message) => {
                 // The app-server's approval reply is `{decision}` and nothing else: it has no
-                // field for a reason, so a policy rule's message cannot reach the model. It is
+                // field for a reason, so a rule's or a person's message cannot reach the model. It is
                 // logged so the refusal is explainable from the daemon's side.
                 if let Some(message) = message.as_deref().filter(|_| decision == Decision::Deny) {
                     tracing::info!(
                         target: "reno_harness::codex",
                         request_id,
                         message,
-                        "declined by policy; the app-server reply cannot carry the message"
+                        "declined with a reason; the app-server reply cannot carry the message"
                     );
                 }
                 self.client
