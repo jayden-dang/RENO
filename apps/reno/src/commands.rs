@@ -520,8 +520,16 @@ pub(crate) async fn decide(
     decision: ApprovalDecision,
 ) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
+    let remember = args.remember.map(|scope| reno_proto::Remember {
+        scope: match scope {
+            crate::cli::RememberArg::Run => reno_proto::RememberScope::Run,
+            crate::cli::RememberArg::Bot => reno_proto::RememberScope::Bot,
+            crate::cli::RememberArg::Always => reno_proto::RememberScope::Always,
+        },
+        expires_in_secs: args.expires_in,
+    });
     client
-        .decide(&args.approval, decision)
+        .decide_remembering(&args.approval, decision, None, remember)
         .await
         .map_err(|e| env.explain(e))?;
     if env.json {

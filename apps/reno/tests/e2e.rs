@@ -302,6 +302,22 @@ fn start_run_list_and_stop() {
         text(&nothing.stderr)
     );
     assert!(text(&world.reno(&["approval", "list"]).stdout).contains("no approvals"));
+    // Standing rules: none yet, an unknown one cannot be revoked, and a scope needs a known name.
+    assert_eq!(
+        text(&world.reno(&["rule", "list"]).stdout).trim(),
+        "no standing rules"
+    );
+    assert_eq!(world.json(&["rule", "list", "--all"])["rules"], serde_json::json!([]));
+    let unknown = world.reno(&["rule", "revoke", "rule_nothere"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(text(&unknown.stderr).contains("not found"), "{}", text(&unknown.stderr));
+    let remembered = world.reno(&["approve", "appr_nothere", "--remember", "bot", "--expires-in", "60"]);
+    assert_eq!(remembered.status.code(), Some(1));
+    assert!(text(&remembered.stderr).contains("not found"), "{}", text(&remembered.stderr));
+    let bad_scope = world.reno(&["approve", "appr_nothere", "--remember", "forever"]);
+    assert_eq!(bad_scope.status.code(), Some(2));
+    let orphan = world.reno(&["approve", "appr_nothere", "--expires-in", "60"]);
+    assert_eq!(orphan.status.code(), Some(2));
     assert_eq!(
         world.reno(&["run", "tail", "nonsense"]).status.code(),
         Some(2)

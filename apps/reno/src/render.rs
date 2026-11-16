@@ -482,6 +482,38 @@ pub(crate) fn fired_line(name: &str, fired: &TriggerFireResult) -> String {
     }
 }
 
+/// One standing rule on one line: id, effect, scope, what it matches, and its end.
+/// `now_ms` is the time to read the expiry against.
+pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String {
+    use reno_proto::{CommandPattern, StandingScope};
+    let scope = match &rule.scope {
+        StandingScope::Run { run } => format!("run {run}"),
+        StandingScope::Bot { bot } => format!("bot {bot}"),
+        StandingScope::Always => "always".to_owned(),
+    };
+    let matcher = &rule.matcher;
+    let mut what = format!("{} {}", wire_name(&matcher.action), matcher.tool);
+    match &matcher.command {
+        Some(CommandPattern::Exact { command }) => what.push_str(&format!(" `{command}`")),
+        Some(CommandPattern::Glob { pattern }) => what.push_str(&format!(" matching `{pattern}`")),
+        None => {}
+    }
+    if !matcher.paths.is_empty() {
+        what.push_str(&format!(" on {}", matcher.paths.join(", ")));
+    }
+    let end = match (rule.revoked_at_ms, rule.expires_at_ms) {
+        (Some(_), _) => "  revoked".to_owned(),
+        (None, Some(at)) if at <= now_ms => "  expired".to_owned(),
+        (None, Some(at)) => format!("  expires in {}", duration((at - now_ms) / 1000)),
+        (None, None) => String::new(),
+    };
+    format!(
+        "{}  {:<5}  {scope}  {what}{end}",
+        rule.id,
+        wire_name(&rule.effect)
+    )
+}
+
 /// `73` as `1m 13s`.
 pub(crate) fn duration(secs: u64) -> String {
     let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
@@ -773,6 +805,52 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_line_shows_scope_effect_what_it_holds_and_when_it_ends() {
+        use reno_proto::{
+            CommandPattern, RuleMatcher, StandingEffect, StandingRule, StandingScope,
+        };
+        let rule = StandingRule {
+            id: "rule_a1".parse().unwrap(),
+            scope: StandingScope::Bot { bot: "keeper".into() },
+            effect: StandingEffect::Allow,
+            matcher: RuleMatcher {
+                action: ActionClass::Command,
+                tool: "bash".into(),
+                command: Some(CommandPattern::Exact { command: "git push".into() }),
+                paths: vec![],
+            },
+            created_by: "human".into(),
+            created_at_ms: 0,
+            expires_at_ms: None,
+            revoked_at_ms: None,
+            source_approval: None,
+        };
+        assert_eq!(
+            rule_line(&rule, 10),
+            "rule_a1  allow  bot keeper  command bash `git push`"
+        );
+        let timed = StandingRule { expires_at_ms: Some(3_700_000), ..rule.clone() };
+        assert!(rule_line(&timed, 100_000).ends_with("  expires in 1h 00m"));
+        assert!(rule_line(&timed, 3_700_000).ends_with("  expired"));
+        let edit = StandingRule {
+            effect: StandingEffect::Deny,
+            scope: StandingScope::Always,
+            matcher: RuleMatcher {
+                action: ActionClass::Edit,
+                tool: "write".into(),
+                command: None,
+                paths: vec!["src/lib.rs".into(), "/etc/hosts".into()],
+            },
+            revoked_at_ms: Some(5),
+            ..rule
+        };
+        assert_eq!(
+            rule_line(&edit, 10),
+            "rule_a1  deny   always  edit write on src/lib.rs, /etc/hosts  revoked"
+        );
+    }
+
+    #[test]
     fn a_history_line_names_the_decider_and_the_rule() {
         let record = |status, decided_by| ApprovalRecord {
             id: "appr_a1".parse().unwrap(),
@@ -785,6 +863,7 @@ mod tests {
                 paths: vec![],
                 raw: json!(null),
             },
+            subject_digest: None,
             status,
             decided_by,
             created_at_ms: 1,
