@@ -373,7 +373,7 @@ daemon_test! {
 }
 
 daemon_test! {
-    async fn daemon_shutdown_ends_cleanly_and_the_next_start_finds_the_run_interrupted() {
+    async fn daemon_shutdown_ends_cleanly_and_the_next_start_resumes_the_run() {
         // A long grace: the reply and the last events must arrive however slow the machine is, and
         // the server ends as soon as the last connection closes, not when the grace does.
         let fx = Fixture::with(|config| config.connection_grace = Duration::from_secs(30)).await;
@@ -392,6 +392,10 @@ daemon_test! {
             tail.push(item.unwrap().event);
         }
         assert!(is_done(tail.last().unwrap(), StopReason::Interrupted));
+        assert!(matches!(
+            tail.last(),
+            Some(ExecEvent::Done { reason: Some(reno_proto::StopDetail::Shutdown), .. })
+        ));
 
         let Fixture { dir, paths, executors, daemon, client } = fx;
         drop((client, events));
@@ -399,10 +403,15 @@ daemon_test! {
         assert!(!stopped.kernel_aborted && !stopped.server_aborted, "{stopped:?}");
         assert!(!paths.socket.exists(), "the socket is removed");
 
-        // The lock is free, and the store kept the run.
+        // The lock is free, and the store kept the run: nobody asked it to stop, so the next
+        // start put it back, and its journal says so.
         let again = within(Daemon::start(config(&dir, &executors))).await.unwrap();
         let client = within(Client::connect_unix(&paths.socket)).await.unwrap();
-        assert_eq!(within(client.get_run(&held)).await.unwrap().status, RunStatus::Interrupted);
+        let journal: Vec<_> =
+            within(client.run_events(held.clone(), None).take(4).collect::<Vec<_>>()).await;
+        let resumed = journal.into_iter().map(|i| i.unwrap().event).last().unwrap();
+        assert!(matches!(resumed, ExecEvent::Resumed { from_attempt: 1, .. }), "{resumed:?}");
+        assert_eq!(within(client.get_run(&held)).await.unwrap().attempt, 2);
         again.request_shutdown();
         within(again.wait()).await.unwrap();
     }
