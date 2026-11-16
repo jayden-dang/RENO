@@ -185,7 +185,15 @@ pub(crate) fn build_rows(
         });
     }
     let mut used = vec![false; pending.len()];
+    // A `Done` ends the list, unless the run is resumed: then its next attempt goes on below.
+    let mut ended = false;
     for (seq, event) in events {
+        if ended {
+            if !matches!(event, ExecEvent::Resumed { .. }) {
+                continue;
+            }
+            ended = false;
+        }
         let key = Key::at(*seq);
         match event {
             ExecEvent::Started { model, .. } => built.facts.model = Some(model.clone()),
@@ -321,8 +329,8 @@ pub(crate) fn build_rows(
                     diagnostic: diagnostic.clone(),
                     reason: reason.clone(),
                 });
+                ended = true;
             }
-            // A `Done` ends one attempt; a resumed run goes on below it.
             ExecEvent::Resumed { from_attempt, .. } => {
                 built.facts.reason = None;
                 built.facts.diagnostic = None;
@@ -790,6 +798,48 @@ mod tests {
             built.rows.last(),
             Some(Row::Done { stop: StopReason::Completed, result: Some(r), .. }) if r == "fine"
         ));
+    }
+
+    #[test]
+    fn a_resumed_run_goes_on_below_the_attempt_that_ended() {
+        let built = build(
+            vec![
+                text("first"),
+                ExecEvent::Done {
+                    stop: StopReason::Interrupted,
+                    result: None,
+                    diagnostic: Some("cancelled".into()),
+                    reason: Some(reno_proto::StopDetail::Shutdown),
+                },
+                text("ignored: nothing resumed yet"),
+                ExecEvent::Resumed {
+                    from_attempt: 1,
+                    session: reno_proto::SessionRef("s".into()),
+                },
+                text("second"),
+                ExecEvent::Done {
+                    stop: StopReason::Completed,
+                    result: Some("fine".into()),
+                    diagnostic: None,
+                    reason: None,
+                },
+            ],
+            &[],
+        );
+        let shape: Vec<&str> = built
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Prose { .. } => "prose",
+                Row::Done { .. } => "done",
+                Row::Asked { .. } => "resumed",
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(shape, ["prose", "done", "resumed", "prose", "done"]);
+        // The facts are the last attempt's: the first one's stop reason is not carried over.
+        assert_eq!(built.facts.reason, None);
+        assert_eq!(built.facts.diagnostic, None);
     }
 
     #[test]

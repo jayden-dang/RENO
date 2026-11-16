@@ -149,7 +149,13 @@ fn script(prompt: &str) -> Vec<MockStep> {
             }),
         ],
         "mock:resume" => vec![
-            MockStep::started("mock-resumed", "mock-1"),
+            MockStep::started("mock-session", "mock-1"),
+            MockStep::text("conf-resumed"),
+            MockStep::done(StopReason::Completed),
+        ],
+        // A harness that starts a new conversation when asked to continue one.
+        "mock:resume-forks" => vec![
+            MockStep::started("mock-forked", "mock-1"),
             MockStep::text("conf-resumed"),
             MockStep::done(StopReason::Completed),
         ],
@@ -220,7 +226,7 @@ pub(crate) fn mock_target_for(executor: Arc<dyn Executor>) -> Target {
         resume: Some(
             Scenario::new("mock:resume")
                 .resume("mock-session")
-                .expect(Expect::SessionIs("mock-resumed".into())),
+                .expect(Expect::SessionIs("mock-session".into())),
         ),
         mcp: Some(
             Scenario::new("mock:mcp")
@@ -372,7 +378,7 @@ pub(crate) fn codex_target() -> Target {
         resume: Some(
             Scenario::new("scenario:resumed")
                 .resume("th-conf")
-                .expect(Expect::SessionIs("th-resumed".into())),
+                .expect(Expect::SessionIs("th-conf".into())),
         ),
         mcp: Some(
             Scenario::new("scenario:mcp-config")

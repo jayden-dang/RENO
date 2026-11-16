@@ -120,7 +120,9 @@ if has "$line" '"method":"thread/resume"'; then
     done
     exit 0
   else
-    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-resumed\"}}}"
+    # A resume continues the thread it was asked for: the same id comes back.
+    tid=$(printf '%s' "$line" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p')
+    emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"$tid\"}}}"
   fi
 elif has "$line" '"method":"thread/start"'; then
   emit "{\"id\":$(rid "$line"),\"result\":{\"thread\":{\"id\":\"th-1\"}}}"

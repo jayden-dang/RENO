@@ -1505,7 +1505,7 @@ async fn resume_reuses_the_existing_thread() {
     let mut spec = spec("scenario:resumed");
     spec.resume = Some(SessionRef("some-thread".into()));
     let events = run_to_end(&executor(), spec).await;
-    assert_eq!(started_session(&events).as_deref(), Some("th-resumed"));
+    assert_eq!(started_session(&events).as_deref(), Some("some-thread"));
     assert_eq!(done(&events).0, StopReason::Completed);
 }
 

@@ -269,6 +269,18 @@ async fn a_claim_with_no_scenario_is_a_failure_unless_waived() {
 }
 
 #[tokio::test]
+async fn a_resume_that_starts_another_session_fails_the_resume_case() {
+    let mut target = crate::targets::mock_target();
+    target.plan.resume = Some(Scenario::new("mock:resume-forks").resume("mock-session"));
+    let report = run_suite(&target).await;
+    assert!(failed(&report, CaseId::Resume), "{:?}", report.labels());
+    let Status::Fail(why) = status(&report, CaseId::Resume) else {
+        unreachable!("failed above");
+    };
+    assert!(why.contains("must continue the session"), "{why}");
+}
+
+#[tokio::test]
 async fn a_case_the_descriptor_does_not_claim_is_skipped_not_passed() {
     let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
     descriptor.caps.steering = reno_proto::Steering::None;
