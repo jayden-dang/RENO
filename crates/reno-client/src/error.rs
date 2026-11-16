@@ -15,6 +15,12 @@ pub enum ClientError {
     /// refused.
     #[error("no daemon is listening on {}", .0.display())]
     NotRunning(PathBuf),
+    /// The daemon was just started (by the app, or through launchd) and has not answered yet.
+    #[error("starting the daemon")]
+    Starting,
+    /// The daemon was started and did not come up. The text says why, with its last log lines.
+    #[error("{0}")]
+    StartFailed(String),
     /// The daemon speaks a protocol version this client cannot use.
     #[error(
         "incompatible daemon: client speaks protocol {client}, daemon answered {}",

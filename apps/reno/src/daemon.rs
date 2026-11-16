@@ -1,19 +1,29 @@
-//! `reno daemon start | stop | status`.
+//! `reno daemon start | stop | status | restart | logs | install | uninstall`.
+//!
+//! Starting, the LaunchAgent and the log files are `reno_client::launcher`, shared with the app;
+//! this file is the commands' words and the waiting.
+//!
+//! `start` and `stop` wait for another process to come up or go away, which has no event to
+//! follow, so they look again every 50 ms up to a deadline. Following a log is event-driven:
+//! it wakes when the file system reports a change in the log directory.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::path::Path;
+use std::process::{Child, ExitCode};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use reno_client::ClientError;
+use notify::{RecursiveMode, Watcher};
+use reno_client::launcher::logs::{recent_trouble, render_line, tail_lines};
+use reno_client::launcher::{LABEL, Launcher, Started};
+use reno_client::{Client, ClientError};
 use reno_proto::DaemonStatusInfo;
 use rustix::io::Errno;
 use rustix::process::{Pid, test_kill_process};
 use serde::Serialize;
 
-use crate::cli::DaemonCommand;
+use crate::cli::{DaemonCommand, DaemonInstall, DaemonLogs};
 use crate::env::{Env, print_json, print_line};
+use crate::follow::Follower;
 use crate::render;
 
 /// How long `daemon start` waits for the daemon to answer.
@@ -23,87 +33,158 @@ const START_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often start and stop look again. They wait on another process; there is no event to follow.
 const LOOK_AGAIN: Duration = Duration::from_millis(50);
+/// How many log lines an error about a failed start quotes.
+const TROUBLE_LINES: usize = 8;
 
 pub(crate) async fn run(env: &Env, command: DaemonCommand) -> anyhow::Result<ExitCode> {
     match command {
         DaemonCommand::Start => start(env).await,
         DaemonCommand::Stop => stop(env).await,
         DaemonCommand::Status => status(env).await,
+        DaemonCommand::Restart => restart(env).await,
+        DaemonCommand::Logs(args) => logs(env, &args).await,
+        DaemonCommand::Install(args) => install(env, &args).await,
+        DaemonCommand::Uninstall(args) => uninstall(env, &args),
     }
+}
+
+// ---- start -------------------------------------------------------------------------------
+
+/// How a daemon was started, for the output.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum Via {
+    Detached,
+    Launchd,
+}
+
+/// What `start` found or did.
+struct Up {
+    started: bool,
+    pid: u32,
+    via: Option<Via>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Started<'a> {
+struct StartedOut<'a> {
     started: bool,
     pid: u32,
     socket: &'a Path,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<Via>,
 }
 
-async fn start(env: &Env) -> anyhow::Result<ExitCode> {
+/// Makes sure a daemon is answering: it is, or it is started and waited for.
+async fn ensure_up(env: &Env) -> anyhow::Result<Up> {
     if let Some(client) = env.try_connect().await? {
-        return report_started(env, false, client.daemon().pid);
+        return Ok(Up {
+            started: false,
+            pid: client.daemon().pid,
+            via: None,
+        });
     }
+    let launcher = env.launcher()?;
+    match launcher.start()? {
+        Started::Spawned(mut child) => {
+            let pid = wait_up(env, &launcher, Some(&mut child)).await?;
+            Ok(Up {
+                started: true,
+                pid,
+                via: Some(Via::Detached),
+            })
+        }
+        Started::Launchd => {
+            let pid = wait_up(env, &launcher, None).await?;
+            Ok(Up {
+                started: true,
+                pid,
+                via: Some(Via::Launchd),
+            })
+        }
+    }
+}
 
-    let data_dir = env
-        .data_dir
-        .as_deref()
-        .context("cannot tell where to keep the daemon's files: set --data-dir, or HOME")?;
-    let renod = find_renod()?;
-    let logs = env.logs().unwrap_or_else(|| data_dir.join("logs"));
-    // Its own session, no inherited stdio: it must outlive this command and this terminal. Its
-    // output goes to its own logs.
-    let mut child = Command::new(&renod)
-        .arg("--data-dir")
-        .arg(data_dir)
-        .arg("--socket")
-        .arg(&env.socket)
-        .arg("--detach")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("cannot start {}", renod.display()))?;
-
+/// Waits until the daemon answers `daemon.hello`, and returns its pid. Fails when the child
+/// we started exits first, or the deadline passes, with the reason from the daemon's logs.
+async fn wait_up(
+    env: &Env,
+    launcher: &Launcher,
+    mut child: Option<&mut Child>,
+) -> anyhow::Result<u32> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        match reno_client::Client::connect_unix(&env.socket).await {
-            Ok(client) => return report_started(env, true, client.daemon().pid),
+        match Client::connect_unix(&env.socket).await {
+            Ok(client) => return Ok(client.daemon().pid),
             Err(error @ ClientError::Incompatible { .. }) => return Err(env.explain(error)),
             // Not listening yet, or still starting up.
             Err(_) => {}
         }
-        if let Some(status) = child.try_wait().context("cannot watch renod")? {
+        if let Some(child) = child.as_deref_mut()
+            && let Some(status) = child.try_wait().context("cannot watch renod")?
+        {
             bail!(
-                "renod exited ({status}) before it answered; see the logs in {}",
-                logs.display()
+                "renod exited ({status}) before it answered{}",
+                why(launcher)
             );
         }
         if Instant::now() >= deadline {
             bail!(
-                "renod did not answer within {} seconds; see the logs in {}",
+                "renod did not answer within {} seconds{}",
                 START_TIMEOUT.as_secs(),
-                logs.display()
+                why(launcher)
             );
         }
         tokio::time::sleep(LOOK_AGAIN).await;
     }
 }
 
-fn report_started(env: &Env, started: bool, pid: u32) -> anyhow::Result<ExitCode> {
-    if env.json {
-        print_json(&Started {
-            started,
-            pid,
-            socket: &env.socket,
-        })?;
-    } else if started {
-        print_line(format_args!("started renod (pid {pid})"))?;
+/// The last log lines and where the logs are, as the tail of an error message.
+fn why(launcher: &Launcher) -> String {
+    let logs = launcher.logs();
+    let trouble = recent_trouble(&logs, TROUBLE_LINES);
+    let mut text = String::new();
+    if !trouble.is_empty() {
+        text.push_str("; the last lines of its log:\n");
+        for line in trouble.lines() {
+            text.push_str("  ");
+            text.push_str(line);
+            text.push('\n');
+        }
+        text.push_str("see ");
     } else {
-        print_line(format_args!("renod is already running (pid {pid})"))?;
+        text.push_str("; see ");
+    }
+    text.push_str(&logs.dir.display().to_string());
+    text
+}
+
+async fn start(env: &Env) -> anyhow::Result<ExitCode> {
+    let up = ensure_up(env).await?;
+    report_started(env, &up)
+}
+
+fn report_started(env: &Env, up: &Up) -> anyhow::Result<ExitCode> {
+    if env.json {
+        print_json(&StartedOut {
+            started: up.started,
+            pid: up.pid,
+            socket: &env.socket,
+            via: up.via,
+        })?;
+    } else if up.started {
+        let how = match up.via {
+            Some(Via::Launchd) => " through launchd",
+            _ => "",
+        };
+        print_line(format_args!("started renod (pid {}){how}", up.pid))?;
+    } else {
+        print_line(format_args!("renod is already running (pid {})", up.pid))?;
     }
     Ok(ExitCode::SUCCESS)
 }
+
+// ---- stop and restart --------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,17 +194,11 @@ struct Stopped {
     pid: Option<u32>,
 }
 
-async fn stop(env: &Env) -> anyhow::Result<ExitCode> {
+/// Asks the daemon to stop and waits until the process and its socket are gone. `None` when it
+/// was not running.
+async fn stop_daemon(env: &Env) -> anyhow::Result<Option<u32>> {
     let Some(client) = env.try_connect().await? else {
-        if env.json {
-            print_json(&Stopped {
-                stopped: false,
-                pid: None,
-            })?;
-        } else {
-            print_line("renod is not running")?;
-        }
-        return Ok(ExitCode::SUCCESS);
+        return Ok(None);
     };
     let pid = client.daemon().pid;
     // The daemon answers, then closes its connections; either outcome means it heard us. What
@@ -144,32 +219,81 @@ async fn stop(env: &Env) -> anyhow::Result<ExitCode> {
         }
         tokio::time::sleep(LOOK_AGAIN).await;
     }
+    Ok(Some(pid))
+}
+
+async fn stop(env: &Env) -> anyhow::Result<ExitCode> {
+    let pid = stop_daemon(env).await?;
     if env.json {
         print_json(&Stopped {
-            stopped: true,
-            pid: Some(pid),
+            stopped: pid.is_some(),
+            pid,
         })?;
-    } else {
+    } else if let Some(pid) = pid {
         print_line(format_args!("stopped renod (pid {pid})"))?;
+    } else {
+        print_line("renod is not running")?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct Restarted {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_pid: Option<u32>,
+    pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<Via>,
+}
+
+async fn restart(env: &Env) -> anyhow::Result<ExitCode> {
+    let stopped_pid = stop_daemon(env).await?;
+    let up = ensure_up(env).await?;
+    if env.json {
+        print_json(&Restarted {
+            stopped_pid,
+            pid: up.pid,
+            via: up.via,
+        })?;
+    } else {
+        match stopped_pid {
+            Some(old) => print_line(format_args!("restarted renod (pid {old} -> {})", up.pid))?,
+            None => print_line(format_args!(
+                "renod was not running; started it (pid {})",
+                up.pid
+            ))?,
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---- status ------------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StatusOut<'a> {
     running: bool,
     socket: &'a Path,
+    /// The LaunchAgent's plist, when one for this data directory is installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_agent: Option<&'a Path>,
     #[serde(flatten)]
     info: Option<&'a DaemonStatusInfo>,
 }
 
 async fn status(env: &Env) -> anyhow::Result<ExitCode> {
+    let launcher = env.launcher().ok();
+    let agent = launcher
+        .as_ref()
+        .filter(|launcher| launcher.is_managed())
+        .map(Launcher::agent_path);
     let Some(client) = env.try_connect().await? else {
         if env.json {
             print_json(&StatusOut {
                 running: false,
                 socket: &env.socket,
+                launch_agent: agent.as_deref(),
                 info: None,
             })?;
         } else {
@@ -177,6 +301,12 @@ async fn status(env: &Env) -> anyhow::Result<ExitCode> {
                 "not running (nothing is listening on {})",
                 env.socket.display()
             ))?;
+            if let Some(agent) = &agent {
+                print_line(format_args!(
+                    "launch agent: {} (`reno daemon start` asks launchd to start it)",
+                    agent.display()
+                ))?;
+            }
         }
         return Ok(ExitCode::FAILURE);
     };
@@ -185,10 +315,194 @@ async fn status(env: &Env) -> anyhow::Result<ExitCode> {
         print_json(&StatusOut {
             running: true,
             socket: &env.socket,
+            launch_agent: agent.as_deref(),
             info: Some(&info),
         })?;
     } else {
         print_line(render::status_text(&info, &env.socket))?;
+        if let Some(agent) = &agent {
+            print_line(format_args!("launch agent: {}", agent.display()))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+// ---- logs --------------------------------------------------------------------------------
+
+async fn logs(env: &Env, args: &DaemonLogs) -> anyhow::Result<ExitCode> {
+    let launcher = env.launcher()?;
+    let paths = launcher.logs();
+    let lines = tail_lines(&paths.log, args.lines)
+        .with_context(|| format!("cannot read {}", paths.log.display()))?;
+    if lines.is_empty() && !args.follow && !env.json {
+        print_line(format_args!("no log lines yet in {}", paths.log.display()))?;
+    }
+    for line in &lines {
+        print_log_line(env, line)?;
+    }
+    if !args.follow {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Opened before the watch starts, at the end of what was just shown, so that nothing
+    // written in between is lost or shown twice.
+    let mut follower = Follower::from_end(&paths.log)?;
+    let (wake, mut changed) = tokio::sync::mpsc::channel::<()>(1);
+    let mut watcher = notify::recommended_watcher(move |_event| {
+        // One pending wake-up is enough: the follower reads everything that is there.
+        let _ = wake.try_send(());
+    })
+    .context("cannot watch the log directory")?;
+    std::fs::create_dir_all(&paths.dir)
+        .with_context(|| format!("cannot create {}", paths.dir.display()))?;
+    watcher
+        .watch(&paths.dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("cannot watch {}", paths.dir.display()))?;
+    loop {
+        for line in follower.read_new()? {
+            print_log_line(env, &line)?;
+        }
+        if changed.recv().await.is_none() {
+            bail!("the file watcher stopped");
+        }
+    }
+}
+
+fn print_log_line(env: &Env, line: &str) -> anyhow::Result<()> {
+    if env.json {
+        print_line(line)
+    } else {
+        print_line(render_line(line))
+    }
+}
+
+// ---- install and uninstall ---------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Installed<'a> {
+    dry_run: bool,
+    label: &'a str,
+    path: &'a Path,
+    plist: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+}
+
+async fn install(env: &Env, args: &DaemonInstall) -> anyhow::Result<ExitCode> {
+    let launcher = env.launcher()?;
+    let agent = launcher.agent()?;
+    let plist = agent.plist();
+    let path = launcher.agent_path();
+    let domain = launcher.domain();
+
+    if args.dry_run {
+        if env.json {
+            print_json(&Installed {
+                dry_run: true,
+                label: LABEL,
+                path: &path,
+                plist: &plist,
+                pid: None,
+            })?;
+        } else {
+            print_line(format_args!("would write {}:\n", path.display()))?;
+            print_line(plist.trim_end())?;
+            print_line(format_args!(
+                "\nthen run: launchctl bootstrap {domain} {}",
+                path.display()
+            ))?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // A daemon started by hand holds the data-directory lock: the agent's would fail on it, and
+    // launchd would keep restarting that failure. So launchd must find the field empty.
+    let stopped = stop_daemon(env).await?;
+    launcher.write_agent(&agent)?;
+    // A reinstall replaces a loaded job: unload (which stops it and waits), then load.
+    let replaced = launcher.unload()?;
+    launcher.load()?;
+    let pid = wait_up(env, &launcher, None).await?;
+
+    if env.json {
+        print_json(&Installed {
+            dry_run: false,
+            label: LABEL,
+            path: &path,
+            plist: &plist,
+            pid: Some(pid),
+        })?;
+    } else {
+        if let Some(old) = stopped {
+            print_line(format_args!(
+                "stopped renod (pid {old}) so that launchd can own it"
+            ))?;
+        }
+        print_line(format_args!("wrote {}:\n", path.display()))?;
+        print_line(plist.trim_end())?;
+        if replaced {
+            print_line(format_args!(
+                "\nran: launchctl bootout {domain}/{LABEL}  (the old job)"
+            ))?;
+        }
+        print_line(format_args!(
+            "{}ran: launchctl bootstrap {domain} {}",
+            if replaced { "" } else { "\n" },
+            path.display()
+        ))?;
+        print_line(format_args!(
+            "renod is running (pid {pid}) and starts at login; `reno daemon uninstall` removes it"
+        ))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Uninstalled<'a> {
+    dry_run: bool,
+    unloaded: bool,
+    removed: bool,
+    path: &'a Path,
+}
+
+fn uninstall(env: &Env, args: &DaemonInstall) -> anyhow::Result<ExitCode> {
+    let launcher = env.launcher()?;
+    let path = launcher.agent_path();
+    let domain = launcher.domain();
+    let (unloaded, removed) = if args.dry_run {
+        (launcher.is_loaded()?, path.exists())
+    } else {
+        (launcher.unload()?, launcher.remove_agent()?)
+    };
+    if env.json {
+        print_json(&Uninstalled {
+            dry_run: args.dry_run,
+            unloaded,
+            removed,
+            path: &path,
+        })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let (would, did) = if args.dry_run {
+        ("would run", "would delete")
+    } else {
+        ("ran", "deleted")
+    };
+    if unloaded {
+        print_line(format_args!(
+            "{would}: launchctl bootout {domain}/{LABEL}  (stops the daemon)"
+        ))?;
+    }
+    if removed {
+        print_line(format_args!("{did} {}", path.display()))?;
+    }
+    if !unloaded && !removed {
+        print_line(format_args!(
+            "no LaunchAgent is installed ({} does not exist and the job is not loaded)",
+            path.display()
+        ))?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -201,54 +515,9 @@ fn process_exists(pid: u32) -> bool {
     !matches!(test_kill_process(pid), Err(Errno::SRCH))
 }
 
-/// `renod` next to this program, else on `PATH`.
-fn find_renod() -> anyhow::Result<PathBuf> {
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = beside
-        .into_iter()
-        .chain(std::env::split_paths(&path))
-        .collect();
-    find_in(&dirs).context("cannot find `renod`: looked next to this program and on PATH")
-}
-
-fn find_in(dirs: &[PathBuf]) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|dir| dir.join("renod"))
-        .find(|candidate| is_executable_file(candidate))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn renod_is_looked_for_in_order_and_must_be_executable() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
-        assert_eq!(find_in(&dirs), None);
-
-        // A file that is not executable does not count.
-        std::fs::write(first.path().join("renod"), b"#!/bin/sh\n").unwrap();
-        assert_eq!(find_in(&dirs), None);
-
-        let later = second.path().join("renod");
-        std::fs::write(&later, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&later, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(find_in(&dirs), Some(later));
-
-        let earlier = first.path().join("renod");
-        std::fs::set_permissions(&earlier, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(find_in(&dirs), Some(earlier));
-    }
 
     #[test]
     fn a_process_that_is_running_exists_and_an_impossible_pid_does_not() {

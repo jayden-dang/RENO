@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::error::{KernelError, Result};
 use crate::shared::Shared;
+use crate::wake::WakeSignal;
 use crate::watch::Watch;
 
 /// The principal named on definition events that come from files.
@@ -76,6 +77,9 @@ pub struct DefsSetup {
     pub context: ValidationContext,
     /// How `fs` triggers watch files. Without it they cannot fire, and are shown as failed.
     pub watch: Option<Arc<dyn Watch>>,
+    /// Raised when the system woke from sleep. Without it the scheduler cannot tell that the
+    /// wall clock jumped while its timer was stopped.
+    pub wake: Option<WakeSignal>,
 }
 
 impl DefsSetup {
@@ -85,6 +89,7 @@ impl DefsSetup {
             port,
             context,
             watch: None,
+            wake: None,
         }
     }
 
@@ -92,6 +97,13 @@ impl DefsSetup {
     #[must_use]
     pub fn with_watch(mut self, watch: Arc<dyn Watch>) -> Self {
         self.watch = Some(watch);
+        self
+    }
+
+    /// The same, with the scheduler listening to `wake` for the system's wake-ups.
+    #[must_use]
+    pub fn with_wake(mut self, wake: WakeSignal) -> Self {
+        self.wake = Some(wake);
         self
     }
 }
@@ -202,6 +214,7 @@ pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> 
         port,
         context,
         watch: _,
+        wake: _,
     } = setup;
     let stored = shared.db.current_definitions().await?;
     let known = versions_of(&stored);

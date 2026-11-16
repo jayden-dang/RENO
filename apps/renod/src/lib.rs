@@ -18,6 +18,7 @@
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
 //! - [`daemon`]: [`Daemon`], start-up and the shutdown sequence.
+//! - [`power`]: the system wake notification, raised as the scheduler's `WakeSignal`.
 //! - [`logging`]: JSON logs to the data directory; called by the binary only.
 //!
 //! The binary (`main.rs`) is arguments, logging, the runtime and signals.
@@ -31,6 +32,7 @@ mod handlers;
 pub mod lock;
 pub mod logging;
 pub mod paths;
+pub mod power;
 pub mod worktrees;
 
 pub use daemon::{

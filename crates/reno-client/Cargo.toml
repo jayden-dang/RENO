@@ -17,6 +17,7 @@ reno-rpc.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util.workspace = true
 futures.workspace = true
+rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

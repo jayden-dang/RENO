@@ -49,6 +49,11 @@ pub enum OfflineKind {
     Incompatible,
     /// A connection that was up closed.
     Lost,
+    /// The daemon was just started and is coming up.
+    Starting,
+    /// The app started the daemon and it did not come up: it exited, or never answered. The
+    /// detail says how and carries the last lines of its logs.
+    StartFailed,
     /// Anything else.
     Other,
 }

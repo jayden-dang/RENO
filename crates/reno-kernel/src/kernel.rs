@@ -120,6 +120,7 @@ impl Kernel {
     ) -> Result<Self> {
         // Without a port the kernel still validates bodies, against the executors it has.
         let watch_port = definitions.as_ref().and_then(|setup| setup.watch.clone());
+        let wake = definitions.as_ref().and_then(|setup| setup.wake.clone());
         let has_definitions = definitions.is_some();
         let context = match &definitions {
             Some(setup) => setup.context.clone(),
@@ -139,7 +140,7 @@ impl Kernel {
             defs::start(&shared, setup).await?;
         }
         if has_definitions {
-            scheduler::start(&shared, watch_port).await?;
+            scheduler::start(&shared, watch_port, wake).await?;
         }
         shared.refresh_runs().await?;
         shared.spawn(dispatcher::run(Arc::clone(&shared)));

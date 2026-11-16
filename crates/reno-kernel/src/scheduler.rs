@@ -10,11 +10,12 @@
 //! - a command: `trigger.fire`, a change reported by the `Watch` port for an `fs` trigger, or the
 //!   dispatcher saying a run started or could not start.
 //!
-//! The one other wake is a guard: the sleep is never longer than [`CLOCK_GUARD`], so the wall
-//! clock is read again at least that often. A deadline is wall-clock time and the timer is
-//! monotonic, which stops counting while a laptop sleeps; without the guard a 02:00 job would
-//! run late by as long as the machine slept. The wake reads the clock and goes back to sleep;
-//! it writes nothing.
+//! - the system's wake-up ([`WakeSignal`], raised by the daemon on the OS notification). A
+//!   deadline is wall-clock time and the timer is monotonic, which stops counting while a laptop
+//!   sleeps; on wake the scheduler reads the clock again and fires what came due meanwhile.
+//!
+//! There is no periodic wake. With no deadline the scheduler arms no timer at all, and otherwise
+//! exactly one, for the earliest deadline.
 //!
 //! # Rules (ARCHITECTURE 7)
 //!
@@ -65,10 +66,8 @@ use crate::error::{KernelError, Result};
 use crate::kernel::{bot_launch, mint};
 use crate::schedule::{Schedule, backoff_step};
 use crate::shared::Shared;
+use crate::wake::WakeSignal;
 use crate::watch::{Watch, WatchSpec};
-
-/// The longest the scheduler sleeps before it reads the clock again (see the module docs).
-pub(crate) const CLOCK_GUARD: Duration = Duration::from_secs(3600);
 
 /// Commands the scheduler accepts. The queue is bounded and every sender waits when it is full;
 /// the scheduler never waits on a sender (it wakes the dispatcher through `Notify`), so the
@@ -185,6 +184,23 @@ impl Plan {
     }
 }
 
+/// The wait until `earliest` (wall-clock milliseconds), at least a millisecond; `None` for no
+/// deadline.
+pub(crate) fn until_deadline(earliest: Option<i64>, now: i64) -> Option<Duration> {
+    earliest.map(|due| {
+        let ms = u64::try_from(due.saturating_sub(now)).unwrap_or(0).max(1);
+        Duration::from_millis(ms)
+    })
+}
+
+/// Sleeps for `wait`, or for ever when there is no deadline.
+async fn sleep_until_due(wait: Option<Duration>) {
+    match wait {
+        Some(wait) => sleep(wait).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// What a fired occurrence is, for the firing and the prompt.
 struct Occurrence {
     /// The first part of the nonce.
@@ -201,12 +217,18 @@ pub(crate) struct Scheduler {
     plans: BTreeMap<String, Plan>,
     commands: mpsc::Receiver<SchedCmd>,
     defs: watch::Receiver<Arc<CurrentDefs>>,
+    /// The system's wake-ups, when the daemon reports them.
+    wake: Option<watch::Receiver<u64>>,
     next_generation: u64,
 }
 
 /// Plans the triggers in force and spawns the scheduler task. Returns once the first plan is
 /// made and published, so `trigger.list` is never empty because it was early.
-pub(crate) async fn start(shared: &Arc<Shared>, watch_port: Option<Arc<dyn Watch>>) -> Result<()> {
+pub(crate) async fn start(
+    shared: &Arc<Shared>,
+    watch_port: Option<Arc<dyn Watch>>,
+    wake: Option<WakeSignal>,
+) -> Result<()> {
     let Some(commands) = shared.take_sched_commands() else {
         return Ok(());
     };
@@ -216,6 +238,7 @@ pub(crate) async fn start(shared: &Arc<Shared>, watch_port: Option<Arc<dyn Watch
         plans: BTreeMap::new(),
         commands,
         defs: shared.defs_tx.subscribe(),
+        wake: wake.map(|signal| signal.subscribe()),
         next_generation: 0,
     };
     let current = scheduler.defs.borrow_and_update().clone();
@@ -233,6 +256,12 @@ impl Scheduler {
         loop {
             self.fire_due().await;
             let wait = self.sleep_for();
+            let woke = async {
+                match self.wake.as_mut() {
+                    Some(wake) => wake.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 biased;
                 () = self.shared.root.cancelled() => break,
@@ -249,7 +278,13 @@ impl Scheduler {
                         tracing::error!(%error, "could not plan the triggers");
                     }
                 }
-                () = sleep(wait) => {}
+                alive = woke => {
+                    // The loop's next turn reads the clock and fires what came due.
+                    if !alive {
+                        self.wake = None;
+                    }
+                }
+                () = sleep_until_due(wait) => {}
             }
         }
         for plan in self.plans.values_mut() {
@@ -259,17 +294,11 @@ impl Scheduler {
         }
     }
 
-    /// How long to sleep: until the earliest deadline, at most [`CLOCK_GUARD`].
-    fn sleep_for(&self) -> Duration {
-        let now = self.now();
+    /// How long to sleep: until the earliest deadline, or `None` when there is none, in which
+    /// case no timer is armed.
+    fn sleep_for(&self) -> Option<Duration> {
         let earliest = self.plans.values().filter_map(Plan::deadline).min();
-        match earliest {
-            None => CLOCK_GUARD,
-            Some(due) => {
-                let ms = u64::try_from(due.saturating_sub(now)).unwrap_or(0).max(1);
-                Duration::from_millis(ms).min(CLOCK_GUARD)
-            }
-        }
+        until_deadline(earliest, self.now())
     }
 
     fn publish(&self) {

@@ -13,10 +13,13 @@
 //! - `mirror`: [`Mirror`], the tokio driver that turns subscriptions into [`Update`]s on a
 //!   bounded channel.
 //! - `error`: [`ClientError`].
+//! - `launcher`: starting the daemon detached or through launchd, `DaemonKeeper` (the app's
+//!   connect-or-start), the restart backoff, the LaunchAgent plist and the daemon's log files.
 //! - `fake` (cargo feature `fake`): an in-process fake daemon over the in-memory transport.
 
 pub mod client;
 pub mod error;
+pub mod launcher;
 pub mod mirror;
 pub mod paths;
 pub mod state;

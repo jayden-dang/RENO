@@ -4841,6 +4841,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "notify",
  "reno-client",
  "reno-proto",
  "rustix",
@@ -4865,6 +4866,7 @@ dependencies = [
  "reno-proto",
  "reno-syntax",
  "serde_json",
+ "tempfile",
  "tokio",
  "unicode-segmentation",
 ]
@@ -4876,6 +4878,7 @@ dependencies = [
  "futures",
  "reno-proto",
  "reno-rpc",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
