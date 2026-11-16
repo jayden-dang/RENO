@@ -244,58 +244,59 @@ impl RootView {
         let triggers = cx.new(|cx| TriggersScreen::new(store.clone(), cx));
         let executors = cx.new(|cx| ExecutorsScreen::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
-        let subscriptions =
-            vec![
-                cx.subscribe_in(&inbox, window, Self::on_screen_event),
-                cx.subscribe_in(&runs, window, Self::on_screen_event),
-                cx.subscribe_in(&triggers, window, Self::on_screen_event),
-                cx.subscribe_in(&executors, window, Self::on_screen_event),
-                cx.observe(&store, |_, _, cx| cx.notify()),
-                cx.observe(&toasts, |_, _, cx| cx.notify()),
-                cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
-                cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| {
-                    match event {
-                        StoreEvent::Failed(message) => {
-                            toast::push(
-                                cx,
-                                toast::Tone::Error,
-                                "Something went wrong",
-                                message.clone(),
-                            );
-                        }
-                        StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
-                        StoreEvent::ExecutorInstalled(id) => {
-                            toast::push(
-                                cx,
-                                toast::Tone::Info,
-                                "Executor installed",
-                                format!(
-                                    "{} is installed. Check its sign-in on the Executors screen.",
-                                    crate::summary::executor_name(id)
-                                ),
-                            );
-                        }
-                        StoreEvent::TriggerFired { name, outcome, run } => {
-                            let what = match outcome {
-                                FiringOutcome::Fired => format!("{name} started a run."),
-                                FiringOutcome::Coalesced => {
-                                    format!("{name} is still running; this firing joined it.")
-                                }
-                                FiringOutcome::Duplicate => {
-                                    format!("{name} had already fired for this occurrence.")
-                                }
-                                FiringOutcome::BackedOff => {
-                                    format!("{name} could not start a run and is backing off.")
-                                }
-                            };
-                            toast::push(cx, toast::Tone::Info, "Trigger fired", what);
-                            if let (FiringOutcome::Fired, Some(run)) = (outcome, run) {
-                                this.pending_fired = Some(run.clone());
+        let subscriptions = vec![
+            cx.subscribe_in(&inbox, window, Self::on_screen_event),
+            cx.subscribe_in(&runs, window, Self::on_screen_event),
+            cx.subscribe_in(&triggers, window, Self::on_screen_event),
+            cx.subscribe_in(&executors, window, Self::on_screen_event),
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&toasts, |_, _, cx| cx.notify()),
+            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| {
+                match event {
+                    StoreEvent::Failed(message) => {
+                        toast::push(
+                            cx,
+                            toast::Tone::Error,
+                            "Something went wrong",
+                            message.clone(),
+                        );
+                    }
+                    StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
+                    // The composer that sent it takes its draft back.
+                    StoreEvent::SendFailed(_) => {}
+                    StoreEvent::ExecutorInstalled(id) => {
+                        toast::push(
+                            cx,
+                            toast::Tone::Info,
+                            "Executor installed",
+                            format!(
+                                "{} is installed. Check its sign-in on the Executors screen.",
+                                crate::summary::executor_name(id)
+                            ),
+                        );
+                    }
+                    StoreEvent::TriggerFired { name, outcome, run } => {
+                        let what = match outcome {
+                            FiringOutcome::Fired => format!("{name} started a run."),
+                            FiringOutcome::Coalesced => {
+                                format!("{name} is still running; this firing joined it.")
                             }
+                            FiringOutcome::Duplicate => {
+                                format!("{name} had already fired for this occurrence.")
+                            }
+                            FiringOutcome::BackedOff => {
+                                format!("{name} could not start a run and is backing off.")
+                            }
+                        };
+                        toast::push(cx, toast::Tone::Info, "Trigger fired", what);
+                        if let (FiringOutcome::Fired, Some(run)) = (outcome, run) {
+                            this.pending_fired = Some(run.clone());
                         }
                     }
-                }),
-            ];
+                }
+            }),
+        ];
         Self {
             store,
             home,

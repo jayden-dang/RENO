@@ -1,40 +1,52 @@
-//! The composer: a multi-line text input with class chips, a route preview and a send button.
+//! The composer: one multi-line text input used on Home (a new task), on the Run screen (steer a
+//! run, or stop it) and under a held action (the reason for a denial).
 //!
-//! The text, caret, selection and IME composition live in [`TextModel`]. This file owns what
-//! needs GPUI: key actions, the platform input handler (IME, `NSTextInputClient` on macOS),
-//! shaping and painting wrapped lines, mouse selection, and the surrounding chrome.
+//! The text, caret, selection, undo history and IME composition live in [`TextModel`]. The
+//! painted text and its scrolling are in `text_area`. This file owns what needs GPUI beyond that:
+//! key actions, the platform input handler (IME, `NSTextInputClient` on macOS), the mouse, the
+//! files attached to the draft, the route preview, and the chrome around the text.
 //!
-//! Capabilities: typing, Backspace/Delete, caret and selection by keyboard and mouse
-//! (grapheme-aware), line Home/End, logical-line Up/Down, select all, cut, copy, paste, IME
-//! composition, Enter to send, Shift+Enter for a newline, auto-grow up to [`MAX_ROWS`].
-//! Gaps: no undo, no word-wise movement or deletion, Up/Down move by logical line not by wrapped
-//! row, and no scrolling past [`MAX_ROWS`] (the caret can leave the visible rows).
+//! Text: typing, Backspace/Delete, caret and selection by keyboard and mouse (grapheme-aware),
+//! Option+arrows and Option+Backspace by word, Cmd+arrows by line and text, Up/Down by visual
+//! row, double and triple click, select all, cut, copy, paste, undo and redo, IME composition
+//! (marked text underlined, candidate window placed at the marked text), Enter to send,
+//! Shift+Enter for a newline, auto-grow up to [`MAX_ROWS`] and then scroll.
+//!
+//! Home: class chips; files attached by paste, drop or the paperclip, shown as chips that can be
+//! taken off; a route preview from `route.preview` (debounced, one request at a time) with a
+//! "why?" list of the executors passed over and why.
+//!
+//! Run screen: while the run is live, an empty draft shows Stop and a draft shows Steer; a
+//! finished run disables the box and says why.
 //!
 //! [`Mode::Reason`] is the small variant the Inbox opens under a held action when the human
 //! denies it: no chips, no send button, one row; Enter and Escape are reported as a
 //! [`ReasonEvent`] for the card to act on.
 
 use std::ops::Range;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, Element,
-    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyBinding,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    Render, SharedString, Style, Subscription, TextAlign, TextRun, TextStyle, UTF16Selection,
-    UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Entity, EntityInputHandler,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
+    Render, ScrollEvent, SharedString, Subscription, Task, UTF16Selection, Window, actions, div,
+    prelude::*, px,
 };
 use reno_client::ConnectionStatus;
-use reno_proto::RunId;
+use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskRunParams};
 
-use super::icon::Icon;
+use super::icon::{Icon, icon};
 use super::kit;
+use super::text_area::{TextArea, TextLayout};
 use super::text_model::{EnterOutcome, TextModel};
 use super::theme::{self, Theme};
 use super::toast;
-use crate::route::{self, Class};
-use crate::store::Store;
+use crate::attach;
+use crate::store::{Store, StoreEvent};
 use crate::summary;
+use crate::vm::routing::{self, Class, Preview};
 
 actions!(
     composer,
@@ -49,6 +61,17 @@ actions!(
         SelectRight,
         SelectUp,
         SelectDown,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordBack,
+        DeleteWordForward,
+        DeleteLineBack,
+        DocStart,
+        DocEnd,
+        SelectDocStart,
+        SelectDocEnd,
         SelectAll,
         Home,
         End,
@@ -57,6 +80,8 @@ actions!(
         Paste,
         Copy,
         Cut,
+        Undo,
+        Redo,
         Submit,
         Cancel,
         Newline,
@@ -66,9 +91,12 @@ actions!(
 
 /// The key context the bindings below are scoped to.
 const CONTEXT: &str = "Composer";
-/// The text area is at least this many rows tall and grows to [`MAX_ROWS`].
-const MIN_ROWS: usize = 2;
-const MAX_ROWS: usize = 10;
+/// Home's text area is at least this many rows tall; the others start at one.
+const HOME_ROWS: usize = 2;
+/// How long the text must stand still before the route is asked for again.
+pub(crate) const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(400);
+/// How long "Sent" stays on a steer box.
+const SENT_FOR: Duration = Duration::from_millis(2_500);
 
 pub(crate) fn bind_keys(cx: &mut App) {
     let ctx = Some(CONTEXT);
@@ -83,11 +111,24 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-right", SelectRight, ctx),
         KeyBinding::new("shift-up", SelectUp, ctx),
         KeyBinding::new("shift-down", SelectDown, ctx),
+        KeyBinding::new("alt-left", WordLeft, ctx),
+        KeyBinding::new("alt-right", WordRight, ctx),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("alt-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("alt-backspace", DeleteWordBack, ctx),
+        KeyBinding::new("alt-delete", DeleteWordForward, ctx),
+        KeyBinding::new("cmd-backspace", DeleteLineBack, ctx),
+        KeyBinding::new("cmd-up", DocStart, ctx),
+        KeyBinding::new("cmd-down", DocEnd, ctx),
+        KeyBinding::new("cmd-shift-up", SelectDocStart, ctx),
+        KeyBinding::new("cmd-shift-down", SelectDocEnd, ctx),
         KeyBinding::new("cmd-a", SelectAll, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("cmd-left", Home, ctx),
         KeyBinding::new("cmd-right", End, ctx),
+        KeyBinding::new("ctrl-a", Home, ctx),
+        KeyBinding::new("ctrl-e", End, ctx),
         KeyBinding::new("shift-home", SelectHome, ctx),
         KeyBinding::new("shift-end", SelectEnd, ctx),
         KeyBinding::new("cmd-shift-left", SelectHome, ctx),
@@ -95,6 +136,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, ctx),
         KeyBinding::new("cmd-c", Copy, ctx),
         KeyBinding::new("cmd-x", Cut, ctx),
+        KeyBinding::new("cmd-z", Undo, ctx),
+        KeyBinding::new("cmd-shift-z", Redo, ctx),
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
@@ -107,7 +150,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub(crate) enum Mode {
     /// Home: a new task, with class chips and a route preview.
     Home,
-    /// The Run screen: steers this run while it is live; a follow-up once it has finished.
+    /// The Run screen: steers this run while it is live.
     Steer(RunId),
     /// An Inbox card's reason for a denial: Enter and Escape are emitted as [`ReasonEvent`]s.
     Reason,
@@ -124,55 +167,132 @@ pub(crate) enum ReasonEvent {
 
 impl EventEmitter<ReasonEvent> for Composer {}
 
+/// What a steer box can do for a run in this state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SteerState {
+    /// The run is live and takes messages: Steer, or Stop with nothing typed.
+    Steering,
+    /// The run is not over but cannot take a message now. Stop still works.
+    Waiting(String),
+    /// The run is over: the box is disabled, with the reason.
+    Ended(String),
+}
+
+/// The steer box's state for a run in `status` (`None` before the run is known).
+pub(crate) fn steer_state(status: Option<RunStatus>) -> SteerState {
+    let Some(status) = status else {
+        return SteerState::Waiting("Loading the run\u{2026}".to_owned());
+    };
+    match status {
+        RunStatus::Succeeded => ended("passed"),
+        RunStatus::Failed => ended("failed"),
+        RunStatus::Cancelled => ended("was stopped"),
+        RunStatus::Interrupted => SteerState::Waiting(
+            "This run was interrupted. It can take a message once it resumes.".to_owned(),
+        ),
+        _ => SteerState::Steering,
+    }
+}
+
+fn ended(how: &str) -> SteerState {
+    SteerState::Ended(format!(
+        "This run {how}. It can't be steered any more, and follow-ups are not available yet."
+    ))
+}
+
+/// What the route preview was last asked for. A new request goes out only when this changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewKey {
+    task: TaskRunParams,
+    /// The probes the answer depends on: a fresh probe can change the decision.
+    probes: Vec<(ExecutorId, Option<u64>)>,
+}
+
+/// A draft that has been sent and may have to come back.
+struct Sent {
+    ticket: u64,
+    text: String,
+    files: Vec<attach::Item>,
+}
+
 pub(crate) struct Composer {
     store: Entity<Store>,
     mode: Mode,
     focus_handle: FocusHandle,
     model: TextModel,
     class: Class,
+    files: attach::Draft,
     why_open: bool,
+    preview: Preview,
+    preview_key: Option<PreviewKey>,
+    debounce: Option<Task<()>>,
+    request: Option<Task<()>>,
+    generation: u64,
     layout: Option<TextLayout>,
+    /// How far the text is scrolled, from its top.
+    scroll: Pixels,
+    /// The next paint scrolls the caret into view.
+    reveal: bool,
+    /// The x a run of Up/Down moves keeps.
+    goal_x: Option<Pixels>,
     selecting: bool,
+    next_ticket: u64,
+    sent: Option<Sent>,
+    /// "Sent" shows until this task ends.
+    sent_note: Option<Task<()>>,
     _store: Subscription,
-}
-
-/// The last painted text, kept for hit testing and IME geometry.
-struct TextLayout {
-    lines: Vec<WrappedLine>,
-    starts: Vec<usize>,
-    bounds: Bounds<Pixels>,
-    line_height: Pixels,
-    /// The text this layout was shaped from.
-    text: String,
+    _events: Subscription,
 }
 
 impl Composer {
     pub(crate) fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        Self {
-            _store: cx.observe(&store, |_, _, cx| cx.notify()),
+        Self::with_mode(store, Mode::Home, cx)
+    }
+
+    fn with_mode(store: Entity<Store>, mode: Mode, cx: &mut Context<Self>) -> Self {
+        let mut composer = Self {
+            _store: cx.observe(&store, |this, _, cx| {
+                this.refresh_preview(cx);
+                cx.notify();
+            }),
+            _events: cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
+                if let StoreEvent::SendFailed(ticket) = event {
+                    this.take_draft_back(*ticket, cx);
+                }
+            }),
             store,
-            mode: Mode::Home,
+            mode,
             focus_handle: cx.focus_handle(),
             model: TextModel::new(),
             class: Class::default(),
+            files: attach::Draft::default(),
             why_open: false,
+            preview: Preview::Idle,
+            preview_key: None,
+            debounce: None,
+            request: None,
+            generation: 0,
             layout: None,
+            scroll: px(0.0),
+            reveal: false,
+            goal_x: None,
             selecting: false,
-        }
+            next_ticket: 0,
+            sent: None,
+            sent_note: None,
+        };
+        composer.refresh_preview(cx);
+        composer
     }
 
     /// The small reason input of a denial.
     pub(crate) fn reason(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        let mut composer = Self::new(store, cx);
-        composer.mode = Mode::Reason;
-        composer
+        Self::with_mode(store, Mode::Reason, cx)
     }
 
     /// A composer that steers `run`.
     pub(crate) fn steer(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
-        let mut composer = Self::new(store, cx);
-        composer.mode = Mode::Steer(run);
-        composer
+        Self::with_mode(store, Mode::Steer(run), cx)
     }
 
     pub(crate) fn class(&self) -> Class {
@@ -184,40 +304,133 @@ impl Composer {
         self.model.text()
     }
 
+    #[cfg(test)]
+    pub(crate) fn preview(&self) -> &Preview {
+        &self.preview
+    }
+
+    #[cfg(test)]
+    pub(crate) fn files(&self) -> &attach::Draft {
+        &self.files
+    }
+
+    #[cfg(test)]
+    pub(crate) fn why_is_open(&self) -> bool {
+        self.why_open
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_sent_noted(&self) -> bool {
+        self.sent_note.is_some()
+    }
+
     /// Replaces the draft (the suggestion chips) and focuses the input.
     pub(crate) fn fill(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.model.set_text(text);
         window.focus(&self.focus_handle, cx);
-        window.notify_text_input_changed(&self.focus_handle);
-        cx.notify();
+        self.text_changed(window, cx);
     }
 
     pub(crate) fn set_class(&mut self, class: Class, cx: &mut Context<Self>) {
         if self.class != class {
             self.class = class;
+            self.refresh_preview(cx);
             cx.notify();
         }
     }
+
+    // ---- what the text area reads ----------------------------------------------------------
+
+    pub(crate) fn text_for_layout(&self) -> &str {
+        self.model.text()
+    }
+
+    pub(crate) fn marked_range(&self) -> Option<Range<usize>> {
+        self.model.marked()
+    }
+
+    pub(crate) fn selection(&self) -> Range<usize> {
+        self.model.selection()
+    }
+
+    pub(crate) fn caret(&self) -> usize {
+        self.model.caret()
+    }
+
+    pub(crate) fn is_blank(&self) -> bool {
+        self.model.is_empty()
+    }
+
+    pub(crate) fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
+    pub(crate) fn focus_handle_ref(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    pub(crate) fn scroll_offset(&self) -> Pixels {
+        self.scroll
+    }
+
+    pub(crate) fn wants_caret_visible(&self) -> bool {
+        self.reveal
+    }
+
+    /// The text area painted: keep what it measured.
+    pub(crate) fn painted(&mut self, layout: TextLayout, scroll: Pixels) {
+        self.layout = Some(layout);
+        self.scroll = scroll;
+        self.reveal = false;
+    }
+
+    // ---- state -----------------------------------------------------------------------------
 
     fn connected(&self, cx: &App) -> bool {
         self.store.read(cx).connection() == ConnectionStatus::Connected
     }
 
-    /// Steering needs a live run; Phase 0 has no follow-up once it has finished.
-    fn target_live(&self, cx: &App) -> bool {
+    fn steer_state(&self, cx: &App) -> Option<SteerState> {
         match &self.mode {
-            Mode::Home | Mode::Reason => true,
-            Mode::Steer(run) => self
+            Mode::Steer(run) => Some(steer_state(
+                self.store.read(cx).state().run(run).map(|r| r.status),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Whether the box takes text: not on the Run screen of a run that is over.
+    fn input_enabled(&self, cx: &App) -> bool {
+        !matches!(self.steer_state(cx), Some(SteerState::Ended(_)))
+    }
+
+    /// Steering needs a run that takes messages.
+    fn target_live(&self, cx: &App) -> bool {
+        !matches!(
+            self.steer_state(cx),
+            Some(SteerState::Ended(_) | SteerState::Waiting(_))
+        )
+    }
+
+    pub(crate) fn can_send(&self, cx: &App) -> bool {
+        self.model.can_submit()
+            && self.connected(cx)
+            && self.target_live(cx)
+            && !self.store.read(cx).is_sending()
+    }
+
+    /// Stop shows instead of Steer while the run is live and nothing is typed.
+    fn shows_stop(&self, cx: &App) -> bool {
+        let Mode::Steer(run) = &self.mode else {
+            return false;
+        };
+        self.model.is_empty()
+            && self
                 .store
                 .read(cx)
                 .state()
                 .run(run)
-                .is_some_and(|r| summary::is_steerable(r.status)),
-        }
-    }
-
-    pub(crate) fn can_send(&self, cx: &App) -> bool {
-        self.model.can_submit() && self.connected(cx) && self.target_live(cx)
+                .is_some_and(|r| !r.status.is_terminal())
     }
 
     /// Enter: send non-blank text to the daemon. A blank draft does nothing; with no daemon the
@@ -235,7 +448,7 @@ impl Composer {
             ));
             return;
         }
-        if !self.model.can_submit() || !self.target_live(cx) {
+        if !self.model.can_submit() || !self.target_live(cx) || self.store.read(cx).is_sending() {
             return;
         }
         if !self.connected(cx) {
@@ -247,32 +460,242 @@ impl Composer {
             );
             return;
         }
-        if let EnterOutcome::Submitted(prompt) = self.model.enter(false) {
-            match &self.mode {
-                Mode::Home => {
-                    let executor = route::route_for(self.class).executor_id;
-                    self.store
-                        .update(cx, |store, cx| store.run_task(prompt, executor, cx));
-                }
-                Mode::Steer(run) => {
-                    let run = run.clone();
-                    self.store
-                        .update(cx, |store, cx| store.steer(run, prompt, cx));
-                }
-                Mode::Reason => {}
+        let draft = self.model.text().to_owned();
+        let files = self.files.take();
+        let wire = attach::wire(&files);
+        let EnterOutcome::Submitted(prompt) = self.model.enter(false) else {
+            self.files.restore(files);
+            return;
+        };
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        self.sent = Some(Sent {
+            ticket,
+            text: draft,
+            files,
+        });
+        match self.mode.clone() {
+            Mode::Home => {
+                let params =
+                    routing::task_params(&prompt, self.class, &wire, self.store.read(cx).state());
+                self.store
+                    .update(cx, |store, cx| store.submit_task(params, ticket, cx));
             }
-            window.notify_text_input_changed(&self.focus_handle);
-            cx.notify();
+            Mode::Steer(run) => {
+                self.store
+                    .update(cx, |store, cx| store.steer(run, prompt, ticket, cx));
+                self.show_sent(cx);
+            }
+            Mode::Reason => {}
         }
+        self.scroll = px(0.0);
+        self.text_changed(window, cx);
     }
 
+    /// "Sent" on a steer box, for a moment.
+    fn show_sent(&mut self, cx: &mut Context<Self>) {
+        self.sent_note = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SENT_FOR).await;
+            this.update(cx, |this, cx| {
+                this.sent_note = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The daemon refused what was sent: the draft comes back, in front of anything typed since.
+    fn take_draft_back(&mut self, ticket: u64, cx: &mut Context<Self>) {
+        if self.sent.as_ref().is_none_or(|s| s.ticket != ticket) {
+            return;
+        }
+        let Some(sent) = self.sent.take() else {
+            return;
+        };
+        self.sent_note = None;
+        if self.model.is_empty() {
+            self.model.set_text(&sent.text);
+        } else {
+            let later = self.model.text().to_owned();
+            self.model.set_text(&format!("{}\n\n{later}", sent.text));
+        }
+        let mut files = sent.files;
+        files.extend(self.files.take());
+        self.files.restore(files);
+        self.reveal = true;
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    // ---- attachments ----------------------------------------------------------------------
+
+    /// Whether this composer sends files: only a new task does.
+    fn takes_files(&self, cx: &App) -> bool {
+        self.mode == Mode::Home
+            && self
+                .store
+                .read(cx)
+                .state()
+                .supports(reno_proto::FEATURE_ATTACHMENTS)
+    }
+
+    /// Paste, drop and the picker all end here.
+    pub(crate) fn add_attachments(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if self.mode != Mode::Home {
+            toast::push(
+                cx,
+                toast::Tone::Info,
+                "Files",
+                "Only a new task takes files. A steer is text.",
+            );
+            return;
+        }
+        if !self
+            .store
+            .read(cx)
+            .state()
+            .supports(reno_proto::FEATURE_ATTACHMENTS)
+        {
+            toast::push(
+                cx,
+                toast::Tone::Info,
+                "Files",
+                "This daemon is too old to take attachments. Update it to attach files.",
+            );
+            return;
+        }
+        let refused = self.files.add_paths(paths);
+        if !refused.is_empty() {
+            toast::push(
+                cx,
+                toast::Tone::Error,
+                "Could not attach",
+                refused.join(" "),
+            );
+        }
+        cx.notify();
+    }
+
+    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.files.remove(index);
+        cx.notify();
+    }
+
+    /// The paperclip: the system file picker.
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.takes_files(cx) {
+            self.add_attachments(&[], cx);
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                this.update(cx, |this, cx| this.add_attachments(&paths, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    // ---- route preview ---------------------------------------------------------------------
+
+    /// Asks for the route again if what it depends on changed, after the text has stood still.
+    /// Home only. Not while the IME is composing; not on every keystroke (the request waits for
+    /// [`PREVIEW_DEBOUNCE`] of quiet and a newer request replaces an older one).
+    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
+        if self.mode != Mode::Home || self.model.marked().is_some() {
+            return;
+        }
+        if !self.connected(cx) {
+            self.debounce = None;
+            self.request = None;
+            self.preview_key = None;
+            self.preview = if self.store.read(cx).connection() == ConnectionStatus::Connecting {
+                Preview::Loading
+            } else {
+                Preview::Unavailable("the daemon is not running".to_owned())
+            };
+            return;
+        }
+        let key = {
+            let state = self.store.read(cx).state();
+            PreviewKey {
+                task: routing::task_params(self.model.text().trim(), self.class, &[], state),
+                probes: state
+                    .executors()
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.descriptor.id.clone(),
+                            e.health.as_ref().map(|h| h.checked_at_ms),
+                        )
+                    })
+                    .collect(),
+            }
+        };
+        if self.preview_key.as_ref() == Some(&key) {
+            return;
+        }
+        let first = self.preview_key.is_none();
+        self.preview_key = Some(key.clone());
+        if matches!(self.preview, Preview::Idle | Preview::Unavailable(_)) {
+            self.preview = Preview::Loading;
+        }
+        self.debounce = Some(cx.spawn(async move |this, cx| {
+            if !first {
+                cx.background_executor().timer(PREVIEW_DEBOUNCE).await;
+            }
+            this.update(cx, |this, cx| this.fetch_preview(key, cx)).ok();
+        }));
+    }
+
+    fn fetch_preview(&mut self, key: PreviewKey, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        let call = self.store.read(cx).preview_route(key.task, cx);
+        // Replacing the task drops the one before it, which cancels its request.
+        self.request = Some(cx.spawn(async move |this, cx| {
+            let answer = call.await;
+            this.update(cx, |this, cx| this.finish_preview(generation, answer, cx))
+                .ok();
+        }));
+    }
+
+    fn finish_preview(
+        &mut self,
+        generation: u64,
+        answer: Result<RoutingDecision, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.generation {
+            return;
+        }
+        self.preview = match answer {
+            Ok(decision) => Preview::Ready(decision),
+            Err(reason) => Preview::Unavailable(reason),
+        };
+        cx.notify();
+    }
+
+    // ---- edits and moves ---------------------------------------------------------------------
+
     fn selection_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.reveal = true;
         window.notify_text_selection_changed(&self.focus_handle);
         cx.notify();
     }
 
     fn text_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.reveal = true;
         window.notify_text_input_changed(&self.focus_handle);
+        self.refresh_preview(cx);
         cx.notify();
     }
 
@@ -290,97 +713,238 @@ impl Composer {
     }
 
     fn on_newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.marked().is_none() {
+        if self.model.marked().is_none() && self.input_enabled(cx) {
             self.model.enter(true);
             self.text_changed(window, cx);
         }
     }
 
-    fn on_backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.backspace() {
+    /// An edit that may do nothing: rings the bell when it did not, and does nothing at all in
+    /// a box that is disabled.
+    fn edit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut TextModel) -> bool,
+    ) {
+        if !self.input_enabled(cx) {
+            return;
+        }
+        if change(&mut self.model) {
             self.text_changed(window, cx);
         } else {
             window.play_system_bell();
         }
+    }
+
+    fn on_backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(window, cx, TextModel::backspace);
     }
 
     fn on_delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.delete() {
-            self.text_changed(window, cx);
-        } else {
-            window.play_system_bell();
-        }
+        self.edit(window, cx, TextModel::delete);
+    }
+
+    fn on_delete_word_back(
+        &mut self,
+        _: &DeleteWordBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit(window, cx, TextModel::delete_word_back);
+    }
+
+    fn on_delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit(window, cx, TextModel::delete_word_forward);
+    }
+
+    fn on_delete_line_back(
+        &mut self,
+        _: &DeleteLineBack,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit(window, cx, TextModel::delete_line_back);
+    }
+
+    fn on_undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(window, cx, TextModel::undo);
+    }
+
+    fn on_redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(window, cx, TextModel::redo);
+    }
+
+    fn step(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mv: impl FnOnce(&mut TextModel),
+    ) {
+        mv(&mut self.model);
+        self.selection_changed(window, cx);
     }
 
     fn on_left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_left(false);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_left(false));
     }
 
     fn on_right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_right(false);
-        self.selection_changed(window, cx);
-    }
-
-    fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_up(false);
-        self.selection_changed(window, cx);
-    }
-
-    fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_down(false);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_right(false));
     }
 
     fn on_select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_left(true);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_left(true));
     }
 
     fn on_select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_right(true);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_right(true));
     }
 
-    fn on_select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_up(true);
-        self.selection_changed(window, cx);
+    fn on_word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(window, cx, |m| m.move_word_left(false));
     }
 
-    fn on_select_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_down(true);
-        self.selection_changed(window, cx);
+    fn on_word_right(&mut self, _: &WordRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(window, cx, |m| m.move_word_right(false));
+    }
+
+    fn on_select_word_left(
+        &mut self,
+        _: &SelectWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step(window, cx, |m| m.move_word_left(true));
+    }
+
+    fn on_select_word_right(
+        &mut self,
+        _: &SelectWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step(window, cx, |m| m.move_word_right(true));
+    }
+
+    fn on_doc_start(&mut self, _: &DocStart, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(window, cx, |m| m.move_doc_start(false));
+    }
+
+    fn on_doc_end(&mut self, _: &DocEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(window, cx, |m| m.move_doc_end(false));
+    }
+
+    fn on_select_doc_start(
+        &mut self,
+        _: &SelectDocStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.step(window, cx, |m| m.move_doc_start(true));
+    }
+
+    fn on_select_doc_end(&mut self, _: &SelectDocEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.step(window, cx, |m| m.move_doc_end(true));
     }
 
     fn on_select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.select_all();
-        self.selection_changed(window, cx);
+        self.step(window, cx, TextModel::select_all);
     }
 
     fn on_home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_home(false);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_home(false));
     }
 
     fn on_end(&mut self, _: &End, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_end(false);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_end(false));
     }
 
     fn on_select_home(&mut self, _: &SelectHome, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_home(true);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_home(true));
     }
 
     fn on_select_end(&mut self, _: &SelectEnd, window: &mut Window, cx: &mut Context<Self>) {
-        self.model.move_end(true);
-        self.selection_changed(window, cx);
+        self.step(window, cx, |m| m.move_end(true));
     }
 
+    /// Up and Down move by visual row, keeping the x they started at, once the text has been
+    /// painted; past the first or last row they go to the start or the end of the text.
+    fn vertical(&mut self, rows: i32, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let goal = self.goal_x;
+        let target = self
+            .layout
+            .as_ref()
+            .filter(|l| l.is_for(self.model.text()) && self.model.marked().is_none())
+            .and_then(|l| l.index_for_row_move(self.model.caret(), rows, goal));
+        match target {
+            Some((index, x)) => {
+                self.model.move_to(index, extend);
+                self.selection_changed(window, cx);
+                self.goal_x = Some(x);
+            }
+            None => {
+                if rows < 0 {
+                    self.model.move_up(extend);
+                } else {
+                    self.model.move_down(extend);
+                }
+                self.selection_changed(window, cx);
+            }
+        }
+    }
+
+    fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(-1, false, window, cx);
+    }
+
+    fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(1, false, window, cx);
+    }
+
+    fn on_select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(-1, true, window, cx);
+    }
+
+    fn on_select_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(1, true, window, cx);
+    }
+
+    /// Paste: files (a Finder copy) attach, text inserts, and an image with no text (a
+    /// screenshot) is saved and attached.
     fn on_paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        if !self.input_enabled(cx) {
+            return;
+        }
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.takes_files(cx)
+            && let Some(paths) = pasted_paths(&item)
+        {
+            self.add_attachments(&paths, cx);
+            return;
+        }
+        if let Some(text) = item.text() {
             self.model.insert(&text);
             self.text_changed(window, cx);
+        } else if self.takes_files(cx)
+            && let Some(image) = pasted_image(&item)
+        {
+            match attach::save_image(&attach::paste_dir(), image.0, image.1) {
+                Ok(path) => self.add_attachments(&[path], cx),
+                Err(e) => toast::push(
+                    cx,
+                    toast::Tone::Error,
+                    "Could not attach",
+                    format!("The pasted image could not be saved: {e}."),
+                ),
+            }
         }
     }
 
@@ -391,6 +955,9 @@ impl Composer {
     }
 
     fn on_cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled(cx) {
+            return;
+        }
         if let Some(selected) = self.model.cut() {
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
             self.text_changed(window, cx);
@@ -414,9 +981,16 @@ impl Composer {
     ) {
         window.focus(&self.focus_handle, cx);
         window.request_virtual_keyboard();
-        self.selecting = true;
         let index = self.index_for_position(event.position);
-        self.model.move_to(index, event.modifiers.shift);
+        self.selecting = false;
+        match event.click_count {
+            0 | 1 => {
+                self.selecting = true;
+                self.model.move_to(index, event.modifiers.shift);
+            }
+            2 => self.model.select_word_at(index),
+            _ => self.model.select_line_at(index),
+        }
         self.selection_changed(window, cx);
     }
 
@@ -437,58 +1011,50 @@ impl Composer {
         self.selecting = false;
     }
 
+    /// The wheel scrolls a draft taller than the box.
+    fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let max = layout.max_scroll();
+        if max <= px(0.0) {
+            return;
+        }
+        let delta = event.delta.pixel_delta(layout.line_height()).y;
+        self.scroll = (self.scroll - delta).clamp(px(0.0), max);
+        cx.notify();
+        cx.stop_propagation();
+    }
+
     /// The byte offset under a window position, from the last painted layout.
     fn index_for_position(&self, position: Point<Pixels>) -> usize {
-        let Some(layout) = &self.layout else {
-            return self.model.text().len();
-        };
-        layout.index_for_position(position)
+        match &self.layout {
+            Some(layout) if layout.is_for(self.model.text()) => layout.index_for_position(position),
+            _ => self.model.text().len(),
+        }
     }
 }
 
-impl TextLayout {
-    fn index_for_position(&self, position: Point<Pixels>) -> usize {
-        let local = position - self.bounds.origin;
-        if local.y < px(0.0) {
-            return 0;
-        }
-        let mut top = px(0.0);
-        for (line, start) in self.lines.iter().zip(&self.starts) {
-            let height = line.size(self.line_height).height;
-            if local.y < top + height {
-                let hit = line
-                    .closest_index_for_position(point(local.x, local.y - top), self.line_height);
-                return start + hit.unwrap_or_else(|end| end);
-            }
-            top += height;
-        }
-        self.text.len()
-    }
-
-    /// Where a byte offset sits, relative to the text origin.
-    fn point_for_index(&self, index: usize) -> Option<Point<Pixels>> {
-        let mut top = px(0.0);
-        for (line, start) in self.lines.iter().zip(&self.starts) {
-            if index <= start + line.len() {
-                let local = line.position_for_index(index - start, self.line_height)?;
-                return Some(point(local.x, top + local.y));
-            }
-            top += line.size(self.line_height).height;
-        }
-        None
-    }
+/// The files a clipboard item carries (a copy in Finder), if any.
+fn pasted_paths(item: &ClipboardItem) -> Option<Vec<PathBuf>> {
+    let paths: Vec<PathBuf> = item
+        .entries()
+        .iter()
+        .filter_map(|e| match e {
+            ClipboardEntry::ExternalPaths(p) => Some(p.paths().to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    (!paths.is_empty()).then_some(paths)
 }
 
-/// Byte offset where each logical line starts, given each line's byte length. Lines are split at
-/// `\n`, which the lines themselves do not include.
-fn line_starts(lengths: impl IntoIterator<Item = usize>) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut next = 0;
-    for len in lengths {
-        starts.push(next);
-        next += len + 1;
-    }
-    starts
+/// The image a clipboard item carries (a screenshot): its file extension and bytes.
+fn pasted_image(item: &ClipboardItem) -> Option<(&'static str, &[u8])> {
+    item.entries().iter().find_map(|e| match e {
+        ClipboardEntry::Image(image) => Some((image.format.extension(), image.bytes.as_slice())),
+        _ => None,
+    })
 }
 
 impl EntityInputHandler for Composer {
@@ -534,6 +1100,9 @@ impl EntityInputHandler for Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.input_enabled(cx) {
+            return;
+        }
         self.model.replace_utf16(range_utf16.as_ref(), text);
         self.text_changed(window, cx);
     }
@@ -546,6 +1115,9 @@ impl EntityInputHandler for Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.input_enabled(cx) {
+            return;
+        }
         self.model.replace_and_mark_utf16(
             range_utf16.as_ref(),
             new_text,
@@ -557,20 +1129,20 @@ impl EntityInputHandler for Composer {
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        bounds: Bounds<Pixels>,
+        _: Bounds<Pixels>,
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
-        if layout.text != self.model.text() {
+        if !layout.is_for(self.model.text()) {
             return None;
         }
         let range = self.model.range_from_utf16(&range_utf16);
-        let start = layout.point_for_index(range.start)?;
-        let end = layout.point_for_index(range.end)?;
+        let start = layout.window_point_for_index(range.start)?;
+        let end = layout.window_point_for_index(range.end)?;
         Some(Bounds::from_corners(
-            bounds.origin + start,
-            bounds.origin + point(end.x.max(start.x), end.y + layout.line_height),
+            start,
+            gpui::point(end.x.max(start.x), end.y + layout.line_height()),
         ))
     }
 
@@ -581,7 +1153,7 @@ impl EntityInputHandler for Composer {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         let layout = self.layout.as_ref()?;
-        if layout.text != self.model.text() {
+        if !layout.is_for(self.model.text()) {
             return None;
         }
         Some(
@@ -597,342 +1169,344 @@ impl Focusable for Composer {
     }
 }
 
-/// The painted text area: shapes wrapped lines, then paints selection, text and caret and
-/// installs the platform input handler.
-struct TextArea {
-    composer: Entity<Composer>,
-    theme: Theme,
-    placeholder: SharedString,
-}
+// ---- drawing ------------------------------------------------------------------------------
 
-struct Prepaint {
-    lines: Vec<WrappedLine>,
-    starts: Vec<usize>,
-    placeholder: Vec<WrappedLine>,
-    selection: Vec<PaintQuad>,
-    cursor: Option<PaintQuad>,
-    line_height: Pixels,
-}
-
-fn run_for(style: &TextStyle, color: Hsla, len: usize) -> TextRun {
-    TextRun {
-        len,
-        font: style.font(),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }
-}
-
-/// Shapes `text` (split at newlines, wrapped at `width`), underlining the IME `marked` range.
-fn shape(
-    window: &Window,
-    style: &TextStyle,
-    text: &SharedString,
-    color: Hsla,
-    marked: Option<&Range<usize>>,
-    width: Option<Pixels>,
-) -> Vec<WrappedLine> {
-    let base = run_for(style, color, text.len());
-    let runs = match marked {
-        Some(m) if m.end <= text.len() && m.start < m.end => vec![
-            TextRun {
-                len: m.start,
-                ..base.clone()
-            },
-            TextRun {
-                len: m.end - m.start,
-                underline: Some(UnderlineStyle {
-                    color: Some(color),
-                    thickness: px(1.0),
-                    wavy: false,
-                }),
-                ..base.clone()
-            },
-            TextRun {
-                len: text.len() - m.end,
-                ..base
-            },
-        ],
-        _ => vec![base],
-    };
-    let font_size = style.font_size.to_pixels(window.rem_size());
-    window
-        .text_system()
-        .shape_text(text.clone(), font_size, &runs, width, None)
-        .map(|lines| lines.into_iter().collect())
-        .unwrap_or_default()
-}
-
-fn row_count(lines: &[WrappedLine]) -> usize {
-    lines
-        .iter()
-        .map(|l| l.wrap_boundaries().len() + 1)
-        .sum::<usize>()
-        .max(1)
-}
-
-/// Selection rectangles for `range`, relative to the text origin: one per visual row, and a
-/// small stub where the selection takes in a newline.
-fn selection_rects(
-    lines: &[WrappedLine],
-    starts: &[usize],
-    line_height: Pixels,
-    width: Pixels,
-    range: &Range<usize>,
-) -> Vec<Bounds<Pixels>> {
-    let mut rects = Vec::new();
-    let mut top = px(0.0);
-    for (line, &start) in lines.iter().zip(starts) {
-        let end = start + line.len();
-        let height = line.size(line_height).height;
-        let takes_newline = range.end > end && range.start <= end;
-        if range.end > start && range.start <= end {
-            let a = range.start.max(start) - start;
-            let b = range.end.min(end) - start;
-            if a < b || takes_newline {
-                let pa = line.position_for_index(a, line_height).unwrap_or_default();
-                let pb = line.position_for_index(b, line_height).unwrap_or_default();
-                let row =
-                    |p: Point<Pixels>| (f32::from(p.y) / f32::from(line_height)).round() as usize;
-                for r in row(pa)..=row(pb) {
-                    let x0 = if r == row(pa) { pa.x } else { px(0.0) };
-                    let mut x1 = if r == row(pb) { pb.x } else { width };
-                    if r == row(pb) && takes_newline {
-                        x1 += px(6.0);
+impl Composer {
+    fn placeholder(&self, cx: &App) -> SharedString {
+        match &self.mode {
+            Mode::Home => "What should Reno orchestrate?".into(),
+            Mode::Reason => "Why? The agent reads this. Optional.".into(),
+            Mode::Steer(run) => {
+                let store = self.store.read(cx);
+                let bot = store
+                    .state()
+                    .run(run)
+                    .and_then(|r| summary::parse_title(&r.title).bot.map(str::to_owned))
+                    .unwrap_or_else(|| "the run".to_owned());
+                match self.steer_state(cx) {
+                    Some(SteerState::Ended(_)) => format!("{bot} has finished").into(),
+                    Some(SteerState::Waiting(_)) => {
+                        format!("Steer {bot} when it is running").into()
                     }
-                    rects.push(Bounds::new(
-                        point(x0, top + line_height * r),
-                        size(x1 - x0, line_height),
-                    ));
+                    _ => format!("Steer {bot}\u{2026} (delivered at the next step)").into(),
                 }
             }
         }
-        top += height;
-    }
-    rects
-}
-
-impl Element for TextArea {
-    type RequestLayoutState = ();
-    type PrepaintState = Prepaint;
-
-    fn id(&self) -> Option<ElementId> {
-        None
     }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
+    fn class_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<gpui::Stateful<gpui::Div>> {
+        Class::ALL
+            .map(|class| {
+                let selected = class == self.class;
+                div()
+                    .id(SharedString::from(format!("class-{}", class.label())))
+                    .debug_selector(move || format!("class-{}", class.label()))
+                    .h(px(26.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(999.0))
+                    .text_size(px(13.0))
+                    .cursor_pointer()
+                    .when(selected, |c| {
+                        c.bg(theme.accent.opacity(0.18)).text_color(theme.accent)
+                    })
+                    .when(!selected, |c| {
+                        c.bg(theme.raised.opacity(0.5))
+                            .text_color(theme.muted)
+                            .hover(|s| s.text_color(theme.text))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_class(class, cx)))
+                    .child(class.label())
+            })
+            .into()
     }
 
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let (text, marked, min_rows) = {
-            let composer = self.composer.read(cx);
-            (
-                SharedString::from(composer.model.text().to_owned()),
-                composer.model.marked(),
-                if composer.mode == Mode::Reason {
-                    1
+    /// The chips of the attached files.
+    fn attachment_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let chips = self.files.items().iter().enumerate().map(|(i, item)| {
+            div()
+                .id(SharedString::from(format!("attachment-{i}")))
+                .debug_selector(move || format!("attachment-{i}"))
+                .h(px(28.0))
+                .max_w(px(260.0))
+                .pl(px(10.0))
+                .pr(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(999.0))
+                .bg(theme.raised)
+                .border_1()
+                .border_color(theme.hairline)
+                .text_size(px(12.5))
+                .child(icon(Icon::File, 13.0, theme.muted))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(item.name.clone())),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.faint)
+                        .child(SharedString::from(item.size_label())),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("remove-attachment-{i}")))
+                        .debug_selector(move || format!("remove-attachment-{i}"))
+                        .flex_none()
+                        .size(px(20.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(10.0))
+                        .cursor_pointer()
+                        .hover({
+                            let hover = theme.surface;
+                            move |s| s.bg(hover)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(i, cx)))
+                        .child(icon(Icon::X, 11.0, theme.muted)),
+                )
+        });
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .px(px(18.0))
+                .children(chips),
+        )
+    }
+
+    /// The route preview in the foot: who it would go to, and the "why?" toggle.
+    fn route_line(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let line = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .min_w_0()
+            .text_size(px(13.0));
+        let why = |label: &'static str, tone: gpui::Hsla, cx: &mut Context<Self>| {
+            div()
+                .id("why")
+                .debug_selector(|| "why".to_owned())
+                .flex_none()
+                .text_size(px(13.0))
+                .text_color(tone)
+                .cursor_pointer()
+                .border_b_1()
+                .border_color(tone.opacity(0.6))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.why_open = !this.why_open;
+                    cx.notify();
+                }))
+                .child(label)
+        };
+        match &self.preview {
+            Preview::Idle | Preview::Loading => line
+                .debug_selector(|| "route-loading".to_owned())
+                .text_color(theme.faint)
+                .child("Checking where this would go\u{2026}"),
+            Preview::Unavailable(_) => line
+                .debug_selector(|| "route-unavailable".to_owned())
+                .text_color(theme.muted)
+                .child(icon(Icon::Route, 14.0, theme.faint))
+                .child("Route unavailable")
+                .child(why("why?", theme.faint, cx)),
+            Preview::Ready(decision) => {
+                let view = routing::view(decision);
+                let passed_over = !view.rejected.is_empty();
+                let tone = if passed_over {
+                    theme.warning
                 } else {
-                    MIN_ROWS
-                },
-            )
-        };
-        let style = window.text_style();
-        let line_height = window.line_height();
-        let color = self.theme.text;
-        let mut layout = Style::default();
-        layout.size.width = relative(1.0).into();
-        let id = window.request_measured_layout(layout, move |known, available, window, _| {
-            let width = known.width.or(match available.width {
-                AvailableSpace::Definite(w) => Some(w),
-                _ => None,
-            });
-            let lines = shape(window, &style, &text, color, marked.as_ref(), width);
-            let rows = row_count(&lines).clamp(min_rows, MAX_ROWS);
-            size(width.unwrap_or_default(), line_height * rows)
-        });
-        (id, ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        let composer = self.composer.read(cx);
-        let text = SharedString::from(composer.model.text().to_owned());
-        let selection = composer.model.selection();
-        let caret = composer.model.caret();
-        let marked = composer.model.marked();
-        let focused = composer.focus_handle.is_focused(window);
-        let style = window.text_style();
-        let line_height = window.line_height();
-
-        let lines = shape(
-            window,
-            &style,
-            &text,
-            self.theme.text,
-            marked.as_ref(),
-            Some(bounds.size.width),
-        );
-        let placeholder = if text.is_empty() {
-            shape(
-                window,
-                &style,
-                &self.placeholder,
-                self.theme.faint,
-                None,
-                Some(bounds.size.width),
-            )
-        } else {
-            Vec::new()
-        };
-        let starts = line_starts(lines.iter().map(WrappedLine::len));
-
-        let accent = self.theme.accent;
-        let selection_quads =
-            selection_rects(&lines, &starts, line_height, bounds.size.width, &selection)
-                .into_iter()
-                .map(|r| {
-                    fill(
-                        Bounds::new(bounds.origin + r.origin, r.size),
-                        accent.opacity(0.28),
-                    )
-                })
-                .collect();
-
-        let cursor = (focused && selection.is_empty()).then(|| {
-            let at = lines
-                .iter()
-                .zip(&starts)
-                .scan(px(0.0), |top, (line, &start)| {
-                    let line_top = *top;
-                    *top += line.size(line_height).height;
-                    Some((line, start, line_top))
-                })
-                .find(|(line, start, _)| caret <= start + line.len())
-                .and_then(|(line, start, top)| {
-                    line.position_for_index(caret - start, line_height)
-                        .map(|p| point(p.x, top + p.y))
-                })
-                .unwrap_or_default();
-            fill(
-                Bounds::new(bounds.origin + at, size(px(1.5), line_height)),
-                self.theme.text,
-            )
-        });
-
-        Prepaint {
-            lines,
-            starts,
-            placeholder,
-            selection: selection_quads,
-            cursor,
-            line_height,
+                    theme.faint
+                };
+                match &view.chosen {
+                    Some(chosen) => {
+                        let how = match &decision.rule_matched {
+                            reno_proto::RuleMatched::BotPreference { bot } => bot.clone(),
+                            reno_proto::RuleMatched::ExplicitExecutor => "named".to_owned(),
+                            reno_proto::RuleMatched::Default => "default".to_owned(),
+                        };
+                        line.child(kit::exec_glyph(theme, &chosen.id, 14.0))
+                            .child(
+                                div()
+                                    .id("route-name")
+                                    .debug_selector(|| "route-name".to_owned())
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(chosen.name.clone())),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.muted)
+                                    .child(SharedString::from(format!("\u{b7} {how}"))),
+                            )
+                            .child(why("why?", tone, cx))
+                    }
+                    None => line
+                        .debug_selector(|| "route-none".to_owned())
+                        .text_color(theme.warning)
+                        .child("No executor available")
+                        .child(why("why?", theme.warning, cx)),
+                }
+            }
         }
     }
 
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let focus_handle = self.composer.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.composer.clone()),
-            cx,
-        );
-        let line_height = prepaint.line_height;
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for quad in prepaint.selection.drain(..) {
-                window.paint_quad(quad);
-            }
-            let mut top = px(0.0);
-            let painted = if prepaint.lines.is_empty() || self.composer.read(cx).model.is_empty() {
-                &prepaint.placeholder
-            } else {
-                &prepaint.lines
-            };
-            for line in painted {
-                let _ = line.paint(
-                    bounds.origin + point(px(0.0), top),
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
+    /// The "why?" list under the foot: the rule, the order, and each executor passed over.
+    fn why_panel(&self, theme: &Theme) -> gpui::Div {
+        let panel = div()
+            .debug_selector(|| "why-panel".to_owned())
+            .px(px(22.0))
+            .pb(px(14.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .text_size(px(12.5))
+            .text_color(theme.muted);
+        match &self.preview {
+            Preview::Idle | Preview::Loading => panel.child("Asking the daemon where this would go\u{2026}"),
+            Preview::Unavailable(reason) => panel.child(SharedString::from(format!(
+                "The route could not be previewed: {reason}. The daemon still routes the task when you send it."
+            ))),
+            Preview::Ready(decision) => {
+                let view = routing::view(decision);
+                let label = |text: &'static str| {
+                    div()
+                        .flex_none()
+                        .w(px(58.0))
+                        .text_color(theme.faint)
+                        .child(text)
+                };
+                let mut panel = panel.child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(label("Rule"))
+                        .child(SharedString::from(view.rule.clone())),
                 );
-                top += line.size(line_height).height;
+                if view.order.len() > 1 {
+                    let order = view
+                        .order
+                        .iter()
+                        .map(|n| n.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(" \u{2192} ");
+                    panel = panel.child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(label("Order"))
+                            .child(SharedString::from(order)),
+                    );
+                }
+                for (i, rejected) in view.rejected.iter().enumerate() {
+                    panel = panel.child(
+                        div()
+                            .id(SharedString::from(format!("rejected-{i}")))
+                            .debug_selector(move || format!("rejected-{i}"))
+                            .flex()
+                            .gap(px(8.0))
+                            .child(label(if i == 0 { "Passed over" } else { "" }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(rejected.who.name.clone())),
+                                    )
+                                    .when_some(rejected.who.secondary(), |d, id| {
+                                        d.child(
+                                            div()
+                                                .text_color(theme.faint)
+                                                .child(SharedString::from(id.to_owned())),
+                                        )
+                                    })
+                                    .child(SharedString::from(rejected.reason.clone())),
+                            ),
+                    );
+                }
+                if view.chosen.is_none() {
+                    panel = panel.child(
+                        div()
+                            .text_color(theme.warning)
+                            .child("Nothing can take this task right now. Fix an executor on the Executors screen."),
+                    );
+                }
+                panel
             }
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
-            }
-        });
+        }
+    }
 
-        let lines = std::mem::take(&mut prepaint.lines);
-        let starts = std::mem::take(&mut prepaint.starts);
-        self.composer.update(cx, |composer, _| {
-            composer.layout = Some(TextLayout {
-                text: composer.model.text().to_owned(),
-                lines,
-                starts,
-                bounds,
-                line_height,
-            });
-        });
+    /// The round button at the foot's right: Stop, Steer, Send or nothing to send.
+    fn action_button(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        if self.shows_stop(cx) {
+            let Mode::Steer(run) = self.mode.clone() else {
+                unreachable!("only a steer box shows Stop");
+            };
+            return div()
+                .id("stop")
+                .debug_selector(|| "stop".to_owned())
+                .flex_none()
+                .size(px(34.0))
+                .rounded(px(17.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.text)
+                .cursor_pointer()
+                .child(icon(Icon::Stop, 14.0, theme.canvas))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let run = run.clone();
+                    this.store.update(cx, |store, cx| store.cancel_run(run, cx));
+                }));
+        }
+        let can_send = self.can_send(cx);
+        kit::send_button(theme, can_send)
+            .debug_selector(|| "send".to_owned())
+            .when(can_send, |s| {
+                s.on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+            })
     }
 }
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
-        let route = route::route_for(self.class);
-        let can_send = self.can_send(cx);
         let focused = self.focus_handle.is_focused(window);
         let entity = cx.entity();
-
-        let placeholder: SharedString = match &self.mode {
-            Mode::Home => "What should Reno orchestrate?".into(),
-            Mode::Reason => "Why? The agent reads this. Optional.".into(),
-            Mode::Steer(run) => {
-                let state = self.store.read(cx);
-                let summary = state.state().run(run);
-                let bot = summary
-                    .and_then(|r| summary::parse_title(&r.title).bot.map(str::to_owned))
-                    .unwrap_or_else(|| "the run".to_owned());
-                if self.target_live(cx) {
-                    format!("Steer {bot}\u{2026} (delivered at the next step)").into()
-                } else {
-                    format!("Follow up with {bot}\u{2026} (not available yet)").into()
-                }
-            }
-        };
-
         let reason = self.mode == Mode::Reason;
+        let enabled = self.input_enabled(cx);
+        let sending = self.store.read(cx).is_sending();
+
+        let min_rows = if self.mode == Mode::Home {
+            HOME_ROWS
+        } else {
+            1
+        };
         let text_area = div()
+            .id("composer-text")
             .w_full()
             .px(px(if reason { 14.0 } else { 22.0 }))
             .pt(px(if reason { 9.0 } else { 18.0 }))
-            .cursor(CursorStyle::IBeam)
+            .cursor(if enabled {
+                CursorStyle::IBeam
+            } else {
+                CursorStyle::Arrow
+            })
             .font_weight(if reason {
                 FontWeight::NORMAL
             } else {
@@ -941,57 +1515,19 @@ impl Render for Composer {
             .text_size(px(if reason { 13.5 } else { 15.0 }))
             .line_height(px(if reason { 20.0 } else { 23.0 }))
             .text_color(theme.text)
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .when(enabled, |d| {
+                d.on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+            })
+            .on_scroll(cx.listener(Self::on_scroll))
             .child(TextArea {
                 composer: entity,
                 theme,
-                placeholder,
-            });
-
-        let class_chips = Class::ALL.map(|class| {
-            let selected = class == self.class;
-            div()
-                .id(SharedString::from(format!("class-{}", class.label())))
-                .debug_selector(move || format!("class-{}", class.label()))
-                .h(px(26.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .rounded(px(999.0))
-                .text_size(px(13.0))
-                .cursor_pointer()
-                .when(selected, |c| {
-                    c.bg(theme.accent.opacity(0.18)).text_color(theme.accent)
-                })
-                .when(!selected, |c| {
-                    c.bg(theme.raised.opacity(0.5))
-                        .text_color(theme.muted)
-                        .hover(|s| s.text_color(theme.text))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.set_class(class, cx)))
-                .child(class.label())
-        });
-
-        let why = div()
-            .id("why")
-            .text_size(px(13.0))
-            .text_color(theme.faint)
-            .cursor_pointer()
-            .border_b_1()
-            .border_color(theme.faint.opacity(0.6))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.why_open = !this.why_open;
-                cx.notify();
-            }))
-            .child("why?");
-
-        let send = kit::send_button(&theme, can_send)
-            .debug_selector(|| "send".to_owned())
-            .when(can_send, |s| {
-                s.on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+                placeholder: self.placeholder(cx),
+                min_rows,
+                disabled: !enabled,
             });
 
         let foot = match &self.mode {
@@ -1003,31 +1539,13 @@ impl Render for Composer {
                 .pb(px(14.0))
                 .child(
                     kit::icon_button(&theme, "attach", Icon::Clip, 28.0)
-                        .on_click(|_, _, cx| toast::not_yet(cx, "Attachments")),
+                        .debug_selector(|| "attach".to_owned())
+                        .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
                 )
-                .children(class_chips)
+                .children(self.class_chips(&theme, cx))
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .text_size(px(13.0))
-                        .child(kit::exec_glyph(&theme, route.executor_id, 14.0))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .child(route.executor),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.muted)
-                                .child(format!("{} \u{b7} {}", route.model, route.bot)),
-                        )
-                        .child(why),
-                )
-                .child(send),
+                .child(self.route_line(&theme, cx))
+                .child(self.action_button(&theme, cx)),
             Mode::Reason => div()
                 .px(px(14.0))
                 .pb(px(8.0))
@@ -1041,6 +1559,18 @@ impl Render for Composer {
                 let model = summary
                     .and_then(|r| r.model.clone())
                     .unwrap_or_else(|| "model".to_owned());
+                let state = self.steer_state(cx);
+                let note: Option<(SharedString, gpui::Hsla)> = match &state {
+                    Some(SteerState::Ended(why) | SteerState::Waiting(why)) => {
+                        Some((why.clone().into(), theme.muted))
+                    }
+                    _ if self.sent_note.is_some() => {
+                        Some(("Sent \u{b7} delivered at the next step".into(), theme.faint))
+                    }
+                    _ if sending => Some(("Sending\u{2026}".into(), theme.faint)),
+                    _ => None,
+                };
+                let ended = matches!(state, Some(SteerState::Ended(_)));
                 div()
                     .flex()
                     .items_center()
@@ -1050,13 +1580,29 @@ impl Render for Composer {
                     .child(
                         kit::chip(&theme, "")
                             .child(kit::exec_glyph(&theme, executor, 13.0))
-                            .child(model),
+                            .child(SharedString::from(format!(
+                                "{} \u{b7} {model}",
+                                summary::executor_name(executor)
+                            ))),
                     )
+                    .when_some(note, |d, (text, tone)| {
+                        d.child(
+                            div()
+                                .id("composer-note")
+                                .debug_selector(|| "composer-note".to_owned())
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(tone)
+                                .child(text),
+                        )
+                    })
                     .child(div().flex_1())
-                    .child(send)
+                    .when(!ended, |d| d.child(self.action_button(&theme, cx)))
             }
         };
 
+        let home = self.mode == Mode::Home;
         div()
             .id("composer")
             .key_context(CONTEXT)
@@ -1066,6 +1612,11 @@ impl Render for Composer {
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_backspace))
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_delete_word_back))
+            .on_action(cx.listener(Self::on_delete_word_forward))
+            .on_action(cx.listener(Self::on_delete_line_back))
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_left))
             .on_action(cx.listener(Self::on_right))
             .on_action(cx.listener(Self::on_up))
@@ -1074,6 +1625,14 @@ impl Render for Composer {
             .on_action(cx.listener(Self::on_select_right))
             .on_action(cx.listener(Self::on_select_up))
             .on_action(cx.listener(Self::on_select_down))
+            .on_action(cx.listener(Self::on_word_left))
+            .on_action(cx.listener(Self::on_word_right))
+            .on_action(cx.listener(Self::on_select_word_left))
+            .on_action(cx.listener(Self::on_select_word_right))
+            .on_action(cx.listener(Self::on_doc_start))
+            .on_action(cx.listener(Self::on_doc_end))
+            .on_action(cx.listener(Self::on_select_doc_start))
+            .on_action(cx.listener(Self::on_select_doc_end))
             .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_home))
             .on_action(cx.listener(Self::on_end))
@@ -1083,6 +1642,15 @@ impl Render for Composer {
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_character_palette))
+            .when(home, |d| {
+                let accent = theme.accent;
+                d.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.add_attachments(paths.paths(), cx);
+                }))
+                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                    style.border_color(accent.opacity(0.7))
+                })
+            })
             .w_full()
             .flex()
             .flex_col()
@@ -1095,21 +1663,11 @@ impl Render for Composer {
             } else {
                 theme.hairline
             })
+            .opacity(if enabled { 1.0 } else { 0.72 })
             .child(text_area)
+            .children(self.attachment_row(&theme, cx))
             .child(foot)
-            .when(self.why_open, |c| {
-                c.child(
-                    div()
-                        .px(px(22.0))
-                        .pb(px(14.0))
-                        .text_size(px(12.5))
-                        .text_color(theme.muted)
-                        .child(format!(
-                            "Routing preview (placeholder until the daemon exposes routing): {}",
-                            route.why.join(" · ")
-                        )),
-                )
-            })
+            .when(home && self.why_open, |c| c.child(self.why_panel(&theme)))
     }
 }
 
@@ -1118,9 +1676,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn line_starts_skip_the_newline_between_lines() {
-        assert_eq!(line_starts([3, 0, 5]), [0, 4, 5]);
-        assert_eq!(line_starts([]), Vec::<usize>::new());
-        assert_eq!(line_starts([0]), [0]);
+    fn a_live_run_takes_a_steer_a_finished_one_says_why_it_does_not() {
+        assert_eq!(steer_state(Some(RunStatus::Running)), SteerState::Steering);
+        assert_eq!(
+            steer_state(Some(RunStatus::WaitingApproval)),
+            SteerState::Steering
+        );
+        assert_eq!(steer_state(Some(RunStatus::Queued)), SteerState::Steering);
+        assert!(matches!(
+            steer_state(Some(RunStatus::Interrupted)),
+            SteerState::Waiting(_)
+        ));
+        assert!(matches!(steer_state(None), SteerState::Waiting(_)));
+        let SteerState::Ended(why) = steer_state(Some(RunStatus::Succeeded)) else {
+            panic!("a passed run is over");
+        };
+        assert!(why.starts_with("This run passed."), "{why}");
+        let SteerState::Ended(why) = steer_state(Some(RunStatus::Cancelled)) else {
+            panic!("a stopped run is over");
+        };
+        assert!(why.starts_with("This run was stopped."), "{why}");
     }
 }

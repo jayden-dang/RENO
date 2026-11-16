@@ -6,6 +6,7 @@
 
 pub(crate) mod executors;
 pub(crate) mod inbox;
+pub(crate) mod routing;
 pub(crate) mod runs;
 pub(crate) mod settings;
 pub(crate) mod triggers;

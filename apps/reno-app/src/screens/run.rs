@@ -17,7 +17,7 @@ use reno_proto::{Approval, ApprovalDecision, ExecutorId, RunId, RunSummary, Stop
 use super::ScreenEvent;
 use super::executors::health_lines;
 use crate::actions::GoRuns;
-use crate::store::Store;
+use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Outcome, Row, ToolEntry};
 use crate::ui::composer::Composer;
@@ -27,6 +27,7 @@ use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
 use crate::ui::toast;
 use crate::vm::executors as executor_facts;
+use crate::vm::routing::{self, RoutingView};
 use crate::vm::runs as run_facts;
 
 /// Width of the transcript column and of the steer input.
@@ -125,6 +126,15 @@ impl RunScreen {
 
     /// Rebuilds the rows from the store and tells the list what changed.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // The routing decision changes while a run starts (a fallback): read it again when the
+        // run's executor or status does. Asking is a no-op while the answer held is current.
+        let run = self.run.clone();
+        self.store
+            .update(cx, |store, cx| store.ensure_routing(&run, cx));
+        let routing = match self.store.read(cx).routing(&self.run) {
+            Some(RunRouting::Ready(Some(decision))) => Some(routing::view(decision)),
+            _ => None,
+        };
         let built = {
             let state = self.store.read(cx).state();
             let events = state
@@ -138,7 +148,9 @@ impl RunScreen {
                     .as_deref()
                     .unwrap_or_else(|| summary::parse_title(&r.title).what)
             });
-            transcript::build_rows(prompt, events, &pending)
+            let mut built = transcript::build_rows(prompt, events, &pending);
+            built.rows = transcript::with_routing(built.rows, routing);
+            built
         };
         self.apply(built);
     }
@@ -179,33 +191,7 @@ impl RunScreen {
             ),
             None => (String::new(), format!("Run {}", self.run), None),
         };
-        let live = status.is_some_and(|s| !s.is_terminal());
         let run_id = self.run.clone();
-
-        let stop = div()
-            .id("stop")
-            .debug_selector(|| "stop".to_owned())
-            .h(px(30.0))
-            .px(px(14.0))
-            .flex()
-            .items_center()
-            .gap(px(7.0))
-            .rounded(px(999.0))
-            .border_1()
-            .border_color(theme.hairline)
-            .text_size(px(13.5))
-            .text_color(theme.text)
-            .cursor_pointer()
-            .hover({
-                let hover = theme.raised;
-                move |s| s.bg(hover)
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let run = this.run.clone();
-                this.store.update(cx, |store, cx| store.cancel_run(run, cx));
-            }))
-            .child(icon(Icon::Stop, 13.0, theme.text))
-            .child("Stop");
 
         div()
             .flex_none()
@@ -242,7 +228,6 @@ impl RunScreen {
                 )
             })
             .child(div().flex_1())
-            .when(live, |h| h.child(stop))
             .child(
                 kit::icon_button(theme, "details-toggle", Icon::Sidebar, 30.0)
                     .debug_selector(|| "details-toggle".to_owned())
@@ -276,6 +261,7 @@ impl RunScreen {
             Row::Question { questions, .. } => question_card(&theme, questions),
             Row::Approval { key, approval } => self.approval_card(&theme, *key, approval, cx),
             Row::Asked { line, .. } => event_line(&theme, Icon::Shield, theme.muted, line),
+            Row::Routing { key, view } => self.routing_card(&theme, *key, view, cx),
             Row::Done {
                 stop,
                 result,
@@ -292,6 +278,161 @@ impl RunScreen {
                 16.0
             }))
             .child(body)
+            .into_any_element()
+    }
+
+    /// "Routed to Codex: Claude Code was signed out", with the "why" collapsed.
+    fn routing_card(
+        &self,
+        theme: &Theme,
+        key: Key,
+        view: &RoutingView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.open.contains(&key);
+        let chosen = view.chosen.clone();
+        let head = div()
+            .id("routing-why")
+            .debug_selector(|| "routing-why".to_owned())
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(13.5))
+            .when(view.has_detail(), |d| {
+                d.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
+            })
+            .child(icon(Icon::Route, 14.0, theme.faint))
+            .when_some(chosen.clone(), |d, who| {
+                d.child(kit::exec_glyph(theme, &who.id, 14.0))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(SharedString::from(view.headline.clone())),
+            )
+            .when_some(
+                chosen.and_then(|c| c.secondary().map(str::to_owned)),
+                |d, id| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.faint)
+                            .child(SharedString::from(id)),
+                    )
+                },
+            )
+            .when_some(view.because.clone(), |d, because| {
+                d.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.muted)
+                        .child(SharedString::from(format!("\u{b7} {because}"))),
+                )
+            })
+            .child(div().flex_1())
+            .when(view.has_detail(), |d| {
+                d.child(icon(
+                    if open { Icon::ChevDown } else { Icon::Fwd },
+                    14.0,
+                    theme.muted,
+                ))
+            });
+
+        let label = |text: &'static str| {
+            div()
+                .flex_none()
+                .w(px(86.0))
+                .text_color(theme.faint)
+                .child(text)
+        };
+        let named = |name: String, id: Option<String>, then: String| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(SharedString::from(name)),
+                )
+                .when_some(id, |d, id| {
+                    d.child(div().text_color(theme.faint).child(SharedString::from(id)))
+                })
+                .child(SharedString::from(then))
+        };
+        let detail = div()
+            .pt(px(8.0))
+            .pl(px(22.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .text_size(px(13.0))
+            .text_color(theme.muted)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(label("Rule"))
+                    .child(SharedString::from(view.rule.clone())),
+            )
+            .when(view.order.len() > 1, |d| {
+                let order = view
+                    .order
+                    .iter()
+                    .map(|n| n.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" \u{2192} ");
+                d.child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(label("Order"))
+                        .child(SharedString::from(order)),
+                )
+            })
+            .children(view.rejected.iter().enumerate().map(|(i, r)| {
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(label(if i == 0 { "Passed over" } else { "" }))
+                    .child(named(
+                        r.who.name.clone(),
+                        r.who.secondary().map(str::to_owned),
+                        r.reason.clone(),
+                    ))
+            }))
+            .children(view.walk.iter().enumerate().map(|(i, step)| {
+                let to = step
+                    .to
+                    .as_ref()
+                    .map_or_else(|| "nothing left".to_owned(), |t| t.name.clone());
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(label(if i == 0 { "Fallback" } else { "" }))
+                    .child(named(
+                        format!("{} \u{2192} {to}", step.from.name),
+                        None,
+                        step.reason.clone(),
+                    ))
+            }));
+
+        div()
+            .id("routing-card")
+            .debug_selector(|| "routing-card".to_owned())
+            .w_full()
+            .px(px(14.0))
+            .py(px(10.0))
+            .rounded(px(12.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
+            .child(head)
+            .when(open, |d| d.child(detail))
             .into_any_element()
     }
 
@@ -577,7 +718,17 @@ impl RunScreen {
                     .items_center()
                     .gap(px(7.0))
                     .child(kit::exec_glyph(theme, run.executor.as_str(), 14.0))
-                    .child(summary::executor_name(run.executor.as_str()).to_owned())
+                    .child(summary::executor_name(run.executor.as_str()))
+                    .when(
+                        run.executor.as_str() != summary::executor_name(run.executor.as_str()),
+                        |d| {
+                            d.child(
+                                div()
+                                    .text_color(theme.faint)
+                                    .child(SharedString::from(run.executor.as_str().to_owned())),
+                            )
+                        },
+                    )
                     .into_any_element(),
             ))
             .when_some(access, |p, access| p.child(kv("Access", text(access))))

@@ -11,6 +11,7 @@ pub(crate) mod page;
 pub(crate) mod palette;
 pub(crate) mod running_pill;
 pub(crate) mod sidebar;
+pub(crate) mod text_area;
 pub(crate) mod text_model;
 pub(crate) mod theme;
 pub(crate) mod toast;

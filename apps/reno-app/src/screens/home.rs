@@ -11,7 +11,6 @@ use gpui::{
 use reno_client::ConnectionStatus;
 
 use crate::actions::{GoInbox, OpenPalette};
-use crate::route;
 use crate::store::Store;
 use crate::summary::{self, Finding};
 use crate::ui::attention::AttentionDock;
@@ -20,6 +19,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::sidebar::daemon_label;
 use crate::ui::theme::{self, Theme};
+use crate::vm::routing::{self, Class};
 
 /// The suggestion chips: label, then the text they put in the composer.
 const SUGGESTIONS: [(&str, &str); 3] = [
@@ -70,10 +70,28 @@ impl HomeScreen {
         let composer = cx.new(|cx| Composer::new(store.clone(), cx));
         let dock = cx.new(|cx| AttentionDock::new(store.clone(), cx));
         Self {
-            _store: cx.observe(&store, |_, _, cx| cx.notify()),
+            _store: cx.observe(&store, |this, _, cx| {
+                this.read_class_bots(cx);
+                cx.notify();
+            }),
             store,
             composer,
             dock,
+        }
+    }
+
+    /// The settings line shows the access the selected class's bot grants: read the bots' definitions.
+    fn read_class_bots(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<_> = {
+            let state = self.store.read(cx).state();
+            Class::ALL
+                .iter()
+                .filter_map(|class| routing::bot_to_fetch(state, *class))
+                .collect()
+        };
+        for (name, version) in wanted {
+            self.store
+                .update(cx, |store, cx| store.ensure_bot(&name, version, cx));
         }
     }
 
@@ -198,7 +216,7 @@ impl Render for HomeScreen {
         let theme = theme::current(cx);
         let headline = self.headline(cx);
         let class = self.composer.read(cx).class();
-        let route = route::route_for(class);
+        let access = routing::class_access(self.store.read(cx).state(), class);
         let offline_reason = match &headline {
             Headline::Offline { reason } => Some(reason.clone()),
             _ => None,
@@ -212,8 +230,14 @@ impl Render for HomeScreen {
             .px(px(14.0))
             .text_size(px(13.5))
             .text_color(theme.muted)
-            .child(setting(&theme, Icon::Branch, route.worktree))
-            .child(setting(&theme, Icon::Shield, route.access))
+            .child(setting(
+                &theme,
+                Icon::Branch,
+                "writes in an isolated worktree",
+            ))
+            .when_some(access, |d, access| {
+                d.child(setting(&theme, Icon::Shield, access))
+            })
             .child(setting(&theme, Icon::Clock, "now · or schedule"));
 
         let suggestions = div()

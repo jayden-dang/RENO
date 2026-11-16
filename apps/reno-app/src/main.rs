@@ -8,8 +8,8 @@
 
 mod actions;
 mod app;
+mod attach;
 mod nav;
-mod route;
 mod screens;
 mod store;
 mod summary;

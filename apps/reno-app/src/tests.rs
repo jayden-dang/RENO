@@ -9,19 +9,22 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    AppContext as _, Entity, EntityInputHandler as _, Modifiers, TestAppContext, VisualTestContext,
+    px, size,
+};
 use reno_client::{ConnectionStatus, Update};
 use reno_proto::{ApprovalDecision, RunId, RunStatus, StopReason};
 
 use crate::app::RootView;
 use crate::nav::Nav;
-use crate::route::Class;
 use crate::screens::home::Headline;
 use crate::store::Store;
 use crate::summary::{self, Attention, Finding};
 use crate::transcript::{Outcome, Row};
 use crate::ui::theme::Appearance;
 use crate::ui::toast;
+use crate::vm::routing::Class;
 
 pub(crate) fn wait_until(
     cx: &mut TestAppContext,
@@ -339,6 +342,7 @@ fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::Question { .. } => "question",
             Row::Approval { .. } => "approval",
             Row::Asked { .. } => "asked",
+            Row::Routing { .. } => "routing",
             Row::Done { .. } => "done",
         })
         .collect()
@@ -511,8 +515,11 @@ fn opening_a_run_from_the_sidebar_shows_its_transcript(cx: &mut TestAppContext) 
         rows.iter().any(|r| matches!(r, Row::Approval { .. }))
     });
     let rows = rows_of(vcx, &root);
-    assert_eq!(kinds(&rows), ["prompt", "prose", "tools", "approval"]);
-    let Row::Prose { text, .. } = &rows[1] else {
+    assert_eq!(
+        kinds(&rows),
+        ["prompt", "routing", "prose", "tools", "approval"]
+    );
+    let Row::Prose { text, .. } = &rows[2] else {
         panic!("expected prose");
     };
     assert!(text.starts_with("Three crates have minor updates"));
@@ -543,7 +550,7 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     });
     assert_eq!(
         seen.last().unwrap(),
-        &["prompt", "prose", "tools", "prose", "done"]
+        &["prompt", "routing", "prose", "tools", "prose", "done"]
     );
     for pair in seen.windows(2) {
         assert!(
@@ -552,7 +559,7 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
         );
     }
     let rows = rows_of(vcx, &root);
-    let Row::Prose { text, .. } = &rows[1] else {
+    let Row::Prose { text, .. } = &rows[2] else {
         panic!("expected prose");
     };
     assert_eq!(
@@ -699,12 +706,17 @@ fn a_finished_run_cannot_be_steered(cx: &mut TestAppContext) {
         !steer.read_with(vcx, |c, cx| c.can_send(cx)),
         "follow-up is disabled in Phase 0"
     );
-    click(vcx, "send");
-    steer.update_in(vcx, |c, window, cx| c.submit(window, cx));
+    // The box says why instead of offering a button, and takes no typing.
+    assert!(!painted(vcx, "send") && !painted(vcx, "stop"));
+    assert!(painted(vcx, "composer-note"));
+    steer.update_in(vcx, |c, window, cx| {
+        c.replace_text_in_range(None, "typed", window, cx);
+        c.submit(window, cx);
+    });
     assert_eq!(
         steer.read_with(vcx, |c, _| c.text().to_owned()),
         "one more thing",
-        "the draft stays"
+        "the draft stays, and nothing typed gets in"
     );
     let rows = rows_of(vcx, &root);
     assert!(

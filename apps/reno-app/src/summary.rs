@@ -53,11 +53,6 @@ pub(crate) fn is_live(status: RunStatus) -> bool {
     )
 }
 
-/// Whether a run can still be steered: it has not ended, and has not been interrupted.
-pub(crate) fn is_steerable(status: RunStatus) -> bool {
-    !status.is_terminal() && status != RunStatus::Interrupted
-}
-
 pub(crate) fn attention(state: &State) -> Attention {
     let runs = state.runs();
     let bots: BTreeSet<&str> = runs
@@ -136,15 +131,35 @@ pub(crate) fn status_label(status: RunStatus) -> &'static str {
     }
 }
 
-/// An executor's display name.
-pub(crate) fn executor_name(id: &str) -> &str {
+/// An executor's display name, for every place the UI names one.
+///
+/// The wire carries only the id, so the name is made here: the known ones by table, an ACP
+/// agent (`acp.grok`, `acp.own.mine`) from the last part of its id ("Grok", "Mine"), and any
+/// other id with its words capitalised. The id stays on screen as secondary text.
+pub(crate) fn executor_name(id: &str) -> String {
     match id {
-        "claude-code" => "Claude Code",
-        "codex" => "Codex",
-        "grok" => "Grok",
-        "opencode" => "OpenCode",
-        other => other,
+        "claude-code" => "Claude Code".to_owned(),
+        "codex" => "Codex".to_owned(),
+        "opencode" => "OpenCode".to_owned(),
+        other => {
+            let tail = other.strip_prefix("acp.").unwrap_or(other);
+            title_case(tail.rsplit('.').next().unwrap_or(tail))
+        }
     }
+}
+
+/// "gemini-cli" becomes "Gemini Cli".
+fn title_case(id: &str) -> String {
+    id.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// "06:00 UTC": the time of day of a timestamp. The app has no time-zone data yet, so the zone is
