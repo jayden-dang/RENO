@@ -1,5 +1,5 @@
-//! Navigation destinations. Home, Inbox, Runs, Triggers and Settings are built; the rest are
-//! listed in the sidebar and say so when chosen. Executors waits for its `executor.list` RPC.
+//! Navigation destinations. Home, Inbox, Runs, Triggers, Executors and Settings are built; the
+//! rest are listed in the sidebar and say so when chosen.
 
 use crate::ui::icon::Icon;
 
@@ -16,6 +16,7 @@ pub(crate) enum Nav {
     Evaluations,
     Improvements,
     Triggers,
+    Executors,
     /// Reached from the sidebar footer and the palette, not from a row.
     Settings,
 }
@@ -32,12 +33,13 @@ impl Nav {
     ];
 
     /// The "ORCHESTRATION" group.
-    pub(crate) const ORCHESTRATION: [Self; 5] = [
+    pub(crate) const ORCHESTRATION: [Self; 6] = [
         Self::Boards,
         Self::Messages,
         Self::Evaluations,
         Self::Improvements,
         Self::Triggers,
+        Self::Executors,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Nav {
             Self::Evaluations => "Evaluations",
             Self::Improvements => "Improvements",
             Self::Triggers => "Triggers",
+            Self::Executors => "Executors",
             Self::Settings => "Settings",
         }
     }
@@ -71,6 +74,7 @@ impl Nav {
             Self::Evaluations => Icon::Eval,
             Self::Improvements => Icon::Wand,
             Self::Triggers => Icon::Clock,
+            Self::Executors => Icon::Cpu,
             Self::Settings => Icon::Settings,
         }
     }
@@ -79,7 +83,12 @@ impl Nav {
     pub(crate) const fn is_built(self) -> bool {
         matches!(
             self,
-            Self::Home | Self::Inbox | Self::Runs | Self::Triggers | Self::Settings
+            Self::Home
+                | Self::Inbox
+                | Self::Runs
+                | Self::Triggers
+                | Self::Executors
+                | Self::Settings
         )
     }
 }
@@ -91,22 +100,18 @@ mod tests {
     #[test]
     fn the_built_screens_and_unique_labels() {
         let all: Vec<Nav> = Nav::MAIN.into_iter().chain(Nav::ORCHESTRATION).collect();
-        assert_eq!(
-            all.len(),
-            11,
-            "Executors is left out until executor.list exists"
-        );
+        assert_eq!(all.len(), 12);
         let built: Vec<_> = all
             .iter()
             .filter(|n| n.is_built())
             .map(|n| n.label())
             .collect();
-        assert_eq!(built, ["Home", "Inbox", "Runs", "Triggers"]);
+        assert_eq!(built, ["Home", "Inbox", "Runs", "Triggers", "Executors"]);
         assert!(Nav::Settings.is_built() && !all.contains(&Nav::Settings));
         let mut labels: Vec<_> = all.iter().map(|n| n.label()).collect();
         labels.push(Nav::Settings.label());
         labels.sort_unstable();
         labels.dedup();
-        assert_eq!(labels.len(), 12);
+        assert_eq!(labels.len(), 13);
     }
 }

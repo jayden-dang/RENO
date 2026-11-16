@@ -132,6 +132,8 @@ pub(crate) struct Facts {
     pub(crate) usage: Option<Usage>,
     /// The model the harness reported in `Started`.
     pub(crate) model: Option<String>,
+    /// Why the run failed, when `Done` says so in words.
+    pub(crate) diagnostic: Option<String>,
 }
 
 /// The result of [`build_rows`].
@@ -283,6 +285,7 @@ pub(crate) fn build_rows(
                 result,
                 diagnostic,
             } => {
+                built.facts.diagnostic.clone_from(diagnostic);
                 built.rows.push(Row::Done {
                     key,
                     stop: *stop,

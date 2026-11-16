@@ -20,6 +20,7 @@ use reno_proto::{FiringOutcome, RunId};
 use crate::actions::{self, GoInbox, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
 use crate::nav::Nav;
 use crate::screens::ScreenEvent;
+use crate::screens::executors::ExecutorsScreen;
 use crate::screens::home::HomeScreen;
 use crate::screens::inbox::InboxScreen;
 use crate::screens::run::RunScreen;
@@ -47,7 +48,7 @@ pub(crate) struct Options {
     pub(crate) quit_after: Option<Duration>,
     /// `RENO_REDUCE_MOTION=1`: force reduced motion (the OS setting is not read, see `motion`).
     pub(crate) reduce_motion: bool,
-    /// `RENO_OPEN=inbox|runs|triggers|settings`: open on that screen (screenshots, reviews).
+    /// `RENO_OPEN=inbox|runs|triggers|executors|settings`: open on that screen (screenshots, reviews).
     pub(crate) open: Option<Nav>,
 }
 
@@ -77,6 +78,7 @@ impl Options {
             Some("inbox") => Some(Nav::Inbox),
             Some("runs") => Some(Nav::Runs),
             Some("triggers") => Some(Nav::Triggers),
+            Some("executors") => Some(Nav::Executors),
             Some("settings") => Some(Nav::Settings),
             Some(other) => return Err(format!("unknown RENO_OPEN screen: {other}")),
         };
@@ -202,6 +204,7 @@ enum Screen {
     Runs,
     Run(Entity<RunScreen>),
     Triggers,
+    Executors,
     Settings,
 }
 
@@ -211,6 +214,7 @@ pub(crate) struct RootView {
     inbox: Entity<InboxScreen>,
     runs: Entity<RunsScreen>,
     triggers: Entity<TriggersScreen>,
+    executors: Entity<ExecutorsScreen>,
     settings: Entity<SettingsScreen>,
     toasts: Entity<Toasts>,
     screen: Screen,
@@ -218,6 +222,8 @@ pub(crate) struct RootView {
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
     appearance_override: Option<Appearance>,
     palette: Option<Entity<Palette>>,
+    /// Hears the open run screen ("Open Executors").
+    _run_events: Option<Subscription>,
     /// The run a trigger just started; the Triggers screen keeps showing, the toast says so.
     pending_fired: Option<RunId>,
     focus_handle: FocusHandle,
@@ -236,12 +242,14 @@ impl RootView {
         let inbox = cx.new(|cx| InboxScreen::new(store.clone(), cx));
         let runs = cx.new(|cx| RunsScreen::new(store.clone(), cx));
         let triggers = cx.new(|cx| TriggersScreen::new(store.clone(), cx));
+        let executors = cx.new(|cx| ExecutorsScreen::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
         let subscriptions =
             vec![
                 cx.subscribe_in(&inbox, window, Self::on_screen_event),
                 cx.subscribe_in(&runs, window, Self::on_screen_event),
                 cx.subscribe_in(&triggers, window, Self::on_screen_event),
+                cx.subscribe_in(&executors, window, Self::on_screen_event),
                 cx.observe(&store, |_, _, cx| cx.notify()),
                 cx.observe(&toasts, |_, _, cx| cx.notify()),
                 cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
@@ -256,6 +264,17 @@ impl RootView {
                             );
                         }
                         StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
+                        StoreEvent::ExecutorInstalled(id) => {
+                            toast::push(
+                                cx,
+                                toast::Tone::Info,
+                                "Executor installed",
+                                format!(
+                                    "{} is installed. Check its sign-in on the Executors screen.",
+                                    crate::summary::executor_name(id)
+                                ),
+                            );
+                        }
                         StoreEvent::TriggerFired { name, outcome, run } => {
                             let what = match outcome {
                                 FiringOutcome::Fired => format!("{name} started a run."),
@@ -283,6 +302,7 @@ impl RootView {
             inbox,
             runs,
             triggers,
+            executors,
             settings,
             pending_fired: None,
             toasts,
@@ -290,6 +310,7 @@ impl RootView {
             sidebar_hidden: false,
             appearance_override,
             palette: None,
+            _run_events: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -304,6 +325,7 @@ impl RootView {
     ) {
         match event {
             ScreenEvent::OpenRun(run) => self.open_run(run.clone(), window, cx),
+            ScreenEvent::OpenExecutors => self.navigate(Nav::Executors, window, cx),
         }
     }
 
@@ -314,6 +336,7 @@ impl RootView {
             Screen::Inbox => Nav::Inbox,
             Screen::Runs | Screen::Run(_) => Nav::Runs,
             Screen::Triggers => Nav::Triggers,
+            Screen::Executors => Nav::Executors,
             Screen::Settings => Nav::Settings,
         }
     }
@@ -339,6 +362,11 @@ impl RootView {
     #[cfg(test)]
     pub(crate) fn triggers(&self) -> &Entity<TriggersScreen> {
         &self.triggers
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executors(&self) -> &Entity<ExecutorsScreen> {
+        &self.executors
     }
 
     #[cfg(test)]
@@ -393,6 +421,7 @@ impl RootView {
                 Screen::Runs
             }
             Nav::Triggers => Screen::Triggers,
+            Nav::Executors => Screen::Executors,
             Nav::Settings => {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Settings
@@ -413,6 +442,7 @@ impl RootView {
         self.pending_fired = None;
         let store = self.store.clone();
         let screen = cx.new(|cx| RunScreen::new(store, run, cx));
+        self._run_events = Some(cx.subscribe_in(&screen, window, Self::on_screen_event));
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
         cx.notify();
@@ -553,6 +583,7 @@ impl Render for RootView {
                 Screen::Runs => self.runs.clone().into_any_element(),
                 Screen::Run(run) => run.clone().into_any_element(),
                 Screen::Triggers => self.triggers.clone().into_any_element(),
+                Screen::Executors => self.executors.clone().into_any_element(),
                 Screen::Settings => self.settings.clone().into_any_element(),
             });
 
@@ -632,7 +663,7 @@ mod tests {
                 ("RENO_APPEARANCE", "light"),
                 ("RENO_QUIT_AFTER_MS", "250"),
                 ("RENO_REDUCE_MOTION", "1"),
-                ("RENO_OPEN", "triggers"),
+                ("RENO_OPEN", "executors"),
             ],
         );
         assert_eq!(
@@ -642,7 +673,7 @@ mod tests {
                 appearance: Some(Appearance::Light),
                 quit_after: Some(Duration::from_millis(250)),
                 reduce_motion: true,
-                open: Some(Nav::Triggers),
+                open: Some(Nav::Executors),
             })
         );
     }

@@ -517,6 +517,13 @@ impl State {
         &self.triggers
     }
 
+    /// Whether the connected daemon negotiated `feature`. False until a daemon has answered.
+    pub fn supports(&self, feature: &str) -> bool {
+        self.daemon
+            .as_ref()
+            .is_some_and(|d| d.hello.features.iter().any(|f| f == feature))
+    }
+
     /// Every executor with its last health, by id.
     pub fn executors(&self) -> &[ExecutorInfo] {
         &self.executors

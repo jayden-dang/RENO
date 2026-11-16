@@ -1,7 +1,8 @@
-//! Screens: Home, Inbox, Runs, one Run, Triggers and Settings.
+//! Screens: Home, Inbox, Runs, one Run, Triggers, Executors and Settings.
 
 use reno_proto::RunId;
 
+pub(crate) mod executors;
 pub(crate) mod home;
 pub(crate) mod inbox;
 pub(crate) mod run;
@@ -14,4 +15,6 @@ pub(crate) mod triggers;
 pub(crate) enum ScreenEvent {
     /// Open a run's transcript.
     OpenRun(RunId),
+    /// Show the Executors screen.
+    OpenExecutors,
 }

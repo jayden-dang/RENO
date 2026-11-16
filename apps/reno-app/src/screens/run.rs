@@ -12,18 +12,21 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
     ListState, Render, SharedString, Subscription, Window, div, list, prelude::*, px,
 };
-use reno_proto::{Approval, ApprovalDecision, RunId, RunSummary, StopReason};
+use reno_proto::{Approval, ApprovalDecision, ExecutorId, RunId, RunSummary, StopReason};
 
+use super::ScreenEvent;
+use super::executors::health_lines;
 use crate::actions::GoRuns;
 use crate::store::Store;
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Outcome, Row, ToolEntry};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit::{self, MONO};
+use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
 use crate::ui::toast;
+use crate::vm::executors as executor_facts;
 use crate::vm::runs as run_facts;
 
 /// Width of the transcript column and of the steer input.
@@ -47,6 +50,8 @@ pub(crate) struct RunScreen {
     steer: Entity<Composer>,
     _store: Subscription,
 }
+
+impl gpui::EventEmitter<ScreenEvent> for RunScreen {}
 
 impl RunScreen {
     pub(crate) fn new(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
@@ -479,10 +484,18 @@ impl RunScreen {
 
     // --- details --------------------------------------------------------------------------
 
-    fn details(&self, theme: &Theme, cx: &gpui::App) -> impl IntoElement {
+    fn details(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let run = store.state().run(&self.run);
         let now = store.now_ms();
+        // A run its executor could not take shows that executor's health, as the daemon has it
+        // now, so the reason and the way out are on the same screen.
+        let failed = executor_facts::failed_executor(
+            store.state(),
+            &self.run,
+            self.facts.diagnostic.as_deref(),
+            now,
+        );
 
         let section = |title: &'static str| {
             div()
@@ -603,9 +616,65 @@ impl RunScreen {
                 .child("none yet")
                 .into_any_element(),
         };
+        if let Some(failed) = failed {
+            pane = pane
+                .child(div().h(px(14.0)))
+                .child(section("EXECUTOR HEALTH"))
+                .child(health_lines(theme, &failed.row))
+                .child(self.executor_actions(&failed.row, theme, cx));
+        }
         pane.child(div().h(px(14.0)))
             .child(section("USAGE"))
             .child(kv("Tokens", usage))
+    }
+
+    /// Open the Executors screen, or check this executor again.
+    fn executor_actions(
+        &self,
+        row: &executor_facts::ExecutorRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let checking = row
+            .id
+            .parse::<ExecutorId>()
+            .is_ok_and(|id| self.store.read(cx).is_checking(Some(&id)));
+        let check = {
+            let id = row.id.parse::<ExecutorId>().ok();
+            cx.listener(move |this, _, _, cx| {
+                if let Some(id) = id.clone() {
+                    this.store
+                        .update(cx, |store, cx| store.refresh_executors(Some(id), cx));
+                }
+            })
+        };
+        let open = cx.listener(|_, _, _, cx| cx.emit(ScreenEvent::OpenExecutors));
+        let check_button = kit::pill_button(
+            theme,
+            "run-check-executor",
+            if checking {
+                "Checking\u{2026}"
+            } else {
+                "Check again"
+            },
+            Tone::Quiet,
+        );
+        let check_button = if checking {
+            check_button.opacity(0.4).cursor_default()
+        } else {
+            check_button.on_click(check)
+        };
+        div()
+            .pt(px(10.0))
+            .flex()
+            .flex_wrap()
+            .gap(px(8.0))
+            .child(
+                kit::pill_button(theme, "run-open-executors", "Open Executors", Tone::Quiet)
+                    .on_click(open),
+            )
+            .child(check_button)
+            .into_any_element()
     }
 }
 

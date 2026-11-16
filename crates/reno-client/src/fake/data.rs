@@ -309,11 +309,18 @@ pub(super) enum Scenario {
     /// Work, then stay live until the run is cancelled or steered; a steer ends it in success.
     /// Prompt: `/long`. For tests that need a run that is still going when they act on it.
     Long,
+    /// Fail at once, as the real daemon does for an executor that is not usable (not installed,
+    /// too old, signed out): a `NoEligibleExecutor` diagnostic and nothing run. Prompt:
+    /// `/refused`. For tests of what the Run screen says about the executor.
+    Refused,
 }
 
 impl Scenario {
     pub(super) fn of(prompt: &str) -> Self {
         let lower = prompt.to_lowercase();
+        if lower.starts_with("/refused") {
+            return Self::Refused;
+        }
         if lower.starts_with("/long") {
             return Self::Long;
         }
