@@ -29,10 +29,19 @@ impl Script {
     /// Waits one step, then applies `f`. False when the run was cancelled meanwhile or `f`
     /// declined, in which case the script stops.
     async fn step(&self, f: impl FnOnce(&mut World, &RunId) -> bool) -> bool {
+        let pause = self.shared.config.step;
         tokio::select! {
             biased;
             () = self.token.cancelled() => return false,
-            () = tokio::time::sleep(self.shared.config.step) => {}
+            // No pause: the step runs as soon as the task is scheduled, with no timer to wait
+            // for, so a test on the real clock does not depend on how loaded the machine is.
+            () = async {
+                if pause.is_zero() {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(pause).await;
+                }
+            } => {}
         }
         self.apply(f)
     }

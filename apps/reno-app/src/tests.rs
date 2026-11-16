@@ -46,9 +46,18 @@ pub(crate) fn fake_store(cx: &mut TestAppContext) -> Entity<Store> {
     cx.update(gpui_tokio::init);
     cx.new(|cx| {
         let mut store = Store::connecting();
-        store.start_fake(cx);
+        store.start_fake_with(instant_script(), cx);
         store
     })
+}
+
+/// The fake daemon with no pause between its script steps: the run goes as fast as the tasks are
+/// scheduled, which does not depend on timers or on how busy the machine is.
+pub(crate) fn instant_script() -> reno_client::fake::FakeConfig {
+    reno_client::fake::FakeConfig {
+        step: Duration::ZERO,
+        ..reno_client::fake::FakeConfig::default()
+    }
 }
 
 pub(crate) fn approvals(cx: &TestAppContext, store: &Entity<Store>) -> usize {
@@ -566,7 +575,10 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
         text.trim_end(),
         "I will start by looking at the repository layout."
     );
-    assert_eq!(run_status(vcx, &store, &run), Some(RunStatus::Succeeded));
+    // The run list is its own feed and can trail the run's own events.
+    wait_drawn(vcx, |vcx| {
+        run_status(vcx, &store, &run) == Some(RunStatus::Succeeded)
+    });
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let usage = screen.read_with(vcx, |s, _| s.facts().usage).unwrap();
     assert_eq!((usage.input, usage.output), (1200, 340));
