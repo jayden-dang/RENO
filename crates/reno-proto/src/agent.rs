@@ -275,7 +275,11 @@ mod tests {
     fn a_token_digest_is_sixty_four_lowercase_hex_digits() {
         let digest = token_digest("rnt_abc");
         assert_eq!(digest.len(), 64);
-        assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
         assert_ne!(digest, token_digest("rnt_abd"));
     }
 

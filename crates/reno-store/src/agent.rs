@@ -19,9 +19,7 @@
 //!
 //! The store never reads the clock: every call takes `now`.
 
-use reno_proto::{
-    BOARD_KEY_MAX_BYTES, BOARD_MAX_KEYS, BOARD_VALUE_MAX_BYTES, RunId, token_digest,
-};
+use reno_proto::{BOARD_KEY_MAX_BYTES, BOARD_MAX_KEYS, BOARD_VALUE_MAX_BYTES, RunId, token_digest};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
