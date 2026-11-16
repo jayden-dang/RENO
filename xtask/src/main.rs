@@ -20,6 +20,9 @@ use std::process::{Command, ExitCode};
 use serde::Deserialize;
 
 mod bench;
+mod conformance;
+mod live;
+mod schema_diff;
 mod stats;
 
 /// Allowed normal and build dependencies between workspace members (ARCH-1).
@@ -159,10 +162,14 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("check") => check(),
         Some("bench") => bench::run(&args[1..]),
+        Some("conformance-live") => live::run(&args[1..]),
+        Some("codex-schema-diff") => schema_diff::run(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask check | {}",
-                &bench::USAGE["usage: ".len()..]
+                "usage: cargo xtask check | {}\n       {}\n       {}",
+                &bench::USAGE["usage: ".len()..],
+                &live::USAGE["usage: ".len()..],
+                &schema_diff::USAGE["usage: ".len()..]
             );
             ExitCode::from(2)
         }

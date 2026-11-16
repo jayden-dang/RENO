@@ -10,5 +10,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+reno-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
