@@ -554,6 +554,7 @@ impl Executor for AcpExecutor {
                 // memory, instructions) Reno has no common switch for; a run loads whatever the
                 // agent loads for its owner. Never claimed (ARCH-15).
                 isolates_user_config: false,
+                model_aliases: vec![],
             },
         }
     }

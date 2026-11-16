@@ -866,7 +866,11 @@ fn trigger_list_and_fire_through_the_cli() {
         "{shown}"
     );
     assert!(shown.contains("cwd ~/code/app"), "{shown}");
-    assert_eq!(shown.matches("cwd").count(), 1, "only nightly names one: {shown}");
+    assert_eq!(
+        shown.matches("cwd").count(),
+        1,
+        "only nightly names one: {shown}"
+    );
 
     let fired = world.reno(&["trigger", "fire", "poke"]);
     assert!(fired.status.success(), "{}", text(&fired.stderr));
@@ -1170,6 +1174,19 @@ fn run_show_explains_which_executor_was_chosen_and_why() {
     assert_eq!(json["run"]["executor"], "mock");
     assert_eq!(json["routing"]["chosen"], "mock");
     assert_eq!(json["routing"]["ranked"][0], "mock");
+
+    // A model asked for by an alias is shown with the one the run started with.
+    let aliased = world.reno(&["task", "run", "--model", "sonnet", "aliased"]);
+    assert!(aliased.status.success(), "{}", text(&aliased.stderr));
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let shown = text(&world.reno(&["run", "show", &id]).stdout);
+    assert!(
+        shown.contains("model: sonnet (started as mock-1)"),
+        "{shown}"
+    );
+    let json = world.json(&["run", "show", &id]);
+    assert_eq!(json["run"]["model"], "sonnet");
+    assert_eq!(json["startedModel"], "mock-1");
 
     // A pinned executor is its own rule.
     let pinned = world.reno(&["task", "run", "--executor", "mock", "pinned"]);

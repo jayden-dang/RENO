@@ -534,6 +534,7 @@ impl Executor for ClaudeExecutor {
                 // `--setting-sources project,local` and two environment switches (see
                 // `isolation_args`), unless the run opts in with `inherit_user_config`.
                 isolates_user_config: true,
+                model_aliases: catalog::aliases(),
             },
         }
     }

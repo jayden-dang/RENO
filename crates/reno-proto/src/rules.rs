@@ -451,8 +451,16 @@ mod tests {
         };
         let ok = cmd("git commit -m \"a\n\nCo-Authored-By: x\" -- Cargo.lock");
         assert!(holds(&m, StandingEffect::Allow, &ok));
-        assert!(!holds(&m, StandingEffect::Allow, &cmd("git commit -m a\nrm x")));
-        assert!(!holds(&m, StandingEffect::Allow, &cmd("git commit -m \"a\nb")));
+        assert!(!holds(
+            &m,
+            StandingEffect::Allow,
+            &cmd("git commit -m a\nrm x")
+        ));
+        assert!(!holds(
+            &m,
+            StandingEffect::Allow,
+            &cmd("git commit -m \"a\nb")
+        ));
     }
 
     #[test]

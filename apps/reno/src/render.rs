@@ -301,9 +301,17 @@ pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<St
 }
 
 /// The model a run asks for (a task's, else its bot's) or reports, for `run show`; `None` when
-/// the executor's default applies and it has not started.
-pub(crate) fn model_line(run: &RunSummary) -> Option<String> {
-    run.model.as_ref().map(|model| format!("model: {model}"))
+/// there is none. `started` is the model the executor reported when the run began: when it
+/// differs from what was asked for (an alias such as `sonnet`), both are shown.
+pub(crate) fn model_line(run: &RunSummary, started: Option<&str>) -> Option<String> {
+    match (run.model.as_deref(), started) {
+        (Some(asked), Some(started)) if asked != started => {
+            Some(format!("model: {asked} (started as {started})"))
+        }
+        (Some(model), _) => Some(format!("model: {model}")),
+        (None, Some(started)) => Some(format!("model: {started}")),
+        (None, None) => None,
+    }
 }
 
 /// One run on one line: `id  status  executor  title`.
@@ -1033,11 +1041,26 @@ mod tests {
             "status": "queued", "attempt": 1, "title": "t", "createdAtMs": 1, "updatedAtMs": 1
         }))
         .unwrap();
-        assert_eq!(model_line(&run), None);
+        assert_eq!(model_line(&run, None), None);
         run.model = Some("claude-sonnet-4-6".into());
         assert_eq!(
-            model_line(&run).as_deref(),
+            model_line(&run, None).as_deref(),
             Some("model: claude-sonnet-4-6")
+        );
+        assert_eq!(
+            model_line(&run, Some("claude-sonnet-4-6")).as_deref(),
+            Some("model: claude-sonnet-4-6")
+        );
+        // An alias is shown with the model the run actually started with.
+        run.model = Some("sonnet".into());
+        assert_eq!(
+            model_line(&run, Some("claude-sonnet-5-5")).as_deref(),
+            Some("model: sonnet (started as claude-sonnet-5-5)")
+        );
+        run.model = None;
+        assert_eq!(
+            model_line(&run, Some("mock-1")).as_deref(),
+            Some("model: mock-1")
         );
     }
 

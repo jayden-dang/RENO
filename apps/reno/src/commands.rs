@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures::StreamExt;
@@ -132,6 +133,10 @@ struct Shown {
     run: RunSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     routing: Option<RoutingDecision>,
+    /// The model the executor reported when the run began, when it differs from `run.model`
+    /// (which is what was asked for, for example an alias).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_model: Option<String>,
 }
 
 async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
@@ -144,12 +149,18 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
         .run_routing(&args.run)
         .await
         .map_err(|e| env.explain(e))?;
+    let started = started_model(&client, &run.run_id).await;
     if env.json {
-        print_json(&Shown { run, routing })?;
+        let started_model = started.filter(|model| run.model.as_ref() != Some(model));
+        print_json(&Shown {
+            run,
+            routing,
+            started_model,
+        })?;
         return Ok(ExitCode::SUCCESS);
     }
     print_line(render::run_line(&run))?;
-    if let Some(line) = render::model_line(&run) {
+    if let Some(line) = render::model_line(&run, started.as_deref()) {
         print_line(line)?;
     }
     for line in render::stop_lines(&run) {
@@ -164,6 +175,21 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
         None => print_line("routing: none recorded (the run predates routing)")?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The model the run's executor reported when it began (the first event of the journal), if the
+/// journal has one to read at once. A run that has not started yet has none, and is not waited
+/// for.
+async fn started_model(client: &Client, run: &RunId) -> Option<String> {
+    let mut events = Box::pin(client.run_events(run.clone(), None));
+    let first = tokio::time::timeout(Duration::from_millis(750), events.next())
+        .await
+        .ok()??
+        .ok()?;
+    match first.event {
+        ExecEvent::Started { model, .. } => Some(model),
+        _ => None,
+    }
 }
 
 async fn run_tail(env: &Env, args: RunTail) -> anyhow::Result<ExitCode> {
