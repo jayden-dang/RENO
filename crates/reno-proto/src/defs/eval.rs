@@ -282,7 +282,8 @@ fn allow_matches(glob: &GlobMatcher, line: &str) -> bool {
 /// - Inside single quotes everything is literal.
 /// - Inside double quotes `$`, a backtick and `\` are dangerous (substitution, escapes) and make
 ///   it compound; `( ) ; & | < > { } * ? [ ] ~ #` are literal.
-/// - A newline or carriage return is compound wherever it is, and an unbalanced quote is compound.
+/// - A newline inside a balanced quote is literal text (a multi-line commit message). A newline
+///   outside quotes, a carriage return anywhere, and an unbalanced quote are compound.
 pub(super) fn chains_or_redirects(line: &str) -> bool {
     #[derive(Clone, Copy, PartialEq)]
     enum Q {
@@ -293,10 +294,9 @@ pub(super) fn chains_or_redirects(line: &str) -> bool {
     let mut quote = Q::None;
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
-        if matches!(c, '\n' | '\r') {
-            return true;
-        }
         match (quote, c) {
+            (Q::Single | Q::Double, '\n') => {}
+            (_, '\n' | '\r') => return true,
             (Q::Single, '\'') | (Q::Double, '"') => quote = Q::None,
             (Q::Single, _) => {}
             (Q::Double, '$' | '`' | '\\') => return true,
@@ -896,6 +896,8 @@ mod tests {
             "git commit -m a\\;b",
             "git commit -m \"it's\"",
             "git commit -m 'say \"hi\"'",
+            "git commit -m \"a\nb\"",
+            "git commit -m 'a\nb'",
         ] {
             assert!(git_commit_allowed(line), "{line:?}");
         }
@@ -915,8 +917,7 @@ mod tests {
             "git commit -m 'x",
             "git commit -m x\\\ny",
             "git commit -m x\\",
-            "git commit -m \"a\nb\"",
-            "git commit -m 'a\nb'",
+            "git commit -m \"a\" \nb",
             "git commit -m \\' ; rm y",
             "git commit -m 'a'; rm y",
             "git commit -m $(id)",
@@ -942,9 +943,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_newline_inside_balanced_quotes_is_literal_to_an_allow_glob() {
+        let p = policy(
+            r#"
+            default = "ask"
+            [[rules]]
+            note = "commit"
+            effect = "allow"
+            match = { action = "command", command = "git commit *" }
+            "#,
+        );
+        let multi =
+            "git commit -m \"chore(deps): cargo update\n\nCo-Authored-By: x\" -- Cargo.lock";
+        assert_eq!(named(&eval(&p, None, &command(multi))).0, "allow");
+        let single = "git commit -m 'a\nb' -- f";
+        assert_eq!(named(&eval(&p, None, &command(single))).0, "allow");
+        for bad in [
+            "git commit -m x\nrm -rf y",
+            "git commit -m \"a\" \\\nrm y",
+            "git commit -m \"a\nb -- f",
+            "git commit -m \"a\n$(rm y)\"",
+            "git commit -m \"a\nb\\n\"",
+            "git commit -m \"a\"\nrm y",
+            "git commit -m \"a\r\nb\"",
+        ] {
+            assert_ne!(named(&eval(&p, None, &command(bad))).0, "allow", "{bad:?}");
+        }
+    }
+
     mod quote_props {
         use super::super::chains_or_redirects;
         use proptest::prelude::*;
+
+        proptest! {
+            /// A newline outside quotes is always compound, wherever quoted text sits around it.
+            #[test]
+            fn an_unquoted_newline_is_never_allow_matchable(
+                quoted in "[a-z\n ;|]{0,8}",
+                single in any::<bool>(),
+                before in "[a-z ]{0,6}",
+                after in "[a-z ]{0,6}",
+            ) {
+                let q = if single { format!("'{quoted}'") } else { format!("\"{quoted}\"") };
+                let line = format!("git commit -m {q} {before}\n{after}");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+                let line = format!("git commit -m {q} {before}\\\n{after}");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+            }
+
+            /// A newline inside balanced quotes alone is not compound.
+            #[test]
+            fn a_quoted_newline_alone_is_literal(
+                parts in proptest::collection::vec(
+                    proptest::sample::select(&["\n", "\n\n", "x", " ", ";", "|", "&"][..]), 0..8),
+                single in any::<bool>(),
+            ) {
+                let q: String = parts.concat();
+                let line = if single {
+                    format!("git commit -m '{q}' -- f")
+                } else {
+                    format!("git commit -m \"{q}\" -- f")
+                };
+                prop_assert!(!chains_or_redirects(&line), "{line:?}");
+            }
+
+            /// An unbalanced quote with a newline is always compound.
+            #[test]
+            fn an_unbalanced_quote_with_newline_is_compound(
+                body in "[a-z\n ]{0,8}",
+                single in any::<bool>(),
+            ) {
+                let q = if single { '\'' } else { '"' };
+                let line = format!("git commit -m {q}{body}\nmore");
+                prop_assert!(chains_or_redirects(&line), "{line:?}");
+            }
+        }
 
         const OPS: &[&str] = &[
             ";", "&", "|", "(", ")", "<", ">", "`", "$(", "\n", "&&", "||",

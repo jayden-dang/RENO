@@ -39,6 +39,12 @@ impl Tab {
     }
 }
 
+/// The policy table's fixed cells, kept narrow so the Matches column (which flexes, and holds a
+/// command glob) takes the rest of the row. Rows and header share [`page::cell`], so they align.
+const EFFECT_W: f32 = 64.0;
+const SCOPE_W: f32 = 120.0;
+const NOTE_W: f32 = 170.0;
+
 pub(crate) struct SettingsScreen {
     store: Entity<Store>,
     tab: Tab,
@@ -457,44 +463,34 @@ impl SettingsScreen {
                 _ => theme.warning,
             };
             page::table_row(theme, i + 1 == count)
+                .child(page::cell(
+                    div().child(kit::tag(tone, rule.effect.clone())),
+                    Some(EFFECT_W),
+                ))
                 .child(
-                    div()
-                        .flex_none()
-                        .w(px(70.0))
-                        .child(kit::tag(tone, rule.effect.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
+                    page::cell(div(), None)
                         .font_family(MONO)
                         .text_size(px(12.5))
                         .child(rule.matches.clone()),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(150.0))
-                        .text_color(theme.muted)
-                        .child(rule.scope.clone()),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(220.0))
-                        .text_color(theme.muted)
-                        .child(rule.note.clone()),
-                )
+                .child(page::cell(
+                    div().text_color(theme.muted).child(rule.scope.clone()),
+                    Some(SCOPE_W),
+                ))
+                .child(page::cell(
+                    div().text_color(theme.muted).child(rule.note.clone()),
+                    Some(NOTE_W),
+                ))
         });
         out.push(
             page::table_frame(theme, page::table())
                 .child(page::table_head(
                     theme,
                     &[
-                        ("Effect", Some(70.0)),
+                        ("Effect", Some(EFFECT_W)),
                         ("Matches", None),
-                        ("Applies to", Some(150.0)),
-                        ("Note", Some(220.0)),
+                        ("Applies to", Some(SCOPE_W)),
+                        ("Note", Some(NOTE_W)),
                     ],
                 ))
                 .children(rows)

@@ -397,6 +397,7 @@ mod tests {
                     plan_mode: false,
                     models,
                     isolates_user_config: false,
+                    model_aliases: vec![],
                 },
             },
             health,

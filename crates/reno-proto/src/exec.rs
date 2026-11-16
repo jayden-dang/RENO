@@ -480,12 +480,40 @@ pub struct ExecutorCaps {
     pub plan_mode: bool,
     /// Models on offer.
     pub models: Vec<ModelInfo>,
+    /// Names the CLI accepts for a model besides the ids in `models`: short aliases that
+    /// resolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.
+    /// Empty when the harness has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_aliases: Vec<String>,
     /// Whether a run is kept from loading the owner's personal configuration for that harness
     /// (its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in
     /// (`inherit_user_config`). Only claimed where the driver enforces it; false means a run
     /// loads whatever the owner's own CLI would (ARCH-15).
     #[serde(default)]
     pub isolates_user_config: bool,
+}
+
+/// The suffix that asks Claude Code for the 1M-token context variant of a model or alias.
+const LONG_CONTEXT_SUFFIX: &str = "[1m]";
+
+impl ExecutorCaps {
+    /// Whether `model` is one of the executor's aliases, with or without the `[1m]` suffix.
+    pub fn is_model_alias(&self, model: &str) -> bool {
+        let base = model.strip_suffix(LONG_CONTEXT_SUFFIX).unwrap_or(model);
+        self.model_aliases
+            .iter()
+            .any(|alias| alias == base || alias == model)
+    }
+
+    /// The id to look `model` up by in a model list: without its `[1m]` suffix when the
+    /// executor has aliases (an executor with none does not know the suffix).
+    pub fn base_model<'a>(&self, model: &'a str) -> &'a str {
+        if self.model_aliases.is_empty() {
+            model
+        } else {
+            model.strip_suffix(LONG_CONTEXT_SUFFIX).unwrap_or(model)
+        }
+    }
 }
 
 /// An installed harness and what it can do.

@@ -192,16 +192,46 @@ pub(crate) fn defs(state: &State) -> DefsView {
     }
 }
 
+/// Whether a rule's tool glob says nothing the action did not: it repeats the action, matches
+/// every tool, or is the one tool that class of action always runs through.
+fn tool_is_implied(action: Option<&str>, tool: &str) -> bool {
+    let tool = tool.to_ascii_lowercase();
+    tool == "*"
+        || action.is_some_and(|action| tool == action)
+        || matches!(
+            (action, tool.as_str()),
+            (Some("command"), "bash" | "shell")
+                | (Some("edit"), "write" | "multiedit")
+                | (Some("network"), "webfetch" | "websearch")
+        )
+}
+
 fn rule_row(rule: &Value) -> RuleRow {
     let matcher = rule.get("match").cloned().unwrap_or(Value::Null);
+    let action = text(&matcher, "action");
     let mut parts = Vec::new();
-    if let Some(action) = text(&matcher, "action") {
+    if let Some(action) = action {
         parts.push(action.to_owned());
     }
-    for (key, label) in [("tool", "tool"), ("command", "command"), ("path", "path")] {
-        if let Some(glob) = text(&matcher, key) {
-            parts.push(format!("{label} `{glob}`"));
-        }
+    if let Some(tool) = text(&matcher, "tool")
+        && !tool_is_implied(action, tool)
+    {
+        parts.push(format!("tool `{tool}`"));
+    }
+    // The action already says "command" or "edit": the pattern is not labelled again.
+    if let Some(glob) = text(&matcher, "command") {
+        parts.push(if action == Some("command") {
+            format!("`{glob}`")
+        } else {
+            format!("command `{glob}`")
+        });
+    }
+    if let Some(glob) = text(&matcher, "path") {
+        parts.push(if matches!(action, Some("edit" | "read")) {
+            format!("`{glob}`")
+        } else {
+            format!("path `{glob}`")
+        });
     }
     let scope = match matcher.get("scope") {
         Some(Value::Array(bots)) => bots
@@ -418,10 +448,41 @@ mod tests {
         let view = policy(&state).unwrap();
         assert_eq!(view.ttl.as_deref(), Some("30m"));
         assert_eq!(view.rules.len(), 3);
-        assert_eq!(view.rules[0].matches, "command command `git reset --hard*`");
+        assert_eq!(view.rules[0].matches, "command `git reset --hard*`");
         assert_eq!(view.rules[0].scope, "all bots");
         assert_eq!(view.rules[1].scope, "builder, keeper");
         assert_eq!(view.rules[2].matches, "anything");
+    }
+
+    #[test]
+    fn a_rule_names_its_action_once_and_its_tool_only_when_that_adds_something() {
+        let row = |matcher: Value| rule_row(&json!({"effect": "deny", "match": matcher})).matches;
+        // The action is said once; the pattern follows without repeating it.
+        assert_eq!(
+            row(json!({"action": "command", "command": "rm *"})),
+            "command `rm *`"
+        );
+        assert_eq!(row(json!({"action": "command"})), "command");
+        assert_eq!(
+            row(json!({"action": "edit", "path": ".github/**"})),
+            "edit `.github/**`"
+        );
+        // A tool the action already implies, or that repeats it, is left out.
+        assert_eq!(
+            row(json!({"action": "command", "tool": "bash", "command": "rm *"})),
+            "command `rm *`"
+        );
+        assert_eq!(row(json!({"action": "edit", "tool": "edit"})), "edit");
+        assert_eq!(row(json!({"action": "command", "tool": "*"})), "command");
+        // One that narrows the action is kept.
+        assert_eq!(
+            row(json!({"action": "mcp_tool", "tool": "github__*"})),
+            "mcp_tool tool `github__*`"
+        );
+        // Without an action the patterns carry their own labels.
+        assert_eq!(row(json!({"command": "rm *"})), "command `rm *`");
+        assert_eq!(row(json!({"path": "src/**"})), "path `src/**`");
+        assert_eq!(row(json!({})), "anything");
     }
 
     #[test]

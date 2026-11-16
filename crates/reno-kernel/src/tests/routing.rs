@@ -78,6 +78,13 @@ impl Fake {
         self
     }
 
+    fn aliases(mut self, aliases: &[&str]) -> Self {
+        let mut descriptor = self.inner.descriptor();
+        descriptor.caps.model_aliases = aliases.iter().map(|a| (*a).to_owned()).collect();
+        self.inner = self.inner.with_descriptor(descriptor);
+        self
+    }
+
     fn says(self, health: HealthProbe) -> Self {
         *self.health.lock().unwrap() = health;
         self
@@ -666,6 +673,24 @@ async fn a_model_the_executor_does_not_list_is_a_warning_and_never_a_refusal() {
     let (run, _) = model_asked(&fx, &listed, None).await;
     assert!(routing_of(&fx, &run).await.warnings.is_empty());
     let (run, _) = model_asked(&fx, &listed, Some("mock-zzz")).await;
+    assert_eq!(routing_of(&fx, &run).await.warnings.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_model_alias_the_executor_accepts_is_not_a_warning() {
+    for model in ["sonnet", "opus[1m]", "mock-1[1m]"] {
+        let fake = Fake::new("mock").aliases(&["sonnet", "opus", "opus[1m]"]);
+        let fx = fx_with_bot(&[&fake], "keeper", &["mock"], &format!("model = {model:?}")).await;
+        let (run, asked) = model_asked(&fx, &fake, None).await;
+        assert_eq!(asked.as_deref(), Some(model));
+        assert!(routing_of(&fx, &run).await.warnings.is_empty(), "{model}");
+    }
+    // Without aliases the same name warns, and so does a suffix the executor does not know.
+    let plain = Fake::new("mock");
+    let fx = fx_with_bot(&[&plain], "keeper", &["mock"], "model = \"sonnet\"").await;
+    let (run, _) = model_asked(&fx, &plain, None).await;
+    assert_eq!(routing_of(&fx, &run).await.warnings.len(), 1);
+    let (run, _) = model_asked(&fx, &plain, Some("mock-1[1m]")).await;
     assert_eq!(routing_of(&fx, &run).await.warnings.len(), 1);
 }
 

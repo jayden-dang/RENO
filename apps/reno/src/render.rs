@@ -301,9 +301,17 @@ pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<St
 }
 
 /// The model a run asks for (a task's, else its bot's) or reports, for `run show`; `None` when
-/// the executor's default applies and it has not started.
-pub(crate) fn model_line(run: &RunSummary) -> Option<String> {
-    run.model.as_ref().map(|model| format!("model: {model}"))
+/// there is none. `started` is the model the executor reported when the run began: when it
+/// differs from what was asked for (an alias such as `sonnet`), both are shown.
+pub(crate) fn model_line(run: &RunSummary, started: Option<&str>) -> Option<String> {
+    match (run.model.as_deref(), started) {
+        (Some(asked), Some(started)) if asked != started => {
+            Some(format!("model: {asked} (started as {started})"))
+        }
+        (Some(model), _) => Some(format!("model: {model}")),
+        (None, Some(started)) => Some(format!("model: {started}")),
+        (None, None) => None,
+    }
 }
 
 /// One run on one line: `id  status  executor  title`.
@@ -540,7 +548,8 @@ pub(crate) fn executor_line(info: &ExecutorInfo) -> String {
     line
 }
 
-/// One trigger on one line: name, kind, status, then what is known of its timing.
+/// One trigger on one line: name, kind, status, bot and the working directory it names, then
+/// what is known of its timing.
 pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
     let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
     let mut line = format!(
@@ -550,6 +559,9 @@ pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
         status_text_of(trigger.status),
         trigger.bot
     );
+    if let Some(cwd) = &trigger.cwd {
+        line.push_str(&format!("  cwd {cwd}"));
+    }
     if let Some(next) = trigger.next_due_at_ms {
         line.push_str(&format!("  next {}", at(next)));
     }
@@ -1007,17 +1019,48 @@ mod tests {
     }
 
     #[test]
+    fn a_trigger_line_shows_the_working_directory_it_names() {
+        let mut trigger: TriggerInfo = serde_json::from_value(serde_json::json!({
+            "name": "nightly", "kind": "cron", "bot": "tester", "version": 1,
+            "status": "scheduled", "failures": 0
+        }))
+        .unwrap();
+        assert!(!trigger_line(&trigger).contains("cwd"));
+        trigger.cwd = Some("~/code/app".into());
+        assert!(
+            trigger_line(&trigger).contains("bot tester  cwd ~/code/app"),
+            "{}",
+            trigger_line(&trigger)
+        );
+    }
+
+    #[test]
     fn the_model_a_run_asks_for_is_a_line_of_run_show() {
         let mut run: RunSummary = serde_json::from_value(serde_json::json!({
             "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
             "status": "queued", "attempt": 1, "title": "t", "createdAtMs": 1, "updatedAtMs": 1
         }))
         .unwrap();
-        assert_eq!(model_line(&run), None);
+        assert_eq!(model_line(&run, None), None);
         run.model = Some("claude-sonnet-4-6".into());
         assert_eq!(
-            model_line(&run).as_deref(),
+            model_line(&run, None).as_deref(),
             Some("model: claude-sonnet-4-6")
+        );
+        assert_eq!(
+            model_line(&run, Some("claude-sonnet-4-6")).as_deref(),
+            Some("model: claude-sonnet-4-6")
+        );
+        // An alias is shown with the model the run actually started with.
+        run.model = Some("sonnet".into());
+        assert_eq!(
+            model_line(&run, Some("claude-sonnet-5-5")).as_deref(),
+            Some("model: sonnet (started as claude-sonnet-5-5)")
+        );
+        run.model = None;
+        assert_eq!(
+            model_line(&run, Some("mock-1")).as_deref(),
+            Some("model: mock-1")
         );
     }
 

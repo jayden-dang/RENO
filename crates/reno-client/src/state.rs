@@ -881,6 +881,7 @@ mod tests {
                     plan_mode: false,
                     models: vec![],
                     isolates_user_config: false,
+                    model_aliases: vec![],
                 },
             },
             health: None,

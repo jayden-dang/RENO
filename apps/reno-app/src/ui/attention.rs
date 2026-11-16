@@ -2,7 +2,8 @@
 //!
 //! Built on [`running_pill`]: the counts are pulsing count pills (the pulse stops under reduced
 //! motion). Clicking the pill expands a stack of approval cards above it. Each card shows the
-//! exact command, with Deny then Approve, which call `Store::decide`. A card is not removed
+//! exact command, with Deny then Approve, which call `Store::decide` (once; `More…` opens the
+//! Inbox, where the answer can reach this run, this bot or always). A card is not removed
 //! locally: it leaves when the daemon reports the new approval list.
 
 use gpui::{
@@ -16,6 +17,7 @@ use super::icon::{Icon, icon};
 use super::kit::{self, MONO};
 use super::running_pill::running_pill;
 use super::theme::{self, Theme};
+use crate::actions::GoInbox;
 use crate::store::Store;
 use crate::summary;
 
@@ -94,6 +96,16 @@ impl AttentionDock {
             }))
         });
 
+        // Deny and Approve answer once. A wider answer (this run, this bot, always) is chosen on
+        // the Inbox card, which this opens, rather than repeated here.
+        let more_button = kit::pill_button(
+            theme,
+            format!("more-{id}"),
+            "More\u{2026}",
+            kit::Tone::Quiet,
+        )
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoInbox), cx));
+
         div()
             .id(SharedString::from(format!("approval-{id}")))
             .w_full()
@@ -162,6 +174,7 @@ impl AttentionDock {
                     .flex_none()
                     .flex()
                     .gap(px(8.0))
+                    .child(more_button)
                     .child(deny_button)
                     .child(approve_button),
             )

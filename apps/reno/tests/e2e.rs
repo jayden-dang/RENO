@@ -470,6 +470,44 @@ fn an_interrupted_run_is_resumed_from_the_command_line() {
     assert!(world.reno(&["daemon", "stop"]).status.success());
 }
 
+#[test]
+fn run_tail_of_a_resumed_run_continues_past_the_first_done() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    world.start_daemon();
+    let mut task = world
+        .command(&["task", "run", "wait for me"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    task.wait_with_output().expect("task run ends");
+    assert!(world.reno(&["run", "resume", &id]).status.success());
+
+    // From the start: the first attempt's Done is followed by the resume, which is followed.
+    let mut follow = world
+        .command(&["run", "tail", &id])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn run tail");
+    read_until(&mut follow, "resumed: attempt 2 continues the session");
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    let rest = follow.wait_with_output().expect("tail ends");
+    let all = text(&rest.stdout);
+    assert!(all.contains("done (interrupted)"), "{all}");
+    assert_eq!(rest.status.code(), Some(1), "{all}");
+
+    // Once both attempts are over, the whole transcript shows both Dones.
+    let full = text(&world.reno(&["run", "tail", &id]).stdout);
+    assert_eq!(full.matches("done (interrupted)").count(), 2, "{full}");
+    assert!(full.contains("resumed: attempt 2"), "{full}");
+
+    assert!(world.reno(&["daemon", "stop"]).status.success());
+}
+
 // ---- definitions --------------------------------------------------------------------------
 
 fn write_def(dir: &Path, rel: &str, text: &str) {
@@ -812,7 +850,7 @@ fn trigger_list_and_fire_through_the_cli() {
     write_def(
         &world.defs_dir(),
         "triggers/nightly.toml",
-        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"UTC\"\n[target]\nbot = \"tester\"\nprompt = \"nightly\"\n",
+        "name = \"nightly\"\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"UTC\"\n[target]\nbot = \"tester\"\nprompt = \"nightly\"\ncwd = \"~/code/app\"\n",
     );
     world.start_daemon();
 
@@ -826,6 +864,12 @@ fn trigger_list_and_fire_through_the_cli() {
     assert!(
         shown.contains("poke") && shown.contains("manual"),
         "{shown}"
+    );
+    assert!(shown.contains("cwd ~/code/app"), "{shown}");
+    assert_eq!(
+        shown.matches("cwd").count(),
+        1,
+        "only nightly names one: {shown}"
     );
 
     let fired = world.reno(&["trigger", "fire", "poke"]);
@@ -1130,6 +1174,19 @@ fn run_show_explains_which_executor_was_chosen_and_why() {
     assert_eq!(json["run"]["executor"], "mock");
     assert_eq!(json["routing"]["chosen"], "mock");
     assert_eq!(json["routing"]["ranked"][0], "mock");
+
+    // A model asked for by an alias is shown with the one the run started with.
+    let aliased = world.reno(&["task", "run", "--model", "sonnet", "aliased"]);
+    assert!(aliased.status.success(), "{}", text(&aliased.stderr));
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let shown = text(&world.reno(&["run", "show", &id]).stdout);
+    assert!(
+        shown.contains("model: sonnet (started as mock-1)"),
+        "{shown}"
+    );
+    let json = world.json(&["run", "show", &id]);
+    assert_eq!(json["run"]["model"], "sonnet");
+    assert_eq!(json["startedModel"], "mock-1");
 
     // A pinned executor is its own rule.
     let pinned = world.reno(&["task", "run", "--executor", "mock", "pinned"]);

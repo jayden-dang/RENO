@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures::StreamExt;
@@ -132,6 +133,10 @@ struct Shown {
     run: RunSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     routing: Option<RoutingDecision>,
+    /// The model the executor reported when the run began, when it differs from `run.model`
+    /// (which is what was asked for, for example an alias).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_model: Option<String>,
 }
 
 async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
@@ -144,12 +149,18 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
         .run_routing(&args.run)
         .await
         .map_err(|e| env.explain(e))?;
+    let started = started_model(&client, &run.run_id).await;
     if env.json {
-        print_json(&Shown { run, routing })?;
+        let started_model = started.filter(|model| run.model.as_ref() != Some(model));
+        print_json(&Shown {
+            run,
+            routing,
+            started_model,
+        })?;
         return Ok(ExitCode::SUCCESS);
     }
     print_line(render::run_line(&run))?;
-    if let Some(line) = render::model_line(&run) {
+    if let Some(line) = render::model_line(&run, started.as_deref()) {
         print_line(line)?;
     }
     for line in render::stop_lines(&run) {
@@ -166,12 +177,28 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The model the run's executor reported when it began (the first event of the journal), if the
+/// journal has one to read at once. A run that has not started yet has none, and is not waited
+/// for.
+async fn started_model(client: &Client, run: &RunId) -> Option<String> {
+    let mut events = Box::pin(client.run_events(run.clone(), None));
+    let first = tokio::time::timeout(Duration::from_millis(750), events.next())
+        .await
+        .ok()??
+        .ok()?;
+    match first.event {
+        ExecEvent::Started { model, .. } => Some(model),
+        _ => None,
+    }
+}
+
 async fn run_tail(env: &Env, args: RunTail) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
     follow(env, &client, args.run, args.from).await
 }
 
-/// Streams a run's events to stdout until its `Done`. Exits 0 only for a completed run, and 1
+/// Streams a run's events to stdout until the stream ends, which it does after the run's final
+/// `Done` (one that a `Resumed` follows is not final). Exits 0 only for a completed run, and 1
 /// for any other end, including a stream that stops without one.
 async fn follow(
     env: &Env,
@@ -186,7 +213,13 @@ async fn follow(
     let mut claimed = HashSet::new();
     while let Some(item) = events.next().await {
         let item = item.map_err(|e| env.explain(e))?;
-        finished = transcript.event(&item)?;
+        // A `Done` ends the run unless a `Resumed` follows it: then the next attempt goes on.
+        if matches!(item.event, ExecEvent::Resumed { .. }) {
+            finished = None;
+        }
+        if let Some(done) = transcript.event(&item)? {
+            finished = Some(done);
+        }
         if let ExecEvent::NeedsApproval {
             request_id,
             subject,
@@ -217,9 +250,6 @@ async fn follow(
             let hint =
                 render::approval_hint_for(request_id, subject, &pending, &history, &mut claimed);
             transcript.approval_hint(&hint)?;
-        }
-        if finished.is_some() {
-            break;
         }
     }
     let Some(finished) = finished else {

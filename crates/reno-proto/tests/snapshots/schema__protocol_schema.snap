@@ -6415,6 +6415,13 @@ expression: protocol_schema()
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
               },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -7010,6 +7017,13 @@ expression: protocol_schema()
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
               },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -7600,6 +7614,13 @@ expression: protocol_schema()
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
+              },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "models": {
                 "description": "Models on offer.",
@@ -10786,6 +10807,13 @@ expression: protocol_schema()
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
                 "type": "boolean"
+              },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "models": {
                 "description": "Models on offer.",

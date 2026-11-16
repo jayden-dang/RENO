@@ -22,6 +22,26 @@ const CURATED: &[(&str, &str)] = &[
     ("claude-haiku-4-5", "Haiku 4.5"),
 ];
 
+/// The aliases Claude Code accepts for `--model` (code.claude.com model-config, Nov 2026). Each
+/// resolves on the CLI's side to the newest model of its family for the account's provider; a
+/// `[1m]` suffix asks for the 1M-token context. `default` is not one: it clears an override.
+const ALIASES: &[&str] = &[
+    "best",
+    "fable",
+    "opus",
+    "sonnet",
+    "haiku",
+    "opusplan",
+    "opus[1m]",
+    "sonnet[1m]",
+    "opusplan[1m]",
+];
+
+/// The aliases the CLI accepts: see [`ALIASES`].
+pub(super) fn aliases() -> Vec<String> {
+    ALIASES.iter().map(|alias| (*alias).to_owned()).collect()
+}
+
 /// The oldest Claude Code that lists each curated model (T3 Code's model
 /// manifest, Nov 2026). An older CLI doesn't report the model at all.
 const MIN_CLI: &[(&str, &str)] = &[
@@ -67,6 +87,28 @@ mod tests {
 
     fn ids(models: &[ModelInfo]) -> Vec<&str> {
         models.iter().map(|m| &*m.id).collect()
+    }
+
+    #[test]
+    fn the_cli_aliases_are_the_documented_ones() {
+        let aliases = aliases();
+        for alias in [
+            "sonnet",
+            "opus",
+            "haiku",
+            "opusplan",
+            "sonnet[1m]",
+            "opus[1m]",
+        ] {
+            assert!(aliases.iter().any(|a| a == alias), "{alias}");
+        }
+        assert!(!aliases.iter().any(|a| a == "default"));
+        // An alias is never also a curated id.
+        assert!(
+            CURATED
+                .iter()
+                .all(|(id, _)| !aliases.iter().any(|a| a == id))
+        );
     }
 
     #[test]

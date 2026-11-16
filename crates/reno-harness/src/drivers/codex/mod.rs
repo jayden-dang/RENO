@@ -577,6 +577,7 @@ impl Executor for CodexExecutor {
                 // `app-server`). Pointing `CODEX_HOME` elsewhere would drop the login. Never claimed
                 // (ARCH-15).
                 isolates_user_config: false,
+                model_aliases: vec![],
             },
         }
     }

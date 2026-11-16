@@ -347,6 +347,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     plan_mode: false,
                     models: health.models.models.clone(),
                     isolates_user_config: false,
+                    model_aliases: vec![],
                 },
             },
             health: Some(health),

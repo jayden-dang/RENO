@@ -1033,8 +1033,8 @@ pub(crate) fn plan_route(
 }
 
 /// The warning for `model` when the models `executor` lists (the live list its last probe
-/// found, else the adapter's curated one) do not include it. `None` when it is listed, or
-/// when nothing is listed to check against.
+/// found, else the adapter's curated one) do not include it. `None` when it is listed, is one
+/// of the executor's aliases, or when nothing is listed to check against.
 fn unlisted_model_warning(
     candidates: &[Candidate],
     executor: &ExecutorId,
@@ -1048,8 +1048,16 @@ fn unlisted_model_warning(
         .as_ref()
         .map(|health| health.models.models.as_slice())
         .filter(|models| !models.is_empty());
-    let listed = live.unwrap_or(candidate.descriptor.caps.models.as_slice());
-    if listed.is_empty() || listed.iter().any(|known| known.id == model) {
+    let caps = &candidate.descriptor.caps;
+    let listed = live.unwrap_or(caps.models.as_slice());
+    // An alias resolves on the CLI's side; so does a listed id with the `[1m]` suffix.
+    let base = caps.base_model(model);
+    if caps.is_model_alias(model)
+        || listed.is_empty()
+        || listed
+            .iter()
+            .any(|known| known.id == model || known.id == base)
+    {
         return None;
     }
     let names: Vec<&str> = listed.iter().map(|known| known.id.as_str()).collect();

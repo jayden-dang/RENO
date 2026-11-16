@@ -134,6 +134,7 @@ impl MockExecutor {
                     display_name: Some("Mock 1".into()),
                 }],
                 isolates_user_config: false,
+                model_aliases: vec![],
             },
         }
     }
