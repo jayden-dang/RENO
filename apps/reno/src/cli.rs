@@ -73,8 +73,8 @@ pub(crate) enum Command {
     Rule(RuleCommand),
     /// Approve one pending action.
     Approve(Decide),
-    /// Deny one pending action.
-    Deny(Decide),
+    /// Deny one pending action, optionally with a reason (`--message`) the agent is told.
+    Deny(Deny),
 }
 
 #[derive(Debug, Subcommand)]
@@ -419,6 +419,18 @@ pub(crate) struct Decide {
     /// With --remember: the rule stops applying after this many seconds [default: never].
     #[arg(long, value_name = "SECONDS", requires = "remember")]
     pub(crate) expires_in: Option<u64>,
+}
+
+/// `reno deny`: the arguments of `reno approve`, and a reason. (An approval takes no message:
+/// the protocol refuses one.)
+#[derive(Debug, Args)]
+pub(crate) struct Deny {
+    #[command(flatten)]
+    pub(crate) decide: Decide,
+    /// Why: recorded in the approval history and the run's transcript, and handed to the agent.
+    /// Needs a daemon with the `approval.message` feature.
+    #[arg(long, short = 'm', value_name = "TEXT")]
+    pub(crate) message: Option<String>,
 }
 
 /// How far a remembered answer reaches.

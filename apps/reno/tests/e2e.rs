@@ -1215,3 +1215,131 @@ fn secrets_are_set_from_stdin_listed_by_name_and_deleted() {
         serde_json::json!([])
     );
 }
+
+/// The one file under `dir` called `token`: a live run's token file.
+fn find_token_file(dir: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_token_file(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|name| name == "token") {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_denial_with_a_message_reaches_the_history_the_journal_and_the_agent() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut world = World::new();
+    world.hold_mock = true;
+    world.start_daemon();
+    let mut task = world
+        .command(&["task", "run", "wait for me"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let run = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+
+    // Be the agent: ask for approval through the run's own MCP server (`reno mcp`).
+    let token_file = find_token_file(&world.data_dir.join("run")).expect("the run's token file");
+    let mut mcp = Command::new(RENO)
+        .arg("mcp")
+        .env("RENO_SOCKET", world.socket())
+        .env("RENO_RUN_ID", &run)
+        .env("RENO_TOKEN_FILE", &token_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn reno mcp");
+    let mut stdin = mcp.stdin.take().unwrap();
+    let mut lines = BufReader::new(mcp.stdout.take().unwrap()).lines();
+    let mut send = |value: Value| {
+        writeln!(stdin, "{value}").unwrap();
+        stdin.flush().unwrap();
+    };
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"}}}),
+    );
+    loop {
+        let line = lines.next().expect("a reply").unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        if reply["id"] == 1 {
+            break;
+        }
+    }
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    send(
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "request_approval",
+        "arguments": {"action": "command", "reason": "ship it", "command": "git push origin main"}}}),
+    );
+
+    // Wait for the held request, then deny it with a reason.
+    let id = {
+        let mut found = None;
+        for _ in 0..200 {
+            let listed = world.json(&["approval", "list"]);
+            if let Some(first) = listed["approvals"].as_array().and_then(|a| a.first()) {
+                found = Some(first["id"].as_str().unwrap().to_owned());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        found.expect("a held approval")
+    };
+    let reason = "not before the review";
+    let denied = world.reno(&["deny", &id, "--message", reason]);
+    assert!(denied.status.success(), "{}", text(&denied.stderr));
+    assert_eq!(text(&denied.stdout).trim(), format!("denied {id}"));
+
+    // The agent was told why.
+    let answer = loop {
+        let line = lines.next().expect("the answer").unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        if reply["id"] == 2 {
+            break reply;
+        }
+    };
+    let said = answer["result"]["content"][0]["text"].as_str().unwrap();
+    let said: Value = serde_json::from_str(said).unwrap();
+    assert_eq!(said["decision"], "denied");
+    assert_eq!(said["message"], reason);
+
+    // The history says it, in words and as data.
+    let history = text(&world.reno(&["approval", "history"]).stdout);
+    assert!(history.contains(&format!("({reason})")), "{history}");
+    let json = world.json(&["approval", "history"]);
+    assert_eq!(json["approvals"][0]["message"], reason);
+
+    // So does the run's journal.
+    assert!(world.reno(&["run", "cancel", &run]).status.success());
+    task.wait_with_output().expect("task run ends");
+    let tail = world.reno(&["--json", "run", "tail", &run]);
+    let journal = text(&tail.stdout);
+    let resolved = journal
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|item| item.to_string().contains("approval_resolved"))
+        .unwrap_or_else(|| panic!("no ApprovalResolved in {journal}"));
+    assert!(resolved.to_string().contains(reason), "{resolved}");
+    drop((stdin, lines));
+    let _ = mcp.wait();
+
+    // An approval takes no message.
+    let refused = world.reno(&["approve", &id, "--message", "x"]);
+    assert_eq!(refused.status.code(), Some(2));
+    // An empty reason is refused before the daemon is asked.
+    let empty = world.reno(&["deny", &id, "-m", "  "]);
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(text(&empty.stderr).contains("--message is empty"));
+}
