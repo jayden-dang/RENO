@@ -7,9 +7,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reno_harness::exec::{MockExecutor, MockStep};
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
 use reno_proto::defs::DefKind;
-use reno_proto::{ActionClass, ExecEvent, RunId, RunStatus, StopReason, ToolCall};
+use reno_proto::{
+    ActionClass, ExecEvent, ExecSpec, HealthProbe, RunId, RunStatus, StopReason, ToolCall,
+};
 
 use super::defs::{FakePort, file, setup};
 use super::*;
@@ -245,4 +249,69 @@ async fn the_fake_port_is_the_only_thing_that_holds_values() {
             .unwrap()
             .contains(&"GITHUB_TOKEN".to_owned())
     );
+}
+
+/// An executor that already holds the run's environment and refuses with a message that echoes
+/// it, as a CLI that fails on a bad credential might.
+#[derive(Debug)]
+struct Echoing {
+    inner: MockExecutor,
+    sign_in: bool,
+}
+
+#[async_trait]
+impl Executor for Echoing {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        self.inner.descriptor()
+    }
+    async fn probe(&self) -> HealthProbe {
+        self.inner.probe().await
+    }
+    async fn start(
+        &self,
+        spec: ExecSpec,
+        _: ExecControls,
+    ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
+        let value = spec.env["GITHUB_TOKEN"].clone();
+        Err(if self.sign_in {
+            ExecError::NotSignedIn(format!("rejected credential {value}"))
+        } else {
+            ExecError::InvalidSpec(format!("GITHUB_TOKEN={value} is not accepted"))
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_an_executor_refuses_with_is_redacted_before_it_is_journaled_or_stored() {
+    for sign_in in [false, true] {
+        let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+        let echoing = Echoing {
+            inner: mock([]),
+            sign_in,
+        };
+        let port = FakePort::with(vec![bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]")]);
+        let fx = Fx::with_definitions(
+            config(1),
+            crate::ExecutorRegistry::new().with(Arc::new(echoing)),
+            setup(&port).with_secrets(secrets),
+        )
+        .await;
+
+        let run = go(&fx).await;
+        fx.wait_status(&run, RunStatus::Failed).await;
+
+        let why = done_diagnostic(&fx, &run).await;
+        assert!(!why.contains(TOKEN), "{why}");
+        assert!(why.contains("[secret:GITHUB_TOKEN]"), "{why}");
+        // The stored routing decision carries the refusal too.
+        let routing = fx.kernel.run_routing(&run).await.unwrap();
+        let shown = format!("{routing:?}");
+        assert!(!shown.contains(TOKEN), "{shown}");
+        let events = fx
+            .store
+            .events_since(reno_proto::Seq(0), 100_000)
+            .await
+            .unwrap();
+        assert!(!format!("{events:?}").contains(TOKEN));
+    }
 }

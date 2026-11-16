@@ -481,9 +481,10 @@ mod tests {
     /// cargo test -p renod --lib secrets::tests::throwaway_keychain -- --ignored
     /// ```
     ///
-    /// It creates `<tmp>/reno-test.keychain-db` with `SecKeychainCreate` (empty password, no
-    /// prompt), stores, reads, lists and deletes a secret in it, and removes the file. The
-    /// first run may make macOS ask whether `renod`'s test binary may use the keychain.
+    /// It creates `reno-test.keychain` in a temporary directory with `SecKeychainCreate` (password
+    /// `reno-test`), stores, replaces, reads, lists and deletes a secret in it, and removes the
+    /// directory with it. The login keychain and the keychain search list are not touched; macOS
+    /// may ask once whether the test binary may use the new keychain.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "uses the macOS Keychain APIs (a throwaway keychain file); run by hand"]

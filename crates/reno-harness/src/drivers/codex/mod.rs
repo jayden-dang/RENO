@@ -786,13 +786,13 @@ async fn launch(
     let missing = |what: &str| std::io::Error::other(format!("codex child has no {what}"));
     let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
-    let stderr_tail = crate::StderrTail::default();
+    let stderr_tail = crate::StderrTail::for_run(&spec.env);
     let stderr_task = child.stderr.take().map(|stderr| {
         let tail = stderr_tail.clone();
         tracker.spawn(async move {
             let mut lines = crate::lossy_lines::lossy_lines(stderr);
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "reno_harness::codex", "stderr: {line}");
+                tracing::debug!(target: "reno_harness::codex", "stderr: {}", tail.scrub(&line));
                 tail.push(&line);
             }
             // The tail is complete: a crash report need not wait it out.

@@ -25,9 +25,16 @@
 //! restricted: they run the user's own CLI as the user, to learn whether it works, and receive
 //! no secret.
 //!
-//! The per-driver lists name variables from each CLI's documentation. They have not been
-//! checked against every live CLI version: a variable a CLI needs that is missing here is
-//! supplied to a bot as a secret (`secrets = ["NAME"]`).
+//! The per-driver lists are a best reading, not a verified one. Only `CLAUDE_CONFIG_DIR`, the
+//! `ANTHROPIC_*` family, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
+//! `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_GIT_BASH_PATH`, `CODEX_HOME` and `GEMINI_HOME` are named
+//! by this repository's own code. Every other name (the AWS and Google cloud credentials, the
+//! OpenAI, xAI, Nous, Devin and Gemini keys, `GROK_HOME`, `HERMES_HOME`) is from general knowledge
+//! of those CLIs and has not been checked against a live one. A variable a CLI needs that is
+//! missing here can be given to one bot as a secret (`secrets = ["NAME"]`), which reaches only
+//! that bot's runs. A variable that only a
+//! secret supplies does not satisfy a sign-in probe, which reads the daemon's own environment: an
+//! executor whose probe says it is signed out is still refused before any secret is applied.
 
 use std::ffi::OsString;
 

@@ -39,7 +39,8 @@ use reno_harness::exec::{ExecControls, ExecError, ExecHandle};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
-    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, StartFailureKind, StopReason,
+    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, SecretsMissing, StartFailureKind,
+    StopReason,
 };
 use reno_store::{Claim, ClaimFilter, RunRecord, StoreError};
 use tokio::sync::mpsc;
@@ -381,17 +382,12 @@ async fn resolve_secrets(
     if missing.is_empty() {
         return Ok(found);
     }
-    let list = missing.join(", ");
-    let (noun, verb) = if missing.len() == 1 {
-        ("secret", "is")
-    } else {
-        ("secrets", "are")
+    let finding = SecretsMissing {
+        bot: settings.bot.clone().unwrap_or_default(),
+        missing: missing.iter().map(|name| (*name).to_owned()).collect(),
     };
     Err(SecretsRefused {
-        why: format!(
-            "SecretMissing: {bot} needs {noun} {list}, which {verb} not set; set each with \
-             `reno secret set <NAME>`"
-        ),
+        why: finding.to_diagnostic(),
         account: Some(StartFailure::SecretMissing),
     })
 }
@@ -421,12 +417,20 @@ enum Attempt {
 
 /// Tries to start `spec` on executor `id`: the eligibility check against fresh health, then the
 /// executor's own start.
+///
+/// `scrub` is the run's secret redactor: the executor already holds the run's secrets, so what it
+/// refuses with is cleaned before it is journaled, stored in the routing decision or logged.
 async fn attempt(
     shared: &Arc<Shared>,
     cancel: &CancellationToken,
     id: &ExecutorId,
     spec: &ExecSpec,
+    scrub: Option<&ValueRedactor>,
 ) -> Attempt {
+    let clean = |text: String| match scrub {
+        Some(redactor) => redactor.redact_str(&text).into_owned(),
+        None => text,
+    };
     let Some(executor) = shared.executors.get(id).cloned() else {
         return Attempt::Failed {
             why: format!("unknown executor {id}"),
@@ -453,9 +457,10 @@ async fn attempt(
     match started {
         Ok(stream) => Attempt::Started(stream, handle),
         Err(error) => {
-            let why = format!("the executor refused the run: {error}");
+            let why = clean(format!("the executor refused the run: {error}"));
             match error {
                 ExecError::NotInstalled(detail) => {
+                    let detail = clean(detail);
                     // A definite signal that what the board holds may be out of date.
                     shared.probe_soon(id);
                     Attempt::Declined {
@@ -465,6 +470,7 @@ async fn attempt(
                     }
                 }
                 ExecError::NotSignedIn(hint) => {
+                    let hint = clean(hint);
                     shared.probe_soon(id);
                     Attempt::Declined {
                         why,
@@ -606,7 +612,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         wall_time: settings.wall_time,
         token_ceiling: settings.token_ceiling,
-        redactor,
+        redactor: redactor.clone(),
     };
 
     // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not
@@ -632,7 +638,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
     }
     let (stream, handle) = loop {
-        match attempt(shared, &cancel, &current, &spec).await {
+        match attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await {
             Attempt::Started(stream, handle) => {
                 if let Some(decision) = decision.as_mut()
                     && decision.chosen.is_none()

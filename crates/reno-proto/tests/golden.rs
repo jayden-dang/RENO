@@ -1164,6 +1164,19 @@ fn secrets_on_the_wire() {
         &SecretDeleteResult { deleted: false },
         json!({"deleted": false}),
     );
+    // The diagnostic of a run refused for a secret that is not set: a tag and this JSON.
+    let missing = SecretsMissing {
+        bot: "keeper".into(),
+        missing: vec!["GITHUB_TOKEN".into()],
+    };
+    golden(
+        &missing,
+        json!({"bot": "keeper", "missing": ["GITHUB_TOKEN"]}),
+    );
+    assert_eq!(
+        missing.to_diagnostic(),
+        r#"SecretMissing: {"bot":"keeper","missing":["GITHUB_TOKEN"]}"#
+    );
 }
 
 #[test]

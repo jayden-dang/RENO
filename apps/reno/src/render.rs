@@ -127,12 +127,15 @@ impl<W: Write> Transcript<W> {
                 stop, diagnostic, ..
             } => {
                 writeln!(self.out, "done ({})", wire_name(stop))?;
-                match diagnostic
-                    .as_deref()
-                    .and_then(reno_proto::BudgetStop::from_diagnostic)
+                let diagnostic = diagnostic.as_deref();
+                if let Some(budget) = diagnostic.and_then(reno_proto::BudgetStop::from_diagnostic) {
+                    writeln!(self.out, "  {budget}")
+                } else if let Some(missing) =
+                    diagnostic.and_then(reno_proto::SecretsMissing::from_diagnostic)
                 {
-                    Some(budget) => writeln!(self.out, "  {budget}"),
-                    None => Ok(()),
+                    writeln!(self.out, "  {missing}")
+                } else {
+                    Ok(())
                 }
             }
             // Text and the quiet kinds returned above; a kind added later prints nothing.

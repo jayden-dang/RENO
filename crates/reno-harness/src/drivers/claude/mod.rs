@@ -420,7 +420,7 @@ async fn launch(
     let missing = |what: &str| std::io::Error::other(format!("claude child has no {what}"));
     let stdin = stdin.ok_or_else(|| missing("stdin"))?;
     let stdout = stdout.ok_or_else(|| missing("stdout"))?;
-    let stderr_tail = crate::StderrTail::default();
+    let stderr_tail = crate::StderrTail::for_run(&spec.env);
     let stderr_task = stderr.map(|stderr| tracker.spawn(read_stderr(stderr, stderr_tail.clone())));
     Ok(Runtime {
         child,
@@ -635,7 +635,7 @@ impl Executor for ClaudeExecutor {
 async fn read_stderr(stderr: impl tokio::io::AsyncRead + Unpin, tail: crate::StderrTail) {
     let mut lines = crate::lossy_lines::lossy_lines(stderr);
     while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!(target: "reno_harness::claude", "stderr: {line}");
+        tracing::debug!(target: "reno_harness::claude", "stderr: {}", tail.scrub(&line));
         tail.push(&line);
     }
     tail.close();
@@ -1027,7 +1027,11 @@ async fn run_session(session: Session) {
                     let frame = match wire::parse_frame(line) {
                         Ok(frame) => frame,
                         Err(e) => {
-                            tracing::debug!(target: "reno_harness::claude", "unparseable frame (skipped): {e}");
+                            tracing::debug!(
+                                target: "reno_harness::claude",
+                                "unparseable frame (skipped): {}",
+                                stderr_tail.scrub(&e.to_string())
+                            );
                             continue;
                         }
                     };
