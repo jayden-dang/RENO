@@ -122,6 +122,43 @@ impl<F: WatcherFactory> WatcherFactory for Counting<F> {
     }
 }
 
+/// Starts nothing real and keeps the handlers it is given, so a test can raise the events itself.
+/// No platform stream is used, so a test with it does not depend on how many others are in use.
+#[derive(Default)]
+pub struct Captured {
+    handlers: Mutex<Vec<Handler>>,
+}
+
+impl fmt::Debug for Captured {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Captured")
+    }
+}
+
+impl Captured {
+    /// Reports `event` to every watcher that was started.
+    pub fn raise(&self, event: notify::Event) {
+        for handler in self
+            .handlers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            handler(Ok(event.clone()));
+        }
+    }
+}
+
+impl WatcherFactory for Captured {
+    fn start(&self, _roots: &[PathBuf], handler: Handler) -> Result<WatcherGuard, String> {
+        self.handlers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handler);
+        Ok(WatcherGuard::new(()))
+    }
+}
+
 /// Fails the first starts, as a platform out of streams does, then hands on to another factory.
 /// For tests.
 #[derive(Debug)]

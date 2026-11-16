@@ -307,6 +307,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::watcher::Captured;
 
     fn spec(paths: Vec<String>) -> WatchSpec {
         WatchSpec {
@@ -327,25 +328,6 @@ mod tests {
         tokio::time::timeout(within, stream.changes.recv())
             .await
             .is_ok_and(|signal| signal.is_some())
-    }
-
-    /// Starts a real watch, waiting for the platform while it refuses: the machine's pool of
-    /// watch streams is shared by every process on it, and these tests are about what a working watch
-    /// reports. (The daemon's own answer to a refusal is the scheduler's retry.)
-    async fn watch_for_real(port: &FsWatch, spec: &WatchSpec) -> WatchStream {
-        tokio::time::timeout(FAILSAFE, async {
-            loop {
-                match port.watch(spec) {
-                    Ok(stream) => return stream,
-                    Err(error) if error.to_string().contains("FSEvent stream") => {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => panic!("{error}"),
-                }
-            }
-        })
-        .await
-        .expect("the platform never allowed a watch")
     }
 
     // ---- which events count (pure) ---------------------------------------------------------
@@ -461,27 +443,37 @@ mod tests {
         task.await.unwrap();
     }
 
-    // ---- real files and the real watcher ---------------------------------------------------
+    // ---- a started watch, end to end -------------------------------------------------------
     //
-    // These share one lock so the suite's own file churn does not overload the platform's event
-    // daemon, and they accept any signal: under load the daemon sends a rescan notice instead of
-    // per-file events, which is the same "look again" as far as a trigger is concerned.
+    // The events are raised by the test, through a watcher that starts nothing real: the platform
+    // has a finite pool of watch streams shared by every process on the machine, and a test that
+    // needs one fails when the pool is empty. What the real backend reports is covered by the
+    // daemon's integration tests, which wait their turn.
+
+    fn create(path: PathBuf) -> notify::Event {
+        notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(path)
+    }
 
     #[tokio::test]
     async fn a_matching_file_change_is_reported_after_it_settles() {
-        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
-        let inbox = dir.path().join("inbox");
+        let inbox = fs::canonicalize(dir.path()).unwrap().join("inbox");
         fs::create_dir(&inbox).unwrap();
-        let port = FsWatch::new();
-        let pattern = format!("{}/*.txt", dir.path().join("inbox").display());
-        let mut stream = watch_for_real(&port, &spec(vec![pattern])).await;
+        let events = Arc::new(Captured::default());
+        let port = FsWatch::with_watchers(events.clone());
+        let pattern = format!("{}/*.txt", inbox.display());
+        let mut stream = port.watch(&spec(vec![pattern])).unwrap();
 
-        // A burst of writes is signalled (the debounce itself is tested above with no files).
+        // Files the pattern does not match are not ours.
+        events.raise(create(inbox.join("a.log")));
+        assert!(!changed(&mut stream, Duration::from_millis(300)).await);
+
+        // A burst of matching writes is signalled once the quiet has passed.
         for n in 0..5 {
-            fs::write(inbox.join(format!("a{n}.txt")), "x").unwrap();
+            events.raise(create(inbox.join(format!("a{n}.txt"))));
         }
         assert!(changed(&mut stream, FAILSAFE).await);
+        assert!(!changed(&mut stream, Duration::from_millis(300)).await);
 
         drop(stream);
         port.shutdown().await;
@@ -489,13 +481,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_directory_covers_what_is_created_under_it_later() {
-        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
-        let port = FsWatch::new();
-        let later = dir.path().join("not-yet");
-        let mut stream = watch_for_real(&port, &spec(vec![later.display().to_string()])).await;
-        fs::create_dir(&later).unwrap();
-        fs::write(later.join("f"), "x").unwrap();
+        let later = fs::canonicalize(dir.path()).unwrap().join("not-yet");
+        let events = Arc::new(Captured::default());
+        let port = FsWatch::with_watchers(events.clone());
+        let mut stream = port
+            .watch(&spec(vec![later.display().to_string()]))
+            .unwrap();
+        events.raise(create(later.join("f")));
         assert!(changed(&mut stream, FAILSAFE).await);
         drop(stream);
         port.shutdown().await;

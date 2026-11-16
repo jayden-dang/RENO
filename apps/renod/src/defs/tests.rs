@@ -5,7 +5,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use notify::event::{AccessKind, CreateKind, Event, Flag};
@@ -636,35 +635,7 @@ async fn a_second_watch_is_refused() {
 
 use std::sync::Arc;
 
-use crate::watcher::{Counting, FailingFirst, Handler, WatcherFactory, WatcherGuard};
-
-/// A watcher that starts nothing real and keeps the handlers, so a test can raise the events
-/// itself. No platform stream is used, so nothing here depends on the machine's few.
-#[derive(Default)]
-struct Captured {
-    handlers: Mutex<Vec<Handler>>,
-}
-
-impl std::fmt::Debug for Captured {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Captured")
-    }
-}
-
-impl Captured {
-    fn raise(&self, event: Event) {
-        for handler in self.handlers.lock().unwrap().iter_mut() {
-            handler(Ok(event.clone()));
-        }
-    }
-}
-
-impl WatcherFactory for Captured {
-    fn start(&self, _roots: &[PathBuf], handler: Handler) -> Result<WatcherGuard, String> {
-        self.handlers.lock().unwrap().push(handler);
-        Ok(WatcherGuard::new(()))
-    }
-}
+use crate::watcher::{Captured, Counting, FailingFirst};
 
 fn quick() -> WatchBackoff {
     WatchBackoff {
