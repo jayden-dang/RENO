@@ -19,6 +19,7 @@ mod defs;
 mod health;
 mod queue;
 mod recovery;
+mod resume;
 mod routing;
 mod runs;
 mod triggers;

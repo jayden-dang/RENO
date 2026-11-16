@@ -89,6 +89,9 @@ pub(crate) struct RunInfo {
     /// The daily token ceiling of the run's bot; the supervisor stops the run when its bot's
     /// tokens for the day reach it.
     pub(crate) token_ceiling: Option<u64>,
+    /// Set when this attempt continues a session: the attempt that ended and the session. The
+    /// supervisor journals it as a `Resumed` before anything else.
+    pub(crate) resumed: Option<(u32, reno_proto::SessionRef)>,
 }
 
 /// How the run ended, as the executor (or the supervisor, when it had to) said.
@@ -203,6 +206,12 @@ impl Supervisor {
 
     pub(crate) async fn run(mut self) {
         self.open_journal().await;
+        if let Some((from_attempt, session)) = self.info.resumed.take() {
+            self.publish(&ExecEvent::Resumed {
+                from_attempt,
+                session,
+            });
+        }
         self.wall = Some(Box::pin(sleep(self.info.wall_time)));
         let period = self.shared.config.heartbeat_period();
         let mut beat = Box::pin(sleep(period));

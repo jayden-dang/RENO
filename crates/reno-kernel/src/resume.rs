@@ -27,13 +27,13 @@
 //!
 //! The run goes `interrupted` (or `failed`) to `queued` with its id, its session and its first
 //! start time kept; the next claim takes a new fence, which is the next attempt number, and the
-//! dispatcher starts the executor with `ExecSpec::resume` set. A `Resumed` event goes into the
-//! journal after the state has committed. The run's worktree is whatever the previous attempt
+//! dispatcher starts the executor with `ExecSpec::resume` set. The first event the new attempt's
+//! supervisor journals is a `Resumed`. The run's worktree is whatever the previous attempt
 //! left: placement finds the run's open workspace and reuses it, and makes a clean one again at
 //! the same path when the release at the end of the attempt had removed it.
 
 use reno_proto::defs::{BotDef, DefKind, ResumePolicy};
-use reno_proto::{ExecEvent, NotResumed, RunId, RunStatus, StopDetail};
+use reno_proto::{NotResumed, RunId, RunStatus, StopDetail};
 use reno_store::RunRecord;
 
 use crate::budget;
@@ -122,7 +122,9 @@ pub(crate) fn active_ms(row: &RunRecord) -> i64 {
         .max(0)
 }
 
-/// Queues `row`'s run again and journals the `Resumed`. Returns the attempt it will be.
+/// Queues `row`'s run again. Returns the attempt it will be. The `Resumed` event is journaled by
+/// the supervisor of that attempt, as the first event it writes, so there is only ever one
+/// writer on the journal.
 pub(crate) async fn requeue(
     shared: &Shared,
     row: &RunRecord,
@@ -133,25 +135,6 @@ pub(crate) async fn requeue(
         .resume_run(&row.id, row.lease_fence, prompt)
         .await?;
     let from_attempt = u32::try_from(resumed.from_attempt).unwrap_or(u32::MAX);
-    let event = ExecEvent::Resumed {
-        from_attempt,
-        session: resumed.session,
-    };
-    let journals = shared.db.journals();
-    let run = row.id.clone();
-    let written = tokio::task::spawn_blocking(move || {
-        let mut writer = journals.writer(&run)?;
-        writer.append(&event)?;
-        writer.flush()
-    })
-    .await;
-    match written {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::error!(run = %row.id, %error, "could not journal the resume");
-        }
-        Err(error) => tracing::error!(run = %row.id, %error, "journal task failed"),
-    }
     shared.mark_runs_dirty();
     Ok(from_attempt.saturating_add(1))
 }

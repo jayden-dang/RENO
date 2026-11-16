@@ -543,6 +543,13 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         wall_time: settings.wall_time,
         token_ceiling: settings.token_ceiling,
+        // This claim is the attempt after the one that ended.
+        resumed: spec.resume.clone().map(|session| {
+            (
+                u32::try_from(fence.saturating_sub(1)).unwrap_or(u32::MAX),
+                session,
+            )
+        }),
     };
 
     // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not
