@@ -149,6 +149,9 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     print_line(render::run_line(&run))?;
+    if let Some(line) = render::model_line(&run) {
+        print_line(line)?;
+    }
     for line in render::stop_lines(&run) {
         print_line(line)?;
     }

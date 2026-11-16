@@ -202,6 +202,8 @@ struct LaunchSettings {
     secrets: Vec<String>,
     /// Whether the pinned bot opted in to the owner's personal harness config.
     inherit_user_config: bool,
+    /// The model the pinned bot asks for, for a run whose task did not fix one.
+    model: Option<String>,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -217,6 +219,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             bot: None,
             secrets: Vec::new(),
             inherit_user_config: false,
+            model: None,
         });
     };
     let stored = shared
@@ -246,6 +249,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         bot: Some(pin.name.clone()),
         secrets: bot.secrets,
         inherit_user_config: bot.inherit_user_config,
+        model: bot.model,
     })
 }
 
@@ -333,6 +337,9 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         .get("model")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+        // A run made before models were pinned at submit: the pinned bot's, then the one the
+        // harness reported (a resumed run continues on it).
+        .or_else(|| settings.model.clone())
         .or_else(|| row.model.clone());
     let resume = row.session_ref.clone().map(SessionRef);
     let prompt = match &resume {

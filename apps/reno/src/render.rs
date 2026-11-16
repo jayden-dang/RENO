@@ -291,7 +291,16 @@ pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<St
             step.from, step.reason
         ));
     }
+    for warning in &decision.warnings {
+        lines.push(format!("  warning: {warning}"));
+    }
     lines
+}
+
+/// The model a run asks for (a task's, else its bot's) or reports, for `run show`; `None` when
+/// the executor's default applies and it has not started.
+pub(crate) fn model_line(run: &RunSummary) -> Option<String> {
+    run.model.as_ref().map(|model| format!("model: {model}"))
 }
 
 /// One run on one line: `id  status  executor  title`.
@@ -981,6 +990,32 @@ mod tests {
             at_ms: 0,
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_routing_warning_is_shown_under_the_decision() {
+        let mut decision = bot_routing();
+        decision.warnings = vec!["model \"x\" is not in claude-code's model list".into()];
+        let lines = routing_lines(&decision, false);
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("  warning: model \"x\" is not in claude-code's model list")
+        );
+    }
+
+    #[test]
+    fn the_model_a_run_asks_for_is_a_line_of_run_show() {
+        let mut run: RunSummary = serde_json::from_value(serde_json::json!({
+            "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
+            "status": "queued", "attempt": 1, "title": "t", "createdAtMs": 1, "updatedAtMs": 1
+        }))
+        .unwrap();
+        assert_eq!(model_line(&run), None);
+        run.model = Some("claude-sonnet-4-6".into());
+        assert_eq!(
+            model_line(&run).as_deref(),
+            Some("model: claude-sonnet-4-6")
+        );
     }
 
     #[test]

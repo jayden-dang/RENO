@@ -724,10 +724,16 @@ async fn the_ceiling_counts_cache_reads_at_a_tenth_and_status_shows_what_it_coun
     .await;
     let run = as_bot(&fx, "keeper").await;
     fx.wait_status(&run, RunStatus::Running).await;
+    // The usage is recorded by the run's own task: wait for the day's count to show it.
+    let status = until(async || {
+        let status = fx.kernel.budget_status().await.unwrap();
+        let counted = status.bots.iter().find(|b| b.bot == "keeper")?.tokens_today;
+        (counted > 0).then_some(status)
+    })
+    .await;
     step(&fx, 1_000).await;
     // Still running: the raw count is far past the ceiling, the counted one is not.
     assert_eq!(fx.status(&run).await, RunStatus::Running);
-    let status = fx.kernel.budget_status().await.unwrap();
     assert_eq!(status.cache_read_weight_permille, 100);
     let keeper = status.bots.iter().find(|b| b.bot == "keeper").unwrap();
     assert_eq!(keeper.tokens_today, 530, "what the ceiling counts");

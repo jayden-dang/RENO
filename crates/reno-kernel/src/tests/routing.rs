@@ -542,3 +542,155 @@ async fn with_no_default_executors_a_task_naming_nothing_fails_and_says_to_name_
     );
     assert_eq!(acp.starts(), 0);
 }
+
+// ---- a bot's model --------------------------------------------------------------------------
+
+/// A run submitted as `keeper` with this task model, and what the executor was asked for.
+async fn model_asked(fx: &Fx, fake: &Fake, task_model: Option<&str>) -> (RunId, Option<String>) {
+    let before = fake.inner.log().specs.len();
+    let run = fx
+        .kernel
+        .submit_for_bot(
+            "keeper",
+            "go",
+            None,
+            PathBuf::from("/work"),
+            task_model.map(str::to_owned),
+        )
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let specs = fake.inner.log().specs;
+    assert_eq!(specs.len(), before + 1);
+    (run, specs[before].model.clone())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runs_model_is_the_tasks_then_the_bots_then_the_executors_default() {
+    let fake = Fake::new("mock");
+    let pinned = fx_with_bot(&[&fake], "keeper", &["mock"], "model = \"mock-1\"").await;
+
+    // The bot's model, when the task names none; the run shows it as its own.
+    let (run, asked) = model_asked(&pinned, &fake, None).await;
+    assert_eq!(asked.as_deref(), Some("mock-1"));
+    assert_eq!(
+        pinned.kernel.get_run(&run).await.unwrap().model.as_deref(),
+        Some("mock-1")
+    );
+    // The task's own model wins over the bot's.
+    let (run, asked) = model_asked(&pinned, &fake, Some("mock-2")).await;
+    assert_eq!(asked.as_deref(), Some("mock-2"));
+    assert_eq!(
+        pinned.kernel.get_run(&run).await.unwrap().model.as_deref(),
+        Some("mock-2")
+    );
+
+    // A bot with no model leaves the executor's default alone.
+    let plain_fake = Fake::new("mock");
+    let plain = fx_with_bot(&[&plain_fake], "keeper", &["mock"], "").await;
+    let (run, asked) = model_asked(&plain, &plain_fake, None).await;
+    assert_eq!(asked, None);
+    assert_eq!(plain.kernel.get_run(&run).await.unwrap().model, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queued_run_keeps_the_model_of_the_bot_version_it_was_made_under() {
+    let port = FakePort::with(vec![file(
+        DefKind::Bot,
+        "keeper",
+        &bot_text("keeper", &["mock"], "model = \"mock-1\""),
+    )]);
+    // One slot, held by a run that does not end, so the second run waits in the queue.
+    let held = Fake {
+        inner: MockExecutor::new(id("mock"))
+            .with_steps([MockStep::Sleep(std::time::Duration::from_secs(3600))]),
+        ..Fake::new("mock")
+    };
+    let fx = Fx::with_definitions(config(1), registry_of(&[&held]), setup(&port)).await;
+    let first = fx
+        .kernel
+        .submit_for_bot("keeper", "hold", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&first, RunStatus::Running).await;
+    let queued = fx
+        .kernel
+        .submit_for_bot("keeper", "wait", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    // The bot is edited afterwards; the queued run keeps the model it was made under.
+    port.set(vec![file(
+        DefKind::Bot,
+        "keeper",
+        &bot_text("keeper", &["mock"], "model = \"mock-2\""),
+    )]);
+    port.touch_and_wait().await;
+    assert_eq!(
+        fx.kernel.get_run(&queued).await.unwrap().model.as_deref(),
+        Some("mock-1")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_model_the_executor_does_not_list_is_a_warning_and_never_a_refusal() {
+    let fake = Fake::new("mock");
+    let fx = fx_with_bot(
+        &[&fake],
+        "keeper",
+        &["mock"],
+        "model = \"mock-not-in-the-list\"",
+    )
+    .await;
+    // The run starts, and asks for the model as given.
+    let (run, asked) = model_asked(&fx, &fake, None).await;
+    assert_eq!(asked.as_deref(), Some("mock-not-in-the-list"));
+    // The stored decision and the preview carry the warning.
+    let decision = routing_of(&fx, &run).await;
+    assert_eq!(decision.chosen, Some(id("mock")));
+    assert_eq!(decision.warnings.len(), 1, "{:?}", decision.warnings);
+    assert!(
+        decision.warnings[0].contains("mock-not-in-the-list")
+            && decision.warnings[0].contains("mock-1"),
+        "{:?}",
+        decision.warnings
+    );
+    let preview = fx
+        .kernel
+        .preview_route(&TaskRequest::new("go", PathBuf::from("/work")).bot("keeper"))
+        .unwrap();
+    assert_eq!(preview.warnings, decision.warnings);
+
+    // A listed model warns of nothing; a task's own unlisted model does.
+    let listed = Fake::new("mock");
+    let fx = fx_with_bot(&[&listed], "keeper", &["mock"], "model = \"mock-1\"").await;
+    let (run, _) = model_asked(&fx, &listed, None).await;
+    assert!(routing_of(&fx, &run).await.warnings.is_empty());
+    let (run, _) = model_asked(&fx, &listed, Some("mock-zzz")).await;
+    assert_eq!(routing_of(&fx, &run).await.warnings.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_trigger_fired_run_asks_for_its_bots_model() {
+    let fake = Fake::new("mock");
+    let port = FakePort::with(vec![
+        file(
+            DefKind::Bot,
+            "keeper",
+            &bot_text("keeper", &["mock"], "model = \"mock-1\""),
+        ),
+        file(
+            DefKind::Trigger,
+            "poke",
+            "name = \"poke\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"keeper\"\nprompt = \"go\"\n",
+        ),
+    ]);
+    let fx = Fx::with_definitions(config(2), registry_of(&[&fake]), setup(&port)).await;
+    let fired = fx.kernel.fire_trigger("poke").await.unwrap();
+    let run = fired.run_id.expect("a run");
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(fake.inner.log().specs[0].model.as_deref(), Some("mock-1"));
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model.as_deref(),
+        Some("mock-1")
+    );
+}
