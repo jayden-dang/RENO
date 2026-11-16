@@ -19,6 +19,7 @@
 //! prefix.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use globset::{Glob, GlobMatcher};
@@ -150,6 +151,48 @@ fn target_of(text: &str) -> Result<Target, String> {
     }
 }
 
+/// What one watcher callback means for a trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Not ours: a read, or a path that matches none of the definition's paths.
+    Ignore,
+    /// A change at one of the paths.
+    Changed,
+    /// The platform dropped events (FSEvents `MustScanSubDirs`, from an overloaded daemon or a
+    /// full buffer) and sent a notice for a directory instead. Which files changed is unknown, so
+    /// the whole watched tree may have. The notice's path is a directory that matches no file
+    /// glob, so it cannot be judged by path.
+    Rescan,
+    /// The watcher itself failed; treated as a rescan.
+    Failed,
+}
+
+/// Judges one callback. A pure function of the event and the targets.
+fn classify(result: &notify::Result<notify::Event>, targets: &[Target]) -> Verdict {
+    let Ok(event) = result else {
+        return Verdict::Failed;
+    };
+    if event.need_rescan() {
+        return Verdict::Rescan;
+    }
+    let relevant = !matches!(event.kind, EventKind::Access(_))
+        && (event.paths.is_empty()
+            || event
+                .paths
+                .iter()
+                .any(|p| targets.iter().any(|t| t.matcher.matches(p))));
+    if relevant {
+        Verdict::Changed
+    } else {
+        Verdict::Ignore
+    }
+}
+
+/// True the first time it is called for `warned`, false after.
+fn first_failure(warned: &AtomicBool) -> bool {
+    !warned.swap(true, Ordering::Relaxed)
+}
+
 impl Watch for FsWatch {
     fn watch(&self, spec: &WatchSpec) -> reno_kernel::Result<WatchStream> {
         let fail = |message: String| {
@@ -166,23 +209,20 @@ impl Watch for FsWatch {
         let (out_tx, out_rx) = mpsc::channel(1);
         let roots: Vec<PathBuf> = targets.iter().map(|t| t.root.clone()).collect();
         let name = spec.trigger.clone();
+        let warned = AtomicBool::new(false);
         let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-                Ok(event) => {
-                    let relevant = !matches!(event.kind, EventKind::Access(_))
-                        && (event.paths.is_empty()
-                            || event
-                                .paths
-                                .iter()
-                                .any(|p| targets.iter().any(|t| t.matcher.matches(p))));
-                    if relevant {
-                        // A full channel already holds a pending signal.
-                        let _ = raw_tx.try_send(());
-                    }
-                }
-                Err(error) => {
-                    // The watcher lost track of something: say so, the paths may have changed.
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                let verdict = classify(&result, &targets);
+                if verdict == Verdict::Failed
+                    && let Err(error) = &result
+                    && first_failure(&warned)
+                {
+                    // The watcher lost track of something, so the paths may have changed. Say
+                    // so once: a failing watcher can repeat itself without end.
                     tracing::warn!(trigger = %name, %error, "a file watcher reported an error");
+                }
+                if verdict != Verdict::Ignore {
+                    // A full channel already holds a pending signal.
                     let _ = raw_tx.try_send(());
                 }
             })
@@ -268,8 +308,128 @@ mod tests {
             .is_ok_and(|signal| signal.is_some())
     }
 
+    // ---- which events count (pure) ---------------------------------------------------------
+
+    use notify::event::{AccessKind, CreateKind, Flag};
+
+    fn event(kind: EventKind, paths: &[&Path]) -> notify::Event {
+        paths.iter().fold(notify::Event::new(kind), |event, path| {
+            event.add_path(path.to_path_buf())
+        })
+    }
+
+    /// What FSEvents sends when it dropped events: kind `Other`, the rescan flag, the directory.
+    fn rescan(path: &Path) -> notify::Event {
+        event(EventKind::Other, &[path]).set_flag(Flag::Rescan)
+    }
+
+    fn glob_target(root: &Path, pattern: &str) -> Target {
+        Target {
+            root: root.to_path_buf(),
+            matcher: Matcher::Glob(Box::new(
+                Glob::new(&root.join(pattern).to_string_lossy())
+                    .unwrap()
+                    .compile_matcher(),
+            )),
+        }
+    }
+
+    #[test]
+    fn a_rescan_notice_means_the_tree_may_have_changed_whatever_its_path() {
+        let root = Path::new("/w/inbox");
+        let targets = [glob_target(root, "*.txt")];
+        let created = EventKind::Create(CreateKind::File);
+
+        // A per-file event counts only when it matches the glob.
+        assert_eq!(
+            classify(&Ok(event(created, &[&root.join("a.txt")])), &targets),
+            Verdict::Changed
+        );
+        assert_eq!(
+            classify(&Ok(event(created, &[&root.join("notes.log")])), &targets),
+            Verdict::Ignore
+        );
+        assert_eq!(
+            classify(
+                &Ok(event(
+                    EventKind::Access(AccessKind::Any),
+                    &[&root.join("a.txt")]
+                )),
+                &targets
+            ),
+            Verdict::Ignore
+        );
+
+        // A rescan notice names the watched root, a subdirectory, an ancestor, or nothing: none
+        // of which match `*.txt`, and all of which mean "look again".
+        for path in [
+            root,
+            Path::new("/w/inbox/sub"),
+            Path::new("/w"),
+            Path::new("/"),
+        ] {
+            assert_eq!(
+                classify(&Ok(rescan(path)), &targets),
+                Verdict::Rescan,
+                "{path:?}"
+            );
+        }
+        let pathless = notify::Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        assert_eq!(classify(&Ok(pathless), &targets), Verdict::Rescan);
+
+        // Even flagged as a read: a rescan outranks the kind.
+        let odd = event(EventKind::Access(AccessKind::Any), &[root]).set_flag(Flag::Rescan);
+        assert_eq!(classify(&Ok(odd), &targets), Verdict::Rescan);
+    }
+
+    #[test]
+    fn a_watcher_error_is_a_rescan_and_is_logged_only_once() {
+        let targets = [glob_target(Path::new("/w"), "*.txt")];
+        let error = || Err(notify::Error::generic("event buffer overflowed"));
+        assert_eq!(classify(&error(), &targets), Verdict::Failed);
+
+        let warned = AtomicBool::new(false);
+        assert!(first_failure(&warned), "the first error is logged");
+        assert!(!first_failure(&warned), "the next ones are not");
+        assert!(!first_failure(&warned));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn many_signals_are_one_debounced_signal() {
+        let (raw_tx, raw_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(debounce(
+            raw_rx,
+            out_tx,
+            Duration::from_millis(100),
+            stop.clone(),
+        ));
+        // A burst of per-file signals and a rescan notice together are still one signal.
+        for _ in 0..10 {
+            let _ = raw_tx.try_send(());
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(20)).await;
+        }
+        tokio::time::advance(Duration::from_millis(101)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(out_rx.try_recv().is_ok());
+        assert!(out_rx.try_recv().is_err(), "one burst, one signal");
+        stop.cancel();
+        task.await.unwrap();
+    }
+
+    // ---- real files and the real watcher ---------------------------------------------------
+    //
+    // These share one lock so the suite's own file churn does not overload the platform's event
+    // daemon, and they accept any signal: under load the daemon sends a rescan notice instead of
+    // per-file events, which is the same "look again" as far as a trigger is concerned.
+
     #[tokio::test]
-    async fn a_matching_file_change_is_reported_once_after_it_settles() {
+    async fn a_matching_file_change_is_reported_after_it_settles() {
+        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
         let inbox = dir.path().join("inbox");
         fs::create_dir(&inbox).unwrap();
@@ -277,19 +437,11 @@ mod tests {
         let pattern = format!("{}/*.txt", dir.path().join("inbox").display());
         let mut stream = port.watch(&spec(vec![pattern])).unwrap();
 
-        // A burst of writes is one signal.
+        // A burst of writes is signalled (the debounce itself is tested above with no files).
         for n in 0..5 {
             fs::write(inbox.join(format!("a{n}.txt")), "x").unwrap();
         }
         assert!(changed(&mut stream, FAILSAFE).await);
-        assert!(
-            !changed(&mut stream, Duration::from_millis(400)).await,
-            "one burst, one signal"
-        );
-
-        // A file that does not match the glob is not a change.
-        fs::write(inbox.join("notes.log"), "x").unwrap();
-        assert!(!changed(&mut stream, Duration::from_millis(500)).await);
 
         drop(stream);
         port.shutdown().await;
@@ -297,6 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_directory_covers_what_is_created_under_it_later() {
+        let _serial = crate::test_serial().await;
         let dir = tempfile::tempdir().unwrap();
         let port = FsWatch::new();
         let later = dir.path().join("not-yet");

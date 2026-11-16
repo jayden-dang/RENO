@@ -247,7 +247,7 @@ fn logs_follow_prints_new_lines_when_the_file_changes() {
     world.ok(&["daemon", "stop"]);
     let mut seen = Vec::new();
     let found = loop {
-        match received.recv_timeout(Duration::from_secs(20)) {
+        match received.recv_timeout(Duration::from_secs(60)) {
             Ok(line) => {
                 let done = line.contains("stopped");
                 seen.push(line);
