@@ -54,6 +54,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error_from_the_explicit_instal
     let (controls, _handle) = ExecControls::new(1);
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: "hi".into(),
         cwd: "/tmp".into(),
         model: None,

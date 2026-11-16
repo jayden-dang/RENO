@@ -334,6 +334,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
     };
     Ok(ExecSpec {
         run_id: row.id.clone(),
+        inherit_user_config: false,
         prompt,
         cwd: PathBuf::from(cwd),
         model,

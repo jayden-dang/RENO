@@ -27,6 +27,7 @@ fn fixture_path() -> PathBuf {
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: prompt.into(),
         cwd: PathBuf::from("/tmp"),
         model: None,

@@ -41,6 +41,8 @@ pub(super) const MAX_WALL_TIME: Duration = Duration::from_secs(24 * 3600);
 /// in_place_writes = false                # optional: allow writes in a non-git directory
 /// secrets = ["GITHUB_TOKEN"]             # optional: Keychain secrets its runs get as env vars
 /// resume = "auto"                        # optional: "auto" (default) or "never"
+/// model = "claude-sonnet-4-6"            # optional: the executor's default when left out
+/// inherit_user_config = false            # optional: true loads the owner's personal config
 ///
 /// [budget]
 /// max_concurrent_runs = 2
@@ -91,7 +93,25 @@ pub struct BotDef {
     /// `run.resume`. A person's cancel and a budget stop are never resumed on their own.
     #[serde(default, skip_serializing_if = "ResumePolicy::is_auto")]
     pub resume: ResumePolicy,
+    /// Let this bot's runs load the owner's personal configuration for their harness. Off by
+    /// default: a run is isolated from it, so the owner's own hooks, plugins, memory and
+    /// instructions do not reach the bot. Only executors that declare
+    /// `isolates_user_config` (Claude Code) can isolate; the others load it either way, and say
+    /// so on their descriptor. Reno's own MCP server and its policy apply in both modes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_user_config: bool,
+    /// The model this bot's runs ask for, as its executor names models (`claude-sonnet-4-6`).
+    /// Left out, the executor's own default applies. A task that names a model wins over it. The
+    /// name is checked against the executor's model list only as a warning, since a list can be
+    /// curated and incomplete; a model the executor does not know fails when the run starts.
+    /// It is passed to whichever executor the run goes to, so a bot that lists executors of
+    /// different vendors should leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
+
+/// The longest `model`, in bytes.
+pub(super) const MAX_MODEL_BYTES: usize = 200;
 
 /// What a bot allows the daemon to do with its interrupted runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -176,6 +196,20 @@ impl BotDef {
 
         self.validate_triggers(stem, cx, sink);
         self.validate_secrets(sink);
+
+        if let Some(model) = &self.model
+            && (model.trim().is_empty()
+                || model.len() > MAX_MODEL_BYTES
+                || model.chars().any(|c| c.is_whitespace() || c.is_control()))
+        {
+            sink.err(
+                "model",
+                format!(
+                    "{model:?} is not a model name: it must be 1..={MAX_MODEL_BYTES} bytes \
+                     with no spaces; leave it out for the executor's default"
+                ),
+            );
+        }
 
         let budget = &self.budget;
         if !(1..=MAX_CONCURRENT_RUNS).contains(&budget.max_concurrent_runs) {

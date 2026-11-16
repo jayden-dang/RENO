@@ -266,6 +266,7 @@ async fn record(s: &Scenario) -> Recorded {
         env: Default::default(),
         output_schema: None,
         instructions: s.instructions.map(Into::into),
+        inherit_user_config: false,
     };
     let (controls, handle) = ExecControls::new(8);
     let mut stream = executor.start(spec, controls).await.unwrap();

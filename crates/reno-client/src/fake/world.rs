@@ -318,6 +318,7 @@ impl World {
             rule_matched,
             fallbacks: Vec::new(),
             at_ms: self.now_ms,
+            warnings: Vec::new(),
         }
     }
 

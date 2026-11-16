@@ -57,6 +57,7 @@ fn routing_decision_wire_shape() {
             at_ms: 11,
         }],
         at_ms: 10,
+        warnings: Vec::new(),
     };
     golden(
         &decision,
@@ -81,6 +82,7 @@ fn routing_decision_wire_shape() {
             rejected: vec![],
             rule_matched: RuleMatched::Default,
             fallbacks: vec![],
+            warnings: Vec::new(),
             at_ms: 1,
         },
         json!({"ranked": [], "rejected": [], "ruleMatched": {"type": "default"}, "atMs": 1}),

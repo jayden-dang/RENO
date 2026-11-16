@@ -258,6 +258,12 @@ pub(crate) struct UsageBody {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    /// Input served from the prompt cache. `input_tokens` excludes it.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Input written to the prompt cache. `input_tokens` excludes it.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 /// A CLI→client control request (`can_use_tool` is the one we act on).

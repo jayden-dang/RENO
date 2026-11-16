@@ -58,6 +58,8 @@ fn usage(input_tokens: u64, output_tokens: u64) -> MockStep {
     MockStep::Emit(ExecEvent::Usage {
         input_tokens,
         output_tokens,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     })
 }
 

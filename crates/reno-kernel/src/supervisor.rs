@@ -356,6 +356,7 @@ impl Supervisor {
         if let ExecEvent::Usage {
             input_tokens,
             output_tokens,
+            ..
         } = event
         {
             self.charge(Tokens {

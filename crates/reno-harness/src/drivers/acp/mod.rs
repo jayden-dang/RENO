@@ -541,6 +541,10 @@ impl Executor for AcpExecutor {
                 // never declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models: self.known_models(),
+                // ACP agents are third-party programs whose personal config (their own settings,
+                // memory, instructions) Reno has no common switch for; a run loads whatever the
+                // agent loads for its owner. Never claimed (ARCH-15).
+                isolates_user_config: false,
             },
         }
     }
@@ -1867,6 +1871,7 @@ mod tests {
     fn a_bots_instructions_lead_the_opening_prompt() {
         let mut spec = ExecSpec {
             run_id: reno_proto::RunId::from_suffix("a").unwrap(),
+            inherit_user_config: false,
             prompt: "do it".into(),
             cwd: "/work".into(),
             model: None,

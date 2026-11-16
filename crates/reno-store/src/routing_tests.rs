@@ -27,6 +27,7 @@ fn decision(chosen: &str, at: u64) -> RoutingDecision {
         rule_matched: RuleMatched::Default,
         fallbacks: vec![],
         at_ms: at,
+        warnings: Vec::new(),
     }
 }
 

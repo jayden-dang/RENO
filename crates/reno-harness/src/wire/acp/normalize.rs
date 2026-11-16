@@ -163,9 +163,16 @@ pub(crate) fn usage(response: &Value) -> Option<ExecEvent> {
     };
     let input = count(&["inputTokens", "input_tokens"]);
     let output = count(&["outputTokens", "output_tokens"]);
+    // The protocol's optional cache counts. It does not say whether `inputTokens` includes them;
+    // they are taken as separate from it, as Claude's adapters report them, so a reply that
+    // folded them into `inputTokens` is counted twice (the safer side for a budget).
+    let cache_read = count(&["cachedReadTokens", "cached_read_tokens"]).unwrap_or(0);
+    let cache_write = count(&["cachedWriteTokens", "cached_write_tokens"]).unwrap_or(0);
     (input.is_some() || output.is_some()).then(|| ExecEvent::Usage {
         input_tokens: input.unwrap_or(0),
         output_tokens: output.unwrap_or(0),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
     })
 }
 
@@ -457,17 +464,36 @@ mod tests {
             usage(&json!({ "_meta": { "inputTokens": 9, "outputTokens": 4 } })),
             Some(ExecEvent::Usage {
                 input_tokens: 9,
-                output_tokens: 4
+                output_tokens: 4,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(
             usage(&json!({ "usage": { "input_tokens": 3 } })),
             Some(ExecEvent::Usage {
                 input_tokens: 3,
-                output_tokens: 0
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(usage(&json!({ "stopReason": "end_turn" })), None);
+    }
+
+    #[test]
+    fn usage_carries_the_cache_counts_an_agent_reports() {
+        assert_eq!(
+            usage(
+                &json!({ "usage": { "inputTokens": 5, "outputTokens": 7, "cachedReadTokens": 900, "cachedWriteTokens": 40, "totalTokens": 952 } })
+            ),
+            Some(ExecEvent::Usage {
+                input_tokens: 5,
+                output_tokens: 7,
+                cache_read_tokens: 900,
+                cache_write_tokens: 40,
+            })
+        );
     }
 
     #[test]

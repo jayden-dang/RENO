@@ -201,6 +201,7 @@ pub(crate) fn build_rows(
             ExecEvent::Usage {
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 built.facts.usage = Some(Usage {
                     input: *input_tokens,
@@ -515,10 +516,14 @@ mod tests {
                 ExecEvent::Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 },
                 ExecEvent::Usage {
                     input_tokens: 30,
                     output_tokens: 9,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 },
             ],
             &[],
@@ -574,6 +579,8 @@ mod tests {
                 ExecEvent::Usage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 },
                 result("t1", true, "Cargo.toml"),
                 text("done"),
@@ -892,6 +899,8 @@ mod tests {
                 ExecEvent::Usage {
                     input_tokens: 1,
                     output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
                 },
                 ExecEvent::NeedsInput {
                     request_id: "q".into(),
@@ -956,6 +965,7 @@ mod tests {
             rule_matched: RuleMatched::Default,
             fallbacks: vec![],
             at_ms: 1,
+            warnings: Vec::new(),
         })
     }
 

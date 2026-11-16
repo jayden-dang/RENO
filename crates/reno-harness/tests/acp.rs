@@ -56,6 +56,7 @@ fn antigravity() -> AcpExecutor {
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: prompt.into(),
         cwd: PathBuf::from("/tmp"),
         model: Some("grok-4.5".into()),
@@ -1454,7 +1455,9 @@ async fn stale_prompt_complete_never_settles_a_newer_turn() {
     // Grok-style `_meta` usage on the response is captured.
     assert!(events.contains(&ExecEvent::Usage {
         input_tokens: 9,
-        output_tokens: 4
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     }));
 }
 

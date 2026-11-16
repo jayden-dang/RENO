@@ -170,6 +170,7 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
         rule_matched,
         fallbacks: Vec::new(),
         at_ms,
+        warnings: Vec::new(),
     }
 }
 

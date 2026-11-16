@@ -942,6 +942,7 @@ mod tests {
             },
             fallbacks: vec![],
             at_ms: 0,
+            warnings: Vec::new(),
         }
     }
 

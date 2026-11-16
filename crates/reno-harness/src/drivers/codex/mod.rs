@@ -558,6 +558,14 @@ impl Executor for CodexExecutor {
                 // declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models,
+                // Not enforced: see [`isolates_user_config`]. `codex app-server` reads
+                // `$CODEX_HOME/config.toml` (profiles, `mcp_servers`, hooks) and the global
+                // `$CODEX_HOME/AGENTS.md` for the owner and the 0.169 `thread/start` params have no
+                // switch to leave them out (`config` overrides only layer on top; `AGENTS.md` has no
+                // toggle; `--ignore-user-config` is documented for `codex exec`, not verified for
+                // `app-server`). Pointing `CODEX_HOME` elsewhere would drop the login. Never claimed
+                // (ARCH-15).
+                isolates_user_config: false,
             },
         }
     }
@@ -2101,6 +2109,7 @@ mod tests {
     fn spec(access: AccessMode, sandbox: SandboxLevel) -> ExecSpec {
         ExecSpec {
             run_id: RunId::from_suffix("01HZX9").unwrap(),
+            inherit_user_config: false,
             prompt: "do it".into(),
             cwd: PathBuf::from("/work"),
             model: Some("gpt-5.6-sol".into()),

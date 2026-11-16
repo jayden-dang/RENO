@@ -396,6 +396,7 @@ mod tests {
                     deterministic_turn_end: false,
                     plan_mode: false,
                     models,
+                    isolates_user_config: false,
                 },
             },
             health,

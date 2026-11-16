@@ -133,6 +133,7 @@ impl MockExecutor {
                     id: "mock-1".into(),
                     display_name: Some("Mock 1".into()),
                 }],
+                isolates_user_config: false,
             },
         }
     }
@@ -349,6 +350,7 @@ mod tests {
     fn spec(access: AccessMode) -> ExecSpec {
         ExecSpec {
             run_id: RunId::from_suffix("01HZX9").unwrap(),
+            inherit_user_config: false,
             prompt: "do it".into(),
             cwd: PathBuf::from("/tmp"),
             model: None,

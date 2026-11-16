@@ -147,7 +147,7 @@ daemon_test! {
 daemon_test! {
     async fn a_bot_that_spends_its_ceiling_is_stopped_and_then_refused_with_a_typed_error() {
         let spender = MockExecutor::new(id("mock")).with_steps([
-            MockStep::Emit(ExecEvent::Usage { input_tokens: 80, output_tokens: 40 }),
+            MockStep::Emit(ExecEvent::Usage { input_tokens: 80, output_tokens: 40, cache_read_tokens: 0, cache_write_tokens: 0, }),
             MockStep::Sleep(std::time::Duration::from_secs(3600)),
         ]);
         let registry = ExecutorRegistry::new().with(Arc::new(spender));

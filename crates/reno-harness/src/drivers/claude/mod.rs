@@ -475,6 +475,9 @@ impl Executor for ClaudeExecutor {
                 // cannot request it yet; never declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models,
+                // `--setting-sources project,local` and two environment switches (see
+                // `isolation_args`), unless the run opts in with `inherit_user_config`.
+                isolates_user_config: true,
             },
         }
     }
@@ -1414,6 +1417,7 @@ mod tests {
     fn spec(access: AccessMode) -> ExecSpec {
         ExecSpec {
             run_id: RunId::from_suffix("01HZX9").unwrap(),
+            inherit_user_config: false,
             prompt: "do it".into(),
             cwd: PathBuf::from("/work"),
             model: None,

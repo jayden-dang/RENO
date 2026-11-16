@@ -41,6 +41,7 @@ fn executor() -> ClaudeExecutor {
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: prompt.into(),
         cwd: std::env::temp_dir(),
         model: None,
@@ -261,7 +262,9 @@ async fn happy_path_maps_frames_to_exec_events_and_drops_subagent_traffic() {
     }));
     assert!(events.contains(&ExecEvent::Usage {
         input_tokens: 10,
-        output_tokens: 20
+        output_tokens: 20,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     }));
     assert_eq!(
         events.last(),

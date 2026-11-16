@@ -227,6 +227,8 @@ mod tests {
             ExecEvent::Usage {
                 input_tokens: 42,
                 output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
             ExecEvent::ToolResult {
                 id: "background-task".into(),

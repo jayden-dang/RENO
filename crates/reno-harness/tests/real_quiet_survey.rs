@@ -30,6 +30,7 @@ async fn probe_once(executor: AcpExecutor) -> ProbeOutcome {
     let (controls, handle) = ExecControls::new(8);
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: "Use your shell tool to run `echo probe-one`. After you see its output, \
                  run `echo probe-two` as a second separate command. After that, reply \
                  with exactly the word PROBE-DONE."

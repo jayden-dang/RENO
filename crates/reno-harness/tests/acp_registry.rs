@@ -168,6 +168,7 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
     let (controls, _handle) = ExecControls::new(8);
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
+        inherit_user_config: false,
         prompt: "scenario:happy".into(),
         cwd: std::env::temp_dir(),
         model: None,
