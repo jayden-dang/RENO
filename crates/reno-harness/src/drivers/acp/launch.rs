@@ -33,6 +33,19 @@ pub(super) enum Launch {
     },
 }
 
+/// What [`Launcher::inspect`] found.
+pub(super) enum Inspected {
+    /// A launchable program, and its version when it will say.
+    Ready {
+        path: PathBuf,
+        version: Option<String>,
+    },
+    /// A managed adapter that has not been installed: an explicit step.
+    NeedsInstall { what: String },
+    /// Nothing launchable; `overridden` when the person pointed at a program of their own.
+    Missing { message: String, overridden: bool },
+}
+
 /// How one agent resolves to a program: its spec and the executable a caller pinned, if any.
 #[derive(Clone, Copy)]
 pub(super) struct Launcher<'a> {
@@ -64,20 +77,6 @@ impl Launcher<'_> {
         } else {
             find_on_paths(self.spec.executable, (self.spec.extra_paths)()).is_some()
         }
-    }
-
-    /// The version of what [`Self::resolve_launch`] finds, when it can be told: a registry agent's
-    /// record, a pinned npm install's pin, a binary's own report.
-    pub(super) fn version(&self) -> Option<String> {
-        if let (HarnessId::Registry(agent), None) = (self.spec.id, self.executable) {
-            return crate::acp_registry::record(agent).map(|record| record.version);
-        }
-        match self.resolve_launch().ok()? {
-            Launch::Program(program, _) => crate::executable::binary_version(&program),
-            Launch::Archive { entry, .. } => crate::executable::binary_version(&entry),
-            Launch::Managed { pin, .. } => return Some(pin.version.to_string()),
-        }
-        .map(|version| version.to_string())
     }
 
     fn find_server(&self) -> Option<PathBuf> {
@@ -143,14 +142,10 @@ impl Launcher<'_> {
         Err(HarnessError::NotInstalled(self.spec.install_hint.into()))
     }
 
-    /// Resolve to a concrete (program, args), running the managed install if it hasn't completed
-    /// yet. `block_on_install: false` never waits on npm: it kicks the install in the background
-    /// and errors out, so a status check never stalls for however long a 500MB dependency tree
-    /// takes to land.
-    pub(super) async fn resolve_program(
-        &self,
-        block_on_install: bool,
-    ) -> Result<(PathBuf, Vec<String>), HarnessError> {
+    /// Resolve to a concrete (program, args). Never installs and never spawns: a managed adapter
+    /// that is not installed yet is [`HarnessError::NotInstalled`], and putting it there is
+    /// [`Self::install`], an explicit step that discovery reports as `NeedsInstall`.
+    pub(super) fn resolve_program(&self) -> Result<(PathBuf, Vec<String>), HarnessError> {
         match self.resolve_launch()? {
             Launch::Program(program, args) => Ok((program, args)),
             Launch::Managed {
@@ -158,43 +153,97 @@ impl Launcher<'_> {
                 bin_name,
                 args,
             } => {
-                let entry = match crate::adapter_install::installed_entry(&pin, bin_name) {
-                    Some(entry) => entry,
-                    None if block_on_install => {
-                        crate::adapter_install::ensure_installed(
-                            pin,
-                            bin_name,
-                            self.spec.display_name,
-                        )
-                        .await?
-                    }
-                    None => {
-                        let display_name = self.spec.display_name;
-                        tokio::spawn(async move {
-                            if let Err(e) = crate::adapter_install::ensure_installed(
-                                pin,
-                                bin_name,
-                                display_name,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    target: "reno_harness::adapter_install",
-                                    "background adapter install failed: {e}"
-                                );
-                            }
-                        });
-                        return Err(HarnessError::Protocol(format!(
-                            "{} adapter is installing in the background",
-                            self.spec.display_name
-                        )));
-                    }
-                };
+                let entry = crate::adapter_install::installed_entry(&pin, bin_name)
+                    .ok_or_else(|| HarnessError::NotInstalled(self.needs_install(&pin)))?;
                 let (program, mut node_args) = crate::adapter_install::launch_for_entry(&entry)?;
                 node_args.extend(args);
                 Ok((program, node_args))
             }
             Launch::Archive { entry, args } => Ok((entry, args)),
+        }
+    }
+
+    /// What discovery says about a managed adapter that is not installed yet.
+    fn needs_install(&self, pin: &crate::adapter_install::NpmPin) -> String {
+        format!(
+            "the {} adapter ({}@{}) needs to be installed",
+            self.spec.display_name, pin.name, pin.version
+        )
+    }
+
+    /// What a probe finds: a launchable program (with its version), a managed adapter that needs
+    /// its explicit install, or nothing. Blocking: it reads the filesystem and may run
+    /// `--version`. It installs nothing.
+    pub(super) fn inspect(&self) -> Inspected {
+        let overridden = self.executable.is_some()
+            || std::env::var_os(self.spec.env_override).is_some_and(|value| !value.is_empty());
+        let registry_version = || match (self.spec.id, self.executable) {
+            (HarnessId::Registry(agent), None) => {
+                crate::acp_registry::record(agent).map(|record| record.version)
+            }
+            _ => None,
+        };
+        let ready = |path: PathBuf, version: Option<String>| Inspected::Ready { path, version };
+        match self.resolve_launch() {
+            // A pinned release archive that was never installed: the explicit step fetches it.
+            Err(HarnessError::NotInstalled(_)) if !overridden && self.spec.archive.is_some() => {
+                Inspected::NeedsInstall {
+                    what: format!(
+                        "the {} release archive (a pinned download)",
+                        self.spec.display_name
+                    ),
+                }
+            }
+            Err(error) => Inspected::Missing {
+                message: match error {
+                    HarnessError::NotInstalled(message) => message,
+                    other => other.to_string(),
+                },
+                overridden,
+            },
+            Ok(Launch::Program(program, _)) => {
+                let version = registry_version().or_else(|| {
+                    crate::executable::binary_version(&program).map(|version| version.to_string())
+                });
+                ready(program, version)
+            }
+            Ok(Launch::Archive { entry, .. }) => {
+                let version =
+                    crate::executable::binary_version(&entry).map(|version| version.to_string());
+                ready(entry, version)
+            }
+            Ok(Launch::Managed { pin, bin_name, .. }) => {
+                match crate::adapter_install::installed_entry(&pin, bin_name) {
+                    Some(entry) => ready(entry, Some(pin.version.to_owned())),
+                    None => Inspected::NeedsInstall {
+                        what: format!(
+                            "the {} adapter ({}@{}, installed with npm)",
+                            self.spec.display_name, pin.name, pin.version
+                        ),
+                    },
+                }
+            }
+        }
+    }
+
+    /// The explicit install step: puts the managed adapter (npm) or the pinned release archive
+    /// where a launch finds it. Does nothing for an agent that is already launchable.
+    pub(super) async fn install(&self) -> Result<(), HarnessError> {
+        match self.resolve_launch() {
+            Ok(Launch::Managed { pin, bin_name, .. }) => {
+                crate::adapter_install::ensure_installed(pin, bin_name, self.spec.display_name)
+                    .await
+                    .map(|_| ())
+            }
+            Ok(Launch::Program(..) | Launch::Archive { .. }) => Ok(()),
+            Err(error) => match self.spec.archive.as_ref() {
+                Some(pin) if self.executable.is_none() => {
+                    crate::archive_install::ensure_installed(*pin, self.spec.display_name)
+                        .await
+                        .map(|_| ())
+                }
+                _ => Err(error),
+            },
         }
     }
 

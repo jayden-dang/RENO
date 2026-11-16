@@ -17,10 +17,14 @@ fn availability_child() {
         .enable_all()
         .build()
         .unwrap();
+    let health = runtime.block_on(ClaudeExecutor::new().probe());
     assert_eq!(
-        runtime.block_on(ClaudeExecutor::new().probe()).installed,
+        matches!(
+            health.installed,
+            reno_proto::InstallStatus::Installed { .. }
+        ),
         expected == "true",
-        "probe() must agree with the launch resolver"
+        "probe() must agree with the launch resolver: {health:?}"
     );
 }
 

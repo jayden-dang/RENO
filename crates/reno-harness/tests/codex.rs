@@ -20,8 +20,9 @@ use futures::stream::BoxStream;
 use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
 use reno_harness::{CodexExecutor, ProcessRecord};
 use reno_proto::{
-    AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId, Question,
-    RunId, SandboxLevel, SessionRef, Steering, StopReason, ToolCall,
+    AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId, Ineligible,
+    InstallStatus, ModelSource, NotInstalledReason, Question, RunId, SandboxLevel, SessionRef,
+    SignedIn, Steering, StopReason, ToolCall, VersionGate,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -1586,17 +1587,152 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
     assert_eq!(caps.models[0].id, "gpt-6-astra");
 }
 
+/// The fake app-server behind a wrapper that sets `env`: its version and its account state.
+fn shim(dir: &Path, env: &[(&str, &str)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let exports: String = env
+        .iter()
+        .map(|(key, value)| format!("export {key}='{value}'\n"))
+        .collect();
+    let path = dir.join("codex");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{exports}exec '{}' \"$@\"\n",
+            fixture_path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn probed(env: &[(&str, &str)]) -> (CodexExecutor, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = CodexExecutor::new()
+        .with_executable(shim(dir.path(), env))
+        .with_graces(Duration::from_millis(50), Duration::from_millis(500))
+        .with_probe_budget(Duration::from_secs(5));
+    (executor, dir)
+}
+
 #[tokio::test]
-async fn probe_reports_the_installed_cli() {
-    let health = executor().probe().await;
-    assert!(health.installed);
-    assert_eq!(health.signed_in, None);
+async fn probe_reports_the_cli_a_login_and_the_live_models() {
+    let (executor, _dir) = probed(&[]);
+    let health = executor.probe().await;
+    let InstallStatus::Installed { path, version } = &health.installed else {
+        panic!("{health:?}");
+    };
+    assert!(path.ends_with("codex"));
+    assert_eq!(version.as_deref(), Some("0.169.0"));
+    assert_eq!(health.version_gate, VersionGate::Ok);
+    assert_eq!(
+        health.signed_in,
+        SignedIn::Yes {
+            account: Some("me@example.com".into())
+        }
+    );
+    // The account's catalog replaces the curated list, and says so.
+    assert_eq!(health.models.source, ModelSource::Live);
+    let ids: Vec<_> = health.models.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-sol"]);
+    assert_eq!(executor.descriptor().caps.models, health.models.models);
+    assert_eq!(health.ineligible(), None);
+}
+
+#[tokio::test]
+async fn a_codex_with_no_login_is_ineligible() {
+    let (executor, _dir) = probed(&[("FAKE_CODEX_ACCOUNT", "signedout")]);
+    let health = executor.probe().await;
+    assert_eq!(
+        health.signed_in,
+        SignedIn::No {
+            hint: "run `codex login`".into()
+        }
+    );
+    assert!(matches!(
+        health.ineligible(),
+        Some(Ineligible::SignedOut(_))
+    ));
+}
+
+#[tokio::test]
+async fn an_api_key_is_a_login_and_a_provider_needing_none_is_unknown() {
+    let (executor, _dir) = probed(&[("FAKE_CODEX_ACCOUNT", "apikey")]);
+    assert_eq!(
+        executor.probe().await.signed_in,
+        SignedIn::Yes { account: None }
+    );
+    let (executor, _dir) = probed(&[("FAKE_CODEX_ACCOUNT", "noauth")]);
+    assert_eq!(executor.probe().await.signed_in, SignedIn::Unknown);
+}
+
+#[tokio::test]
+async fn a_method_the_app_server_lacks_leaves_sign_in_unknown_and_the_models_live() {
+    let (executor, _dir) = probed(&[("FAKE_CODEX_ACCOUNT", "error")]);
+    let health = executor.probe().await;
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    assert_eq!(health.models.source, ModelSource::Live);
+}
+
+#[tokio::test]
+async fn an_app_server_that_hangs_is_bounded_and_leaves_the_curated_models() {
+    let (executor, _dir) = probed(&[("FAKE_CODEX_ACCOUNT", "hang")]);
+    let health = executor
+        .with_probe_budget(Duration::from_millis(400))
+        .probe()
+        .await;
+    assert!(matches!(health.installed, InstallStatus::Installed { .. }));
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert_eq!(health.models.models.len(), 9);
+}
+
+#[tokio::test]
+async fn an_old_codex_is_too_old_and_its_app_server_is_not_started() {
+    // The wrapper would hang an app-server; a too-old CLI is never asked.
+    let (executor, _dir) = probed(&[
+        ("FAKE_CODEX_VERSION", "0.120.0"),
+        ("FAKE_CODEX_ACCOUNT", "hang"),
+    ]);
+    let health = executor.probe().await;
+    assert!(matches!(
+        &health.version_gate,
+        VersionGate::TooOld { min } if min == "0.146.0"
+    ));
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert!(matches!(
+        health.ineligible(),
+        Some(Ineligible::TooOld { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_codex_that_is_not_there_is_not_installed() {
     let missing = CodexExecutor::new()
         .with_executable("/nonexistent/codex-nowhere")
         .probe()
         .await;
-    assert!(!missing.installed);
-    assert!(missing.detail.is_some());
+    assert!(matches!(
+        missing.installed,
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::Unusable { .. }
+        }
+    ));
+    assert_eq!(missing.signed_in, SignedIn::Unknown);
+}
+
+#[tokio::test]
+async fn a_later_failed_probe_keeps_the_last_live_models() {
+    let (executor, dir) = probed(&[]);
+    assert_eq!(executor.probe().await.models.source, ModelSource::Live);
+    // The same executor, its CLI now an app-server that fails: the last live list stays.
+    std::fs::write(dir.path().join("codex"), "#!/bin/sh\nexit 1\n").unwrap();
+    let health = executor.probe().await;
+    assert_eq!(health.models.source, ModelSource::Live);
+    assert_eq!(health.models.models.len(), 3);
+    assert_eq!(health.signed_in, SignedIn::Unknown);
 }
 
 #[tokio::test]

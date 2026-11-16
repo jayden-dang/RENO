@@ -29,6 +29,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+
 /// The current lock, inside the config dir.
 const LOCK_NAME: &str = ".oauth_refresh.lock";
 /// A holder bumps its lock's mtime every 5s; one untouched for longer than
@@ -134,13 +137,19 @@ pub async fn settle(config_dir: &Path, max: Duration) -> bool {
 #[derive(Debug)]
 pub struct RefreshLock {
     held: Vec<PathBuf>,
-    touch: Option<tokio::task::JoinHandle<()>>,
+    /// Stops the task that keeps the locks fresh. The task lives on the caller's tracker, so
+    /// shutdown waits for it (ARCH-11).
+    touch: Option<CancellationToken>,
 }
 
 impl RefreshLock {
     /// Take both locks, waiting (at most `timeout`) for a live holder to
     /// finish. A lock whose holder died is taken over, as the CLI does.
-    pub async fn acquire(config_dir: &Path, timeout: Duration) -> std::io::Result<Self> {
+    pub async fn acquire(
+        tracker: &TaskTracker,
+        config_dir: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(config_dir)?;
         let paths = lock_paths(config_dir);
         let deadline = tokio::time::Instant::now() + timeout;
@@ -161,15 +170,21 @@ impl RefreshLock {
             }
             if !busy {
                 let held = lock.held.clone();
-                lock.touch = Some(tokio::spawn(async move {
+                let stop = CancellationToken::new();
+                let stopped = stop.clone();
+                tracker.spawn(async move {
                     loop {
-                        tokio::time::sleep(TOUCH_EVERY).await;
+                        tokio::select! {
+                            () = stopped.cancelled() => break,
+                            () = tokio::time::sleep(TOUCH_EVERY) => {}
+                        }
                         let now = filetime::FileTime::now();
                         for path in &held {
                             let _ = filetime::set_file_mtime(path, now);
                         }
                     }
-                }));
+                });
+                lock.touch = Some(stop);
                 return Ok(lock);
             }
             // Release a partial hold before waiting: never sit on one lock
@@ -212,7 +227,7 @@ fn try_take(path: &Path) -> std::io::Result<bool> {
 impl Drop for RefreshLock {
     fn drop(&mut self) {
         if let Some(touch) = self.touch.take() {
-            touch.abort();
+            touch.cancel();
         }
         for path in self.held.drain(..).rev() {
             let _ = std::fs::remove_dir(&path);
@@ -297,7 +312,7 @@ mod tests {
     async fn acquire_takes_both_locks_and_releases_them_on_drop() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("claude");
-        let lock = RefreshLock::acquire(&config, Duration::from_secs(1))
+        let lock = RefreshLock::acquire(&TaskTracker::new(), &config, Duration::from_secs(1))
             .await
             .unwrap();
         let [current, legacy] = lock_paths(&config);
@@ -305,7 +320,7 @@ mod tests {
         assert!(refresh_in_flight(&config));
         // A second taker (another CLI) waits.
         assert!(
-            RefreshLock::acquire(&config, Duration::from_millis(300))
+            RefreshLock::acquire(&TaskTracker::new(), &config, Duration::from_millis(300))
                 .await
                 .is_err()
         );
@@ -323,7 +338,7 @@ mod tests {
         // Live holder of the legacy lock only: nothing is left half-held.
         std::fs::create_dir(&legacy).unwrap();
         assert!(
-            RefreshLock::acquire(&config, Duration::from_millis(300))
+            RefreshLock::acquire(&TaskTracker::new(), &config, Duration::from_millis(300))
                 .await
                 .is_err()
         );
@@ -331,7 +346,7 @@ mod tests {
 
         // The holder died long ago.
         age_lock(&legacy, Duration::from_secs(120));
-        let lock = RefreshLock::acquire(&config, Duration::from_secs(1))
+        let lock = RefreshLock::acquire(&TaskTracker::new(), &config, Duration::from_secs(1))
             .await
             .unwrap();
         assert!(current.is_dir() && legacy.is_dir());
@@ -343,7 +358,7 @@ mod tests {
     async fn a_held_lock_stays_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("claude");
-        let lock = RefreshLock::acquire(&config, Duration::from_secs(1))
+        let lock = RefreshLock::acquire(&TaskTracker::new(), &config, Duration::from_secs(1))
             .await
             .unwrap();
         let [current, legacy] = lock_paths(&config);

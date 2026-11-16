@@ -286,76 +286,113 @@ fn binary_version_with(path: &Path, timeout: std::time::Duration) -> Option<semv
 }
 
 fn probe_version(path: &Path, timeout: std::time::Duration) -> Probe {
-    let probe = || -> Probe {
-        use std::io::Read;
-        use std::process::{Command, Stdio};
-        let mut command = Command::new(path);
-        command
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let Ok(mut child) = command.spawn() else {
-            // ETXTBSY while an updater is still writing the file, EAGAIN, …
-            return Probe::Inconclusive;
-        };
-        fn reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
-            std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = pipe.take(65536).read_to_end(&mut bytes);
-                bytes
-            })
-        }
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Probe::Inconclusive;
-        };
-        let readers = [reader(stdout), reader(stderr)];
-        let start = std::time::Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if start.elapsed() < timeout => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        #[cfg(unix)]
-        #[expect(unsafe_code, reason = "kill(2) on the probe's own process group")]
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-        let Some(status) = status else {
-            return Probe::Inconclusive;
-        };
-        if !status.success() {
-            return Probe::Answered(None);
-        }
-        let mut bytes = Vec::new();
-        for reader in readers {
-            while !reader.is_finished() && start.elapsed() < timeout {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            if !reader.is_finished() {
-                return Probe::Inconclusive;
-            }
-            bytes.extend(reader.join().unwrap_or_default());
+    match run_bounded(path, &["--version"], timeout) {
+        Capture::Inconclusive => Probe::Inconclusive,
+        Capture::Finished { success: false, .. } => Probe::Answered(None),
+        Capture::Finished {
+            stdout, mut stderr, ..
+        } => {
+            let mut bytes = stdout;
             bytes.push(b' ');
+            bytes.append(&mut stderr);
+            bytes.push(b' ');
+            Probe::Answered(parse_version(&bytes))
         }
-        Probe::Answered(parse_version(&bytes))
+    }
+}
+
+/// The most output of each stream [`run_bounded`] keeps.
+const CAPTURE_LIMIT: u64 = 65536;
+
+/// What [`run_bounded`] saw.
+#[derive(Debug)]
+pub(crate) enum Capture {
+    /// The program ended inside the budget.
+    Finished {
+        /// Exit status zero.
+        success: bool,
+        /// Standard output, cut at [`CAPTURE_LIMIT`] bytes.
+        stdout: Vec<u8>,
+        /// Standard error, cut at [`CAPTURE_LIMIT`] bytes.
+        stderr: Vec<u8>,
+    },
+    /// It could not be spawned, or did not finish (or its pipes did not close) in time.
+    Inconclusive,
+}
+
+/// Runs `path args` with no stdin, its own process group and a deadline, and returns its bounded
+/// output. The whole group is killed when the call returns, so a hung program or a grandchild
+/// holding a pipe never outlives it. Blocking: call it from `spawn_blocking`.
+pub(crate) fn run_bounded(path: &Path, args: &[&str], timeout: std::time::Duration) -> Capture {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(path);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let Ok(mut child) = command.spawn() else {
+        // ETXTBSY while an updater is still writing the file, EAGAIN, …
+        return Capture::Inconclusive;
     };
-    probe()
+    fn reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.take(CAPTURE_LIMIT).read_to_end(&mut bytes);
+            bytes
+        })
+    }
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Capture::Inconclusive;
+    };
+    let readers = [reader(stdout), reader(stderr)];
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if start.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    #[cfg(unix)]
+    #[expect(unsafe_code, reason = "kill(2) on the probe's own process group")]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let Some(status) = status else {
+        return Capture::Inconclusive;
+    };
+    let mut streams = Vec::new();
+    for reader in readers {
+        while !reader.is_finished() && start.elapsed() < timeout {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if !reader.is_finished() {
+            return Capture::Inconclusive;
+        }
+        streams.push(reader.join().unwrap_or_default());
+    }
+    let stderr = streams.pop().unwrap_or_default();
+    let stdout = streams.pop().unwrap_or_default();
+    Capture::Finished {
+        success: status.success(),
+        stdout,
+        stderr,
+    }
 }
 
 pub(crate) fn parse_version(bytes: &[u8]) -> Option<semver::Version> {

@@ -6,7 +6,7 @@
 //!
 //! Sans-IO (ARCH-6).
 
-use reno_proto::{Effort, ModelInfo, SandboxLevel};
+use reno_proto::{Effort, ModelInfo, SandboxLevel, SignedIn};
 use serde_json::Value;
 
 /// `turn/start`'s `effort`.
@@ -118,6 +118,34 @@ pub(crate) fn static_model_infos() -> Vec<ModelInfo> {
         .collect()
 }
 
+/// What to tell a person whose Codex is signed out.
+const SIGN_IN_HINT: &str = "run `codex login`";
+
+/// The sign-in state an `account/read` reply describes.
+///
+/// The reply is `{ account: { type: "chatgpt" | "apiKey", email?, .. } | null,
+/// requiresOpenaiAuth: bool }`. An account is a login. No account while the configured provider
+/// requires OpenAI auth is signed out. No account and no such requirement (a custom provider
+/// that brings its own key) is not something this can judge, so it is `Unknown`, as is any other
+/// shape.
+pub(crate) fn account_state(reply: &Value) -> SignedIn {
+    if let Some(account) = reply.get("account").filter(|account| account.is_object()) {
+        return SignedIn::Yes {
+            account: account
+                .get("email")
+                .and_then(Value::as_str)
+                .filter(|email| !email.is_empty())
+                .map(str::to_owned),
+        };
+    }
+    match reply.get("requiresOpenaiAuth").and_then(Value::as_bool) {
+        Some(true) => SignedIn::No {
+            hint: SIGN_IN_HINT.into(),
+        },
+        Some(false) | None => SignedIn::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +221,35 @@ mod tests {
             ]
         );
         assert_eq!(parse_model_page(&json!({})).1, None);
+    }
+
+    #[test]
+    fn account_replies_map_to_a_sign_in_state() {
+        assert_eq!(
+            account_state(
+                &json!({"account": {"type": "chatgpt", "email": "a@b.c", "planType": "pro"}, "requiresOpenaiAuth": true})
+            ),
+            SignedIn::Yes {
+                account: Some("a@b.c".into())
+            }
+        );
+        assert_eq!(
+            account_state(&json!({"account": {"type": "apiKey"}, "requiresOpenaiAuth": true})),
+            SignedIn::Yes { account: None }
+        );
+        assert_eq!(
+            account_state(&json!({"account": null, "requiresOpenaiAuth": true})),
+            SignedIn::No {
+                hint: SIGN_IN_HINT.into()
+            }
+        );
+        // A provider that needs no OpenAI login: nothing to say.
+        assert_eq!(
+            account_state(&json!({"account": null, "requiresOpenaiAuth": false})),
+            SignedIn::Unknown
+        );
+        assert_eq!(account_state(&json!({})), SignedIn::Unknown);
+        assert_eq!(account_state(&json!([])), SignedIn::Unknown);
     }
 
     #[test]

@@ -42,7 +42,7 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +50,7 @@ use tokio_util::sync::CancellationToken;
 use crate::proc::ProcessRecord;
 
 mod mock;
+pub(crate) mod probe;
 mod requests;
 
 pub use mock::{MockExecutor, MockLog, MockStep};
@@ -61,9 +62,23 @@ pub trait Executor: Send + Sync {
     /// What this executor declares it can do. Nothing is trusted beyond it (ARCH-15).
     fn descriptor(&self) -> ExecutorDescriptor;
 
-    /// Whether the harness is usable now. Never fails: a probe that cannot tell reports `None`
-    /// for that field.
-    async fn probe(&self) -> ExecutorHealth;
+    /// Finds out whether the harness is usable now, without running a model: where it is
+    /// installed and at which version, whether that version is inside the range the adapter was
+    /// verified on, whether it is signed in, and which models it offers. Never fails: what
+    /// cannot be told is reported as such (`SignedIn::Unknown`, `VersionGate::Unchecked`), and a
+    /// probe that cannot finish says `NotInstalled { ProbeFailed }`.
+    ///
+    /// Bounded in time and output, spawns nothing it does not reap, and installs nothing: a
+    /// harness that needs an install says so (`NeedsInstall`) and waits for [`Self::install`].
+    async fn probe(&self) -> HealthProbe;
+
+    /// The explicit install step for a harness whose probe said `NeedsInstall`: fetches and
+    /// verifies the managed adapter. Never called by a run. The default has nothing to install.
+    async fn install(&self) -> Result<(), crate::HarnessError> {
+        Err(crate::HarnessError::Install(
+            "this executor has nothing to install".into(),
+        ))
+    }
 
     /// Start one run.
     ///
@@ -80,19 +95,6 @@ pub trait Executor: Send + Sync {
     /// streams ended or were dropped: each task stops with its stream. The default has nothing
     /// to wait for.
     async fn shutdown(&self) {}
-}
-
-/// What [`Executor::probe`] found.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExecutorHealth {
-    /// The harness CLI is present on this machine.
-    pub installed: bool,
-    /// The CLI's version, when it can be read.
-    pub version: Option<String>,
-    /// Whether the harness is signed in. `None` when it cannot be known without starting a run.
-    pub signed_in: Option<bool>,
-    /// Anything worth showing a person: why `installed` is false, for example.
-    pub detail: Option<String>,
 }
 
 /// Why [`Executor::start`] refused a run. Every variant means nothing was spawned.

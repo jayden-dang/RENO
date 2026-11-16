@@ -1001,7 +1001,9 @@ fn executor_health_on_the_wire() {
     }
     golden(&VersionGate::Ok, json!({"type": "ok"}));
     golden(
-        &VersionGate::TooOld { min: "2.0.0".into() },
+        &VersionGate::TooOld {
+            min: "2.0.0".into(),
+        },
         json!({"type": "too_old", "min": "2.0.0"}),
     );
     golden(&SignedIn::Yes { account: None }, json!({"type": "yes"}));

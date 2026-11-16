@@ -424,7 +424,7 @@ impl AcpExecutor {
         let display_name = self.spec.display_name;
         let on_progress: std::sync::Arc<dyn Fn(SignInProgress) + Send + Sync> =
             std::sync::Arc::new(on_progress);
-        let (exe, args) = self.launcher().resolve_program(false).await?;
+        let (exe, args) = self.launcher().resolve_program()?;
         // A page the agent opens however it opens one: `$BROWSER`, or the
         // system's opener (macOS `open`, `xdg-open`, as npm's `open` and
         // most CLIs call it), recorded where the caller reads it, never
@@ -783,7 +783,7 @@ impl AcpExecutor {
         HarnessError,
     > {
         let display_name = self.spec.display_name;
-        let (exe, args) = self.launcher().resolve_program(false).await?;
+        let (exe, args) = self.launcher().resolve_program()?;
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         crate::compose_child_path(&mut cmd, &exe);

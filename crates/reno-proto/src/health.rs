@@ -457,7 +457,9 @@ mod tests {
             probe.ineligible(),
             Some(Ineligible::SignedOut("run x login".into()))
         );
-        probe.version_gate = VersionGate::TooOld { min: "2.0.0".into() };
+        probe.version_gate = VersionGate::TooOld {
+            min: "2.0.0".into(),
+        };
         assert!(matches!(
             probe.ineligible(),
             Some(Ineligible::TooOld { .. })

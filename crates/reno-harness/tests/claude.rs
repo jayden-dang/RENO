@@ -18,8 +18,9 @@ use futures::stream::BoxStream;
 use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
 use reno_harness::{ClaudeExecutor, ProcessRecord};
 use reno_proto::{
-    AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorId, Question, RunId,
-    SandboxLevel, SessionRef, Steering, StopReason, ToolCall,
+    AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorId, Ineligible,
+    InstallStatus, ModelSource, NotInstalledReason, Question, RunId, SandboxLevel, SessionRef,
+    SignedIn, Steering, StopReason, ToolCall, VersionGate,
 };
 use tokio::sync::mpsc;
 
@@ -1316,17 +1317,151 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
     assert!(caps.models.iter().all(|m| !m.id.is_empty()));
 }
 
+/// The fake CLI behind a wrapper that sets `env`, so each test picks the CLI's version and
+/// sign-in state without touching this process's environment.
+fn shim(dir: &Path, env: &[(&str, &str)]) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let exports: String = env
+        .iter()
+        .map(|(key, value)| format!("export {key}='{value}'\n"))
+        .collect();
+    let path = dir.join("claude");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n{exports}exec '{}' \"$@\"\n",
+            fixture_path().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// An executor on the fake CLI in the given state, blind to credentials in this machine's
+/// environment.
+fn probed(env: &[(&str, &str)]) -> (ClaudeExecutor, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let executor = ClaudeExecutor::new()
+        .with_executable(shim(dir.path(), env))
+        .with_probe_env(|_| None)
+        .with_probe_budget(Duration::from_secs(2));
+    (executor, dir)
+}
+
 #[tokio::test]
-async fn probe_reports_the_installed_cli_and_its_version() {
-    let health = executor().probe().await;
-    assert!(health.installed);
-    assert_eq!(health.signed_in, None);
+async fn probe_reports_where_the_cli_is_its_version_and_that_it_is_signed_in() {
+    let (executor, _dir) = probed(&[]);
+    let health = executor.probe().await;
+    let InstallStatus::Installed { path, version } = &health.installed else {
+        panic!("{health:?}");
+    };
+    assert!(path.ends_with("claude"));
+    assert_eq!(version.as_deref(), Some("2.1.325"));
+    assert_eq!(health.version_gate, VersionGate::Ok);
+    assert_eq!(
+        health.signed_in,
+        SignedIn::Yes {
+            account: Some("me@example.com".into())
+        }
+    );
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert!(!health.models.models.is_empty());
+    assert_eq!(health.ineligible(), None);
+    // The descriptor now carries the version the probe read.
+    assert!(
+        executor
+            .descriptor()
+            .adapter_version
+            .contains("CLI 2.1.325")
+    );
+}
+
+#[tokio::test]
+async fn a_signed_out_cli_is_ineligible_and_says_how_to_sign_in() {
+    let (executor, _dir) = probed(&[("FAKE_CLAUDE_AUTH", "out")]);
+    let health = executor.probe().await;
+    assert_eq!(
+        health.signed_in,
+        SignedIn::No {
+            hint: "run `claude auth login`".into()
+        }
+    );
+    assert!(matches!(
+        health.ineligible(),
+        Some(Ineligible::SignedOut(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_credential_in_the_environment_is_a_login_and_asks_the_cli_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    // The CLI would say signed out; the key wins, as it does for the CLI itself.
+    let executor = ClaudeExecutor::new()
+        .with_executable(shim(dir.path(), &[("FAKE_CLAUDE_AUTH", "out")]))
+        .with_probe_env(|name| (name == "ANTHROPIC_API_KEY").then(|| "sk-test".into()));
+    assert_eq!(
+        executor.probe().await.signed_in,
+        SignedIn::Yes { account: None }
+    );
+}
+
+#[tokio::test]
+async fn sign_in_is_unknown_when_the_cli_cannot_tell_in_time() {
+    for state in ["garbage", "broken", "hang"] {
+        let (executor, _dir) = probed(&[("FAKE_CLAUDE_AUTH", state)]);
+        let health = executor
+            .with_probe_budget(Duration::from_millis(300))
+            .probe()
+            .await;
+        assert_eq!(health.signed_in, SignedIn::Unknown, "{state}");
+        assert_eq!(health.ineligible(), None, "{state}: unknown stays eligible");
+    }
+}
+
+#[tokio::test]
+async fn an_old_cli_is_too_old_and_is_not_asked_about_its_login() {
+    let (executor, _dir) = probed(&[
+        ("FAKE_CLAUDE_VERSION", "2.1.100"),
+        ("FAKE_CLAUDE_AUTH", "out"),
+    ]);
+    let health = executor.probe().await;
+    assert!(matches!(
+        &health.version_gate,
+        VersionGate::TooOld { min } if min == "2.1.228"
+    ));
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    assert!(matches!(
+        health.ineligible(),
+        Some(Ineligible::TooOld { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_newer_cli_than_the_verified_one_is_untested_but_eligible() {
+    let (executor, _dir) = probed(&[("FAKE_CLAUDE_VERSION", "2.9.0")]);
+    let health = executor.probe().await;
+    assert!(matches!(health.version_gate, VersionGate::Untested { .. }));
+    assert_eq!(health.ineligible(), None);
+}
+
+#[tokio::test]
+async fn a_cli_that_is_not_there_is_not_installed() {
     let missing = ClaudeExecutor::new()
         .with_executable("/nonexistent/claude-nowhere")
         .probe()
         .await;
-    assert!(!missing.installed);
-    assert!(missing.detail.is_some());
+    assert!(matches!(
+        missing.installed,
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::Unusable { .. }
+        }
+    ));
+    assert_eq!(missing.version_gate, VersionGate::Unchecked);
+    assert!(matches!(
+        missing.ineligible(),
+        Some(Ineligible::NotInstalled(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------

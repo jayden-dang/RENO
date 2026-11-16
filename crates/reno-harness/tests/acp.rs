@@ -20,8 +20,9 @@ use reno_harness::RegistryAgent;
 use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor, InputAnswer};
 use reno_harness::{AcpExecutor, ProcessRecord};
 use reno_proto::{
-    AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId,
-    McpServerSpec, Question, RunId, SandboxLevel, SessionRef, Steering, StopReason, ToolCall,
+    AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, ExecutorId, Ineligible,
+    InstallStatus, McpServerSpec, ModelSource, NotInstalledReason, Question, RunId, SandboxLevel,
+    SessionRef, SignedIn, Steering, StopReason, ToolCall, VersionGate,
 };
 use tokio::sync::mpsc;
 
@@ -1955,14 +1956,30 @@ fn the_models_an_agent_is_known_to_offer_are_requestable_ids() {
 #[tokio::test]
 async fn probe_reports_the_installed_agent_and_nothing_it_cannot_know() {
     let health = grok().probe().await;
-    assert!(health.installed);
-    assert_eq!(health.signed_in, None);
+    assert!(matches!(health.installed, InstallStatus::Installed { .. }));
+    // Grok offers no login status the driver can read without a run.
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    // No conformance run covers it, so it is never "ok".
+    assert!(matches!(
+        health.version_gate,
+        VersionGate::Untested { .. } | VersionGate::Unchecked | VersionGate::Ok
+    ));
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert_eq!(health.ineligible(), None);
     let missing = AcpExecutor::grok()
         .with_executable("/nonexistent/grok-nowhere")
         .probe()
         .await;
-    assert!(!missing.installed);
-    assert!(missing.detail.is_some());
+    assert!(matches!(
+        missing.installed,
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::Unusable { .. }
+        }
+    ));
+    assert!(matches!(
+        missing.ineligible(),
+        Some(Ineligible::NotInstalled(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -2036,7 +2053,32 @@ async fn antigravity_detection_subprocess() {
     let executor = AcpExecutor::antigravity();
     let installed = matches!(scenario.as_str(), "server" | "par" | "override");
     assert_eq!(executor.installed(), installed);
-    assert_eq!(executor.probe().await.installed, installed);
+    let probed = executor.probe().await;
+    assert_eq!(
+        matches!(probed.installed, InstallStatus::Installed { .. }),
+        installed,
+        "{probed:?}"
+    );
+    if !installed {
+        // A pinned download that was never fetched is reported as needing the explicit install,
+        // never fetched by the probe; a bad override is just unusable.
+        let expected = match scenario.as_str() {
+            "invalid-override" => matches!(
+                probed.installed,
+                InstallStatus::NotInstalled {
+                    why: NotInstalledReason::Unusable { .. }
+                }
+            ),
+            _ => matches!(
+                probed.installed,
+                InstallStatus::NotInstalled {
+                    why: NotInstalledReason::NeedsInstall { .. }
+                        | NotInstalledReason::NotFound { .. }
+                }
+            ),
+        };
+        assert!(expected, "{probed:?}");
+    }
     if installed {
         assert!(executor.launch_program().is_ok());
         return;

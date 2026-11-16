@@ -7,6 +7,21 @@
 # mirror live captures from CLI 2.1.228. Driven by
 # crates/reno-harness/tests/claude.rs, and by the kernel's end-to-end test.
 
+# Discovery commands the driver's probe runs (never a run): `--version`, and `auth status` in the
+# sign-in state FAKE_CLAUDE_AUTH names (in, out, garbage, broken, hang).
+case "$1" in
+  --version) echo "${FAKE_CLAUDE_VERSION:-2.1.325} (Claude Code)"; exit 0 ;;
+  auth)
+    case "${FAKE_CLAUDE_AUTH:-in}" in
+      in) echo '{"loggedIn":true,"authMethod":"claude.ai","email":"me@example.com"}'; exit 0 ;;
+      out) echo '{"loggedIn":false}'; exit 1 ;;
+      garbage) echo 'something else entirely'; exit 0 ;;
+      hang) exec sleep 30 ;;
+      *) exit 2 ;;
+    esac
+    ;;
+esac
+
 read -r first || exit 1
 # A run opens with an `initialize` control request (the SDK handshake); the
 # real CLI answers it before the first user line.

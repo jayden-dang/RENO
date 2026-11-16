@@ -1,7 +1,6 @@
-//! Real-world E2E for the managed adapter install: with no `grok` binary anywhere, `start()`
-//! must npm-install the pinned adapter into `$RENO_ADAPTERS_DIR`, spawn it via node, and reach
-//! `Started` (the full initialize then session/new handshake): the path that `npx -y` at run
-//! time would otherwise take.
+//! Real-world E2E for the managed adapter install: with no `grok` binary anywhere, the explicit
+//! `install()` step npm-installs the pinned adapter into `$RENO_ADAPTERS_DIR`, and a run then
+//! spawns it via node and reaches `Started` (the full initialize then session/new handshake).
 //!
 //! Ignored: needs network and npm. Run with
 //! `cargo test -p reno-harness --test managed_install -- --ignored`.
@@ -26,6 +25,12 @@ async fn managed_install_reaches_started() {
         std::env::remove_var("GROK_EXECUTABLE");
     }
 
+    let executor = AcpExecutor::grok();
+    tokio::time::timeout(std::time::Duration::from_secs(600), executor.install())
+        .await
+        .expect("the install finished in time")
+        .expect("the adapter installed");
+
     let (controls, handle) = ExecControls::new(1);
     let spec = ExecSpec {
         run_id: RunId::from_suffix("01HZX9").unwrap(),
@@ -42,10 +47,10 @@ async fn managed_install_reaches_started() {
     };
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        AcpExecutor::grok().start(spec, controls),
+        executor.start(spec, controls),
     )
     .await
-    .expect("start() (including the npm install) finished in time")
+    .expect("start() finished in time")
     .expect("start() resolved a launch");
 
     // The handshake proves the whole chain: managed install, node spawn, initialize,
