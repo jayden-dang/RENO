@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -290,6 +290,39 @@ CREATE TABLE pauses (
 CREATE INDEX runs_bot_slots ON runs (bot_name, status) WHERE bot_name IS NOT NULL;
 ";
 
+/// Migration 11 (T1.9, `reno mcp`): run tokens and the private boards.
+///
+/// `run_tokens` holds one row per token minted for a run, keyed by the SHA-256 of the token (the
+/// token itself is never stored). It binds the token to its run, the run's bot and the board
+/// scopes it may touch, and to an expiry; `revoked_at` is set when the run ends. A run may have
+/// several rows over its life (a resumed run mints again), so `run_id` is not unique.
+///
+/// `board_entries` is the key/value board of a scope: `bot:<name>` for a bot's private board, or
+/// `run:<id>` for a run that has no bot. `version` counts the writes of a key, from 1.
+const V11: &str = "
+CREATE TABLE run_tokens (
+    token_hash TEXT PRIMARY KEY,
+    run_id     TEXT NOT NULL REFERENCES runs (id),
+    bot        TEXT,
+    scopes     TEXT NOT NULL CHECK (json_valid(scopes)),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    revoked_at INTEGER
+) WITHOUT ROWID;
+CREATE INDEX run_tokens_run ON run_tokens (run_id);
+
+CREATE TABLE board_entries (
+    scope      TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    version    INTEGER NOT NULL CHECK (version >= 1),
+    size       INTEGER NOT NULL CHECK (size >= 0),
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    PRIMARY KEY (scope, key)
+) WITHOUT ROWID;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -303,6 +336,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V8),
         M::up(V9),
         M::up(V10),
+        M::up(V11),
     ])
 }
 
@@ -351,7 +385,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -543,6 +577,38 @@ mod tests {
             "INSERT INTO run_usage (run_id, input_tokens, output_tokens, updated_at)
              VALUES ('run_a', 1, 2, 3);
              INSERT INTO pauses (scope, paused_at) VALUES ('*', 4);",
+        )
+        .unwrap();
+    }
+
+    /// Upgrading a database written before `reno mcp` (schema 10): its runs keep their rows and
+    /// the token and board tables start empty and work.
+    #[test]
+    fn upgrade_from_a_version_ten_database_adds_empty_token_and_board_tables() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 10).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT 1 FROM run_tokens").is_err());
+        run(&mut conn).unwrap();
+        let (runs, tokens, entries): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM runs), (SELECT count(*) FROM run_tokens),
+                        (SELECT count(*) FROM board_entries)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((runs, tokens, entries), (1, 0, 0));
+        conn.execute_batch(
+            "INSERT INTO run_tokens (token_hash, run_id, scopes, created_at, expires_at)
+             VALUES ('h', 'run_a', '[]', 1, 2);
+             INSERT INTO board_entries (scope, key, value, version, size, updated_at, updated_by)
+             VALUES ('bot:b', 'k', 'v', 1, 1, 1, 'run_a');",
         )
         .unwrap();
     }
