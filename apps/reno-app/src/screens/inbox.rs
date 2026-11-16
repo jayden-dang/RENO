@@ -4,14 +4,20 @@
 //! click. Approve and Deny are the only actions a held action has. Approve is one click. Deny
 //! opens a small reason field under the card (optional: Enter denies, Escape cancels) when the
 //! daemon takes a reason, and the harness is told it; on an older daemon Deny is one click.
+//!
+//! A card also offers how far the answer reaches (`Once` by default, `This run`, `This bot`,
+//! `Always`) when the daemon keeps standing rules. A choice other than `Once` makes the next
+//! Approve or Deny also keep a rule for exactly this action, and a line under the choice says
+//! what that is. The choice belongs to the card and is forgotten with it.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, Render,
     SharedString, Subscription, Window, div, prelude::*, px,
 };
-use reno_proto::{ApprovalDecision, ApprovalId};
+use reno_proto::{ApprovalDecision, ApprovalId, Remember, RememberScope};
 
 use super::ScreenEvent;
 use crate::store::Store;
@@ -21,6 +27,7 @@ use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
 use crate::vm::inbox::{self, HeldRow, HistoryRow, Verdict};
+use crate::vm::rules;
 
 /// The reason field open under one card.
 struct Reason {
@@ -32,6 +39,8 @@ struct Reason {
 pub(crate) struct InboxScreen {
     store: Entity<Store>,
     reason: Option<Reason>,
+    /// How far each card's answer reaches; a card not here is `Once`.
+    scopes: HashMap<ApprovalId, RememberScope>,
     _store: Subscription,
 }
 
@@ -43,7 +52,34 @@ impl InboxScreen {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             reason: None,
+            scopes: HashMap::new(),
         }
+    }
+
+    /// What the card's choice says now: `None` is once.
+    pub(crate) fn scope_of(&self, approval: &ApprovalId) -> Option<RememberScope> {
+        self.scopes.get(approval).copied()
+    }
+
+    /// Choose how far the answer to `approval` reaches.
+    pub(crate) fn choose_scope(
+        &mut self,
+        approval: &ApprovalId,
+        scope: Option<RememberScope>,
+        cx: &mut Context<Self>,
+    ) {
+        match scope {
+            Some(scope) => self.scopes.insert(approval.clone(), scope),
+            None => self.scopes.remove(approval),
+        };
+        cx.notify();
+    }
+
+    fn remember(&self, approval: &ApprovalId) -> Option<Remember> {
+        self.scope_of(approval).map(|scope| Remember {
+            scope,
+            expires_in_secs: None,
+        })
     }
 
     /// Deny: opens (or closes) the reason field under the card; without one to offer, denies.
@@ -89,10 +125,11 @@ impl InboxScreen {
             return;
         };
         if let ReasonEvent::Submitted(message) = event {
+            let remember = self.remember(&open.approval);
             let id = open.approval;
             let message = message.clone();
             self.store.update(cx, |store, cx| {
-                store.decide_with_message(id, ApprovalDecision::Deny, message, cx);
+                store.decide_remembering(id, ApprovalDecision::Deny, message, remember, cx);
             });
         }
         cx.notify();
@@ -120,8 +157,69 @@ impl InboxScreen {
         cx: &mut Context<Self>,
     ) {
         let id = row.approval.id.clone();
+        let remember = self.remember(&id);
         self.store
-            .update(cx, |store, cx| store.decide(id, decision, cx));
+            .update(cx, |store, cx| {
+                store.decide_remembering(id, decision, None, remember, cx);
+            });
+    }
+
+    /// The choice of how far an answer reaches, and the line that says what it keeps. Nothing
+    /// when the daemon keeps no rules.
+    fn scope_choice(&self, row: &HeldRow, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.store.read(cx).state().supports(reno_proto::FEATURE_RULES) {
+            return None;
+        }
+        let id = row.approval.id.clone();
+        let current = self.scope_of(&id);
+        let chips = rules::choices(row.bot.is_some()).into_iter().map(|(scope, label)| {
+            let approval = id.clone();
+            kit::choice_chip(
+                theme,
+                format!("scope-{label}-{id}", label = label.replace(' ', "-")),
+                label,
+                scope == current,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.choose_scope(&approval, scope, cx)))
+        });
+        let hint =
+            current.map(|scope| rules::hint(&row.approval.subject, scope, row.bot.as_deref()));
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .mr(px(4.0))
+                                .text_size(px(12.5))
+                                .text_color(theme.muted)
+                                .child("Applies to"),
+                        )
+                        .children(chips),
+                )
+                .when_some(hint, |d, hint| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("scope-hint-{id}")))
+                            .debug_selector({
+                                let id = id.clone();
+                                move || format!("scope-hint-{id}")
+                            })
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .text_color(theme.muted)
+                            .child(hint),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn held_card(&self, row: &HeldRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -146,13 +244,24 @@ impl InboxScreen {
             let run = row.run.clone();
             cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone())))
         };
-        let deny_button = kit::pill_button(theme, format!("deny-{id}"), "Deny", Tone::Danger)
+        let remembering = self.scope_of(&row.approval.id).is_some();
+        let scope_choice = self.scope_choice(row, theme, cx);
+        let deny_button = kit::pill_button(
+            theme,
+            format!("deny-{id}"),
+            if remembering { "Deny & keep" } else { "Deny" },
+            Tone::Danger,
+        )
             .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| b.on_click(deny));
         let approve_button = kit::pill_button(
             theme,
             format!("approve-{id}"),
-            "Approve once",
+            if remembering {
+                "Approve & keep"
+            } else {
+                "Approve once"
+            },
             Tone::Primary,
         )
         .when(busy, |b| b.opacity(0.4))
@@ -242,6 +351,7 @@ impl InboxScreen {
                             .line_height(px(20.0))
                             .child(SharedString::from(row.line.clone())),
                     )
+                    .children(scope_choice)
                     .child(
                         // The chips wrap among themselves; the two decisions stay together on
                         // the right, so a narrow window never splits Deny from Approve.
@@ -375,6 +485,14 @@ impl Render for InboxScreen {
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
 
+        // A card that left takes its scope choice with it.
+        let held_ids: Vec<ApprovalId> = view
+            .held
+            .rows()
+            .iter()
+            .map(|row| row.approval.id.clone())
+            .collect();
+        self.scopes.retain(|id, _| held_ids.contains(id));
         // A card that left (decided somewhere else) takes its reason field with it.
         if self.reason.as_ref().is_some_and(|open| {
             !view

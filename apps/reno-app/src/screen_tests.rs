@@ -352,6 +352,85 @@ fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn a_held_action_offers_how_far_the_answer_reaches_and_the_rule_is_listed_and_revoked(
+    cx: &mut TestAppContext,
+) {
+    use reno_proto::{RememberScope, StandingEffect};
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-appr_keeperpush"));
+
+    // The default is once: no hint, and the button says so.
+    let keeper = "appr_keeperpush".parse().unwrap();
+    assert_eq!(
+        root.read_with(vcx, |r, cx| r.inbox().read(cx).scope_of(&keeper)),
+        None
+    );
+    assert!(!painted(vcx, "scope-hint-appr_keeperpush"));
+    // keeper's run has a bot, so the bot scope is offered.
+    assert!(painted(vcx, "scope-This-bot-appr_keeperpush"));
+    click(vcx, "scope-This-bot-appr_keeperpush");
+    draw(vcx);
+    assert_eq!(
+        root.read_with(vcx, |r, cx| r.inbox().read(cx).scope_of(&keeper)),
+        Some(RememberScope::Bot)
+    );
+    assert!(painted(vcx, "scope-hint-appr_keeperpush"));
+
+    click(vcx, "approve-appr_keeperpush");
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.source_approval.as_ref() == Some(&keeper))))
+    });
+    let rule = store.read_with(vcx, |s, _| {
+        s.rules()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|rules| rules.iter().find(|r| r.source_approval.as_ref() == Some(&keeper)))
+            .cloned()
+            .unwrap()
+    });
+    assert_eq!(rule.effect, StandingEffect::Allow);
+    // The card is gone and its choice with it.
+    wait_drawn(vcx, |vcx| !painted(vcx, "approve-appr_keeperpush"));
+
+    // Settings, Policy: the rule is listed with a Revoke button, and revoking removes it.
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "tab-Policy");
+    let revoke = format!("revoke-{}", rule.id);
+    wait_drawn(vcx, |vcx| painted(vcx, &revoke));
+    click(vcx, &revoke);
+    wait_drawn(vcx, |vcx| !painted(vcx, &revoke));
+    assert!(
+        store.read_with(vcx, |s, _| !matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.id == rule.id)))
+    );
+}
+
+#[gpui::test]
+fn an_older_daemon_without_rules_offers_no_scope(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_RULES.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-appr_keeperpush"));
+    assert!(!painted(vcx, "scope-Always-appr_keeperpush"));
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "tab-Policy");
+    wait_drawn(vcx, |vcx| {
+        store.read_with(vcx, |s, _| settings::policy(s.state()).is_some())
+    });
+    assert!(painted(vcx, "standing-rules"));
+}
+
+#[gpui::test]
 fn the_app_reconnects_after_the_daemon_drops(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);

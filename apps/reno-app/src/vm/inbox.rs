@@ -105,7 +105,10 @@ fn held_row(state: &State, approval: &Approval, now_ms: u64) -> HeldRow {
 fn who(by: Option<&ResolvedBy>, status: ApprovalStatus) -> String {
     match by {
         Some(ResolvedBy::Human) => "you".to_owned(),
-        Some(ResolvedBy::Rule { name }) => format!("rule: {name}"),
+        Some(ResolvedBy::Rule { name }) => match name.strip_prefix("standing:") {
+            Some(id) => format!("your rule {id}"),
+            None => format!("rule: {name}"),
+        },
         Some(ResolvedBy::Expired) => "nobody in time".to_owned(),
         Some(ResolvedBy::RepeatDenial) => "repeat of an earlier denial".to_owned(),
         None if status == ApprovalStatus::Expired => "nobody in time".to_owned(),
@@ -215,6 +218,7 @@ mod tests {
             run_id: RunId::from_suffix("r").unwrap(),
             request_id: "req".into(),
             subject: subject("cargo test"),
+            subject_digest: None,
             status,
             decided_by: by,
             created_at_ms: NOW - 3 * HOUR,
