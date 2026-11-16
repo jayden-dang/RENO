@@ -40,6 +40,7 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
 
 fn workspace_code(error: &WorkspaceError) -> ErrorCode {
     match error {
+        WorkspaceError::DirMissing { .. } => ErrorCode::NotFound,
         WorkspaceError::NotAGitRepo { .. }
         | WorkspaceError::NoCommits { .. }
         | WorkspaceError::BareRepository { .. }
@@ -240,6 +241,10 @@ mod tests {
             (
                 KernelError::Workspace(WorkspaceError::NotAGitRepo { dir: "/x".into() }),
                 ErrorCode::InvalidParams,
+            ),
+            (
+                KernelError::Workspace(WorkspaceError::DirMissing { dir: "/x".into() }),
+                ErrorCode::NotFound,
             ),
             (
                 KernelError::Workspace(WorkspaceError::NoCommits { repo: "/x".into() }),

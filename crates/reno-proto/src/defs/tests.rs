@@ -1374,3 +1374,78 @@ fn secret_names_are_validated() {
     let errors = bot_errors(&bot_with(&format!("secrets = [{}]", many.join(", "))));
     assert_one(&errors, "bots/keeper.toml: secrets: lists 33 secrets");
 }
+
+// ---- a trigger's working directory --------------------------------------------------------
+
+fn trigger_cwd_text(cwd_line: &str) -> String {
+    format!(
+        "name = \"nightly\"\n[when]\nkind = \"manual\"\n[target]\nbot = \"keeper\"\nprompt = \"go\"\n{cwd_line}\n"
+    )
+}
+
+fn loaded_trigger(text: &str) -> Validated<TriggerDef> {
+    let set = load(&[
+        file(DefKind::Bot, "keeper", &bot_with("")),
+        file(DefKind::Trigger, "nightly", text),
+    ])
+    .unwrap();
+    set.triggers()["nightly"].clone()
+}
+
+#[test]
+fn a_trigger_cwd_is_absolute_or_home_relative() {
+    for good in ["/srv/app", "~/code/app", "/srv/app/"] {
+        let text = trigger_cwd_text(&format!("cwd = \"{good}\""));
+        assert!(trigger_errors(&text).is_empty(), "{good}");
+    }
+    let trigger = loaded_trigger(&trigger_cwd_text("cwd = \"~/code/app\""));
+    // Kept as written: `~/` is expanded when the trigger fires, against the daemon's HOME.
+    assert_eq!(trigger.def().target.cwd.as_deref(), Some("~/code/app"));
+}
+
+#[test]
+fn a_trigger_cwd_expands_the_home_directory() {
+    let home = std::path::Path::new("/Users/u");
+    let target = |cwd: &str| loaded_trigger(&trigger_cwd_text(cwd)).def().target.clone();
+    let tilde = target("cwd = \"~/code/app\"");
+    assert_eq!(
+        tilde.resolved_cwd(Some(home)),
+        Some(Ok("/Users/u/code/app".into()))
+    );
+    assert!(tilde.resolved_cwd(None).is_some_and(|r| r.is_err()));
+    assert!(
+        tilde
+            .resolved_cwd(Some("rel".as_ref()))
+            .is_some_and(|r| r.is_err())
+    );
+    let plain = target("cwd = \"/srv/app\"");
+    assert_eq!(plain.resolved_cwd(None), Some(Ok("/srv/app".into())));
+    assert_eq!(target("").resolved_cwd(Some(home)), None);
+}
+
+#[test]
+fn a_relative_trigger_cwd_is_refused() {
+    for bad in [
+        "code/app",
+        "./app",
+        "~",
+        "~other/app",
+        "",
+        "/srv/../etc",
+        "~/../etc",
+    ] {
+        let errors = trigger_errors(&trigger_cwd_text(&format!("cwd = \"{bad}\"")));
+        assert_one(&errors, "triggers/nightly.toml: target.cwd: ");
+    }
+}
+
+#[test]
+fn an_omitted_trigger_cwd_leaves_the_content_hash_alone() {
+    let plain = loaded_trigger(&trigger_cwd_text(""));
+    // No `cwd` key in the canonical form: every version stored before the field existed keeps
+    // its hash.
+    assert!(!plain.canonical().contains("cwd"));
+    let with = loaded_trigger(&trigger_cwd_text("cwd = \"/srv/app\""));
+    assert!(with.canonical().contains("cwd"));
+    assert_ne!(with.hash(), plain.hash());
+}

@@ -256,6 +256,10 @@ impl Daemon {
             })?;
         kernel.trigger_cwd.clone_from(&scratch);
         kernel.scratch_root = Some(scratch.clone());
+        // What a trigger's `cwd = "~/..."` is expanded against.
+        kernel.home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from);
         let fs_watch = Arc::new(FsWatch::new());
         let wake = WakeSignal::new();
         let mut setup = DefsSetup::new(fs_defs.clone(), context)

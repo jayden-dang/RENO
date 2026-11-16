@@ -920,3 +920,187 @@ async fn an_idle_scheduler_writes_nothing_for_an_hour() {
     );
     assert!(runs(&fx).await.is_empty());
 }
+
+// ---- a trigger's working directory --------------------------------------------------------
+
+fn trigger_in(name: &str, when: &str, cwd: &str) -> DefFile {
+    file(
+        DefKind::Trigger,
+        name,
+        &format!(
+            "name = \"{name}\"\n[when]\n{when}\n[target]\nbot = \"keeper\"\nprompt = \"go\"\ncwd = \"{cwd}\"\n"
+        ),
+    )
+}
+
+const NIGHTLY: &str = "kind = \"cron\"\ncron = \"0 3 * * *\"\ntimezone = \"UTC\"";
+
+async fn start_in_workspace(
+    files: Vec<DefFile>,
+    config: KernelConfig,
+    ws: &Arc<crate::FakeWorkspace>,
+    m: &MockExecutor,
+) -> Fx {
+    let port = FakePort::with(files);
+    Fx::with_workspace(
+        config,
+        registry(std::slice::from_ref(m)),
+        Some(setup(&port)),
+        ws.clone(),
+    )
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_trigger_with_a_cwd_runs_in_a_worktree_of_that_repository() {
+    let ws = Arc::new(crate::FakeWorkspace::new().with_repo("/repos/app"));
+    let m = mock([]);
+    let fx = start_in_workspace(
+        files(vec![trigger_in("nightly", NIGHTLY, "/repos/app")]),
+        KernelConfig::default(),
+        &ws,
+        &m,
+    )
+    .await;
+    assert_eq!(
+        info(&fx, "nightly").cwd.as_deref(),
+        Some("/repos/app"),
+        "the list shows where the trigger works"
+    );
+
+    step(&fx, 5 * HOUR).await;
+    all_ended(&fx).await;
+    let made = runs(&fx).await;
+    assert_eq!(made.len(), 1);
+    let cwd = m.log().specs[0].cwd.clone();
+    assert_eq!(
+        cwd,
+        std::path::PathBuf::from(crate::FAKE_WORKTREES)
+            .join("app-000000000000")
+            .join(made[0].id.as_str()),
+        "the run works in a worktree, never in the repository itself"
+    );
+    assert_ne!(cwd, std::path::PathBuf::from("/repos/app"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_home_relative_cwd_is_expanded_against_the_configured_home() {
+    let ws = Arc::new(crate::FakeWorkspace::new().with_repo("/home/u/code/app"));
+    let m = mock([]);
+    let config = KernelConfig {
+        home: Some("/home/u".into()),
+        ..KernelConfig::default()
+    };
+    let fx = start_in_workspace(
+        files(vec![trigger_in("nightly", NIGHTLY, "~/code/app")]),
+        config,
+        &ws,
+        &m,
+    )
+    .await;
+    step(&fx, 5 * HOUR).await;
+    all_ended(&fx).await;
+    let made = runs(&fx).await;
+    assert_eq!(made.len(), 1);
+    assert!(
+        made[0].spec["cwd"] == "/home/u/code/app",
+        "the task records the expanded directory: {}",
+        made[0].spec
+    );
+    assert!(
+        m.log().specs[0].cwd.starts_with(crate::FAKE_WORKTREES),
+        "{:?}",
+        m.log().specs[0].cwd
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_trigger_without_a_cwd_still_uses_the_trigger_directory() {
+    let ws = Arc::new(crate::FakeWorkspace::new());
+    let m = mock([]);
+    let config = KernelConfig {
+        trigger_cwd: "/data/workspace".into(),
+        scratch_root: Some("/data/workspace".into()),
+        ..KernelConfig::default()
+    };
+    let fx = start_in_workspace(
+        files(vec![trigger("nightly", NIGHTLY, "go")]),
+        config,
+        &ws,
+        &m,
+    )
+    .await;
+    step(&fx, 5 * HOUR).await;
+    all_ended(&fx).await;
+    assert_eq!(
+        m.log().specs[0].cwd,
+        std::path::PathBuf::from("/data/workspace")
+    );
+    assert_eq!(info(&fx, "nightly").cwd, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missing_cwd_refuses_the_run_before_spawn_and_backs_the_trigger_off_until_it_returns() {
+    let ws = Arc::new(crate::FakeWorkspace::new());
+    let m = mock([]);
+    let fx = start_in_workspace(
+        files(vec![trigger_in("nightly", NIGHTLY, "/mnt/gone/app")]),
+        KernelConfig::default(),
+        &ws,
+        &m,
+    )
+    .await;
+
+    step(&fx, 5 * HOUR).await;
+    until(async || info(&fx, "nightly").failures.eq(&1).then_some(())).await;
+    // Nothing was spawned, and the run carries the typed refusal.
+    assert!(m.log().specs.is_empty());
+    let made = runs(&fx).await;
+    assert_eq!(made.len(), 1);
+    match fx
+        .journal_with_done(&made[0].id)
+        .await
+        .last()
+        .unwrap()
+        .1
+        .clone()
+    {
+        reno_proto::ExecEvent::Done {
+            reason: Some(reno_proto::StopDetail::StartRefused { failure, detail }),
+            ..
+        } => {
+            assert_eq!(failure, reno_proto::StartRefusal::WorkspaceRefused);
+            assert!(detail.contains("/mnt/gone/app"), "{detail}");
+        }
+        other => panic!("not a typed refusal: {other:?}"),
+    }
+    // A missing repository needs a person, like a signed-out account: the trigger backs off.
+    let t = info(&fx, "nightly");
+    assert_eq!(t.status, TriggerStatus::BackedOff);
+    assert!(t.backoff_until_ms.is_some());
+    assert_eq!(firings(&fx).await[0].outcome, FiringOutcome::BackedOff);
+
+    // The disk comes back; when the backoff ends the next run starts and the episode is over.
+    ws.declare_repo("/mnt/gone/app");
+    // (The cron's next occurrence is tomorrow's, past the backoff.)
+    step(&fx, 24 * HOUR).await;
+    until(async || info(&fx, "nightly").failures.eq(&0).then_some(())).await;
+    assert_eq!(m.log().specs.len(), 1);
+    assert!(m.log().specs[0].cwd.starts_with(crate::FAKE_WORKTREES));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_home_relative_cwd_with_no_home_refuses_like_a_missing_directory() {
+    let ws = Arc::new(crate::FakeWorkspace::new());
+    let m = mock([]);
+    let fx = start_in_workspace(
+        files(vec![trigger_in("nightly", NIGHTLY, "~/code/app")]),
+        KernelConfig::default(),
+        &ws,
+        &m,
+    )
+    .await;
+    step(&fx, 5 * HOUR).await;
+    until(async || info(&fx, "nightly").failures.eq(&1).then_some(())).await;
+    assert!(m.log().specs.is_empty());
+}

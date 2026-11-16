@@ -77,6 +77,10 @@ pub struct TriggerInfo {
     /// Why it cannot run, when `status` is `failed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The working directory its definition names, as written (`~/` is not expanded). Absent
+    /// when the runs use the daemon's own workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Result of `trigger.list`.

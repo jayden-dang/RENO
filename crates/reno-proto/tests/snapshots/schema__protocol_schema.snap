@@ -582,6 +582,13 @@ expression: protocol_schema()
               "description": "The bot to start. It must exist.",
               "type": "string"
             },
+            "cwd": {
+              "description": "The directory the run works in: absolute, or starting with `~/` (the daemon user's home).\nOmitted, the run uses the daemon's own scratch workspace. A git repository here is not\nwritten to: a write run works in a worktree of it. The directory is checked when the\ntrigger fires, not when the definition loads, so an unmounted disk does not make the\ndefinition invalid; a missing directory refuses the run.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "prompt": {
               "description": "The prompt template for the task. `{{trigger}}` is the trigger's name,\n`{{scheduled_at}}` the occurrence it fires for (RFC 3339, in the trigger's time zone) and\n`{{lateness}}` how late the run started (`0s` when on time). Any other `{{...}}` is an\nerror. A run that starts late or merges missed occurrences also gets a sentence saying\nso after the prompt.",
               "type": "string"
@@ -596,7 +603,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A trigger: when to start, and whom to start.\n\n```toml\nname = \"nightly\"\nenabled = true                  # optional, defaults to true\n\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"Asia/Ho_Chi_Minh\"\n\n[target]\nbot = \"keeper\"\nprompt = \"Check for outdated dependencies.\"\n```",
+      "description": "A trigger: when to start, and whom to start.\n\n```toml\nname = \"nightly\"\nenabled = true                  # optional, defaults to true\n\n[when]\nkind = \"cron\"\ncron = \"0 2 * * *\"\ntimezone = \"Asia/Ho_Chi_Minh\"\n\n[target]\nbot = \"keeper\"\nprompt = \"Check for outdated dependencies.\"\ncwd = \"~/code/app\"              # optional: where the run works\n```",
       "properties": {
         "enabled": {
           "default": true,
@@ -5072,6 +5079,13 @@ expression: protocol_schema()
               "bot": {
                 "description": "The bot it starts.",
                 "type": "string"
+              },
+              "cwd": {
+                "description": "The working directory its definition names, as written (`~/` is not expanded). Absent\nwhen the runs use the daemon's own workspace.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "error": {
                 "description": "Why it cannot run, when `status` is `failed`.",
@@ -10112,6 +10126,13 @@ expression: protocol_schema()
               "bot": {
                 "description": "The bot it starts.",
                 "type": "string"
+              },
+              "cwd": {
+                "description": "The working directory its definition names, as written (`~/` is not expanded). Absent\nwhen the runs use the daemon's own workspace.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "error": {
                 "description": "Why it cannot run, when `status` is `failed`.",

@@ -156,10 +156,20 @@ impl TriggersScreen {
                     .font_family(MONO)
                     .text_size(px(12.0))
                     .line_height(px(18.0))
+                    .flex()
+                    .flex_col()
                     .child(if row.schedule.is_empty() {
                         SharedString::from("\u{2026}")
                     } else {
                         SharedString::from(row.schedule.clone())
+                    })
+                    .when_some(row.cwd.clone(), |d, cwd| {
+                        d.child(
+                            div()
+                                .truncate()
+                                .text_color(theme.faint)
+                                .child(format!("in {cwd}")),
+                        )
                     }),
             )
             .child(

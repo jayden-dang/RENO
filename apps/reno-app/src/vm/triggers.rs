@@ -27,6 +27,8 @@ pub(crate) struct TriggerRow {
     /// definition is read.
     pub(crate) schedule: String,
     pub(crate) bot: String,
+    /// "~/code/app": where its runs work, when the definition names a directory.
+    pub(crate) cwd: Option<String>,
     pub(crate) status: TriggerStatus,
     pub(crate) status_label: &'static str,
     /// "in 18h"; `None` when nothing is scheduled (manual, fs, finished, disabled).
@@ -112,6 +114,7 @@ fn row(state: &State, info: &TriggerInfo, now_ms: u64) -> TriggerRow {
         kind: info.kind.clone(),
         schedule,
         bot: info.bot.clone(),
+        cwd: info.cwd.clone(),
         status: info.status,
         status_label: status_label(info.status),
         next: info
@@ -186,6 +189,7 @@ mod tests {
             failures: 0,
             backoff_until_ms: None,
             error: None,
+            cwd: None,
         }
     }
 
@@ -253,6 +257,22 @@ mod tests {
         );
         assert_eq!(runs_to_fetch(&state).len(), 1);
         assert!(row.can_fire);
+    }
+
+    #[test]
+    fn a_row_shows_the_directory_its_runs_work_in_when_one_is_named() {
+        let mut state = State::new();
+        let mut t = info("nightly", "cron", TriggerStatus::Scheduled);
+        t.cwd = Some("~/code/app".into());
+        state.apply(Update::Triggers(vec![
+            t,
+            info("poke", "manual", TriggerStatus::Manual),
+        ]));
+        let view = build(&state, NOW);
+        let rows = view.rows.rows();
+        let by_name = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(by_name("nightly").cwd.as_deref(), Some("~/code/app"));
+        assert_eq!(by_name("poke").cwd, None);
     }
 
     #[test]
