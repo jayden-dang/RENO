@@ -57,6 +57,7 @@ use crate::error::KernelError;
 use crate::lifecycle;
 use crate::procs::{Records, Spawned};
 use crate::shared::{AgentDecision, Shared, Slot, StopCause, Subscription, SupCmd};
+use crate::wake::{WakeSignal, system_woke};
 
 /// A `run_events` subscriber's queue, from the supervisor's side.
 #[derive(Debug)]
@@ -239,9 +240,11 @@ impl Supervisor {
         let mut beat = Box::pin(sleep(period));
         let mut grace: Option<Pin<Box<Sleep>>> = None;
         let mut commands_open = true;
+        let mut woke = self.shared.system_wake.as_ref().map(WakeSignal::subscribe);
         let end = loop {
             tokio::select! {
                 biased;
+                () = system_woke(&mut woke) => self.expire_past_wall_clock().await,
                 spawned = self.records.next() => self.persist(spawned).await,
                 cmd = self.cmd_rx.recv(), if commands_open => match cmd {
                     Some(cmd) => self.command(cmd).await,

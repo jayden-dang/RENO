@@ -18,6 +18,15 @@
 //! midnight except wake the dispatcher: while a bot has queued runs held back by its ceiling, the
 //! dispatcher arms one deadline at the next local midnight (ARCH-10).
 //!
+//! # What `max_wall_time` measures
+//!
+//! Awake time, on purpose. It is a tokio timer, and a Mac's monotonic timer stops while it
+//! sleeps: a run that was live across a night asleep has not used the night, because the machine
+//! did no work for it. Everything else with a time limit is wall clock and is re-read when the
+//! system wakes: approvals, run tokens (a safety net only), leases and cron (see ARCH-10 in
+//! `docs/INVARIANTS.md`). The budget day is the one wall-clock figure a budget has, and the
+//! dispatcher looks again on a wake.
+//!
 //! # The kill switch
 //!
 //! A pause is global or per bot, and it is persisted (`pauses`), so it outlives the daemon.

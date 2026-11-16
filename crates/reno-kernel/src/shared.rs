@@ -31,6 +31,7 @@ use crate::link::RunLink;
 use crate::registry::ExecutorRegistry;
 use crate::scheduler::{COMMAND_QUEUE as SCHED_QUEUE, SchedCmd};
 use crate::secrets::Secrets;
+use crate::wake::WakeSignal;
 use crate::workspace::Workspace;
 
 /// Commands a run supervisor accepts. Bounded (`COMMAND_QUEUE`); the sender waits for room, and
@@ -140,6 +141,8 @@ pub(crate) struct LiveRun {
     pub(crate) cmd: mpsc::Sender<SupCmd>,
     /// The bot the run is pinned to, which a bot's pause (`stop_live`) is matched against.
     pub(crate) bot: Option<String>,
+    /// The lease fence the run was claimed under, which its lease is renewed against.
+    pub(crate) fence: u64,
 }
 
 /// A run's place in the `live` table. Dropping it frees the slot and wakes the dispatcher, on
@@ -199,6 +202,10 @@ pub(crate) struct Shared {
     pub(crate) workspace: Option<Arc<dyn Workspace>>,
     /// Where a bot's secrets come from; `None` when the daemon has no secret store.
     pub(crate) secrets: Option<Arc<dyn Secrets>>,
+    /// Raised when the system woke from sleep: the wall clock may have jumped while every
+    /// monotonic timer stood still. The scheduler, the dispatcher and each supervisor listen
+    /// (ARCH-10); `None` when the daemon does not report it.
+    pub(crate) system_wake: Option<WakeSignal>,
     /// How a run's own `reno mcp` reaches the daemon; `None` injects nothing.
     pub(crate) link: Option<Arc<dyn RunLink>>,
     /// The scheduler's inbox. Senders wait when it is full; the scheduler never waits on them.
@@ -251,6 +258,7 @@ impl Shared {
             mint: IdMint::default(),
             workspace,
             secrets: None,
+            system_wake: None,
             link,
             sched_tx,
             sched_rx: Mutex::new(Some(sched_rx)),
@@ -296,6 +304,14 @@ impl Shared {
 
     pub(crate) fn live_len(&self) -> usize {
         self.live_lock().len()
+    }
+
+    /// Every live run with the fence it holds its lease under.
+    pub(crate) fn live_fences(&self) -> Vec<(RunId, u64)> {
+        self.live_lock()
+            .iter()
+            .map(|(run, live)| (run.clone(), live.fence))
+            .collect()
     }
 
     pub(crate) fn is_live(&self, run: &RunId) -> bool {

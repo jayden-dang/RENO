@@ -190,6 +190,7 @@ impl Kernel {
             link,
         );
         shared.secrets = secrets;
+        shared.system_wake.clone_from(&wake);
         let shared = Arc::new(shared);
         recovery::recover(&shared).await?;
         workspaces::sweep(&shared).await?;

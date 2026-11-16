@@ -933,3 +933,36 @@ async fn list_and_watch_cut_the_prompt_and_run_get_keeps_it_whole() {
     let (listed, _) = fx.kernel.list_runs(None, Some(1), None).await.unwrap();
     assert_eq!(listed[0].prompt.as_deref(), Some(exact.as_str()));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_renews_the_lease_of_a_live_run_before_anyone_can_take_it() {
+    let wake = crate::WakeSignal::new();
+    let m = mock([MockStep::Sleep(Duration::from_secs(3600))]);
+    let port = super::defs::FakePort::with(vec![]);
+    let fx = Fx::with_definitions(
+        config(2),
+        registry(&[m]),
+        super::defs::setup(&port).with_wake(wake.clone()),
+    )
+    .await;
+    let run = fx.submit("long").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    let lease = async || {
+        fx.store
+            .get_run(&run)
+            .await
+            .unwrap()
+            .unwrap()
+            .lease_expires_at
+            .unwrap()
+    };
+    assert_eq!(lease().await, START_MS + 60_000);
+
+    // The machine sleeps for an hour: the lease ran out on the wall clock, the heartbeat timer
+    // did not move. The system wakes; nobody takes the run, and its lease is renewed at once.
+    fx.clock.advance(3_600_000);
+    wake.notify();
+    until(async || (lease().await > START_MS + 3_600_000).then_some(())).await;
+    assert_eq!(lease().await, START_MS + 3_600_000 + 60_000);
+    assert_eq!(fx.status(&run).await, RunStatus::Running);
+}

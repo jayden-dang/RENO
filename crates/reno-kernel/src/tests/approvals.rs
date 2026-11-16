@@ -21,7 +21,7 @@ use tokio::time::advance;
 
 use super::defs::{FakePort, file, setup};
 use super::{Fx, config, id, mock, registry, until};
-use crate::{ExecutorRegistry, KernelConfig, KernelError};
+use crate::{ExecutorRegistry, KernelConfig, KernelError, WakeSignal};
 
 const WORKTREE: &str = "/work/tree";
 
@@ -99,14 +99,35 @@ impl Rig {
         steps: Vec<MockStep>,
         config: KernelConfig,
     ) -> Self {
+        Self::with_setup(policy_text, steps, config, |setup| setup).await
+    }
+
+    /// Like `new`, with the system's wake-up wired in.
+    pub(super) async fn waking(policy_text: &str, steps: Vec<MockStep>, wake: &WakeSignal) -> Self {
+        Self::with_setup(policy_text, steps, config(1), |setup| {
+            setup.with_wake(wake.clone())
+        })
+        .await
+    }
+
+    async fn with_setup(
+        policy_text: &str,
+        steps: Vec<MockStep>,
+        config: KernelConfig,
+        adjust: impl FnOnce(crate::DefsSetup) -> crate::DefsSetup,
+    ) -> Self {
         let mock = mock(steps);
         let port = FakePort::with(vec![
             bot("keeper", ""),
             bot("scout", ""),
             policy(policy_text),
         ]);
-        let fx =
-            Fx::with_definitions(config, registry(std::slice::from_ref(&mock)), setup(&port)).await;
+        let fx = Fx::with_definitions(
+            config,
+            registry(std::slice::from_ref(&mock)),
+            adjust(setup(&port)),
+        )
+        .await;
         Self { fx, port, mock }
     }
 
@@ -1419,4 +1440,117 @@ async fn a_bot_run_goes_to_the_first_listed_executor_that_supports_its_access() 
         .await
         .unwrap();
     assert_eq!(fx.kernel.get_run(&run).await.unwrap().executor, id("codex"));
+}
+
+/// Lets spawned tasks run without moving paused time.
+async fn settle() {
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_approval_that_came_due_while_the_machine_slept_expires_on_the_wake_signal() {
+    let wake = WakeSignal::new();
+    let same = || command("git push");
+    let rig = Rig::waking(
+        "default = \"ask\"\n",
+        script(vec![("r1", same()), ("r2", same())]),
+        &wake,
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    let pending = rig.pending().await;
+    rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+
+    // The machine sleeps for an hour: the wall clock moves, the timer only 10 s.
+    let begun = tokio::time::Instant::now();
+    rig.fx.clock.advance(60 * 60 * 1000);
+    advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert!(rig.decisions().is_empty(), "nothing reads the clock yet");
+    assert_eq!(rig.fx.kernel.pending_approvals().await.unwrap().len(), 1);
+
+    // It wakes up. The approval is expired at once, not 5 more minutes of timer time later.
+    wake.notify();
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert!(begun.elapsed() < Duration::from_secs(60));
+    assert!(rig.fx.kernel.pending_approvals().await.unwrap().is_empty());
+
+    let history = rig.history(&run).await;
+    let first = history.iter().find(|r| r.id == pending.id).unwrap();
+    assert_eq!(first.status, ApprovalStatus::Expired);
+    assert_eq!(first.decided_by, Some(ResolvedBy::Expired));
+    // Exactly as the timer would have: the journal says so, and the denial is remembered, so
+    // the same request, asked again, is refused without a human.
+    assert_eq!(
+        resolved(&rig.fx.journal_with_done(&run).await),
+        [
+            (
+                "r1".into(),
+                ApprovalOutcome::Denied,
+                ResolvedBy::Expired,
+                None
+            ),
+            (
+                "r2".into(),
+                ApprovalOutcome::Denied,
+                ResolvedBy::RepeatDenial,
+                None
+            ),
+        ]
+    );
+    assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_leaves_an_approval_that_is_not_due_and_the_timer_still_expires_it() {
+    let wake = WakeSignal::new();
+    let rig = Rig::waking(
+        "default = \"ask\"\n",
+        script(vec![("r1", command("git push"))]),
+        &wake,
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    rig.pending().await;
+    rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+
+    rig.fx.clock.advance(60 * 1000);
+    wake.notify();
+    wake.notify();
+    settle().await;
+    assert!(rig.decisions().is_empty());
+    assert_eq!(rig.fx.kernel.pending_approvals().await.unwrap().len(), 1);
+    assert_eq!(rig.fx.status(&run).await, RunStatus::WaitingApproval);
+
+    // The monotonic timer is still armed for the deadline.
+    rig.fx.clock.advance(30 * 60 * 1000);
+    advance(Duration::from_secs(30 * 60 + 1)).await;
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(rig.decisions(), [Decision::Deny]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_expires_only_the_approvals_that_are_due() {
+    let wake = WakeSignal::new();
+    let rig = Rig::waking(
+        "default = \"ask\"\napproval_ttl = \"5m\"\n",
+        script(vec![("r1", command("git push"))]),
+        &wake,
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    rig.pending().await;
+    rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+    // Three minutes of wall clock: not yet due at a 5 minute limit.
+    rig.fx.clock.advance(3 * 60 * 1000);
+    wake.notify();
+    settle().await;
+    assert_eq!(rig.fx.kernel.pending_approvals().await.unwrap().len(), 1);
+    // Two minutes more: due exactly at the stored deadline.
+    rig.fx.clock.advance(2 * 60 * 1000);
+    wake.notify();
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(rig.decisions(), [Decision::Deny]);
 }

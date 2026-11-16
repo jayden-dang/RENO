@@ -173,18 +173,110 @@ async fn a_token_is_refused_for_another_run_and_when_it_is_wrong() {
     assert!(rig.session(&first).await.is_ok());
 }
 
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
 #[tokio::test(start_paused = true)]
-async fn a_token_stops_working_when_it_expires_even_while_the_run_is_live() {
+async fn a_token_outlives_a_wall_clock_jump_while_its_run_is_live_and_dies_with_the_run() {
     let rig = Rig::new(hold(), config(1)).await;
-    let (_, session) = rig.live(None).await;
+    let (run, session) = rig.live(None).await;
+    let token = rig.link.token_for(&run).unwrap();
     assert!(rig.fx.kernel.agent_board_read(&session, None).await.is_ok());
 
-    // Past the run's wall time, the cancel grace and the slack.
-    rig.fx.clock.advance(5 * 60 * 60 * 1000);
+    // The machine sleeps: the wall clock is far past the run's wall time, its cancel grace and
+    // the old minute of slack, and the run is still live (its budget counts awake time).
+    rig.fx.clock.advance(5 * HOUR_MS);
+    assert!(rig.fx.kernel.agent_board_read(&session, None).await.is_ok());
+    assert!(
+        rig.fx
+            .kernel
+            .agent_authenticate(&run, &token_digest(&token))
+            .await
+            .is_ok()
+    );
+
+    // Revocation at the run's end is the bound.
+    rig.finish(&run).await;
     assert!(matches!(
         rig.fx.kernel.agent_board_read(&session, None).await,
         Err(KernelError::AgentDenied)
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tokens_wall_clock_expiry_is_a_generous_safety_net_not_the_runs_budget() {
+    let rig = Rig::new(hold(), config(1)).await;
+    let (run, session) = rig.live(None).await;
+    let stored = rig
+        .fx
+        .store
+        .run_token(&run, &rig.digest(&run))
+        .await
+        .unwrap()
+        .unwrap();
+    // The default wall time is 4 h: four times that is under a day, so the floor of 24 h holds.
+    assert_eq!(stored.expires_at, START_MS + 24 * HOUR_MS);
+
+    rig.fx.clock.advance(24 * HOUR_MS - 1);
+    assert!(rig.fx.kernel.agent_board_read(&session, None).await.is_ok());
+    rig.fx.clock.advance(1);
+    assert!(matches!(
+        rig.fx.kernel.agent_board_read(&session, None).await,
+        Err(KernelError::AgentDenied)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_longer_wall_time_budget_stretches_the_safety_net_to_four_times_it() {
+    let cfg = KernelConfig {
+        default_wall_time: std::time::Duration::from_secs(10 * 60 * 60),
+        ..config(1)
+    };
+    let rig = Rig::new(hold(), cfg).await;
+    let (run, _) = rig.live(None).await;
+    let stored = rig
+        .fx
+        .store
+        .run_token(&run, &rig.digest(&run))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.expires_at, START_MS + 40 * HOUR_MS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_token_for_a_run_the_kernel_does_not_hold_is_refused_and_start_up_revokes_it() {
+    let rig = Rig::new(hold(), config(1)).await;
+    let (run, _) = rig.live(None).await;
+    let digest = rig.digest(&run);
+
+    // The daemon dies with the run live: the store keeps the open token and a `running` row.
+    let (dir, store) = rig.fx.into_store();
+    let open = store.run_token(&run, &digest).await.unwrap().unwrap();
+    assert_eq!(open.revoked_at, None);
+
+    // Back up a day and a half later: no run is live in the new kernel, so the token is refused,
+    // and start-up revokes it whatever its expiry says.
+    let second = Fx::over_link(
+        dir,
+        store,
+        config(1),
+        registry(&[mock(hold())]),
+        None,
+        Arc::new(FakeRunLink::new()),
+        START_MS + 36 * HOUR_MS,
+    )
+    .await;
+    assert!(matches!(
+        second.kernel.agent_authenticate(&run, &digest).await,
+        Err(KernelError::AgentDenied)
+    ));
+    let revoked = second
+        .store
+        .run_token(&run, &digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(revoked.revoked_at.is_some(), "start-up revoked it");
 }
 
 #[tokio::test(start_paused = true)]

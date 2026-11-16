@@ -5,12 +5,16 @@
 //!
 //! When a run starts, [`provision`] asks the `RunLink` port for a link, stores the token's digest
 //! bound to the run, its bot and its board scope, and puts Reno's MCP server first in
-//! `ExecSpec::mcp`. The token expires when the run's wall time, the cancel grace and a minute
-//! have passed, and is revoked when the run ends ([`revoke`]), when a run fails to start, and,
-//! for every run at once, when the daemon starts ([`revoke_orphans`]).
+//! `ExecSpec::mcp`. The token is bounded by the run: it is revoked when the run ends
+//! ([`revoke`]), when a run fails to start, and, for every run at once, when the daemon starts
+//! ([`revoke_orphans`]); a resumed attempt is given a fresh one. Its wall-clock expiry is only a
+//! safety net, the greater of four times the run's wall-time budget and 24 hours: the budget
+//! counts awake time and a Mac's clock keeps going while it sleeps, so a token that expired by
+//! the clock at the budget would die under a run that is still live.
 //!
 //! A token is **valid** when its digest is stored under the run it names, it is not revoked, its
-//! expiry has not passed on the kernel's clock and the run is live in this kernel. Every refusal
+//! safety-net expiry has not passed on the kernel's clock and the run is live in this kernel.
+//! Every refusal
 //! is [`KernelError::AgentDenied`], so a caller learns nothing about why. Every `agent_*` call
 //! checks again, so a token revoked mid-connection stops working at once.
 //!
@@ -40,9 +44,26 @@ use crate::error::{KernelError, Result};
 use crate::kernel::Kernel;
 use crate::shared::{Shared, SupCmd};
 
-/// How long past a run's wall time and cancel grace its token stays valid, as a last bound for a
-/// run whose end was never recorded.
-const TOKEN_SLACK: Duration = Duration::from_secs(60);
+/// The shortest the wall-clock safety net of a token may be.
+const TOKEN_SAFETY_FLOOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many times the run's wall-time budget the safety net of a token is, when that is longer
+/// than [`TOKEN_SAFETY_FLOOR`].
+const TOKEN_SAFETY_FACTOR: u32 = 4;
+
+/// The wall-clock `expires_at` of a run's token, as a duration from now: the greater of
+/// [`TOKEN_SAFETY_FACTOR`] times the run's wall-time budget and a day.
+///
+/// This is a safety net and not the run's budget. A run's life is measured in awake time (its
+/// wall-time budget stops while a Mac sleeps), so a token that expired at "wall time + budget"
+/// would die under a run that is still legitimately live after the machine slept. What bounds a
+/// token is the run: it is valid while the run is live in this kernel and not revoked. The
+/// expiry only catches a token that was never revoked for a run that is gone.
+fn token_safety_net(wall_time: Duration) -> Duration {
+    wall_time
+        .saturating_mul(TOKEN_SAFETY_FACTOR)
+        .max(TOKEN_SAFETY_FLOOR)
+}
 
 /// The board scope of a run: its bot's private one, or its own when it has no bot.
 pub(crate) fn scope_of(bot: Option<&str>, run: &RunId) -> String {
@@ -66,7 +87,7 @@ pub(crate) async fn provision(
         .await
         .map_err(|error| format!("McpLinkFailed: {error}"))?;
     let bot = row.bot.as_ref().map(|pin| pin.name.clone());
-    let lifetime = wall_time + shared.config.cancel_grace + TOKEN_SLACK;
+    let lifetime = token_safety_net(wall_time);
     let expires_at = shared
         .db
         .now_ms()
