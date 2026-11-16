@@ -470,6 +470,44 @@ fn an_interrupted_run_is_resumed_from_the_command_line() {
     assert!(world.reno(&["daemon", "stop"]).status.success());
 }
 
+#[test]
+fn run_tail_of_a_resumed_run_continues_past_the_first_done() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    world.start_daemon();
+    let mut task = world
+        .command(&["task", "run", "wait for me"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    task.wait_with_output().expect("task run ends");
+    assert!(world.reno(&["run", "resume", &id]).status.success());
+
+    // From the start: the first attempt's Done is followed by the resume, which is followed.
+    let mut follow = world
+        .command(&["run", "tail", &id])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn run tail");
+    read_until(&mut follow, "resumed: attempt 2 continues the session");
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    let rest = follow.wait_with_output().expect("tail ends");
+    let all = text(&rest.stdout);
+    assert!(all.contains("done (interrupted)"), "{all}");
+    assert_eq!(rest.status.code(), Some(1), "{all}");
+
+    // Once both attempts are over, the whole transcript shows both Dones.
+    let full = text(&world.reno(&["run", "tail", &id]).stdout);
+    assert_eq!(full.matches("done (interrupted)").count(), 2, "{full}");
+    assert!(full.contains("resumed: attempt 2"), "{full}");
+
+    assert!(world.reno(&["daemon", "stop"]).status.success());
+}
+
 // ---- definitions --------------------------------------------------------------------------
 
 fn write_def(dir: &Path, rel: &str, text: &str) {
