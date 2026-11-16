@@ -12,12 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RunId, RunStatus, SessionRef, TaskId, WorkspaceChanges, WorkspaceInfo,
+    RoutingDecision, RuleId, RunId, RunStatus, SessionRef, StandingRule, TaskId, WorkspaceChanges, WorkspaceInfo,
     WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
-    FireResult, Journals, NewApproval, NewDefinition, NewFiring, NewRunToken, NewTask, Note,
+    FireResult, Journals, NewApproval, NewDefinition, NewFiring, NewRule, NewRunToken, NewTask,
+    Note,
     Occupancy, Resumed, RunRecord, RunToken, Store, StoreError, StoredApproval, Tokens, TriggerRow,
 };
 
@@ -393,6 +394,40 @@ impl Db {
         self.store
             .resolve_approval(id, outcome, by, message, fence, self.now_ms())
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resolve_approval_remembering(
+        &self,
+        id: &ApprovalId,
+        outcome: ApprovalOutcome,
+        by: ResolvedBy,
+        message: Option<String>,
+        rule: NewRule,
+        fence: u64,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .resolve_approval_remembering(id, outcome, by, message, rule, fence, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn revoke_rule(&self, id: &RuleId) -> Result<()> {
+        self.wrote();
+        self.store.revoke_rule(id, self.now_ms()).await
+    }
+
+    pub(crate) async fn list_rules(&self, include_inactive: bool) -> Result<Vec<StandingRule>> {
+        self.store.list_rules(include_inactive, self.now_ms()).await
+    }
+
+    /// The standing rules in force now that apply to `run`, a run of `bot`.
+    pub(crate) async fn active_rules(
+        &self,
+        run: &RunId,
+        bot: Option<&str>,
+    ) -> Result<Vec<StandingRule>> {
+        self.store.active_rules(run, bot, self.now_ms()).await
     }
 
     pub(crate) async fn expire_pending(&self, scope: ExpireScope) -> Result<Vec<Expired>> {

@@ -25,7 +25,7 @@ use crate::{ExecutorRegistry, KernelConfig, KernelError};
 
 const WORKTREE: &str = "/work/tree";
 
-fn command(line: &str) -> ApprovalSubject {
+pub(super) fn command(line: &str) -> ApprovalSubject {
     ApprovalSubject {
         action: ActionClass::Command,
         tool: "bash".into(),
@@ -35,7 +35,7 @@ fn command(line: &str) -> ApprovalSubject {
     }
 }
 
-fn edit(path: &str) -> ApprovalSubject {
+pub(super) fn edit(path: &str) -> ApprovalSubject {
     ApprovalSubject {
         action: ActionClass::Edit,
         tool: "write".into(),
@@ -45,21 +45,21 @@ fn edit(path: &str) -> ApprovalSubject {
     }
 }
 
-fn asks(request: &str, subject: ApprovalSubject) -> MockStep {
+pub(super) fn asks(request: &str, subject: ApprovalSubject) -> MockStep {
     MockStep::Emit(ExecEvent::NeedsApproval {
         request_id: request.into(),
         subject,
     })
 }
 
-fn awaits(request: &str) -> MockStep {
+pub(super) fn awaits(request: &str) -> MockStep {
     MockStep::AwaitAnswer {
         request_id: request.into(),
     }
 }
 
 /// `asks` then `awaits`, for each `(request, subject)`, then one last text.
-fn script(requests: Vec<(&str, ApprovalSubject)>) -> Vec<MockStep> {
+pub(super) fn script(requests: Vec<(&str, ApprovalSubject)>) -> Vec<MockStep> {
     let mut steps = vec![MockStep::started("s", "mock-1")];
     for (request, subject) in requests {
         steps.push(asks(request, subject));
@@ -69,7 +69,7 @@ fn script(requests: Vec<(&str, ApprovalSubject)>) -> Vec<MockStep> {
     steps
 }
 
-fn bot(name: &str, extra: &str) -> DefFile {
+pub(super) fn bot(name: &str, extra: &str) -> DefFile {
     file(
         DefKind::Bot,
         name,
@@ -77,24 +77,24 @@ fn bot(name: &str, extra: &str) -> DefFile {
     )
 }
 
-fn policy(text: &str) -> DefFile {
+pub(super) fn policy(text: &str) -> DefFile {
     file(DefKind::Policy, "policy", text)
 }
 
-struct Rig {
-    fx: Fx,
-    port: Arc<FakePort>,
-    mock: MockExecutor,
+pub(super) struct Rig {
+    pub(super) fx: Fx,
+    pub(super) port: Arc<FakePort>,
+    pub(super) mock: MockExecutor,
 }
 
 impl Rig {
     /// A kernel with `policy` and the bots `keeper` and `scout` loaded, and a mock that plays
     /// `steps`.
-    async fn new(policy_text: &str, steps: Vec<MockStep>) -> Self {
+    pub(super) async fn new(policy_text: &str, steps: Vec<MockStep>) -> Self {
         Self::with(policy_text, steps, config(1)).await
     }
 
-    async fn with(policy_text: &str, steps: Vec<MockStep>, config: KernelConfig) -> Self {
+    pub(super) async fn with(policy_text: &str, steps: Vec<MockStep>, config: KernelConfig) -> Self {
         let mock = mock(steps);
         let port = FakePort::with(vec![
             bot("keeper", ""),
@@ -107,7 +107,7 @@ impl Rig {
     }
 
     /// A run of `bot` in the worktree.
-    async fn run_as(&self, bot: &str) -> RunId {
+    pub(super) async fn run_as(&self, bot: &str) -> RunId {
         self.fx
             .kernel
             .submit_for_bot(bot, "go", None, WORKTREE.into(), None)
@@ -116,7 +116,7 @@ impl Rig {
     }
 
     /// Replace the policy file and wait until the kernel holds the new version.
-    async fn reload(&self, policy_text: &str) {
+    pub(super) async fn reload(&self, policy_text: &str) {
         let version = || {
             self.fx
                 .kernel
@@ -134,7 +134,7 @@ impl Rig {
         until(async || (version() > before).then_some(())).await;
     }
 
-    async fn pending(&self) -> Approval {
+    pub(super) async fn pending(&self) -> Approval {
         until(async || {
             self.fx
                 .kernel
@@ -147,7 +147,7 @@ impl Rig {
         .await
     }
 
-    async fn history(&self, run: &RunId) -> Vec<ApprovalRecord> {
+    pub(super) async fn history(&self, run: &RunId) -> Vec<ApprovalRecord> {
         self.fx
             .kernel
             .approval_history(Some(run), None)
@@ -155,7 +155,7 @@ impl Rig {
             .unwrap()
     }
 
-    fn decisions(&self) -> Vec<Decision> {
+    pub(super) fn decisions(&self) -> Vec<Decision> {
         self.mock
             .log()
             .answers
@@ -169,7 +169,7 @@ impl Rig {
 }
 
 /// Waits until the kernel holds version `version` of the bot `name`.
-async fn bot_at(fx: &Fx, name: &str, version: u32) {
+pub(super) async fn bot_at(fx: &Fx, name: &str, version: u32) {
     until(async || {
         let current = fx.kernel.current_defs();
         (current.version_of(DefKind::Bot, name).map(|v| v.version) == Some(version)).then_some(())
@@ -178,7 +178,7 @@ async fn bot_at(fx: &Fx, name: &str, version: u32) {
 }
 
 /// The `ApprovalResolved` events of a journal, in order.
-fn resolved(
+pub(super) fn resolved(
     journal: &[(Seq, ExecEvent)],
 ) -> Vec<(String, ApprovalOutcome, ResolvedBy, Option<String>)> {
     journal
@@ -195,7 +195,7 @@ fn resolved(
         .collect()
 }
 
-fn rule(name: &str) -> ResolvedBy {
+pub(super) fn rule(name: &str) -> ResolvedBy {
     ResolvedBy::Rule { name: name.into() }
 }
 

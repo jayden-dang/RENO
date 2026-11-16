@@ -653,15 +653,58 @@ async fn judged(subject: ApprovalSubject, policy: Option<&str>) -> (ApprovalOutc
 }
 
 #[tokio::test(start_paused = true)]
-async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human() {
+async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human_and_without_a_journal_pair()
+{
     for tool in ["report", "request_approval", "board_read", "board_write"] {
-        let (decision, by) = judged(mcp_call(&format!("mcp__reno__{tool}")), None).await;
-        assert_eq!(decision, ApprovalOutcome::Approved, "{tool}");
+        let name = format!("mcp__reno__{tool}");
+        let steps = vec![
+            MockStep::started("s", "mock-1"),
+            MockStep::Emit(ExecEvent::NeedsApproval {
+                request_id: "r1".into(),
+                subject: mcp_call(&name),
+            }),
+            MockStep::AwaitAnswer {
+                request_id: "r1".into(),
+            },
+            MockStep::text("after"),
+        ];
+        let rig = Rig::with_policy(steps, config(1), None).await;
+        let run = rig
+            .fx
+            .kernel
+            .submit_for_bot("keeper", "go", None, "/work".into(), None)
+            .await
+            .unwrap();
+        // The harness got its answer: the text after the wait is journaled.
+        until(async || {
+            rig.fx
+                .journal(&run)
+                .iter()
+                .any(|(_, event)| matches!(event, ExecEvent::Text { .. }))
+                .then_some(())
+        })
+        .await;
+        let journal = rig.fx.journal(&run);
+        assert!(
+            !journal.iter().any(|(_, event)| matches!(
+                event,
+                ExecEvent::NeedsApproval { .. } | ExecEvent::ApprovalResolved { .. }
+            )),
+            "{tool}: the call is in the approval history only, not the journal: {journal:?}"
+        );
+        let history = rig.fx.kernel.approval_history(Some(&run), None).await.unwrap();
+        assert_eq!(history.len(), 1, "{tool}");
+        assert_eq!(history[0].subject, mcp_call(&name));
         assert_eq!(
-            by,
-            ResolvedBy::Rule {
+            history[0].subject_digest.as_deref(),
+            Some(mcp_call(&name).digest().as_str())
+        );
+        assert_eq!(history[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            history[0].decided_by,
+            Some(ResolvedBy::Rule {
                 name: "builtin:reno-mcp".into()
-            }
+            })
         );
     }
 }

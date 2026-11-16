@@ -70,6 +70,7 @@ pub(crate) fn record(row: &StoredApproval) -> ApprovalRecord {
         run_id: row.run_id.clone(),
         request_id: row.request_id.clone(),
         subject: row.subject.clone(),
+        subject_digest: Some(row.subject_digest.clone()),
         status: row.status,
         decided_by: row.decided_by.clone(),
         created_at_ms: to_ms(row.created_at),

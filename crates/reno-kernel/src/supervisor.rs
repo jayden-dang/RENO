@@ -466,9 +466,10 @@ impl Supervisor {
                 approval,
                 decision,
                 message,
+                remember,
                 reply,
             } => {
-                let outcome = self.decide(approval, decision, message).await;
+                let outcome = self.decide(approval, decision, message, remember).await;
                 // The caller may have gone away; the decision stands either way.
                 let _ = reply.send(outcome);
             }
