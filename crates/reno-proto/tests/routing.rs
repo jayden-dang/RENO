@@ -16,6 +16,27 @@ fn golden<T: Serialize + DeserializeOwned + PartialEq + Debug>(value: &T, wire: 
 }
 
 #[test]
+fn a_routing_warning_is_on_the_wire_and_absent_when_there_is_none() {
+    let mut decision: RoutingDecision = serde_json::from_value(json!({
+        "chosen": "claude-code", "ranked": ["claude-code"], "rejected": [],
+        "ruleMatched": {"type": "default"}, "atMs": 1
+    }))
+    .unwrap();
+    assert!(decision.warnings.is_empty());
+    assert!(
+        serde_json::to_value(&decision)
+            .unwrap()
+            .get("warnings")
+            .is_none()
+    );
+    decision.warnings = vec!["model \"x\" is not in claude-code's model list".into()];
+    assert_eq!(
+        serde_json::to_value(&decision).unwrap()["warnings"],
+        json!(["model \"x\" is not in claude-code's model list"])
+    );
+}
+
+#[test]
 fn task_run_in_place_is_opt_in_and_omitted_when_off() {
     golden(
         &TaskRunParams {

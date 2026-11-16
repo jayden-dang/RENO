@@ -41,6 +41,17 @@
 //! - Cancel: cancelling `ExecControls::cancel` declines every open request (and any that arrives
 //!   later), sends `turn/interrupt`, then SIGTERM and SIGKILL after their graces. The stream
 //!   ends with `Done { stop: Interrupted }`.
+//! - NO ISOLATION FROM THE OWNER'S CONFIG (`ExecSpec::inherit_user_config` is not honoured, and
+//!   the descriptor says `isolates_user_config: false`; ARCH-15). `codex app-server` loads the
+//!   owner's `$CODEX_HOME/config.toml` (profiles, `mcp_servers`, hooks) and the global
+//!   `$CODEX_HOME/AGENTS.md`. The 0.169 schema snapshot's `thread/start` params have no switch
+//!   to leave them out: `config` entries are dotted overrides that only layer on top of the
+//!   user's table (they cannot remove a server they do not know the name of), the global
+//!   `AGENTS.md` has no toggle (`project_doc_max_bytes = 0` covers project files only), and
+//!   moving `CODEX_HOME` would drop the login. Codex's docs list `--ignore-user-config` (auth
+//!   still read from `CODEX_HOME`) for `codex exec`; nothing says `app-server` accepts it, and an
+//!   unknown flag would fail every run, so it is not passed. Reno's own MCP server is added on
+//!   top of the owner's, never in place of it.
 //! - Process records: every app-server this module spawns for a run is reported through
 //!   `ExecControls::processes` as soon as it exists, so a crash of the daemon leaves a row for
 //!   the orphan sweep (ARCHITECTURE 17.3). The short-lived `model/list` probe is not a run and

@@ -29,6 +29,15 @@
 //! - Cancel: `session/cancel`, escalating SIGTERM then SIGKILL; every open request is answered
 //!   `cancelled` first, one that arrives afterwards at once, and the stream ends with
 //!   `Done { stop: Interrupted }`.
+//! - NO ISOLATION FROM THE OWNER'S CONFIG (`ExecSpec::inherit_user_config` is not honoured, and
+//!   the descriptor says `isolates_user_config: false`; ARCH-15). ACP carries no setting for
+//!   "ignore the user's configuration", and each agent reads its own settings, memory and
+//!   instructions from places this driver does not know and cannot name in general, so a run
+//!   loads whatever the agent loads for its owner. Reno's MCP servers are passed to
+//!   `session/new` beside the owner's.
+//! - Usage: a settled `session/prompt`'s `usage` (or Grok's `_meta`) fills `Usage`, including
+//!   `cachedReadTokens` and `cachedWriteTokens` when reported. The protocol does not say whether
+//!   `inputTokens` includes them; they are taken as separate from it.
 //! - Process records: every child this module spawns for a run is reported through
 //!   `ExecControls::processes` as soon as it exists, so a crash of the daemon leaves a row for
 //!   the orphan sweep (ARCHITECTURE 17.3).
