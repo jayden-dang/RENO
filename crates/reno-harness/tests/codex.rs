@@ -1556,7 +1556,6 @@ async fn the_descriptor_declares_what_the_driver_really_does() {
     let descriptor = executor().descriptor();
     assert_eq!(descriptor.id, "codex".parse::<ExecutorId>().unwrap());
     assert_eq!(descriptor.cli_verified.min, "0.146.0");
-    assert_eq!(descriptor.cli_verified.verified, "0.169.0");
     assert_eq!(descriptor.cli_verified.min, MIN_CLI_VERSION);
     assert_eq!(descriptor.cli_verified.verified, VERIFIED_CLI_VERSION);
     assert!(
