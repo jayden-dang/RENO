@@ -9,8 +9,9 @@ use std::io::{self, Write};
 use reno_proto::defs::format_instant;
 use reno_proto::{
     Approval, ApprovalOutcome, ApprovalRecord, CleanItem, CleanOutcome, DaemonStatusInfo,
-    ExecEvent, FiringOutcome, ResolvedBy, RunEventItem, RunStatus, RunSummary, StopReason,
-    TriggerFireResult, TriggerInfo, TriggerStatus, WorkspaceInfo,
+    ExecEvent, ExecutorInfo, FiringOutcome, InstallStatus, ModelSource, NotInstalledReason,
+    ResolvedBy, RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult,
+    TriggerInfo, TriggerStatus, VersionGate, WorkspaceInfo,
 };
 use serde::Serialize;
 
@@ -293,6 +294,57 @@ pub(crate) fn clean_line(item: &CleanItem) -> String {
     }
 }
 
+/// One executor on one line: id, whether it is installed (and at which version), the version
+/// gate, whether it is signed in, and the models with where the list came from.
+pub(crate) fn executor_line(info: &ExecutorInfo) -> String {
+    let id = info.descriptor.id.as_str();
+    let Some(health) = &info.health else {
+        return format!("{id:<16} not probed yet");
+    };
+    let mut line = format!("{id:<16} ");
+    match &health.installed {
+        InstallStatus::Installed { version, .. } => {
+            line.push_str("installed ");
+            line.push_str(version.as_deref().unwrap_or("(version unknown)"));
+        }
+        InstallStatus::NotInstalled { why } => {
+            line.push_str(&match why {
+                NotInstalledReason::NotFound { hint } => format!("not installed: {hint}"),
+                NotInstalledReason::NeedsInstall { what } => {
+                    format!("needs install: {what}")
+                }
+                NotInstalledReason::Unusable { detail } => format!("unusable: {detail}"),
+                NotInstalledReason::ProbeFailed { detail } => {
+                    format!("probe failed: {detail}")
+                }
+            });
+            return line;
+        }
+    }
+    match &health.version_gate {
+        VersionGate::Ok | VersionGate::Unchecked => {}
+        VersionGate::TooOld { min } => line.push_str(&format!(" TOO OLD (needs {min})")),
+        VersionGate::Untested { verified } => {
+            line.push_str(&format!(" untested (verified {verified})"));
+        }
+    }
+    match &health.signed_in {
+        SignedIn::Yes { account: Some(who) } => line.push_str(&format!("  signed in as {who}")),
+        SignedIn::Yes { account: None } => line.push_str("  signed in"),
+        SignedIn::No { hint } => line.push_str(&format!("  NOT SIGNED IN: {hint}")),
+        SignedIn::Unknown => line.push_str("  sign-in unknown"),
+    }
+    let source = match health.models.source {
+        ModelSource::Curated => "curated",
+        ModelSource::Live => "live",
+    };
+    line.push_str(&format!(
+        "  {} models ({source})",
+        health.models.models.len()
+    ));
+    line
+}
+
 /// One trigger on one line: name, kind, status, then what is known of its timing.
 pub(crate) fn trigger_line(trigger: &TriggerInfo) -> String {
     let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
@@ -380,6 +432,56 @@ pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> 
 
 #[cfg(test)]
 mod tests {
+    fn executor(health: Option<reno_proto::ExecutorHealth>) -> ExecutorInfo {
+        ExecutorInfo {
+            descriptor: serde_json::from_value(serde_json::json!({
+                "id": "codex", "contractVersion": 1, "adapterVersion": "x",
+                "cliVerified": {"min": "0.1.0", "verified": "0.2.0"},
+                "caps": {"steering": "none", "resume": false, "accessModes": [],
+                         "sandboxLevels": [], "mcpInjection": false, "structuredOutput": false,
+                         "deterministicTurnEnd": false, "planMode": false, "models": []}
+            }))
+            .unwrap(),
+            health,
+        }
+    }
+
+    #[test]
+    fn an_executor_line_says_what_the_probe_found() {
+        use reno_proto::ModelCatalog;
+        assert_eq!(
+            executor_line(&executor(None)),
+            "codex            not probed yet"
+        );
+        let mut health = reno_proto::ExecutorHealth {
+            installed: InstallStatus::Installed {
+                path: "/bin/codex".into(),
+                version: Some("0.3.0".into()),
+            },
+            version_gate: VersionGate::Untested {
+                verified: "0.2.0".into(),
+            },
+            signed_in: SignedIn::No {
+                hint: "run `codex login`".into(),
+            },
+            models: ModelCatalog::live(vec![]),
+            checked_at_ms: 1,
+        };
+        assert_eq!(
+            executor_line(&executor(Some(health.clone()))),
+            "codex            installed 0.3.0 untested (verified 0.2.0)  NOT SIGNED IN: run `codex login`  0 models (live)"
+        );
+        health.installed = InstallStatus::NotInstalled {
+            why: NotInstalledReason::NeedsInstall {
+                what: "the adapter".into(),
+            },
+        };
+        assert_eq!(
+            executor_line(&executor(Some(health))),
+            "codex            needs install: the adapter"
+        );
+    }
+
     use reno_proto::{ActionClass, Question, Seq, ToolCall};
     use serde_json::json;
 

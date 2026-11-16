@@ -9,15 +9,15 @@ use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
-    RUN_LIST_MAX_LIMIT, RunCancelResult, RunId, RunListParams, RunListResult, Seq, StopReason,
-    TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
+    ExecutorListResult, RUN_LIST_MAX_LIMIT, RunCancelResult, RunId, RunListParams, RunListResult,
+    Seq, StopReason, TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
-    ApprovalCommand, ApprovalHistory, Decide, RunCancel, RunCommand, RunList, RunTail, TaskCommand,
-    TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList,
-    WorkspaceShow,
+    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorRefresh, RunCancel,
+    RunCommand, RunList, RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire,
+    WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line};
 use crate::render::{self, Finished, Transcript};
@@ -40,6 +40,13 @@ pub(crate) async fn trigger(env: &Env, command: TriggerCommand) -> anyhow::Resul
     match command {
         TriggerCommand::List => trigger_list(env).await,
         TriggerCommand::Fire(args) => trigger_fire(env, args).await,
+    }
+}
+
+pub(crate) async fn executor(env: &Env, command: ExecutorCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        ExecutorCommand::List => executor_list(env).await,
+        ExecutorCommand::Refresh(args) => executor_refresh(env, args).await,
     }
 }
 
@@ -213,6 +220,41 @@ async fn run_cancel(env: &Env, args: RunCancel) -> anyhow::Result<ExitCode> {
             args.run,
             render::status_name(status)
         ))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_list(env: &Env) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let executors = client.list_executors().await.map_err(|e| env.explain(e))?;
+    print_executors(env, executors)
+}
+
+async fn executor_refresh(env: &Env, args: ExecutorRefresh) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let mut executors = client
+        .refresh_executors(args.id.clone())
+        .await
+        .map_err(|e| env.explain(e))?;
+    // Naming one executor asked about that one: show it, not the whole list.
+    if let Some(id) = &args.id {
+        executors.retain(|info| &info.descriptor.id == id);
+    }
+    print_executors(env, executors)
+}
+
+fn print_executors(
+    env: &Env,
+    executors: Vec<reno_proto::ExecutorInfo>,
+) -> anyhow::Result<ExitCode> {
+    if env.json {
+        print_json(&ExecutorListResult { executors })?;
+    } else if executors.is_empty() {
+        print_line("no executors")?;
+    } else {
+        for info in &executors {
+            print_line(render::executor_line(info))?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
