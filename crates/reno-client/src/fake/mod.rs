@@ -448,21 +448,28 @@ fn router(shared: &Arc<Shared>) -> Router {
         let s = Arc::clone(&s);
         async move {
             // The fake has no definitions, so there is no bot to run as.
-            let executor = match (&p.bot, &p.executor) {
-                (None, Some(executor)) => executor.clone(),
-                _ => {
-                    return Err(ErrorObject::new(
-                        ErrorCode::InvalidParams,
-                        "the fake daemon runs tasks on a named executor, and has no bots",
-                    ));
-                }
+            if p.bot.is_some() {
+                return Err(ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    "the fake daemon has no bots",
+                ));
+            }
+            let routing = s.read(|w| w.route(&p));
+            let Some(executor) = routing.chosen.clone().or_else(|| p.executor.clone()) else {
+                return Err(ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    "the fake daemon has no executor for this task",
+                ));
             };
             let run_id = s
-                .with(|w| w.create_run(&p, executor, &s.cancel))
+                .with(|w| w.create_run(&p, executor, routing.clone(), &s.cancel))
                 .map_err(internal)?;
             s.tracker
                 .spawn(script::run_new(Arc::clone(&s), run_id.clone(), p.prompt));
-            Ok(TaskRunResult { run_id })
+            Ok(TaskRunResult {
+                run_id,
+                routing: Some(routing),
+            })
         }
     };
 
@@ -472,6 +479,29 @@ fn router(shared: &Arc<Shared>) -> Router {
         async move {
             s.read(|w| w.run(&p.run_id).map(|r| r.summary.clone()))
                 .ok_or_else(|| not_found("run"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let run_routing = move |p: reno_proto::RunRoutingParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            s.read(|w| w.run(&p.run_id).map(|r| r.routing.clone()))
+                .map(|decision| reno_proto::RunRoutingResult {
+                    run_id: p.run_id,
+                    decision,
+                })
+                .ok_or_else(|| not_found("run"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let route_preview = move |p: reno_proto::RoutePreviewParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            Ok(reno_proto::RoutePreviewResult {
+                decision: s.read(|w| w.route(&p.task)),
+            })
         }
     };
 
@@ -750,6 +780,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<DaemonShutdown, _, _>(|_: NoParams, _| async { Ok(DaemonShutdownResult {}) })
         .method::<TaskRun, _, _>(task_run)
         .method::<RunGet, _, _>(run_get)
+        .method::<reno_proto::RunRouting, _, _>(run_routing)
+        .method::<reno_proto::RoutePreview, _, _>(route_preview)
         .method::<RunList, _, _>(run_list)
         .method::<RunCancel, _, _>(run_cancel)
         .method::<RunSteer, _, _>(run_steer)

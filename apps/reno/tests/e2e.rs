@@ -893,3 +893,54 @@ fn workspace_list_show_and_clean_through_the_cli() {
         text(&ghost.stderr)
     );
 }
+
+#[test]
+fn run_show_explains_which_executor_was_chosen_and_why() {
+    let world = World::new();
+    world.start_daemon();
+
+    // No `--executor`: the daemon's router chooses, and says so on stderr, keeping stdout the
+    // transcript.
+    let run = world.reno(&["task", "run", "hi"]);
+    assert!(run.status.success(), "{}", text(&run.stderr));
+    let said = text(&run.stderr);
+    assert!(said.contains("routed to mock (default order)"), "{said}");
+    assert!(
+        !text(&run.stdout).contains("routed to"),
+        "{}",
+        text(&run.stdout)
+    );
+
+    // --json: the run id and its decision on the first line.
+    let streamed = world.reno(&["--json", "task", "run", "again"]);
+    let out = text(&streamed.stdout);
+    let first: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(first["routing"]["chosen"], "mock");
+    assert_eq!(first["routing"]["ruleMatched"]["type"], "default");
+
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let shown = text(&world.reno(&["run", "show", &id]).stdout);
+    assert!(shown.contains("routing: mock (default order)"), "{shown}");
+    assert!(shown.contains("ranked: mock"), "{shown}");
+    let json = world.json(&["run", "show", &id]);
+    assert_eq!(json["run"]["executor"], "mock");
+    assert_eq!(json["routing"]["chosen"], "mock");
+    assert_eq!(json["routing"]["ranked"][0], "mock");
+
+    // A pinned executor is its own rule.
+    let pinned = world.reno(&["task", "run", "--executor", "mock", "pinned"]);
+    assert!(
+        text(&pinned.stderr).contains("routed to mock (the task named it)"),
+        "{}",
+        text(&pinned.stderr)
+    );
+
+    // An unknown run is a short error.
+    let missing = world.reno(&["run", "show", "run_nothere"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        text(&missing.stderr).contains("not found"),
+        "{}",
+        text(&missing.stderr)
+    );
+}

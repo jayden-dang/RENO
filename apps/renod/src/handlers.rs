@@ -5,8 +5,10 @@
 //! | `daemon.hello` | none: checks the protocol version, answers version, features, pid |
 //! | `daemon.status` | `list_runs` (counts) |
 //! | `daemon.shutdown` | none: asks the daemon to begin its shutdown sequence |
-//! | `task.run` | `submit`, or `submit_for_bot` when it names a bot |
+//! | `task.run` | `submit_task` (the router picks the executor unless the task names one) |
 //! | `run.get`, `run.list` | `get_run`, `list_runs` |
+//! | `run.routing` | `run_routing` |
+//! | `route.preview` | `preview_route` |
 //! | `run.cancel` | `cancel` |
 //! | `run.steer` | `get_run`, `steer` |
 //! | `run.events` | `run_events` |
@@ -38,7 +40,7 @@ use std::time::Instant;
 
 use futures::stream::{self, BoxStream};
 use futures::{Stream, StreamExt};
-use reno_kernel::{CurrentDefs, Kernel, KernelError};
+use reno_kernel::{CurrentDefs, Kernel, KernelError, TaskRequest};
 use reno_proto::defs::{
     DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult, DefsSnapshot,
     DefsWatchParams,
@@ -61,6 +63,10 @@ use reno_proto::{
 use reno_proto::{
     ExecutorInfo, ExecutorList, ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams,
     ExecutorsSnapshot, ExecutorsWatch, ExecutorsWatchParams,
+};
+use reno_proto::{
+    RoutePreview, RoutePreviewParams, RoutePreviewResult, RunRouting, RunRoutingParams,
+    RunRoutingResult,
 };
 use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
@@ -115,6 +121,8 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<DaemonShutdown, _, _>(bind(ctx, shutdown))
         .method::<TaskRun, _, _>(bind(ctx, task_run))
         .method::<RunGet, _, _>(bind(ctx, run_get))
+        .method::<RunRouting, _, _>(bind(ctx, run_routing))
+        .method::<RoutePreview, _, _>(bind(ctx, route_preview))
         .method::<RunList, _, _>(bind(ctx, run_list))
         .method::<RunCancel, _, _>(bind(ctx, run_cancel))
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
@@ -222,32 +230,68 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
             ),
         ));
     }
-    let cwd = match p.cwd {
+    let cwd = match &p.cwd {
         Some(cwd) => {
             if !cwd.is_absolute() {
                 return Err(invalid("cwd must be an absolute path"));
             }
             // Resolved, so that where a run works does not depend on how the path was spelled
             // (symlinks, `/var` against `/private/var`).
-            match tokio::fs::canonicalize(&cwd).await {
+            match tokio::fs::canonicalize(cwd).await {
                 Ok(resolved) if resolved.is_dir() => resolved,
                 _ => return Err(invalid(format!("cwd {} is not a directory", cwd.display()))),
             }
         }
         None => ctx.default_cwd.clone(),
     };
-    let model = p.model.filter(|model| !model.is_empty());
-    let submitted = match (p.bot, p.executor) {
-        (Some(bot), executor) => {
-            ctx.kernel
-                .submit_for_bot(&bot, p.prompt, executor, cwd, model)
-                .await
-        }
-        (None, Some(executor)) => ctx.kernel.submit(p.prompt, executor, cwd, model).await,
-        (None, None) => return Err(invalid("a task needs an executor or a bot")),
-    };
-    let run_id = submitted.map_err(|e| kernel_error(&e))?;
-    Ok(TaskRunResult { run_id })
+    let request = task_request(p, cwd);
+    let (run_id, decision) = ctx
+        .kernel
+        .submit_task(request)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(TaskRunResult {
+        run_id,
+        routing: Some(decision),
+    })
+}
+
+/// The kernel's view of a `task.run`.
+fn task_request(p: TaskRunParams, cwd: PathBuf) -> TaskRequest {
+    let mut request = TaskRequest::new(p.prompt, cwd)
+        .model(p.model.filter(|model| !model.is_empty()))
+        .in_place(p.in_place);
+    request.executor = p.executor;
+    request.bot = p.bot;
+    request
+}
+
+/// `route.preview`: the decision the task would get. Nothing is created, so an empty prompt, an
+/// executor this daemon lacks and a directory that is not there are all answered as they would
+/// route (the unknown executor shows as rejected), not refused.
+async fn route_preview(ctx: Arc<Ctx>, p: RoutePreviewParams) -> Reply<RoutePreviewResult> {
+    let cwd = p
+        .task
+        .cwd
+        .clone()
+        .unwrap_or_else(|| ctx.default_cwd.clone());
+    let decision = ctx
+        .kernel
+        .preview_route(&task_request(p.task, cwd))
+        .map_err(|e| kernel_error(&e))?;
+    Ok(RoutePreviewResult { decision })
+}
+
+async fn run_routing(ctx: Arc<Ctx>, p: RunRoutingParams) -> Reply<RunRoutingResult> {
+    let decision = ctx
+        .kernel
+        .run_routing(&p.run_id)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(RunRoutingResult {
+        run_id: p.run_id,
+        decision,
+    })
 }
 
 async fn run_get(ctx: Arc<Ctx>, p: RunGetParams) -> Reply<RunSummary> {

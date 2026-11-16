@@ -165,16 +165,17 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
 fn excluded(request: &RouteRequest, id: &ExecutorId) -> Option<RejectReason> {
     let why = if request.exclude.contains(id) {
         "the request excludes it".to_owned()
-    } else if let Some(explicit) = request.explicit.as_ref().filter(|e| *e != id) {
+    } else if let Some(explicit) = &request.explicit {
+        if explicit == id {
+            return None;
+        }
         format!("the task names {explicit}")
-    } else if let Some(bot) = request
-        .bot
-        .as_ref()
-        .filter(|bot| request.explicit.is_none() && !bot.executors.contains(id))
-    {
-        format!("bot {} does not list it", bot.name)
     } else {
-        return None;
+        let bot = request.bot.as_ref()?;
+        if bot.executors.contains(id) {
+            return None;
+        }
+        format!("bot {} does not list it", bot.name)
     };
     Some(RejectReason::Excluded { why })
 }

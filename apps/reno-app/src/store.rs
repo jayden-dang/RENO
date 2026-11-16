@@ -475,6 +475,7 @@ impl Store {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         };
         self.call(
             "Could not start the task",

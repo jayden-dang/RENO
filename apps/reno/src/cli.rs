@@ -108,7 +108,9 @@ pub(crate) enum TaskCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct TaskRun {
-    /// The executor to run on [default: mock, or with --bot the bot's first executor].
+    /// The executor to run on [default: the daemon's router chooses: the bot's first eligible
+    /// executor with --bot, else the first eligible one by name]. Naming one means no fallback to
+    /// another.
     #[arg(long)]
     pub(crate) executor: Option<String>,
     /// Run as this bot: the run is pinned to the version of the bot's definition in force now.
@@ -120,6 +122,10 @@ pub(crate) struct TaskRun {
     /// The model to ask for.
     #[arg(long)]
     pub(crate) model: Option<String>,
+    /// Allow a write run to work directly in a directory that is not a git repository (as a
+    /// bot's `in_place_writes` does). A git repository is never written in place.
+    #[arg(long)]
+    pub(crate) in_place: bool,
     /// What to do.
     pub(crate) prompt: String,
 }
@@ -130,6 +136,9 @@ pub(crate) enum RunCommand {
     List(RunList),
     /// Follow a run's transcript from a sequence number (the start by default), until it ends.
     Tail(RunTail),
+    /// Show one run, and why the router chose its executor: the candidates it kept and dropped,
+    /// the rule that matched and any fallback steps.
+    Show(RunShow),
     /// Stop a run.
     Cancel(RunCancel),
 }
@@ -142,6 +151,12 @@ pub(crate) struct RunList {
     /// Show every run, fetched a page at a time. Overrides `--limit`.
     #[arg(long)]
     pub(crate) all: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunShow {
+    /// The run.
+    pub(crate) run: RunId,
 }
 
 #[derive(Debug, Args)]

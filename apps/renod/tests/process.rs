@@ -127,6 +127,7 @@ async fn start_live_run(client: &Client) -> RunId {
         bot: None,
         cwd: None,
         model: None,
+        in_place: false,
     }))
     .await
     .expect("task.run");
@@ -301,6 +302,7 @@ process_test! {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         }))
         .await
         .expect("task.run");

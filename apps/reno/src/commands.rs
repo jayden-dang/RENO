@@ -9,17 +9,18 @@ use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
-    ExecutorListResult, RUN_LIST_MAX_LIMIT, RunCancelResult, RunId, RunListParams, RunListResult,
-    Seq, StopReason, TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
+    ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult, RunId, RunListParams,
+    RunListResult, RunSummary, Seq, StopReason, TaskRunParams, TriggerListResult,
+    WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorRefresh, RunCancel,
-    RunCommand, RunList, RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire,
+    RunCommand, RunList, RunShow, RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire,
     WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
 };
-use crate::env::{Env, print_json, print_line};
+use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
 
 pub(crate) async fn task(env: &Env, command: TaskCommand) -> anyhow::Result<ExitCode> {
@@ -31,6 +32,7 @@ pub(crate) async fn task(env: &Env, command: TaskCommand) -> anyhow::Result<Exit
 pub(crate) async fn run(env: &Env, command: RunCommand) -> anyhow::Result<ExitCode> {
     match command {
         RunCommand::List(args) => run_list(env, args).await,
+        RunCommand::Show(args) => run_show(env, args).await,
         RunCommand::Tail(args) => run_tail(env, args).await,
         RunCommand::Cancel(args) => run_cancel(env, args).await,
     }
@@ -69,21 +71,21 @@ pub(crate) async fn approval(env: &Env, command: ApprovalCommand) -> anyhow::Res
 #[serde(rename_all = "camelCase")]
 struct Submitted<'a> {
     run_id: &'a RunId,
+    /// Where the router sent the run and why; absent from a daemon that predates routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing: Option<&'a RoutingDecision>,
 }
 
 async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
-    // Without a bot the executor defaults to the mock. With one, the daemon picks the bot's
-    // first executor that it has.
-    let executor = match (&args.executor, &args.bot) {
-        (Some(name), _) => Some(name.as_str()),
-        (None, None) => Some("mock"),
-        (None, Some(_)) => None,
-    }
-    .map(|name| {
-        name.parse()
-            .with_context(|| format!("`{name}` is not an executor name"))
-    })
-    .transpose()?;
+    // Without `--executor` (and without a bot) the daemon's router chooses; naming one pins it.
+    let executor = args
+        .executor
+        .as_deref()
+        .map(|name| {
+            name.parse()
+                .with_context(|| format!("`{name}` is not an executor name"))
+        })
+        .transpose()?;
     let cwd = match args.cwd {
         Some(cwd) => cwd,
         None => std::env::current_dir().context("cannot read the current directory")?,
@@ -93,20 +95,63 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
         .with_context(|| format!("cannot make {} absolute", cwd.display()))?;
 
     let client = env.connect().await?;
-    let run = client
-        .run_task(TaskRunParams {
+    let submitted = client
+        .submit_task(TaskRunParams {
             prompt: args.prompt,
             executor,
             bot: args.bot,
             cwd: Some(cwd),
             model: args.model,
+            in_place: args.in_place,
         })
         .await
         .map_err(|e| env.explain(e))?;
+    let run = submitted.run_id;
     if env.json {
-        print_json(&Submitted { run_id: &run })?;
+        print_json(&Submitted {
+            run_id: &run,
+            routing: submitted.routing.as_ref(),
+        })?;
+    } else if let Some(decision) = &submitted.routing {
+        // On stderr, so stdout stays the transcript that `run tail` prints too.
+        print_note(format!("routed to {}", decision.explain()))?;
     }
     follow(env, &client, run, None).await
+}
+
+/// One run with its routing decision.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Shown {
+    run: RunSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing: Option<RoutingDecision>,
+}
+
+async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let run = client
+        .get_run(&args.run)
+        .await
+        .map_err(|e| env.explain(e))?;
+    let routing = client
+        .run_routing(&args.run)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&Shown { run, routing })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    print_line(render::run_line(&run))?;
+    match &routing {
+        Some(decision) => {
+            for line in render::routing_lines(decision) {
+                print_line(line)?;
+            }
+        }
+        None => print_line("routing: none recorded (the run predates routing)")?,
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn run_tail(env: &Env, args: RunTail) -> anyhow::Result<ExitCode> {

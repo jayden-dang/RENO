@@ -195,6 +195,7 @@ impl Fixture {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         }))
         .await
         .expect("task.run")

@@ -10,8 +10,8 @@ use reno_proto::defs::format_instant;
 use reno_proto::{
     Approval, ApprovalOutcome, ApprovalRecord, CleanItem, CleanOutcome, DaemonStatusInfo,
     ExecEvent, ExecutorInfo, FiringOutcome, InstallStatus, ModelSource, NotInstalledReason,
-    ResolvedBy, RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult,
-    TriggerInfo, TriggerStatus, VersionGate, WorkspaceInfo,
+    ResolvedBy, RoutingDecision, RunEventItem, RunStatus, RunSummary, SignedIn, StopReason,
+    TriggerFireResult, TriggerInfo, TriggerStatus, VersionGate, WorkspaceInfo,
 };
 use serde::Serialize;
 
@@ -161,6 +161,30 @@ fn shorten(text: &str, width: usize) -> String {
     let mut cut: String = text.chars().take(width).collect();
     cut.push('…');
     cut
+}
+
+/// A routing decision as lines for `run show`: who was chosen and by which rule, then every
+/// executor that was passed over with its reason, then the fallback walk.
+pub(crate) fn routing_lines(decision: &RoutingDecision) -> Vec<String> {
+    let mut lines = vec![format!("routing: {}", decision.explain())];
+    if !decision.ranked.is_empty() {
+        let ranked: Vec<&str> = decision.ranked.iter().map(|id| id.as_str()).collect();
+        lines.push(format!("  ranked: {}", ranked.join(", ")));
+    }
+    for rejection in &decision.rejected {
+        lines.push(format!(
+            "  rejected: {}: {}",
+            rejection.executor, rejection.reason
+        ));
+    }
+    for step in &decision.fallbacks {
+        let to = step.to.as_ref().map_or("nothing left", |id| id.as_str());
+        lines.push(format!(
+            "  fallback: {} -> {to}: {}",
+            step.from, step.reason
+        ));
+    }
+    lines
 }
 
 /// One run on one line: `id  status  executor  title`.

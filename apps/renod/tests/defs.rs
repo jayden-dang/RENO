@@ -270,6 +270,7 @@ async fn run_for_bot(
         bot: Some(bot.into()),
         cwd: None,
         model: None,
+        in_place: false,
     }))
     .await
 }
@@ -328,6 +329,7 @@ daemon_test! {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         }))
         .await
         .unwrap_err();

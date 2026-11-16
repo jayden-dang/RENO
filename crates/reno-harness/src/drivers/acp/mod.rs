@@ -1236,7 +1236,7 @@ async fn run_session(session: Session) {
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     // The prompt in flight (re-sent by a preempt when the agent drops an unstarted cancelled
     // prompt).
-    let mut current_prompt = spec.prompt.clone();
+    let mut current_prompt = opening_prompt(&spec);
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some(prompt_turn(
         &client,
         &session_id,
@@ -1813,6 +1813,16 @@ async fn run_session(session: Session) {
 }
 
 /// How a settled `session/prompt` ended (see [`normalize::stop`]).
+/// The first prompt of a session. The protocol has no system-prompt channel, so a bot's
+/// `instructions` go in front of the task prompt, set apart by a rule. A run with none sends the
+/// prompt as it is.
+fn opening_prompt(spec: &ExecSpec) -> String {
+    match &spec.instructions {
+        Some(instructions) => format!("{instructions}\n\n---\n\n{}", spec.prompt),
+        None => spec.prompt.clone(),
+    }
+}
+
 fn stop_of(
     response: &Result<Value, HarnessError>,
     interrupted: bool,
@@ -1828,6 +1838,27 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn a_bots_instructions_lead_the_opening_prompt() {
+        let mut spec = ExecSpec {
+            run_id: reno_proto::RunId::from_suffix("a").unwrap(),
+            prompt: "do it".into(),
+            cwd: "/work".into(),
+            model: None,
+            instructions: None,
+            effort: None,
+            access: reno_proto::AccessMode::Supervised,
+            sandbox: reno_proto::SandboxLevel::Unrestricted,
+            resume: None,
+            mcp: Vec::new(),
+            env: Default::default(),
+            output_schema: None,
+        };
+        assert_eq!(opening_prompt(&spec), "do it");
+        spec.instructions = Some("Be terse.".into());
+        assert_eq!(opening_prompt(&spec), "Be terse.\n\n---\n\ndo it");
+    }
 
     #[test]
     fn unix_browser_suppression_falls_back_to_renos_noop_mode() {

@@ -49,6 +49,7 @@ daemon_test! {
             bot: None,
             cwd: None,
             model: Some("mock-1".into()),
+            in_place: false,
         }))
         .await
         .unwrap();
@@ -410,6 +411,7 @@ daemon_test! {
             bot: None,
             cwd: cwd.map(Into::into),
             model: None,
+            in_place: false,
         };
         let e = within(fx.client.run_task(run("hi", "no-such-executor", None))).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::NotFound);

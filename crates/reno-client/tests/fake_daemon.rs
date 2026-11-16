@@ -21,6 +21,7 @@ fn task(prompt: &str) -> TaskRunParams {
         bot: None,
         cwd: None,
         model: None,
+        in_place: false,
     }
 }
 
@@ -546,19 +547,19 @@ async fn a_daemon_without_definitions_is_not_asked_for_bots_or_definitions() {
     assert!(!client.supports(reno_proto::FEATURE_DEFS));
     let mut as_bot = task("go");
     as_bot.bot = Some("keeper".to_owned());
-    for params in [
-        as_bot,
-        TaskRunParams {
+    let error = client.run_task(as_bot).await.unwrap_err();
+    assert!(
+        matches!(&error, ClientError::Protocol(m) if m.contains("feature `defs`")),
+        "{error:?}"
+    );
+    // Leaving the executor to the router is the `routing` feature, which this daemon has.
+    client
+        .run_task(TaskRunParams {
             executor: None,
             ..task("go")
-        },
-    ] {
-        let error = client.run_task(params).await.unwrap_err();
-        assert!(
-            matches!(&error, ClientError::Protocol(m) if m.contains("feature `defs`")),
-            "{error:?}"
-        );
-    }
+        })
+        .await
+        .unwrap();
     assert!(matches!(
         client.list_defs(None).await.unwrap_err(),
         ClientError::Protocol(_)
@@ -616,4 +617,39 @@ async fn executors_are_listed_refreshed_and_watched() {
     assert_eq!(error.code(), Some(reno_proto::ErrorCode::NotFound));
     daemon.set_executors(vec![]);
     assert!(client.list_executors().await.unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_fake_previews_routes_and_keeps_each_runs_decision() {
+    use reno_proto::RuleMatched;
+    let client = FakeDaemon::spawn().await.unwrap();
+
+    // Naming an executor is the explicit rule; naming none routes by default, and nothing is
+    // created by a preview.
+    let named = client.route_preview(task("go")).await.unwrap();
+    assert_eq!(named.rule_matched, RuleMatched::ExplicitExecutor);
+    assert_eq!(named.chosen, Some("claude-code".parse().unwrap()));
+    let before = client
+        .list_runs(RunListParams::default())
+        .await
+        .unwrap()
+        .len();
+    let mut unnamed_task = task("go");
+    unnamed_task.executor = None;
+    let unnamed = client.route_preview(unnamed_task.clone()).await.unwrap();
+    assert_eq!(unnamed.rule_matched, RuleMatched::Default);
+    assert!(unnamed.chosen.is_some());
+    let after = client
+        .list_runs(RunListParams::default())
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after, before);
+
+    // A submitted task answers with its decision, and `run.routing` returns the same one.
+    let submitted = client.submit_task(unnamed_task).await.unwrap();
+    let stored = client.run_routing(&submitted.run_id).await.unwrap();
+    assert_eq!(stored, submitted.routing);
+    let missing = client.run_routing(&run("nowhere")).await.unwrap_err();
+    assert_eq!(missing.code(), Some(reno_proto::ErrorCode::NotFound));
 }
