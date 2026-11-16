@@ -121,7 +121,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("engine.lock");
         drop(DataDirLock::acquire(&path).expect("first"));
-        let again = DataDirLock::acquire(&path).expect("free again");
+        // A `flock` belongs to the open file description. Another test in this process may fork
+        // a child between our open and its `exec`; until that `exec` closes the inherited
+        // descriptor (it is close-on-exec), the child shares the lock. So the lock is free again
+        // within that window, not necessarily at the instant of the drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let again = loop {
+            match DataDirLock::acquire(&path) {
+                Ok(lock) => break lock,
+                Err(LockError::Held { .. }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("free again: {error}"),
+            }
+        };
         assert_eq!(again.path(), path);
     }
 }
