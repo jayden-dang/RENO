@@ -365,17 +365,40 @@ async fn logs(env: &Env, args: &DaemonLogs) -> anyhow::Result<ExitCode> {
     let Some(mut follower) = follower else {
         return Ok(ExitCode::SUCCESS);
     };
-    let (wake, mut changed) = tokio::sync::mpsc::channel::<()>(1);
-    let mut watcher = notify::recommended_watcher(move |_event| {
-        // One pending wake-up is enough: the follower reads everything that is there.
-        let _ = wake.try_send(());
-    })
-    .context("cannot watch the log directory")?;
     std::fs::create_dir_all(&paths.dir)
         .with_context(|| format!("cannot create {}", paths.dir.display()))?;
-    watcher
-        .watch(&paths.dir, RecursiveMode::NonRecursive)
-        .with_context(|| format!("cannot watch {}", paths.dir.display()))?;
+    let (wake, mut changed) = tokio::sync::mpsc::channel::<()>(1);
+    // The machine's pool of file-watch streams is shared by every process and can be empty for a
+    // while. Following is worth waiting for: try again after a growing delay (a retry on error,
+    // not a poll), and say so once. Lines written meanwhile are read as soon as the watch runs.
+    let mut failures = 0u32;
+    let _watcher = loop {
+        let wake = wake.clone();
+        let started = notify::recommended_watcher(move |_event| {
+            // One pending wake-up is enough: the follower reads everything that is there.
+            let _ = wake.try_send(());
+        })
+        .and_then(|mut watcher| {
+            watcher.watch(&paths.dir, RecursiveMode::NonRecursive)?;
+            Ok(watcher)
+        });
+        match started {
+            Ok(watcher) => break watcher,
+            Err(error) => {
+                if failures == 0 {
+                    crate::env::print_note(format_args!(
+                        "reno: cannot watch {} yet ({error}); trying again",
+                        paths.dir.display()
+                    ))?;
+                }
+                failures = failures.saturating_add(1);
+                let wait = Duration::from_millis(250)
+                    .saturating_mul(2u32.saturating_pow(failures.saturating_sub(1)))
+                    .min(Duration::from_secs(5));
+                tokio::time::sleep(wait).await;
+            }
+        }
+    };
     loop {
         for line in follower.read_new()? {
             print_log_line(env, &line)?;
