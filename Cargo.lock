@@ -4876,6 +4876,7 @@ dependencies = [
  "futures",
  "reno-proto",
  "reno-rpc",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
