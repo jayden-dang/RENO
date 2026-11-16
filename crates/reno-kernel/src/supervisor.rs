@@ -43,7 +43,9 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_harness::exec::{ExecHandle, SteerRejected};
-use reno_proto::{BudgetKind, BudgetStop, ExecEvent, RunId, RunStatus, Seq, StopReason};
+use reno_proto::{
+    BudgetKind, BudgetStop, CancelledBy, ExecEvent, RunId, RunStatus, Seq, StopDetail, StopReason,
+};
 use reno_store::{JournalWriter, StoreError, Tokens};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::oneshot;
@@ -53,7 +55,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::KernelError;
 use crate::lifecycle;
 use crate::procs::{Records, Spawned};
-use crate::shared::{AgentDecision, Shared, Slot, Subscription, SupCmd};
+use crate::shared::{AgentDecision, Shared, Slot, StopCause, Subscription, SupCmd};
 
 /// A `run_events` subscriber's queue, from the supervisor's side.
 #[derive(Debug)]
@@ -88,6 +90,9 @@ pub(crate) struct RunInfo {
     /// The daily token ceiling of the run's bot; the supervisor stops the run when its bot's
     /// tokens for the day reach it.
     pub(crate) token_ceiling: Option<u64>,
+    /// Set when this attempt continues a session: the attempt that ended and the session. The
+    /// supervisor journals it as a `Resumed` before anything else.
+    pub(crate) resumed: Option<(u32, reno_proto::SessionRef)>,
 }
 
 /// How the run ended, as the executor (or the supervisor, when it had to) said.
@@ -105,6 +110,8 @@ pub(crate) struct Supervisor {
     stream: BoxStream<'static, ExecEvent>,
     handle: ExecHandle,
     cancel: CancellationToken,
+    /// Who cancelled the run, when someone other than the shutdown did.
+    cause: StopCause,
     cmd_rx: mpsc::Receiver<SupCmd>,
     records: Records,
     status: RunStatus,
@@ -172,6 +179,7 @@ impl Supervisor {
         stream: BoxStream<'static, ExecEvent>,
         handle: ExecHandle,
         cancel: CancellationToken,
+        cause: StopCause,
         cmd_rx: mpsc::Receiver<SupCmd>,
         slot: Slot,
     ) -> Self {
@@ -184,6 +192,7 @@ impl Supervisor {
             stream,
             handle,
             cancel,
+            cause,
             cmd_rx,
             records,
             status: RunStatus::Running,
@@ -205,6 +214,12 @@ impl Supervisor {
 
     pub(crate) async fn run(mut self) {
         self.open_journal().await;
+        if let Some((from_attempt, session)) = self.info.resumed.take() {
+            self.publish(&ExecEvent::Resumed {
+                from_attempt,
+                session,
+            });
+        }
         self.wall = Some(Box::pin(sleep(self.info.wall_time)));
         let period = self.shared.config.heartbeat_period();
         let mut beat = Box::pin(sleep(period));
@@ -241,7 +256,7 @@ impl Supervisor {
                     grace = Some(Box::pin(sleep(self.shared.config.cancel_grace)));
                 }
                 event = self.stream.next() => match event {
-                    Some(ExecEvent::Done { stop, result, diagnostic }) => {
+                    Some(ExecEvent::Done { stop, result, diagnostic, .. }) => {
                         break End { stop, result, diagnostic };
                     }
                     Some(event) => self.event(event).await,
@@ -310,6 +325,17 @@ impl Supervisor {
         if let ExecEvent::NeedsInput { request_id, .. } = &event {
             self.open_inputs.insert(request_id.clone());
             self.enter_wait(RunStatus::WaitingInput).await;
+        }
+        if let ExecEvent::Started { session, .. } = &event {
+            // The session is what a resume continues: it is durable before anyone sees it.
+            if let Err(error) = self
+                .shared
+                .db
+                .record_session(&self.run, self.fence, session)
+                .await
+            {
+                tracing::warn!(run = %self.run, %error, "could not record the run's session");
+            }
         }
         // Whatever the event is, it is recorded and broadcast.
         self.publish(&event);
@@ -495,6 +521,29 @@ impl Supervisor {
         }
     }
 
+    /// The typed reason an `interrupted` end has: the budget that stopped it, or whoever
+    /// cancelled it, or the shutdown, or (when nobody asked) the executor stopping by itself.
+    /// Any other end has none.
+    fn stop_reason(&self, stop: StopReason) -> Option<StopDetail> {
+        if stop != StopReason::Interrupted {
+            return None;
+        }
+        Some(if let Some(budget) = self.budget {
+            budget.into()
+        } else if let Some(cause) = self.cause.get() {
+            cause
+        } else if self.shared.root.is_cancelled() {
+            StopDetail::Shutdown
+        } else if self.cancel.is_cancelled() {
+            // Cancelled by a path that named no reason: treat it as a person's.
+            StopDetail::Cancelled {
+                by: CancelledBy::User,
+            }
+        } else {
+            StopDetail::ExecutorStopped
+        })
+    }
+
     async fn finish(&mut self, end: End) {
         // The run is over, whatever the state says next: its token stops working now, and the
         // link's file goes (T1.9).
@@ -519,12 +568,20 @@ impl Supervisor {
             stop = StopReason::Error;
             diagnostic = Some(why);
         }
+        let reason = self.stop_reason(stop);
         if self.lost {
             tracing::warn!(run = %self.run, "not ending a run whose lease was lost");
         } else {
             // State first, journal second (ARCH-8).
-            match lifecycle::end_run(&self.shared.db, &self.run, self.fence, self.status, stop)
-                .await
+            match lifecycle::end_run(
+                &self.shared.db,
+                &self.run,
+                self.fence,
+                self.status,
+                stop,
+                reason.as_ref(),
+            )
+            .await
             {
                 Ok(_) => {
                     crate::workspaces::release_after_run(&self.shared, &self.run).await;
@@ -534,6 +591,7 @@ impl Supervisor {
                         stop,
                         result,
                         diagnostic,
+                        reason,
                     });
                 }
                 Err(error) => tracing::error!(

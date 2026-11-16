@@ -77,6 +77,7 @@ mod link;
 mod procs;
 mod recovery;
 mod registry;
+mod resume;
 mod router;
 mod schedule;
 mod scheduler;

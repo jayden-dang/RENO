@@ -540,7 +540,7 @@ async fn a_typed_change_and_its_event_roll_back_together() {
     let run = c.run_id.clone();
     let res: Result<(), StoreError> = store
         .write(Durability::Normal, move |conn| {
-            tx_transition(conn, &run, 1, RunStatus::Running, 5)?;
+            tx_transition(conn, &run, 1, RunStatus::Running, &Default::default(), 5)?;
             Err(StoreError::InvalidArgument(
                 "forced after the transition".into(),
             ))

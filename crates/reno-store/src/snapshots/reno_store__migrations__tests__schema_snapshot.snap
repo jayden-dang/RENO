@@ -181,7 +181,7 @@ CREATE TABLE runs (
     created_at       INTEGER NOT NULL,
     started_at       INTEGER,
     ended_at         INTEGER
-, process_start INTEGER, bot_name TEXT, bot_version INTEGER);
+, process_start INTEGER, bot_name TEXT, bot_version INTEGER, stop TEXT CHECK (stop IS NULL OR json_valid(stop)), not_resumed TEXT CHECK (not_resumed IS NULL OR json_valid(not_resumed)), resume_prompt TEXT);
 
 CREATE INDEX runs_bot ON runs (bot_name, bot_version) WHERE bot_name IS NOT NULL;
 

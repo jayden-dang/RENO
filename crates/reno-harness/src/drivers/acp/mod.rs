@@ -487,6 +487,7 @@ fn failed(diagnostic: String) -> BoxStream<'static, ExecEvent> {
             stop: StopReason::Error,
             result: None,
             diagnostic: Some(crate::redact_secrets(&diagnostic)),
+            reason: None,
         }
     })
     .boxed()
@@ -1043,6 +1044,7 @@ async fn run_session(session: Session) {
                     stop: StopReason::Error,
                     result: None,
                     diagnostic: Some("agent child has no stdio".into()),
+                    reason: None,
                 })
                 .await;
             child.shutdown(kill_grace).await;
@@ -1167,7 +1169,7 @@ async fn run_session(session: Session) {
                         .send(ExecEvent::Done {
                             stop: StopReason::Interrupted,
                             result: None,
-                            diagnostic: None,
+                            diagnostic: None, reason: None,
                         })
                         .await;
                     child.shutdown(kill_grace).await;
@@ -1213,6 +1215,7 @@ async fn run_session(session: Session) {
                     stop: StopReason::Error,
                     result: None,
                     diagnostic: Some(crate::redact_secrets(&error)),
+                    reason: None,
                 })
                 .await;
             child.shutdown(kill_grace).await;
@@ -1308,7 +1311,7 @@ async fn run_session(session: Session) {
                     let _ = pump.emit(ExecEvent::Done {
                         stop: StopReason::Error,
                         result: None,
-                        diagnostic: Some(not_signed_in(agent_name)),
+                        diagnostic: Some(not_signed_in(agent_name)), reason: None,
                     }).await;
                 }
                 break 'main;
@@ -1429,7 +1432,7 @@ async fn run_session(session: Session) {
                     let _ = pump.emit(ExecEvent::Done {
                         stop,
                         result: None,
-                        diagnostic: diagnostic.map(|d| crate::redact_secrets(&d)),
+                        diagnostic: diagnostic.map(|d| crate::redact_secrets(&d)), reason: None,
                     }).await;
                     break 'main;
                 }
@@ -1552,7 +1555,7 @@ async fn run_session(session: Session) {
                         let _ = pump.emit(ExecEvent::Done {
                             stop,
                             result: None,
-                            diagnostic,
+                            diagnostic, reason: None,
                         }).await;
                     }
                     break 'main;
@@ -1673,7 +1676,7 @@ async fn run_session(session: Session) {
                     let _ = pump.emit(ExecEvent::Done {
                         stop: StopReason::Completed,
                         result: None,
-                        diagnostic: None,
+                        diagnostic: None, reason: None,
                     }).await;
                     break 'main;
                 }
@@ -1760,7 +1763,7 @@ async fn run_session(session: Session) {
                         "{agent_name} did not respond to the prompt at all (no wire activity \
                          for {}s). {stall_hint}",
                         prompt_stall.map_or(0, |d| d.as_secs()),
-                    )),
+                    )), reason: None,
                 }).await;
                 break 'main;
             },
@@ -1797,6 +1800,7 @@ async fn run_session(session: Session) {
                     stop: StopReason::Interrupted,
                     result: None,
                     diagnostic: None,
+                    reason: None,
                 })
                 .await;
         } else {
@@ -1819,6 +1823,7 @@ async fn run_session(session: Session) {
                         status,
                         &stderr_tail,
                     ))),
+                    reason: None,
                 })
                 .await;
         }

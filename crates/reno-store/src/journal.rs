@@ -266,6 +266,7 @@ mod tests {
             stop: StopReason::Completed,
             result: None,
             diagnostic: None,
+            reason: None,
         }
     }
 

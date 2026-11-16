@@ -580,6 +580,7 @@ impl Executor for ClaudeExecutor {
                         stop: StopReason::Error,
                         result: None,
                         diagnostic: Some(diagnostic),
+                        reason: None,
                     }
                 })
                 .boxed());
@@ -999,6 +1000,7 @@ async fn run_session(session: Session) {
                             stop: StopReason::Error,
                             result: None,
                             diagnostic: Some(diagnostic),
+                            reason: None,
                         })
                         .await
                         .is_ok();
@@ -1167,7 +1169,7 @@ async fn run_session(session: Session) {
                         .send(ExecEvent::Done {
                             stop: StopReason::Error,
                             result: None,
-                            diagnostic: Some(crate::redact_secrets(&e.to_string())),
+                            diagnostic: Some(crate::redact_secrets(&e.to_string())), reason: None,
                         })
                         .await
                         .is_ok();
@@ -1259,6 +1261,7 @@ async fn run_session(session: Session) {
                     stop: StopReason::Interrupted,
                     result: None,
                     diagnostic: None,
+                    reason: None,
                 })
                 .await;
         } else {
@@ -1286,6 +1289,7 @@ async fn run_session(session: Session) {
                         status,
                         &stderr_tail,
                     ))),
+                    reason: None,
                 })
                 .await;
         }

@@ -44,6 +44,9 @@ fn summary(n: u64) -> RunSummary {
         bot: None,
         created_at_ms: 0,
         updated_at_ms: n,
+        stop: None,
+        not_resumed: None,
+        session: None,
     }
 }
 

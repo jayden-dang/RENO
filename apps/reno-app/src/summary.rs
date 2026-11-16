@@ -295,6 +295,9 @@ mod tests {
             bot: None,
             created_at_ms: NOW - HOUR,
             updated_at_ms: NOW - 1000,
+            stop: None,
+            not_resumed: None,
+            session: None,
         }
     }
 

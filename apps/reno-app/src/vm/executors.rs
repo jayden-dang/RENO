@@ -7,7 +7,7 @@
 use reno_client::{Feed, State};
 use reno_proto::{
     AccessMode, ExecutorHealth, ExecutorInfo, InstallStatus, ModelSource, NotInstalledReason,
-    RunId, RunStatus, SandboxLevel, SignedIn, VersionGate,
+    RunId, RunStatus, SandboxLevel, SignedIn, StartRefusal, StopDetail, VersionGate,
 };
 
 use super::{Banner, Section, banner};
@@ -310,25 +310,28 @@ pub(crate) struct FailedExecutor {
     pub(crate) row: ExecutorRow,
 }
 
-/// The kernel's diagnostics for a run its executor could not take: `NoEligibleExecutor: ...`
-/// (the health gate, an access mode or sandbox it cannot honour), and the executor's own refusal
-/// (`the executor refused the run: harness is not installed / not signed in ...`).
-pub(crate) fn is_executor_refusal(diagnostic: &str) -> bool {
-    diagnostic.starts_with("NoEligibleExecutor")
-        || diagnostic.starts_with("the executor refused the run: harness is not installed")
-        || diagnostic.starts_with("the executor refused the run: harness is not signed in")
+/// Whether the run's typed stop reason says its executor could not take it: not installed, not
+/// signed in, or not eligible (an access mode or sandbox it cannot honour, a health gate). The
+/// daemon says so in `RunSummary::stop`; the diagnostic's text is never read.
+pub(crate) fn is_executor_refusal(reason: &StopDetail) -> bool {
+    matches!(
+        reason,
+        StopDetail::StartRefused {
+            failure: StartRefusal::NotInstalled
+                | StartRefusal::NotSignedIn
+                | StartRefusal::NoEligibleExecutor,
+            ..
+        }
+    )
 }
 
 /// The health of `run`'s executor to show inline when the run failed for an executor reason.
 /// `None` for any other run, and when the daemon has not listed that executor.
-pub(crate) fn failed_executor(
-    state: &State,
-    run: &RunId,
-    diagnostic: Option<&str>,
-    now_ms: u64,
-) -> Option<FailedExecutor> {
+pub(crate) fn failed_executor(state: &State, run: &RunId, now_ms: u64) -> Option<FailedExecutor> {
     let summary = state.run(run)?;
-    if summary.status != RunStatus::Failed || !diagnostic.is_some_and(is_executor_refusal) {
+    if summary.status != RunStatus::Failed
+        || !summary.stop.as_ref().is_some_and(is_executor_refusal)
+    {
         return None;
     }
     let info = state
@@ -703,7 +706,11 @@ mod tests {
     #[test]
     fn a_failed_run_shows_its_executors_health_only_for_an_executor_reason() {
         use reno_proto::RunSummary;
-        let run = |status: RunStatus| RunSummary {
+        let refused = |failure: StartRefusal| StopDetail::StartRefused {
+            failure,
+            detail: "words for a person, never read".into(),
+        };
+        let run = |status: RunStatus, stop: Option<StopDetail>| RunSummary {
             run_id: RunId::from_suffix("r1").unwrap(),
             task_id: "task_t1".parse().unwrap(),
             title: "x".into(),
@@ -716,6 +723,9 @@ mod tests {
             prompt: None,
             bot: None,
             stop_reason: None,
+            stop,
+            not_resumed: None,
+            session: None,
         };
         let signed_out = with(|h| {
             h.signed_in = SignedIn::No {
@@ -724,28 +734,41 @@ mod tests {
         });
         let mut state = State::new();
         state.apply(Update::Executors(vec![info("codex", Some(signed_out))]));
-        state.apply(Update::Runs(vec![run(RunStatus::Failed)]));
         let id = RunId::from_suffix("r1").unwrap();
-        let refusal = "NoEligibleExecutor: executor codex is not usable: not signed in: login";
-        let found = failed_executor(&state, &id, Some(refusal), NOW).unwrap();
-        assert_eq!(found.row.need, Some(Need::SignIn));
-        for text in [
-            "the executor refused the run: harness is not installed: codex",
-            "the executor refused the run: harness is not signed in: codex login",
+        let shown = |state: &State| failed_executor(state, &id, NOW);
+
+        // The three executor reasons, whatever the words say.
+        for failure in [
+            StartRefusal::NotSignedIn,
+            StartRefusal::NotInstalled,
+            StartRefusal::NoEligibleExecutor,
         ] {
-            assert!(
-                failed_executor(&state, &id, Some(text), NOW).is_some(),
-                "{text}"
-            );
+            state.apply(Update::Runs(vec![run(
+                RunStatus::Failed,
+                Some(refused(failure)),
+            )]));
+            let found = shown(&state).unwrap_or_else(|| panic!("{failure:?}"));
+            assert_eq!(found.row.need, Some(Need::SignIn));
         }
-        // Other failures are not about the executor.
-        assert!(failed_executor(&state, &id, Some("boom"), NOW).is_none());
-        assert!(failed_executor(&state, &id, None, NOW).is_none());
+        // Other failures are not about the executor, even when the words say they are.
+        for stop in [
+            Some(refused(StartRefusal::WorkspaceRefused)),
+            Some(refused(StartRefusal::Invalid)),
+            Some(StopDetail::Crashed),
+            None,
+        ] {
+            state.apply(Update::Runs(vec![run(RunStatus::Failed, stop)]));
+            assert!(shown(&state).is_none());
+        }
         // A run that did not fail, or whose executor is not listed, shows nothing.
-        state.apply(Update::Runs(vec![run(RunStatus::Succeeded)]));
-        assert!(failed_executor(&state, &id, Some(refusal), NOW).is_none());
-        state.apply(Update::Runs(vec![run(RunStatus::Failed)]));
+        let refusal = Some(refused(StartRefusal::NotSignedIn));
+        state.apply(Update::Runs(vec![run(
+            RunStatus::Succeeded,
+            refusal.clone(),
+        )]));
+        assert!(shown(&state).is_none());
+        state.apply(Update::Runs(vec![run(RunStatus::Failed, refusal)]));
         state.apply(Update::Executors(vec![]));
-        assert!(failed_executor(&state, &id, Some(refusal), NOW).is_none());
+        assert!(shown(&state).is_none());
     }
 }

@@ -64,6 +64,7 @@ fn done(stop: StopReason) -> ExecEvent {
         stop,
         result: Some("ok".into()),
         diagnostic: None,
+        reason: None,
     }
 }
 
@@ -265,6 +266,18 @@ async fn a_claim_with_no_scenario_is_a_failure_unless_waived() {
     );
     assert!(matches!(status(&report, CaseId::Claims), Status::Waived(_)));
     assert!(report.is_green(), "{:?}", report.failures());
+}
+
+#[tokio::test]
+async fn a_resume_that_starts_another_session_fails_the_resume_case() {
+    let mut target = crate::targets::mock_target();
+    target.plan.resume = Some(Scenario::new("mock:resume-forks").resume("mock-session"));
+    let report = run_suite(&target).await;
+    assert!(failed(&report, CaseId::Resume), "{:?}", report.labels());
+    let Status::Fail(why) = status(&report, CaseId::Resume) else {
+        unreachable!("failed above");
+    };
+    assert!(why.contains("must continue the session"), "{why}");
 }
 
 #[tokio::test]

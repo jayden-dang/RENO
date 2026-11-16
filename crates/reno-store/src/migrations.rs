@@ -2,7 +2,7 @@
 //!
 //! Migration 1 creates the Phase 0 tables of ARCHITECTURE section 9; migration 2 adds the
 //! process start time to `runs`; migration 5 adds the durable approval records; migration 6 adds
-//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards. Status columns carry
+//! the scheduler's trigger state and firings; migration 7 adds the workspaces of write runs; migration 8 adds the latest executor health; migration 9 adds the routing decision of each run; migration 10 adds token accounting and the pauses of the kill switch; migration 11 adds run tokens and the private boards; migration 12 adds why a run stopped and whether it was resumed. Status columns carry
 //! `CHECK` constraints that [`RunStatus`](reno_proto::RunStatus) round-trips through (a test
 //! inserts every variant). JSON columns are checked with `json_valid`.
 
@@ -323,6 +323,19 @@ CREATE TABLE board_entries (
 ) WITHOUT ROWID;
 ";
 
+/// Migration 12 (T1.10, resume): why a run last stopped, why it was not resumed, and the prompt a
+/// person gave to resume it.
+///
+/// `stop` is the typed `StopDetail` of the run's last end and `not_resumed` the typed `NotResumed`
+/// recovery or the end of the run recorded for an interrupted run it left alone; both are cleared
+/// when the run is queued again. `session_ref` already existed (migration 1) and is now written.
+/// `resume_prompt` holds a manual resume's prompt until the next attempt ends.
+const V12: &str = "
+ALTER TABLE runs ADD COLUMN stop TEXT CHECK (stop IS NULL OR json_valid(stop));
+ALTER TABLE runs ADD COLUMN not_resumed TEXT CHECK (not_resumed IS NULL OR json_valid(not_resumed));
+ALTER TABLE runs ADD COLUMN resume_prompt TEXT;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -337,6 +350,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V9),
         M::up(V10),
         M::up(V11),
+        M::up(V12),
     ])
 }
 
@@ -385,7 +399,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -611,5 +625,43 @@ mod tests {
              VALUES ('bot:b', 'k', 'v', 1, 1, 1, 'run_a');",
         )
         .unwrap();
+    }
+
+    /// A database written before resume (schema 11) keeps its runs and gains the empty reason columns; the
+    /// `session_ref` column of migration 1 is untouched and writable.
+    #[test]
+    fn upgrade_from_a_version_eleven_database_adds_empty_stop_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 11).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, session_ref, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'interrupted', 'sess-1', 2);",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT stop FROM runs").is_err());
+        run(&mut conn).unwrap();
+        let (session, stop, not_resumed, prompt): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT session_ref, stop, not_resumed, resume_prompt FROM runs WHERE id = 'run_a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(session.as_deref(), Some("sess-1"));
+        assert_eq!((stop, not_resumed, prompt), (None, None, None));
+        conn.execute_batch(
+            "UPDATE runs SET stop = '{\"type\":\"crashed\"}', not_resumed = '{\"type\":\"no_session\"}'",
+        )
+        .unwrap();
+        assert!(
+            conn.execute("UPDATE runs SET stop = 'not json'", [])
+                .is_err()
+        );
     }
 }

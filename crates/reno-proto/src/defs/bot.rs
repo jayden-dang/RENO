@@ -36,6 +36,7 @@ pub(super) const MAX_WALL_TIME: Duration = Duration::from_secs(24 * 3600);
 /// team = "core"                          # optional
 /// triggers = ["nightly"]                 # names of triggers/<name>.toml
 /// in_place_writes = false                # optional: allow writes in a non-git directory
+/// resume = "auto"                        # optional: "auto" (default) or "never"
 ///
 /// [budget]
 /// max_concurrent_runs = 2
@@ -74,6 +75,31 @@ pub struct BotDef {
     /// is no worktree to isolate it in. A git repository is never written in place.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place_writes: bool,
+    /// Whether a run of this bot that was interrupted (the daemon crashed or was stopped) is
+    /// resumed by the daemon on its own at the next start. `auto`, the default, resumes it when
+    /// its executor supports resume, the run has a session, it is under its attempt cap and not
+    /// past its wall-time budget; `never` leaves it `interrupted` for a person to resume with
+    /// `run.resume`. A person's cancel and a budget stop are never resumed on their own.
+    #[serde(default, skip_serializing_if = "ResumePolicy::is_auto")]
+    pub resume: ResumePolicy,
+}
+
+/// What a bot allows the daemon to do with its interrupted runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumePolicy {
+    /// Resume an interrupted run on its own when it can be.
+    #[default]
+    Auto,
+    /// Leave an interrupted run for a person.
+    Never,
+}
+
+impl ResumePolicy {
+    /// Whether this is the default, so a bot that never mentions `resume` hashes as before.
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
 }
 
 fn default_access() -> AccessMode {

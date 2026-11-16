@@ -452,8 +452,22 @@ impl Cx<'_> {
             return Err("the resume scenario carries no session to resume".into());
         }
         let log = self.run_completed(&scenario, Behaviour::Passive).await?;
-        if log.started().is_empty() {
+        let started = log.started();
+        let Some(began) = started.first() else {
             return Err("the resumed run never emitted Started".into());
+        };
+        // A resume continues the session it was given: the kernel stores what `Started` reports
+        // and resumes that next time, so a harness that quietly begins a new conversation here
+        // would lose the run's history without a word.
+        if let Some(asked) = &scenario.resume
+            && *began != asked
+        {
+            return Err(format!(
+                "the run was asked to resume session {:?} and started session {:?}: a resume \
+                 must continue the session it was given",
+                asked.0, began.0
+            )
+            .into());
         }
         require_expectations(&log, &scenario)
     }

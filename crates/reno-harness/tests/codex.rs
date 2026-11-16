@@ -182,6 +182,7 @@ fn done(events: &[ExecEvent]) -> (StopReason, Option<String>, Option<String>) {
             stop,
             result,
             diagnostic,
+            ..
         }) => (*stop, result.clone(), diagnostic.clone()),
         other => panic!("the stream did not end with Done: {other:?} in {events:?}"),
     }
@@ -332,6 +333,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 stop: StopReason::Completed,
                 result: Some("unstreamed tail".into()),
                 diagnostic: None,
+                reason: None,
             },
         ]
     );
@@ -423,6 +425,7 @@ async fn a_failed_turn_is_an_error_done() {
             stop: StopReason::Error,
             result: None,
             diagnostic: Some("boom".into()),
+            reason: None,
         })
     );
 }
@@ -1286,6 +1289,7 @@ async fn cancel_sends_turn_interrupt_and_ends_with_an_interrupted_done() {
             stop: StopReason::Interrupted,
             result: None,
             diagnostic: None,
+            reason: None,
         })
     );
     assert_eq!(dones(&events), 1);
@@ -1312,6 +1316,7 @@ async fn an_unresponsive_child_is_reaped_with_an_interrupted_done() {
             stop: StopReason::Interrupted,
             result: None,
             diagnostic: None,
+            reason: None,
         })
     );
 }
@@ -1500,7 +1505,7 @@ async fn resume_reuses_the_existing_thread() {
     let mut spec = spec("scenario:resumed");
     spec.resume = Some(SessionRef("some-thread".into()));
     let events = run_to_end(&executor(), spec).await;
-    assert_eq!(started_session(&events).as_deref(), Some("th-resumed"));
+    assert_eq!(started_session(&events).as_deref(), Some("some-thread"));
     assert_eq!(done(&events).0, StopReason::Completed);
 }
 

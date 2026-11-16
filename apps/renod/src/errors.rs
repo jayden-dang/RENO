@@ -19,7 +19,9 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
         KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
         KernelError::NoExecutor(_) => ErrorCode::InvalidParams,
-        KernelError::NotCancellable { .. } | KernelError::RunEnded(_) => ErrorCode::Conflict,
+        KernelError::NotCancellable { .. }
+        | KernelError::NotResumable { .. }
+        | KernelError::RunEnded(_) => ErrorCode::Conflict,
         KernelError::SteerQueueFull(_) | KernelError::ShuttingDown | KernelError::Gap { .. } => {
             ErrorCode::Unavailable
         }
@@ -89,6 +91,15 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
             .ok(),
             ..object
         },
+        // Why the run cannot be resumed, typed, so a client never parses the message.
+        KernelError::NotResumable { run, why } => ErrorObject {
+            data: serde_json::to_value(reno_proto::NotResumable {
+                run_id: run.clone(),
+                why: why.clone(),
+            })
+            .ok(),
+            ..object
+        },
         _ => object,
     }
 }
@@ -143,6 +154,13 @@ mod tests {
                 ErrorCode::Conflict,
             ),
             (KernelError::RunEnded(run()), ErrorCode::Conflict),
+            (
+                KernelError::NotResumable {
+                    run: run(),
+                    why: reno_proto::NotResumed::NoSession,
+                },
+                ErrorCode::Conflict,
+            ),
             (KernelError::SteerQueueFull(run()), ErrorCode::Unavailable),
             (KernelError::ShuttingDown, ErrorCode::Unavailable),
             (

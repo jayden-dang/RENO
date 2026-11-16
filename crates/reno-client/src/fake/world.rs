@@ -352,6 +352,9 @@ impl World {
                 }),
                 created_at_ms: now,
                 updated_at_ms: now,
+                stop: None,
+                not_resumed: None,
+                session: None,
             },
             journal: vec![],
             journal_tx: watch::channel(0).0,
@@ -384,8 +387,12 @@ impl World {
         let Some(run) = self.run_mut(id) else {
             return;
         };
-        if let ExecEvent::Done { stop, .. } = &event {
+        if let ExecEvent::Done { stop, reason, .. } = &event {
             run.summary.stop_reason = Some(*stop);
+            run.summary.stop.clone_from(reason);
+        }
+        if let ExecEvent::Started { session, .. } = &event {
+            run.summary.session = Some(session.clone());
         }
         run.summary.updated_at_ms = now;
         run.journal.push(event);
@@ -578,9 +585,44 @@ impl World {
         if let Some(run) = self.run_mut(id) {
             run.cancel.cancel();
         }
-        let done = data::done(StopReason::Interrupted, None, reason);
+        let done = data::done_because(
+            StopReason::Interrupted,
+            None,
+            reason,
+            Some(reno_proto::StopDetail::Cancelled {
+                by: reno_proto::CancelledBy::User,
+            }),
+        );
         self.push(id, done);
         Some(RunStatus::Cancelled)
+    }
+
+    /// `run.resume`: queues an interrupted (or failed) run that has a session again, journals
+    /// the `Resumed` and returns the attempt it will be.
+    pub(super) fn resume_run(&mut self, id: &RunId) -> Result<u32, reno_proto::NotResumed> {
+        let run = self.run(id).ok_or(reno_proto::NotResumed::NoSession)?;
+        let status = run.summary.status;
+        if !matches!(status, RunStatus::Interrupted | RunStatus::Failed) {
+            return Err(reno_proto::NotResumed::WrongStatus { status });
+        }
+        let Some(session) = run.summary.session.clone() else {
+            return Err(reno_proto::NotResumed::NoSession);
+        };
+        let attempt = run.summary.attempt;
+        self.set_status(id, RunStatus::Queued);
+        if let Some(run) = self.run_mut(id) {
+            run.summary.stop = None;
+            run.summary.not_resumed = None;
+            run.summary.attempt = attempt + 1;
+        }
+        self.push(
+            id,
+            ExecEvent::Resumed {
+                from_attempt: attempt,
+                session,
+            },
+        );
+        Ok(attempt + 1)
     }
 
     /// `budget.status`: each demo bot with its live and queued runs and its pause. The fake

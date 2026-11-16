@@ -43,7 +43,7 @@ pub const KEEPER_PUSH: &str = "git push -u origin reno/keeper/deps-1115";
 pub const SCOUT_FETCH_URL: &str = "https://advisories.example.org/feeds/web-console.json";
 
 /// Model every demo run reports.
-const MODEL: &str = "opus-5.5";
+pub(super) const MODEL: &str = "opus-5.5";
 
 /// One seeded run and its journal so far.
 pub(super) struct SeedRun {
@@ -87,6 +87,9 @@ fn summary(
         }),
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
+        stop: None,
+        not_resumed: None,
+        session: None,
     })
 }
 
@@ -125,10 +128,21 @@ pub(super) fn tool_ok(id: &str, summary: &str) -> ExecEvent {
 }
 
 pub(super) fn done(stop: StopReason, result: Option<&str>, diagnostic: Option<&str>) -> ExecEvent {
+    done_because(stop, result, diagnostic, None)
+}
+
+/// Like [`done`], with the typed reason the daemon gives.
+pub(super) fn done_because(
+    stop: StopReason,
+    result: Option<&str>,
+    diagnostic: Option<&str>,
+    reason: Option<reno_proto::StopDetail>,
+) -> ExecEvent {
     ExecEvent::Done {
         stop,
         result: result.map(str::to_owned),
         diagnostic: diagnostic.map(str::to_owned),
+        reason,
     }
 }
 
@@ -326,6 +340,9 @@ pub(super) enum Scenario {
     /// too old, signed out): a `NoEligibleExecutor` diagnostic and nothing run. Prompt:
     /// `/refused`. For tests of what the Run screen says about the executor.
     Refused,
+    /// Work, then fail after the harness reported a session: the run `run.resume` can take back.
+    /// Prompt: `/fails`.
+    Fails,
 }
 
 impl Scenario {
@@ -333,6 +350,9 @@ impl Scenario {
         let lower = prompt.to_lowercase();
         if lower.starts_with("/refused") {
             return Self::Refused;
+        }
+        if lower.starts_with("/fails") {
+            return Self::Fails;
         }
         if lower.starts_with("/long") {
             return Self::Long;

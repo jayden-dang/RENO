@@ -64,19 +64,25 @@ fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-/// The budget stop a run's journal ends with, and the stop reason it ended with.
+/// The budget stop a run's journal ends with, and the stop reason it ended with. The stop is
+/// the typed `reason`; the diagnostic still says the same in its legacy form.
 async fn ended_by_budget(fx: &Fx, run: &RunId) -> (StopReason, Option<BudgetStop>) {
     let journal = fx.journal_with_done(run).await;
     match journal.last() {
         Some((
             _,
             ExecEvent::Done {
-                stop, diagnostic, ..
+                stop,
+                diagnostic,
+                reason,
+                ..
             },
-        )) => (
-            *stop,
-            diagnostic.as_deref().and_then(BudgetStop::from_diagnostic),
-        ),
+        )) => {
+            let typed = reason.as_ref().and_then(reno_proto::StopDetail::budget);
+            let legacy = diagnostic.as_deref().and_then(BudgetStop::from_diagnostic);
+            assert_eq!(typed, legacy, "the typed reason and the diagnostic agree");
+            (*stop, typed)
+        }
         other => panic!("no Done: {other:?}"),
     }
 }

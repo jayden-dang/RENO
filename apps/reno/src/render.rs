@@ -135,17 +135,32 @@ impl<W: Write> Transcript<W> {
                 }
             }
             ExecEvent::Done {
-                stop, diagnostic, ..
+                stop,
+                diagnostic,
+                reason,
+                ..
             } => {
                 writeln!(self.out, "done ({})", wire_name(stop))?;
-                match diagnostic
-                    .as_deref()
-                    .and_then(reno_proto::BudgetStop::from_diagnostic)
-                {
-                    Some(budget) => writeln!(self.out, "  {budget}"),
+                // The typed reason; a daemon that predates it only has the diagnostic's tag.
+                let budget = reason.as_ref().map_or_else(
+                    || {
+                        diagnostic
+                            .as_deref()
+                            .and_then(reno_proto::BudgetStop::from_diagnostic)
+                            .map(|stop| stop.to_string())
+                    },
+                    |reason| Some(reason.to_string()),
+                );
+                match budget {
+                    Some(why) => writeln!(self.out, "  {why}"),
                     None => Ok(()),
                 }
             }
+            ExecEvent::Resumed { from_attempt, .. } => writeln!(
+                self.out,
+                "resumed: attempt {} continues the session",
+                from_attempt.saturating_add(1)
+            ),
             // Text and the quiet kinds returned above; a kind added later prints nothing.
             _ => Ok(()),
         }
@@ -218,6 +233,22 @@ pub(crate) fn run_line(run: &RunSummary) -> String {
         run.executor.as_str(),
         run.title
     )
+}
+
+/// What a run's stop and resume state add to its one line, as extra lines: why it stopped, and
+/// why it was not resumed.
+pub(crate) fn stop_lines(run: &RunSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(stop) = &run.stop {
+        lines.push(format!("stopped: {stop}"));
+    }
+    if let Some(why) = &run.not_resumed {
+        lines.push(format!(
+            "not resumed: {why}; `reno run resume {}` continues it",
+            run.run_id
+        ));
+    }
+    lines
 }
 
 pub(crate) fn status_name(status: RunStatus) -> String {
@@ -626,6 +657,7 @@ mod tests {
             stop,
             result: None,
             diagnostic: Some("boom".into()),
+            reason: None,
         }
     }
 

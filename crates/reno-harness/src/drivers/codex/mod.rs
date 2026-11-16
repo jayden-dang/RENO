@@ -683,6 +683,7 @@ impl Executor for CodexExecutor {
                         stop: StopReason::Error,
                         result: None,
                         diagnostic: Some(diagnostic),
+                        reason: None,
                     }
                 })
                 .boxed());
@@ -1348,6 +1349,7 @@ impl Run {
             stop: StopReason::Error,
             result: None,
             diagnostic: Some(crate::redact_secrets(&diagnostic)),
+            reason: None,
         };
         if self.emit(done).await {
             Step::Finished
@@ -1678,6 +1680,7 @@ async fn end_early(
             stop,
             result: None,
             diagnostic,
+            reason: None,
         })
         .await;
     app.child.shutdown(session.kill_grace).await;
@@ -2049,6 +2052,7 @@ async fn run_session(mut session: Session, mut app: AppServer) {
                 stop: StopReason::Interrupted,
                 result: None,
                 diagnostic: None,
+                reason: None,
             }
         } else {
             // The app-server died mid-turn (OS memory pressure, `killall codex`): never a
@@ -2063,6 +2067,7 @@ async fn run_session(mut session: Session, mut app: AppServer) {
                 stop: StopReason::Error,
                 result: None,
                 diagnostic: Some(crate::redact_secrets(&diagnostic)),
+                reason: None,
             }
         };
         let _ = run.event_tx.send(done).await;

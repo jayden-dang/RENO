@@ -19,12 +19,18 @@
 //! 4. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
 //!    its journal if the journal does not already end in one, with the stop reason its status
 //!    implies.
+//! 5. **Resume.** Each `interrupted` run nobody has judged yet (one the previous start left
+//!    behind at its shutdown, or step 2 just made) is decided by `resume::judge_auto`: queued
+//!    again, with a `Resumed` in its journal, or left with the reason stored.
 
-use reno_proto::{ApprovalOutcome, ExecEvent, ResolvedBy, RunId, RunStatus, StopReason};
-use reno_store::{ExpireScope, RunRecord};
+use reno_proto::{
+    ApprovalOutcome, ExecEvent, ResolvedBy, RunId, RunStatus, StopDetail, StopReason,
+};
+use reno_store::{ExpireScope, Note, RunRecord};
 
 use crate::error::Result;
 use crate::procs;
+use crate::resume::{self, Verdict};
 use crate::shared::Shared;
 
 /// What recovery did, for the log and for tests.
@@ -32,6 +38,10 @@ use crate::shared::Shared;
 pub(crate) struct Recovered {
     pub(crate) requeued: Vec<RunId>,
     pub(crate) interrupted: Vec<RunId>,
+    /// Interrupted runs queued again to continue their session.
+    pub(crate) resumed: Vec<RunId>,
+    /// Interrupted runs left alone, with the reason stored on the run.
+    pub(crate) not_resumed: Vec<RunId>,
     pub(crate) swept: usize,
     pub(crate) approvals_expired: usize,
     pub(crate) journals_repaired: usize,
@@ -61,9 +71,14 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
             | RunStatus::WaitingInput
             | RunStatus::WaitingApproval
             | RunStatus::Evaluating => {
+                // The daemon died with this run live: nobody asked it to stop.
+                let note = Note {
+                    stop: Some(StopDetail::Crashed),
+                    not_resumed: None,
+                };
                 shared
                     .db
-                    .transition(&row.id, row.lease_fence, RunStatus::Interrupted)
+                    .transition_noted(&row.id, row.lease_fence, RunStatus::Interrupted, note)
                     .await?;
                 report.interrupted.push(row.id.clone());
             }
@@ -87,7 +102,7 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         .await?
         .iter()
         .filter(|row| row.status.is_terminal() || row.status == RunStatus::Interrupted)
-        .map(|row| (row.id.clone(), repair_done(row.status)))
+        .map(|row| (row.id.clone(), repair_done(row.status, row.stop.clone())))
         .collect();
     let journals = shared.db.journals();
     // Blocking file I/O: scan each journal's tail, append where `Done` is missing.
@@ -107,6 +122,37 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         tracing::error!(%error, "journal repair task failed");
         0
     });
+
+    // How long each run had been at it is read from the rows as they were before this recovery
+    // wrote its own transitions, which would otherwise count the time the daemon was down.
+    let worked: std::collections::HashMap<RunId, i64> = rows
+        .iter()
+        .map(|row| (row.id.clone(), resume::active_ms(row)))
+        .collect();
+    for row in shared.db.list_runs(Some(RunStatus::Interrupted)).await? {
+        if row.not_resumed.is_some() {
+            continue;
+        }
+        let active = worked
+            .get(&row.id)
+            .copied()
+            .unwrap_or_else(|| resume::active_ms(&row));
+        match resume::judge_auto(shared, &row, active).await {
+            Verdict::Resume => match resume::requeue(shared, &row, None).await {
+                Ok(_) => report.resumed.push(row.id.clone()),
+                Err(error) => {
+                    tracing::error!(run = %row.id, %error, "could not resume the run");
+                }
+            },
+            Verdict::Keep(why) => {
+                shared
+                    .db
+                    .set_not_resumed(&row.id, row.lease_fence, &why)
+                    .await?;
+                report.not_resumed.push(row.id.clone());
+            }
+        }
+    }
 
     if report != Recovered::default() {
         tracing::info!(?report, "recovery finished");
@@ -151,7 +197,7 @@ pub(crate) async fn expire_orphans(shared: &Shared) -> Result<usize> {
 }
 
 /// The `Done` a journal gets when state says the run ended and the journal never said so.
-fn repair_done(status: RunStatus) -> ExecEvent {
+fn repair_done(status: RunStatus, reason: Option<StopDetail>) -> ExecEvent {
     let (stop, diagnostic) = match status {
         RunStatus::Succeeded => (StopReason::Completed, None),
         RunStatus::Failed => (
@@ -167,5 +213,6 @@ fn repair_done(status: RunStatus) -> ExecEvent {
         stop,
         result: None,
         diagnostic: diagnostic.map(str::to_owned),
+        reason,
     }
 }

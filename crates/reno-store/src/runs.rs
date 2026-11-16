@@ -19,7 +19,9 @@
 //!   the lifecycle rule.
 
 use reno_proto::defs::{BotPin, DefKind};
-use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskId};
+use reno_proto::{
+    ExecutorId, NotResumed, RoutingDecision, RunId, RunStatus, SessionRef, StopDetail, TaskId,
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
@@ -91,6 +93,12 @@ pub struct RunRecord {
     /// The bot the run was submitted for, with the version of its definition the run is pinned
     /// to for life.
     pub bot: Option<BotPin>,
+    /// Why the run last stopped, when something recorded a reason.
+    pub stop: Option<StopDetail>,
+    /// Why an interrupted run was left alone instead of resumed, once something decided.
+    pub not_resumed: Option<NotResumed>,
+    /// The prompt a person gave when they resumed the run, for the attempt that follows.
+    pub resume_prompt: Option<String>,
     /// When it was enqueued.
     pub created_at: i64,
     /// When it first ran.
@@ -161,7 +169,14 @@ const RUN_COLS: &str = "id, task_id, executor, model, status, lease_owner, lease
      (SELECT spec FROM tasks WHERE tasks.id = runs.task_id), \
      COALESCE((SELECT MAX(ts) FROM events \
                WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at), \
-     bot_name, bot_version";
+     bot_name, bot_version, stop, not_resumed, resume_prompt";
+
+fn json_col<T: serde::de::DeserializeOwned>(text: Option<String>, what: &str) -> Result<Option<T>> {
+    text.map(|text| {
+        serde_json::from_str(&text).map_err(|e| StoreError::Corrupt(format!("run {what}: {e}")))
+    })
+    .transpose()
+}
 
 fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let id: String = row.get(0)?;
@@ -185,6 +200,9 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let updated_at = row.get(18)?;
     let bot_name: Option<String> = row.get(19)?;
     let bot_version: Option<i64> = row.get(20)?;
+    let stop: Option<String> = row.get(21)?;
+    let not_resumed: Option<String> = row.get(22)?;
+    let resume_prompt = row.get(23)?;
     Ok((|| {
         let id_u32 = |v: Option<i64>| {
             v.map(|v| u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("bad pid {v}"))))
@@ -220,6 +238,9 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
                 .map_err(|e| StoreError::Corrupt(format!("task spec: {e}")))?,
             updated_at,
             bot,
+            stop: json_col(stop, "stop")?,
+            not_resumed: json_col(not_resumed, "not_resumed")?,
+            resume_prompt,
             created_at,
             started_at,
             ended_at,
@@ -438,11 +459,21 @@ pub(crate) fn tx_heartbeat(
     Ok(())
 }
 
+/// What a transition records beside the new status.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Note {
+    /// The run's last stop, typed.
+    pub stop: Option<StopDetail>,
+    /// Why the run, now interrupted, will not be resumed.
+    pub not_resumed: Option<NotResumed>,
+}
+
 pub(crate) fn tx_transition(
     conn: &Connection,
     run: &RunId,
     fence: u64,
     to: RunStatus,
+    note: &Note,
     now: i64,
 ) -> Result<()> {
     let rec = load_fenced(conn, run, fence)?;
@@ -493,13 +524,22 @@ pub(crate) fn tx_transition(
         .db()?
         .execute(params![run.as_str(), fence_i, status_str(to)])
         .db()?;
+    if requeue {
+        // A run queued again starts its reasons afresh.
+        set_reasons(conn, run, None, None)?;
+    } else if note.stop.is_some() || note.not_resumed.is_some() {
+        set_reasons(conn, run, note.stop.as_ref(), note.not_resumed.as_ref())?;
+    }
     events::insert(
         conn,
         now,
         "run.transitioned",
         ("run", run.as_str()),
         None,
-        &json!({ "from": from, "to": to, "fence": fence }),
+        &json!({
+            "from": from, "to": to, "fence": fence,
+            "stop": note.stop, "notResumed": note.not_resumed,
+        }),
     )?;
     if set_ended {
         events::insert(
@@ -512,6 +552,122 @@ pub(crate) fn tx_transition(
         )?;
     }
     Ok(())
+}
+
+/// Writes the run's reasons: `stop` and `not_resumed`, each only when given, both cleared when
+/// both are `None`.
+fn set_reasons(
+    conn: &Connection,
+    run: &RunId,
+    stop: Option<&StopDetail>,
+    not_resumed: Option<&NotResumed>,
+) -> Result<()> {
+    let stop_json = stop.map(serde_json::to_string).transpose()?;
+    let not_resumed_json = not_resumed.map(serde_json::to_string).transpose()?;
+    let clear = stop.is_none() && not_resumed.is_none();
+    conn.prepare_cached(
+        "UPDATE runs SET
+             stop = CASE WHEN ?4 THEN NULL WHEN ?2 IS NOT NULL THEN ?2 ELSE stop END,
+             not_resumed = CASE WHEN ?4 THEN NULL WHEN ?3 IS NOT NULL THEN ?3 ELSE not_resumed END
+         WHERE id = ?1",
+    )
+    .db()?
+    .execute(params![run.as_str(), stop_json, not_resumed_json, clear])
+    .db()?;
+    Ok(())
+}
+
+pub(crate) fn tx_record_session(
+    conn: &Connection,
+    run: &RunId,
+    fence: u64,
+    session: &SessionRef,
+    now: i64,
+) -> Result<()> {
+    let rec = load_fenced(conn, run, fence)?;
+    if rec.session_ref.as_deref() == Some(session.0.as_str()) {
+        return Ok(());
+    }
+    conn.prepare_cached("UPDATE runs SET session_ref = ?3 WHERE id = ?1 AND lease_fence = ?2")
+        .db()?
+        .execute(params![run.as_str(), to_i64(fence, "fence")?, session.0])
+        .db()?;
+    events::insert(
+        conn,
+        now,
+        "run.session_recorded",
+        ("run", run.as_str()),
+        None,
+        &json!({ "session": session, "fence": fence }),
+    )
+}
+
+/// What `resume_run` found and did: the attempt that ended and the session that continues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resumed {
+    /// The attempt (fence) that ended.
+    pub from_attempt: u64,
+    /// The session the next attempt resumes.
+    pub session: SessionRef,
+}
+
+pub(crate) fn tx_resume(
+    conn: &Connection,
+    run: &RunId,
+    fence: u64,
+    prompt: Option<&str>,
+    now: i64,
+) -> Result<Resumed> {
+    let rec = load_fenced(conn, run, fence)?;
+    if !rec.status.can_transition_to(RunStatus::Queued)
+        || !matches!(rec.status, RunStatus::Interrupted | RunStatus::Failed)
+    {
+        return Err(StoreError::IllegalTransition {
+            run: run.clone(),
+            from: rec.status,
+            to: RunStatus::Queued,
+        });
+    }
+    let session = rec
+        .session_ref
+        .clone()
+        .map(SessionRef)
+        .ok_or_else(|| StoreError::InvalidArgument(format!("run {run} has no session")))?;
+    let fence_i = to_i64(fence, "fence")?;
+    // `started_at` is kept: the run is one run, however many attempts it takes.
+    conn.prepare_cached(
+        "UPDATE runs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+             ended_at = NULL, resume_prompt = ?3
+         WHERE id = ?1 AND lease_fence = ?2",
+    )
+    .db()?
+    .execute(params![run.as_str(), fence_i, prompt])
+    .db()?;
+    conn.prepare_cached("UPDATE attempts SET status = 'queued' WHERE run_id = ?1 AND fence = ?2")
+        .db()?
+        .execute(params![run.as_str(), fence_i])
+        .db()?;
+    set_reasons(conn, run, None, None)?;
+    events::insert(
+        conn,
+        now,
+        "run.transitioned",
+        ("run", run.as_str()),
+        None,
+        &json!({ "from": rec.status, "to": RunStatus::Queued, "fence": fence }),
+    )?;
+    events::insert(
+        conn,
+        now,
+        "run.resumed",
+        ("run", run.as_str()),
+        None,
+        &json!({ "fromAttempt": fence, "session": session, "prompt": prompt }),
+    )?;
+    Ok(Resumed {
+        from_attempt: fence,
+        session,
+    })
 }
 
 pub(crate) fn tx_record_process(
@@ -646,9 +802,81 @@ impl Store {
     /// `fence` is not current, and with [`StoreError::IllegalTransition`] when the diagram has no
     /// such edge. The fence is checked first.
     pub async fn transition(&self, run: &RunId, fence: u64, to: RunStatus, now: i64) -> Result<()> {
+        self.transition_noted(run, fence, to, Note::default(), now)
+            .await
+    }
+
+    /// Like [`transition`](Self::transition), and records `note` (why the run stopped, why it
+    /// will not be resumed) in the same transaction. A transition to `queued` clears both.
+    pub async fn transition_noted(
+        &self,
+        run: &RunId,
+        fence: u64,
+        to: RunStatus,
+        note: Note,
+        now: i64,
+    ) -> Result<()> {
         let run = run.clone();
         self.write(Durability::Normal, move |c| {
-            tx_transition(c, &run, fence, to, now)
+            tx_transition(c, &run, fence, to, &note, now)
+        })
+        .await
+    }
+
+    /// Records the harness session of a run, as soon as its executor reports one: what a resume
+    /// continues. Fenced, and a no-op when the run already holds this session.
+    pub async fn record_session(
+        &self,
+        run: &RunId,
+        fence: u64,
+        session: &SessionRef,
+        now: i64,
+    ) -> Result<()> {
+        let (run, session) = (run.clone(), session.clone());
+        self.write(Durability::Normal, move |c| {
+            tx_record_session(c, &run, fence, &session, now)
+        })
+        .await
+    }
+
+    /// Queues an `interrupted` run, or a `failed` one, to continue its session: `queued`, the
+    /// same run id, `started_at` kept, reasons cleared, `prompt` held for the next attempt. The
+    /// next claim bumps the fence, which is the attempt number. Needs a recorded session
+    /// ([`StoreError::InvalidArgument`] otherwise).
+    pub async fn resume_run(
+        &self,
+        run: &RunId,
+        fence: u64,
+        prompt: Option<String>,
+        now: i64,
+    ) -> Result<Resumed> {
+        let run = run.clone();
+        self.write(Durability::Normal, move |c| {
+            tx_resume(c, &run, fence, prompt.as_deref(), now)
+        })
+        .await
+    }
+
+    /// Records, on an interrupted run, why it was left alone instead of resumed. Fenced.
+    pub async fn set_not_resumed(
+        &self,
+        run: &RunId,
+        fence: u64,
+        why: &NotResumed,
+        now: i64,
+    ) -> Result<()> {
+        let (run, why) = (run.clone(), why.clone());
+        self.write(Durability::Normal, move |c| {
+            load_fenced(c, &run, fence)?;
+            set_reasons(c, &run, None, Some(&why))?;
+            events::insert(
+                c,
+                now,
+                "run.not_resumed",
+                ("run", run.as_str()),
+                None,
+                &json!({ "fence": fence, "why": why }),
+            )
         })
         .await
     }
