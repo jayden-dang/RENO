@@ -45,6 +45,10 @@ use crate::error::{KernelError, Result};
 use crate::shared::Shared;
 use crate::workspace::{InPlace, Placement, ReleasePolicy, Released, Workspace, WorkspaceError};
 
+/// The task spec key a trigger sets when its definition names the working directory: the
+/// directory must exist when the run starts.
+pub(crate) const CWD_NAMED: &str = "cwd_named";
+
 const OPEN: [WorkspaceStatus; 3] = [
     WorkspaceStatus::Preparing,
     WorkspaceStatus::Active,
@@ -71,6 +75,12 @@ pub(crate) async fn place(
     let Some(port) = shared.workspace.as_ref() else {
         return Ok(in_place(InPlace::Unmanaged));
     };
+    // A trigger that names its directory needs it to be there; Reno's own scratch is made on
+    // demand and is not checked.
+    let named = row.spec.get(CWD_NAMED).and_then(serde_json::Value::as_bool);
+    if named == Some(true) && !port.dir_exists(&cwd).await {
+        return Err(WorkspaceError::DirMissing { dir: cwd });
+    }
     let decided = if sandbox == SandboxLevel::ReadOnly {
         Some(InPlace::ReadOnly)
     } else if shared

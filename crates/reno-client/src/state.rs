@@ -918,6 +918,7 @@ mod tests {
             failures: 0,
             backoff_until_ms: None,
             error: None,
+            cwd: None,
         };
         let mut s = State::new();
         let c = s.apply(Update::Triggers(vec![trigger("b"), trigger("a")]));

@@ -79,6 +79,12 @@ impl Workspace for GitWorkspace {
         }))
     }
 
+    async fn dir_exists(&self, dir: &Path) -> bool {
+        tokio::fs::metadata(dir)
+            .await
+            .is_ok_and(|meta| meta.is_dir())
+    }
+
     async fn create(&self, plan: &WorkspaceInfo) -> Result<(), WorkspaceError> {
         self.git.create(&location(plan)).await.map_err(error)
     }

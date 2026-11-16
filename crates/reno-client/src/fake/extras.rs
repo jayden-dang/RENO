@@ -106,6 +106,7 @@ fn info(
         failures: 0,
         backoff_until_ms: None,
         error: None,
+        cwd: (name == "nightly-deps").then(|| "~/code/app".to_owned()),
     })
 }
 

@@ -90,6 +90,10 @@ pub(crate) enum StartFailure {
     /// A secret the bot lists is not set. Like `NotSignedIn`, only a person can fix it, so the
     /// trigger backs off rather than starting a run that fails the same way every time.
     SecretMissing,
+    /// The working directory the trigger names is gone (an unmounted disk, a moved repository).
+    /// Only a person can put it back, so the trigger backs off rather than failing a run on
+    /// every occurrence.
+    WorkingDirMissing,
 }
 
 impl StartFailure {
@@ -98,6 +102,7 @@ impl StartFailure {
             Self::NotInstalled => "NotInstalled",
             Self::NotSignedIn => "NotSignedIn",
             Self::SecretMissing => "SecretMissing",
+            Self::WorkingDirMissing => "WorkingDirMissing",
             Self::NoEligibleExecutor => "NoEligibleExecutor",
         }
     }
@@ -197,6 +202,7 @@ impl Plan {
             failures: self.row.failures,
             backoff_until_ms: self.row.backoff_until.map(ms),
             error: self.error.clone(),
+            cwd: self.def.target.cwd.clone(),
         }
     }
 }
@@ -771,16 +777,32 @@ impl Scheduler {
             });
         }
         let (executor, bot, routing) = bot_launch(&self.shared, &plan.def.target.bot)?;
-        let cwd = self
-            .shared
-            .config
-            .trigger_cwd
+        // The definition's directory when it names one (checked when the run starts), else the
+        // daemon's scratch workspace.
+        let named = match plan
+            .def
+            .target
+            .resolved_cwd(self.shared.config.home.as_deref())
+        {
+            Some(Ok(dir)) => Some(dir),
+            Some(Err(why)) => {
+                // Keep the text as written: the run is refused at start, naming it.
+                tracing::warn!(trigger = %name, %why, "cannot expand the trigger's directory");
+                plan.def.target.cwd.as_deref().map(std::path::PathBuf::from)
+            }
+            None => None,
+        };
+        let cwd = named.as_ref().unwrap_or(&self.shared.config.trigger_cwd);
+        let cwd = cwd
             .to_str()
             .ok_or_else(|| {
                 KernelError::Invalid("the trigger working directory is not UTF-8".into())
             })?
             .to_owned();
-        let spec = serde_json::json!({ "cwd": cwd, "model": null, "trigger": name });
+        let mut spec = serde_json::json!({ "cwd": cwd, "model": null, "trigger": name });
+        if named.is_some() {
+            spec[crate::workspaces::CWD_NAMED] = true.into();
+        }
 
         let mut result = None;
         for _ in 0..MINT_ATTEMPTS {

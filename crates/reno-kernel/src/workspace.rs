@@ -52,6 +52,13 @@ pub enum WorkspaceError {
         /// The repository.
         repo: PathBuf,
     },
+    /// The directory a trigger names for its run does not exist (an unmounted disk, a moved
+    /// repository). A person has to put it back, so a trigger backs off, like a signed-out CLI.
+    #[error("the working directory {} does not exist or is not a directory", dir.display())]
+    DirMissing {
+        /// The directory.
+        dir: PathBuf,
+    },
     /// The repository is bare: it has no working tree.
     #[error("{} is a bare repository", repo.display())]
     BareRepository {
@@ -116,6 +123,9 @@ pub trait Workspace: Send + Sync + fmt::Debug {
     /// path, branch, base commit and the relative subdirectory. Read-only. `Ok(None)` means
     /// `dir` is not in a git repository. The returned status is `Preparing`.
     async fn plan(&self, run: &RunId, dir: &Path) -> Result<Option<WorkspaceInfo>, WorkspaceError>;
+
+    /// Whether `dir` exists and is a directory. The kernel touches no disk itself.
+    async fn dir_exists(&self, dir: &Path) -> bool;
 
     /// Creates the worktree and branch of `plan`. Idempotent for the same plan.
     async fn create(&self, plan: &WorkspaceInfo) -> Result<(), WorkspaceError>;
@@ -231,6 +241,11 @@ impl FakeWorkspace {
         self
     }
 
+    /// Declares `repo` a git repository after the port was built (a disk that came back).
+    pub fn declare_repo(&self, repo: impl Into<PathBuf>) {
+        self.lock().repos.push(repo.into());
+    }
+
     /// Makes the next `create` fail with `error`.
     pub fn fail_next_create(&self, error: WorkspaceError) {
         self.lock().fail_create = Some(error);
@@ -306,6 +321,10 @@ impl Workspace for FakeWorkspace {
             created_at_ms: 0,
             updated_at_ms: 0,
         }))
+    }
+
+    async fn dir_exists(&self, dir: &Path) -> bool {
+        self.lock().repos.iter().any(|repo| dir.starts_with(repo))
     }
 
     async fn create(&self, plan: &WorkspaceInfo) -> Result<(), WorkspaceError> {

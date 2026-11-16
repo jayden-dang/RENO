@@ -43,6 +43,10 @@ pub struct KernelConfig {
     pub approval_ttl: Duration,
     /// The working directory of the runs triggers start. The daemon points it at its workspace.
     pub trigger_cwd: PathBuf,
+    /// The daemon user's home directory, which a trigger's `cwd = "~/..."` is expanded against
+    /// when the trigger fires. The daemon sets it from `HOME`; `None` leaves `~/` unexpandable,
+    /// and such a trigger's run is refused.
+    pub home: Option<PathBuf>,
     /// Reno's own scratch directory, the working directory of a run that names none. A run whose
     /// directory is under it works there in place, with no worktree: it is not the user's
     /// checkout. `None` for a kernel with no scratch directory.
@@ -78,6 +82,7 @@ impl Default for KernelConfig {
             sandbox: SandboxLevel::Unrestricted,
             approval_ttl: Duration::from_secs(30 * 60),
             trigger_cwd: PathBuf::from("."),
+            home: None,
             scratch_root: None,
             default_executors: Vec::new(),
             default_wall_time: Duration::from_secs(4 * 60 * 60),

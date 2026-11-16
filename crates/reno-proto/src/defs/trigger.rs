@@ -3,6 +3,7 @@
 //! A trigger is loaded, validated and versioned here; the kernel's scheduler fires it. This module
 //! also owns the text of a firing: the prompt template and the note about a late run.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use schemars::JsonSchema;
@@ -15,6 +16,8 @@ use super::{Cx, Sink, check_name, check_ref_name};
 
 /// The longest prompt template, in bytes.
 pub(super) const MAX_PROMPT_BYTES: usize = 16 * 1024;
+/// The longest `target.cwd`, in bytes.
+const MAX_CWD_BYTES: usize = 4096;
 /// The most paths one `fs` trigger may watch.
 pub(super) const MAX_FS_PATHS: usize = 64;
 /// The longest a glob may be, in bytes.
@@ -38,6 +41,7 @@ const MAX_DEBOUNCE: Duration = Duration::from_secs(3600);
 /// [target]
 /// bot = "keeper"
 /// prompt = "Check for outdated dependencies."
+/// cwd = "~/code/app"              # optional: where the run works
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +73,53 @@ pub struct TriggerTarget {
     /// error. A run that starts late or merges missed occurrences also gets a sentence saying
     /// so after the prompt.
     pub prompt: String,
+    /// The directory the run works in: absolute, or starting with `~/` (the daemon user's home).
+    /// Omitted, the run uses the daemon's own scratch workspace. A git repository here is not
+    /// written to: a write run works in a worktree of it. The directory is checked when the
+    /// trigger fires, not when the definition loads, so an unmounted disk does not make the
+    /// definition invalid; a missing directory refuses the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+impl TriggerTarget {
+    /// The working directory with `~/` expanded against `home`, or `None` when `cwd` is omitted.
+    /// `Err` says why it cannot be used (`~/` with no home).
+    pub fn resolved_cwd(&self, home: Option<&Path>) -> Option<Result<PathBuf, String>> {
+        let cwd = self.cwd.as_deref()?;
+        Some(match cwd.strip_prefix("~/") {
+            None => Ok(PathBuf::from(cwd)),
+            Some(rest) => home
+                .filter(|home| home.is_absolute())
+                .map(|home| home.join(rest))
+                .ok_or_else(|| {
+                    format!("{cwd:?} starts with `~/` but the home directory is unknown")
+                }),
+        })
+    }
+}
+
+/// Checks a trigger's `cwd`: absolute or `~/...`, with no `..` part.
+fn check_cwd(cwd: &str) -> Result<(), String> {
+    let rest = match cwd.strip_prefix("~/") {
+        Some(rest) => rest,
+        None if cwd.starts_with('/') => cwd,
+        None => {
+            return Err(format!(
+                "{cwd:?} must be an absolute path or start with `~/`"
+            ));
+        }
+    };
+    if cwd.len() > MAX_CWD_BYTES {
+        return Err(format!(
+            "is {} bytes; the limit is {MAX_CWD_BYTES}",
+            cwd.len()
+        ));
+    }
+    if cwd.contains('\0') || rest.split('/').any(|part| part == "..") {
+        return Err(format!("{cwd:?} must not contain NUL or `..`"));
+    }
+    Ok(())
 }
 
 /// What fires a trigger. The `kind` key names the variant, and the other keys belong to it.
@@ -253,6 +304,11 @@ impl TriggerDef {
         if check_ref_name(sink, "target.bot", &self.target.bot) && !cx.bot_exists(&self.target.bot)
         {
             sink.err("target.bot", format!("unknown bot {:?}", self.target.bot));
+        }
+        if let Some(cwd) = &self.target.cwd
+            && let Err(message) = check_cwd(cwd)
+        {
+            sink.err("target.cwd", message);
         }
         if self.target.prompt.trim().is_empty() {
             sink.err("target.prompt", "must not be empty");

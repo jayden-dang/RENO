@@ -678,7 +678,11 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         Some(Err(error)) => {
             let why = format!("WorkspaceRefused: {error}");
             let refusal = StartRefusal::WorkspaceRefused;
-            return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
+            // A directory that is gone needs a person, like a signed-out account: the trigger
+            // backs off. The other refusals are about this run and do not.
+            let account = matches!(error, crate::WorkspaceError::DirMissing { .. })
+                .then_some(StartFailure::WorkingDirMissing);
+            return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot).await;
         }
         Some(Ok(placement)) => spec.cwd = placement.cwd(),
     }
@@ -846,6 +850,7 @@ fn refusal_of(failure: StartFailure) -> StartRefusal {
         StartFailure::NotSignedIn => StartRefusal::NotSignedIn,
         StartFailure::NoEligibleExecutor => StartRefusal::NoEligibleExecutor,
         StartFailure::SecretMissing => StartRefusal::SecretMissing,
+        StartFailure::WorkingDirMissing => StartRefusal::WorkspaceRefused,
     }
 }
 

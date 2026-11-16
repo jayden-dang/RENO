@@ -870,6 +870,7 @@ fn trigger_state_on_the_wire() {
             failures: 3,
             backoff_until_ms: Some(1_800_000_600_000),
             error: None,
+            cwd: None,
         },
         json!({
             "name": "nightly", "kind": "cron", "bot": "keeper", "version": 2,
@@ -892,9 +893,29 @@ fn trigger_state_on_the_wire() {
             failures: 0,
             backoff_until_ms: None,
             error: None,
+            cwd: None,
         },
         json!({"name": "poke", "kind": "manual", "bot": "keeper", "version": 1,
                "status": "manual", "failures": 0}),
+    );
+    // A trigger that names a directory shows it, as written.
+    golden(
+        &TriggerInfo {
+            name: "nightly".into(),
+            kind: "cron".into(),
+            bot: "keeper".into(),
+            version: 1,
+            status: TriggerStatus::Scheduled,
+            next_due_at_ms: None,
+            last_fired_at_ms: None,
+            last_run_id: None,
+            failures: 0,
+            backoff_until_ms: None,
+            error: None,
+            cwd: Some("~/code/app".into()),
+        },
+        json!({"name": "nightly", "kind": "cron", "bot": "keeper", "version": 1,
+               "status": "scheduled", "failures": 0, "cwd": "~/code/app"}),
     );
     golden(
         &TriggerFireParams {
