@@ -229,6 +229,15 @@ fn own_process_group() -> i32 {
     unsafe { libc::getpgrp() }
 }
 
+impl ProcessRecord {
+    /// Whether any process is still in this record's group. A pure liveness check (signal 0): it
+    /// proves a run left nothing behind. A group id that no sweep may signal (1 or less) is
+    /// reported as gone.
+    pub fn group_alive(&self) -> bool {
+        self.pgid > 1 && group_exists(self.pgid)
+    }
+}
+
 /// Whether any process is in group `pgid`.
 fn group_exists(pgid: i32) -> bool {
     // SAFETY: signal 0 only checks for existence. `pgid` was validated as greater than 1 by

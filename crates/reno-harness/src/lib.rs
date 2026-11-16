@@ -38,6 +38,8 @@ mod agent_id;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
 pub use drivers::{acp, claude, codex};
+#[cfg(all(feature = "conformance", unix))]
+pub mod conformance;
 pub mod exec;
 pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;

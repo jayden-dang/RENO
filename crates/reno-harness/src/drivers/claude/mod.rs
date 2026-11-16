@@ -58,7 +58,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, probe, require_access,
+    ExecAnswer, ExecControls, ExecError, Executor, OpenRequests, Resolved, UnknownFrames, probe,
+    require_access, require_sandbox,
 };
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
@@ -78,6 +79,8 @@ pub const VERIFIED_CLI_VERSION: &str = "2.1.325";
 
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
 const CONTRACT_VERSION: u32 = 1;
+/// The sandbox levels this driver honours; `start` refuses any other (ARCH-15).
+const SANDBOX_LEVELS: [SandboxLevel; 1] = [SandboxLevel::Unrestricted];
 
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "claude-code";
@@ -194,6 +197,8 @@ pub struct ClaudeExecutor {
     /// Where `probe` looks for a credential in the environment.
     probe_env: health::EnvLookup,
     tracker: TaskTracker,
+    /// Frames of a type the wire layer does not know, counted across runs.
+    unknown: UnknownFrames,
 }
 
 impl std::fmt::Debug for ClaudeExecutor {
@@ -220,6 +225,7 @@ impl Default for ClaudeExecutor {
             probe_budget: probe::COMMAND_BUDGET,
             probe_env: health::process_env(),
             tracker: TaskTracker::new(),
+            unknown: UnknownFrames::new(),
         }
     }
 }
@@ -458,7 +464,7 @@ impl Executor for ClaudeExecutor {
                 // mode drives. A run is therefore honoured only at `Unrestricted` (no sandbox,
                 // as asked); `ReadOnly` and `WorkspaceWrite` would be run with more latitude
                 // than requested, so they are not declared (ARCH-15).
-                sandbox_levels: vec![SandboxLevel::Unrestricted],
+                sandbox_levels: SANDBOX_LEVELS.to_vec(),
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the CLI's own terminal `result` frame.
@@ -518,6 +524,10 @@ impl Executor for ClaudeExecutor {
         }
     }
 
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.unknown.snapshot()
+    }
+
     async fn start(
         &self,
         spec: ExecSpec,
@@ -525,6 +535,7 @@ impl Executor for ClaudeExecutor {
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
         require_access(spec.access, &self.access_modes)?;
+        require_sandbox(spec.sandbox, &SANDBOX_LEVELS)?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }
@@ -602,6 +613,7 @@ impl Executor for ClaudeExecutor {
             stderr_tail,
             stderr_task,
             tracker: self.tracker.clone(),
+            unknown: self.unknown.clone(),
         }));
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
@@ -718,6 +730,7 @@ struct Session {
     stderr_tail: crate::StderrTail,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     tracker: TaskTracker,
+    unknown: UnknownFrames,
 }
 
 /// What the driver needs to answer an approval later: the tool's input, which an allow echoes
@@ -925,6 +938,7 @@ async fn run_session(session: Session) {
         mut stderr_tail,
         mut stderr_task,
         tracker,
+        unknown,
     } = session;
 
     let mut pending_steers = std::collections::VecDeque::new();
@@ -1015,6 +1029,9 @@ async fn run_session(session: Session) {
                             continue;
                         }
                     };
+                    if let Frame::Unknown(kind) = &frame {
+                        unknown.note(&format!("type:{kind}"));
+                    }
                     if restore_fallback
                         && !interrupted
                         && !norm.started()
@@ -1392,7 +1409,7 @@ mod tests {
             model: None,
             effort: None,
             access,
-            sandbox: SandboxLevel::WorkspaceWrite,
+            sandbox: SandboxLevel::Unrestricted,
             resume: None,
             mcp: Vec::new(),
             env: Default::default(),

@@ -45,7 +45,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
         model: None,
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: [(

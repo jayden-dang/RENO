@@ -32,6 +32,19 @@ zip.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[features]
+# The conformance suite (`reno_harness::conformance`): one set of checks, written against
+# `dyn Executor`, that the mock, every driver's fake and (opt-in) the real CLIs run. Off in
+# production builds; the harness's own tests turn it on through the dev-dependency below.
+conformance = []
+
 [dev-dependencies]
+# Turns the `conformance` feature on for this crate's own integration tests, so the suite runs
+# in plain `cargo test`.
+reno-harness = { path = ".", features = ["conformance"] }
+# Validates the Codex driver's wire traffic against the schema `codex app-server
+# generate-json-schema` emits. Default features (HTTP and file `$ref` resolution, TLS) stay off:
+# the schemas are self-contained.
+jsonschema = { version = "0.54.0", default-features = false }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -22,7 +22,7 @@
 {"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"followup-alpha","kind":"started","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}
 {"method":"item/completed","params":{"threadId":"child-alpha","item":{"type":"agentMessage","id":"alpha-answer-2","text":"second alpha"}}}
 {"method":"turn/completed","params":{"threadId":"child-alpha","turn":{"id":"alpha-turn-2","status":"failed","error":{"message":"followup failed"}}}}
-{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"failed-alpha","kind":"failed","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}
+{"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"failed-alpha","kind":"interrupted","agentThreadId":"child-alpha","agentPath":"/root/alpha"}}}
 {"method":"thread/closed","params":{"threadId":"child-alpha"}}
 {"method":"item/completed","params":{"threadId":"th-1","item":{"type":"subAgentActivity","id":"root-activity","kind":"started","agentThreadId":"th-1","agentPath":"/root"}}}
 {"method":"item/completed","params":{"threadId":"th-1","item":{"type":"agentMessage","id":"parent-answer","text":"parent answer"}}}

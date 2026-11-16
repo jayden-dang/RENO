@@ -1,7 +1,7 @@
 //! Claude CLI stream-json wire frames (stdout JSONL + stdin lines).
 //!
 //! Tolerant by construction: every field defaults, unknown frame types map to
-//! [`Frame::Other`], so a newer CLI never breaks parsing — we only read the
+//! [`Frame::Unknown`], so a newer CLI never breaks parsing — we only read the
 //! fields the normalizer needs (spec: docs/research/harness.md).
 
 use serde::Deserialize;
@@ -21,8 +21,11 @@ pub(crate) enum Frame {
     ControlResponse(ControlResponseFrame),
     /// Where the CLI has taken one of our stdin user messages.
     CommandLifecycle(CommandLifecycleFrame),
-    /// control_cancel_request / anything unknown.
+    /// A frame type the driver knows and ignores on purpose (`control_cancel_request`).
     Other,
+    /// A frame type this driver has never seen: dropped and counted by the driver (the type
+    /// name, `""` when the frame has none), the early signal that the CLI moved.
+    Unknown(String),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -372,7 +375,8 @@ fn typed_frame(value: Value) -> Result<Frame, serde_json::Error> {
         }
         "control_response" => Frame::ControlResponse(serde_json::from_value(value)?),
         "command_lifecycle" => Frame::CommandLifecycle(serde_json::from_value(value)?),
-        _ => Frame::Other,
+        "control_cancel_request" => Frame::Other,
+        other => Frame::Unknown(other.to_owned()),
     };
     Ok(frame)
 }
@@ -633,6 +637,10 @@ mod tests {
         }
         assert!(matches!(
             parse_frame(r#"{"type":"mystery_frame"}"#).expect("parses"),
+            Frame::Unknown(kind) if kind == "mystery_frame"
+        ));
+        assert!(matches!(
+            parse_frame(r#"{"type":"control_cancel_request","request_id":"r"}"#).expect("parses"),
             Frame::Other
         ));
         assert!(parse_frame("not json").is_err());

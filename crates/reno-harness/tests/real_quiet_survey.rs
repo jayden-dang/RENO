@@ -38,7 +38,7 @@ async fn probe_once(executor: AcpExecutor) -> ProbeOutcome {
         model: None,
         effort: None,
         access: AccessMode::FullAccess,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),

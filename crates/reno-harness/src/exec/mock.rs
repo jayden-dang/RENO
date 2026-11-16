@@ -17,7 +17,7 @@ use reno_proto::{
     StopReason, VersionGate, VersionRange,
 };
 
-use super::{ExecAnswer, ExecControls, ExecError, Executor, require_access};
+use super::{ExecAnswer, ExecControls, ExecError, Executor, require_access, require_sandbox};
 #[cfg(unix)]
 use crate::proc::ProcessRecord;
 
@@ -185,6 +185,10 @@ impl Executor for MockExecutor {
         controls: ExecControls,
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         require_access(spec.access, &self.descriptor.caps.access_modes)?;
+        require_sandbox(spec.sandbox, &self.descriptor.caps.sandbox_levels)?;
+        if spec.output_schema.is_some() && !self.descriptor.caps.structured_output {
+            return Err(ExecError::UnsupportedOutputSchema);
+        }
         lock(&self.log).specs.push(spec);
         let run = Run {
             steps: self.steps.iter().cloned().collect(),

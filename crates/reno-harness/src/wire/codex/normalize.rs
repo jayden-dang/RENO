@@ -452,7 +452,12 @@ fn changes(item: &Value) -> Vec<(String, &'static str)> {
         .iter()
         .filter_map(|change| {
             let path = str_field(change, &["path"]);
-            let kind = match change.get("kind").and_then(Value::as_str) {
+            // A string on older app-servers, `{ type, .. }` on 0.169.
+            let kind = change.get("kind").and_then(|kind| {
+                kind.as_str()
+                    .or_else(|| kind.get("type").and_then(Value::as_str))
+            });
+            let kind = match kind {
                 Some("add") => "add",
                 Some("delete") => "delete",
                 _ => "update",
@@ -942,6 +947,19 @@ mod tests {
                 "apply_patch",
                 ActionClass::Edit,
                 json!({"changes": [{"path": "/a", "kind": "add"}, {"path": "/b", "kind": "update"}]}),
+            ),
+            // The 0.169 wire: a change's `kind` is an object tagged by `type`.
+            (
+                json!({"id": "1", "type": "fileChange", "changes": [
+                    {"path": "/a", "diff": "", "kind": {"type": "add"}},
+                    {"path": "/b", "diff": "", "kind": {"type": "delete"}},
+                    {"path": "/c", "diff": "", "kind": {"type": "update", "move_path": null}},
+                    {"path": "/d", "diff": "", "kind": {"type": "strange"}}]}),
+                "apply_patch",
+                ActionClass::Edit,
+                json!({"changes": [
+                    {"path": "/a", "kind": "add"}, {"path": "/b", "kind": "delete"},
+                    {"path": "/c", "kind": "update"}, {"path": "/d", "kind": "update"}]}),
             ),
             (
                 json!({"id": "1", "type": "mcpToolCall", "server": "linear", "tool": "search", "arguments": {"q": 1}}),

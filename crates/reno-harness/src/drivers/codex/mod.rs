@@ -50,6 +50,7 @@ pub mod npm_repair;
 
 use crate::wire::codex::catalog;
 use crate::wire::codex::elicitation;
+use crate::wire::codex::known;
 use crate::wire::codex::normalize::{
     ChildRoute, Normalizer, Phase, TurnEnd, notification_thread_id, route_child_notification,
     turn_id,
@@ -76,7 +77,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::exec::{
     Decision, ExecAnswer, ExecControls, ExecError, Executor, InputAnswer, Open, OpenRequests,
-    ProcessSink, Resolved, probe, require_access,
+    ProcessSink, Resolved, UnknownFrames, probe, require_access, require_sandbox,
 };
 use crate::jsonrpc::{Incoming, RpcClient, transport_lost};
 use crate::process::owned::Child as OwnedChild;
@@ -97,6 +98,13 @@ pub const VERIFIED_CLI_VERSION: &str = "0.169.0";
 
 /// The executor contract version this driver implements (`ExecutorDescriptor::contract_version`).
 const CONTRACT_VERSION: u32 = 1;
+/// The sandbox levels this driver honours (the spec's level is a ceiling); `start` refuses any
+/// other (ARCH-15).
+const SANDBOX_LEVELS: [SandboxLevel; 3] = [
+    SandboxLevel::ReadOnly,
+    SandboxLevel::WorkspaceWrite,
+    SandboxLevel::Unrestricted,
+];
 
 /// The id this executor registers under.
 pub const EXECUTOR_ID: &str = "codex";
@@ -243,6 +251,8 @@ pub struct CodexExecutor {
     /// How long `probe` lets its short-lived app-server take in all.
     probe_budget: Duration,
     tracker: TaskTracker,
+    /// Notifications and requests the wire layer does not know, counted across runs.
+    unknown: UnknownFrames,
 }
 
 impl std::fmt::Debug for CodexExecutor {
@@ -270,6 +280,7 @@ impl Default for CodexExecutor {
             models: Arc::new(Mutex::new(None)),
             probe_budget: probe::WIRE_BUDGET,
             tracker: TaskTracker::new(),
+            unknown: UnknownFrames::new(),
         }
     }
 }
@@ -535,11 +546,7 @@ impl Executor for CodexExecutor {
                 access_modes: self.access_modes.clone(),
                 // The spec's sandbox is a ceiling: each level is what a run gets at most, and
                 // the access mode can only narrow it (see the table on the type).
-                sandbox_levels: vec![
-                    SandboxLevel::ReadOnly,
-                    SandboxLevel::WorkspaceWrite,
-                    SandboxLevel::Unrestricted,
-                ],
+                sandbox_levels: SANDBOX_LEVELS.to_vec(),
                 mcp_injection: true,
                 structured_output: false,
                 // Done is the app-server's own terminal `turn/completed`.
@@ -631,6 +638,7 @@ impl Executor for CodexExecutor {
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
         require_access(spec.access, &self.access_modes)?;
+        require_sandbox(spec.sandbox, &SANDBOX_LEVELS)?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
         }
@@ -694,6 +702,7 @@ impl Executor for CodexExecutor {
             kill_grace: self.kill_grace,
             startup_retry_delays: self.startup_retry_delays.clone(),
             tracker: self.tracker.clone(),
+            unknown: self.unknown.clone(),
         };
         self.tracker.spawn(run_session(session, app));
 
@@ -706,6 +715,10 @@ impl Executor for CodexExecutor {
     async fn shutdown(&self) {
         self.tracker.close();
         self.tracker.wait().await;
+    }
+
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.unknown.snapshot()
     }
 }
 
@@ -1226,6 +1239,7 @@ struct Session {
     kill_grace: Duration,
     startup_retry_delays: Vec<Duration>,
     tracker: TaskTracker,
+    unknown: UnknownFrames,
 }
 
 /// The state of the turn loop, and the parts of it that talk to the app-server.
@@ -1243,6 +1257,7 @@ struct Run {
     /// `turn/start` when the expected turn's end arrives.
     queued_steers: VecDeque<String>,
     interrupted: bool,
+    unknown: UnknownFrames,
 }
 
 impl Run {
@@ -1383,9 +1398,14 @@ impl Run {
                 self.norm.rate_limits(&params);
                 Vec::new()
             }
-            // thread/status, mcpServer startup, account noise, ...: unknown notification
-            // methods are tolerated by design.
-            _ => Vec::new(),
+            // thread/status, mcpServer startup, account noise, ...: tolerated by design. A
+            // method the driver has no name for is counted, never fatal.
+            other => {
+                if !known::is_known_notification(other) {
+                    self.unknown.note(&format!("method:{other}"));
+                }
+                Vec::new()
+            }
         };
         if self.emit_all(events).await {
             Step::Continue
@@ -1516,6 +1536,7 @@ impl Run {
                     target: "reno_harness::codex",
                     "unhandled server request: {method}"
                 );
+                self.unknown.note(&format!("request:{method}"));
                 self.client
                     .respond_error(&id, -32601, &format!("unsupported method: {method}"));
                 return Step::Continue;
@@ -1892,6 +1913,7 @@ async fn run_session(mut session: Session, mut app: AppServer) {
         requests: Requests::new(),
         queued_steers: VecDeque::new(),
         interrupted: false,
+        unknown: session.unknown.clone(),
     };
 
     // ---- the turn --------------------------------------------------------------

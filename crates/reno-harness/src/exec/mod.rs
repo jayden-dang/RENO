@@ -53,7 +53,7 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, SandboxLevel};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -63,9 +63,11 @@ use crate::proc::ProcessRecord;
 mod mock;
 pub(crate) mod probe;
 mod requests;
+mod unknown;
 
 pub use mock::{MockExecutor, MockLog, MockStep};
 pub use requests::{Open, OpenRequests, Resolved};
+pub use unknown::UnknownFrames;
 
 /// A harness run, as the kernel sees it. Object safe: the kernel holds `Arc<dyn Executor>`.
 #[async_trait]
@@ -106,6 +108,13 @@ pub trait Executor: Send + Sync {
     /// streams ended or were dropped: each task stops with its stream. The default has nothing
     /// to wait for.
     async fn shutdown(&self) {}
+
+    /// How many frames the wire layer did not recognise, by kind, since this executor was built
+    /// (`type:foo`, `method:bar`). A frame the driver knows and ignores on purpose is not
+    /// counted. The default, for an executor with no wire, counts nothing.
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        std::collections::BTreeMap::new()
+    }
 }
 
 /// Why [`Executor::start`] refused a run. Every variant means nothing was spawned.
@@ -363,5 +372,37 @@ pub(crate) fn require_access(
             requested,
             supported: supported.to_vec(),
         })
+    }
+}
+
+/// Fail with [`ExecError::InvalidSpec`] unless `supported` lists the sandbox level `requested`
+/// (ARCH-15): a run never gets more latitude than the spec asked for, and an executor that
+/// cannot enforce a level does not pretend to. `Unrestricted` asks for no ceiling beyond the access
+/// mode, so it needs no declaration, as at the router. The router refuses first; this is the
+/// executor's own defence, so a caller that skips the router is refused too.
+pub(crate) fn require_sandbox(
+    requested: SandboxLevel,
+    supported: &[SandboxLevel],
+) -> Result<(), ExecError> {
+    if requested == SandboxLevel::Unrestricted || supported.contains(&requested) {
+        Ok(())
+    } else {
+        Err(ExecError::InvalidSpec(format!(
+            "sandbox level {requested:?} is not supported; supported: {supported:?}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sandbox_level_outside_the_declared_ones_is_refused_before_a_run() {
+        let supported = [SandboxLevel::Unrestricted];
+        assert!(require_sandbox(SandboxLevel::Unrestricted, &supported).is_ok());
+        assert!(require_sandbox(SandboxLevel::Unrestricted, &[]).is_ok());
+        let refused = require_sandbox(SandboxLevel::ReadOnly, &supported);
+        assert!(matches!(refused, Err(ExecError::InvalidSpec(why)) if why.contains("ReadOnly")));
     }
 }

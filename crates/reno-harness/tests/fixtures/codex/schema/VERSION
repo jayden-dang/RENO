@@ -1,0 +1,7 @@
+# codex-cli version this snapshot was generated from (`codex app-server generate-json-schema --out DIR`).
+# Only the files the driver uses are kept: the four union files and the replies it sends.
+# To refresh: generate into a scratch directory, copy those files over, update this line, and run
+#   cargo test -p reno-harness --test codex_schema
+# To check the driver against the CLI installed here without a model call, run the same test with
+#   RENO_CODEX_SCHEMA_DIR=<the generated directory>
+0.169.0

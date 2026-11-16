@@ -173,7 +173,7 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
         model: None,
         effort: None,
         access: AccessMode::Supervised,
-        sandbox: SandboxLevel::WorkspaceWrite,
+        sandbox: SandboxLevel::Unrestricted,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),
