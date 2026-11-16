@@ -10,6 +10,8 @@
 //! | `run.routing` | `run_routing` |
 //! | `route.preview` | `preview_route` |
 //! | `run.cancel` | `cancel` |
+//! | `budget.status` | `budget_status` |
+//! | `budget.pause`, `budget.resume` | `pause`, `resume` |
 //! | `run.steer` | `get_run`, `steer` |
 //! | `run.events` | `run_events` |
 //! | `runs.watch` | `watch_runs` |
@@ -59,6 +61,10 @@ use reno_proto::{
     RunCancelResult, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunList,
     RunListParams, RunListResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult, RunSummary,
     RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
+};
+use reno_proto::{
+    BudgetPause, BudgetPauseParams, BudgetPauseResult, BudgetResume, BudgetResumeParams,
+    BudgetResumeResult, BudgetStatus, BudgetStatusParams, BudgetStatusResult,
 };
 use reno_proto::{
     DefGet, DefList, DefValidate, DefsWatch, TriggerFire, TriggerFireParams, TriggerFireResult,
@@ -128,6 +134,9 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<RunGet, _, _>(bind(ctx, run_get))
         .method::<RunRouting, _, _>(bind(ctx, run_routing))
         .method::<RoutePreview, _, _>(bind(ctx, route_preview))
+        .method::<BudgetStatus, _, _>(bind(ctx, budget_status))
+        .method::<BudgetPause, _, _>(bind(ctx, budget_pause))
+        .method::<BudgetResume, _, _>(bind(ctx, budget_resume))
         .method::<RunList, _, _>(bind(ctx, run_list))
         .method::<RunCancel, _, _>(bind(ctx, run_cancel))
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
@@ -455,6 +464,32 @@ async fn trigger_fire(ctx: Arc<Ctx>, p: TriggerFireParams) -> Reply<TriggerFireR
     tracing::info!(trigger = %p.name, "trigger fire requested");
     ctx.kernel
         .fire_trigger(&p.name)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+/// `budget.status`: each bot's limits and use today, and what is paused.
+async fn budget_status(ctx: Arc<Ctx>, _: BudgetStatusParams) -> Reply<BudgetStatusResult> {
+    ctx.kernel
+        .budget_status()
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+/// `budget.pause`: the kill switch, for everything or one bot.
+async fn budget_pause(ctx: Arc<Ctx>, p: BudgetPauseParams) -> Reply<BudgetPauseResult> {
+    tracing::warn!(bot = ?p.bot, stop_live = p.stop_live, "pause requested");
+    ctx.kernel
+        .pause(p.bot.as_deref(), p.stop_live)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+/// `budget.resume`: lifts a pause.
+async fn budget_resume(ctx: Arc<Ctx>, p: BudgetResumeParams) -> Reply<BudgetResumeResult> {
+    tracing::warn!(bot = ?p.bot, "resume requested");
+    ctx.kernel
+        .resume(p.bot.as_deref())
         .await
         .map_err(|e| kernel_error(&e))
 }

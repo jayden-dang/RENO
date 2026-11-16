@@ -123,7 +123,18 @@ impl<W: Write> Transcript<W> {
                 writeln!(self.out, "  (the CLI cannot answer questions yet)")
             }
             ExecEvent::UserMessage { text } => writeln!(self.out, "you: {text}"),
-            ExecEvent::Done { stop, .. } => writeln!(self.out, "done ({})", wire_name(stop)),
+            ExecEvent::Done {
+                stop, diagnostic, ..
+            } => {
+                writeln!(self.out, "done ({})", wire_name(stop))?;
+                match diagnostic
+                    .as_deref()
+                    .and_then(reno_proto::BudgetStop::from_diagnostic)
+                {
+                    Some(budget) => writeln!(self.out, "  {budget}"),
+                    None => Ok(()),
+                }
+            }
             // Text and the quiet kinds returned above; a kind added later prints nothing.
             _ => Ok(()),
         }
@@ -437,6 +448,66 @@ pub(crate) fn duration(secs: u64) -> String {
         (0, _) => format!("{minutes}m {seconds:02}s"),
         _ => format!("{hours}h {minutes:02}m"),
     }
+}
+
+/// What `reno pause` says.
+pub(crate) fn pause_line(bot: Option<&str>, result: &reno_proto::BudgetPauseResult) -> String {
+    let what = bot.map_or_else(|| "everything".to_owned(), |name| format!("bot {name}"));
+    let mut line = if result.changed {
+        format!("paused {what}: nothing new will start; triggers wait for `reno resume`")
+    } else {
+        format!("{what} was already paused")
+    };
+    if !result.stopped.is_empty() {
+        let runs: Vec<_> = result.stopped.iter().map(ToString::to_string).collect();
+        line.push_str(&format!(
+            "\nstopping {} live run(s): {}",
+            runs.len(),
+            runs.join(", ")
+        ));
+    }
+    line
+}
+
+/// What `reno resume` says.
+pub(crate) fn resume_line(bot: Option<&str>, result: &reno_proto::BudgetResumeResult) -> String {
+    let what = bot.map_or_else(|| "everything".to_owned(), |name| format!("bot {name}"));
+    if result.changed {
+        format!("resumed {what}")
+    } else {
+        format!("{what} was not paused")
+    }
+}
+
+/// `reno budget`: the state of the kill switch, then one line per bot.
+pub(crate) fn budget_lines(status: &reno_proto::BudgetStatusResult) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}; tokens counted for {} (local day); runs with no bot may take {}",
+        if status.paused {
+            "PAUSED: nothing new starts"
+        } else {
+            "running"
+        },
+        status.day,
+        duration(status.default_wall_time_ms / 1000),
+    )];
+    for bot in &status.bots {
+        let ceiling = bot.daily_token_ceiling.map_or_else(
+            || "no ceiling".to_owned(),
+            |ceiling| format!("of {ceiling}"),
+        );
+        lines.push(format!(
+            "{}{}: {}/{} live, {} queued, {} tokens today ({ceiling}), runs may take {}",
+            bot.bot,
+            if bot.paused { " (paused)" } else { "" },
+            bot.live_runs,
+            bot.max_concurrent_runs,
+            bot.queued_runs,
+            bot.tokens_today,
+            duration(bot.max_wall_time_ms / 1000),
+        ));
+    }
+    lines
 }
 
 /// The text of `reno daemon status` for a running daemon.

@@ -53,6 +53,13 @@ pub(crate) enum Command {
     /// each, and ask it to look again.
     #[command(subcommand)]
     Executor(ExecutorCommand),
+    /// The kill switch: stop new runs from starting, for everything or one bot. Triggers are
+    /// held and catch up on `reno resume`. Persists across daemon restarts.
+    Pause(Pause),
+    /// Lift a pause started with `reno pause`.
+    Resume(Resume),
+    /// Show each bot's limits and what it has used today, and what is paused.
+    Budget,
     /// Approve one pending action.
     Approve(Decide),
     /// Deny one pending action.
@@ -79,6 +86,23 @@ pub(crate) enum DaemonCommand {
     Install(DaemonInstall),
     /// Unload the LaunchAgent and delete its plist. This stops the daemon.
     Uninstall(DaemonInstall),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Pause {
+    /// Pause only this bot [default: everything].
+    #[arg(long, value_name = "NAME")]
+    pub(crate) bot: Option<String>,
+    /// Also stop the runs that are live now: each ends `interrupted`. Without it they finish.
+    #[arg(long)]
+    pub(crate) stop_live: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct Resume {
+    /// Resume only this bot's own pause [default: the global pause].
+    #[arg(long, value_name = "NAME")]
+    pub(crate) bot: Option<String>,
 }
 
 #[derive(Debug, Args)]

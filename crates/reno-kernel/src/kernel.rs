@@ -35,6 +35,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::time::timeout;
 
 use crate::approvals;
+use crate::budget;
 use crate::clock::Clock;
 use crate::config::KernelConfig;
 use crate::db::Db;
@@ -139,6 +140,7 @@ impl Kernel {
         workspaces::sweep(&shared).await?;
         shared.load_executor_health().await?;
         shared.approvals.refresh(&shared.db).await?;
+        budget::load(&shared).await?;
         if let Some(setup) = definitions {
             defs::start(&shared, setup).await?;
         }
@@ -204,6 +206,14 @@ impl Kernel {
         if self.shared.root.is_cancelled() {
             return Err(KernelError::ShuttingDown);
         }
+        if let Some(bot) = request.bot.as_deref()
+            && let Some(stop) = budget::token_refusal(&self.shared, bot).await?
+        {
+            return Err(KernelError::BudgetExhausted {
+                bot: bot.to_owned(),
+                stop,
+            });
+        }
         let planned = plan_route(
             &self.shared,
             request.bot.as_deref(),
@@ -262,6 +272,28 @@ impl Kernel {
             }
         }
         Err(KernelError::Invalid("no free run id".into()))
+    }
+
+    /// The kill switch: nothing new is claimed for `bot` (everything when `None`), and its
+    /// triggers are held. Runs already live go on, unless `stop_live`, which cancels them (each
+    /// ends `interrupted`). Persisted: a restart keeps it. See the module `budget`.
+    pub async fn pause(
+        &self,
+        bot: Option<&str>,
+        stop_live: bool,
+    ) -> Result<reno_proto::BudgetPauseResult> {
+        budget::pause(&self.shared, bot, stop_live).await
+    }
+
+    /// Lifts the pause of `bot` (the global pause when `None`). Held runs are claimed and held
+    /// triggers catch up.
+    pub async fn resume(&self, bot: Option<&str>) -> Result<reno_proto::BudgetResumeResult> {
+        budget::resume(&self.shared, bot).await
+    }
+
+    /// Every bot's limits and use today, and what is paused.
+    pub async fn budget_status(&self) -> Result<reno_proto::BudgetStatusResult> {
+        budget::status(&self.shared).await
     }
 
     /// The decision `request` would get now: the router run over the executors and the health

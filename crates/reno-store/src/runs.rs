@@ -23,6 +23,7 @@ use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 
+use crate::budget::{ClaimFilter, claim_terms, filter_params};
 use crate::db::Store;
 use crate::error::{DbResult, Result, StoreError, is_unique_violation};
 use crate::events;
@@ -348,17 +349,23 @@ pub(crate) fn tx_claim_next(
     owner: &str,
     now: i64,
     lease_ms: u64,
+    filter: &ClaimFilter,
 ) -> Result<Option<Claim>> {
     let expires = expiry(now, lease_ms)?;
+    let (paused, day) = filter_params(filter)?;
     let candidate: Option<(String, i64, String, Option<String>)> = conn
-        .prepare_cached(
-            "SELECT id, lease_fence, status, lease_owner FROM runs
-             WHERE status IN ('queued', 'leased')
-               AND (status = 'queued' OR lease_expires_at <= ?1)
-             ORDER BY created_at, rowid LIMIT 1",
-        )
+        .prepare_cached(&format!(
+            "SELECT r.id, r.lease_fence, r.status, r.lease_owner FROM runs r
+             WHERE r.status IN ('queued', 'leased')
+               AND (r.status = 'queued' OR r.lease_expires_at <= ?1)
+               AND {}
+             ORDER BY r.created_at, r.rowid LIMIT 1",
+            claim_terms()
+        ))
         .db()?
-        .query_row([now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .query_row(params![now, paused, day], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .optional()
         .db()?;
     let Some((id, old_fence, from, previous_owner)) = candidate else {
@@ -602,9 +609,25 @@ impl Store {
     /// from `now`. Claimable means `queued`, or `leased` with an expired lease. Returns `None`
     /// when nothing is claimable.
     pub async fn claim_next(&self, owner: &str, now: i64, lease_ms: u64) -> Result<Option<Claim>> {
+        self.claim_next_filtered(owner, now, lease_ms, &ClaimFilter::default())
+            .await
+    }
+
+    /// Like [`claim_next`](Self::claim_next), passing over the runs `filter` forbids: a paused
+    /// bot's, a bot's at its concurrency limit, a bot's past its daily token ceiling (see
+    /// [`ClaimFilter`]). A run passed over stays `queued`; the next claimable one behind it is
+    /// taken instead.
+    pub async fn claim_next_filtered(
+        &self,
+        owner: &str,
+        now: i64,
+        lease_ms: u64,
+        filter: &ClaimFilter,
+    ) -> Result<Option<Claim>> {
         let owner = owner.to_owned();
+        let filter = filter.clone();
         self.write(Durability::Normal, move |c| {
-            tx_claim_next(c, &owner, now, lease_ms)
+            tx_claim_next(c, &owner, now, lease_ms, &filter)
         })
         .await
     }

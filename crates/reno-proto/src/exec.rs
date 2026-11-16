@@ -304,7 +304,8 @@ pub enum ExecEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
     },
-    /// Token usage so far.
+    /// Tokens used since the previous `Usage` of the run (executors report per turn, or once at
+    /// the end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.
     Usage {
         /// Input tokens.
         input_tokens: u64,

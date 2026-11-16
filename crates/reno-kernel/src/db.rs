@@ -5,17 +5,19 @@
 //! store write at all, not even an empty claim, and a counter is the only thing that can see
 //! the writes that leave no event row (heartbeats, empty claims).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, ResolvedBy, RoutingDecision, RunId,
-    RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, ResolvedBy,
+    RoutingDecision, RunId, RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
-    Applied, Claim, DefinitionRecord, ExpireScope, Expired, FireResult, Journals, NewApproval,
-    NewDefinition, NewFiring, NewTask, RunRecord, Store, StoreError, StoredApproval, TriggerRow,
+    Applied, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired, FireResult, Journals,
+    NewApproval, NewDefinition, NewFiring, NewTask, Occupancy, RunRecord, Store, StoreError,
+    StoredApproval, Tokens, TriggerRow,
 };
 
 use crate::clock::Clock;
@@ -133,9 +135,101 @@ impl Db {
         self.store.latest_definition(kind, name).await
     }
 
-    pub(crate) async fn claim_next(&self, owner: &str, lease_ms: u64) -> Result<Option<Claim>> {
+    /// The claim with the budget filter: paused bots, bots at their concurrency limit and bots
+    /// past their daily tokens are passed over (`reno_store::ClaimFilter`).
+    pub(crate) async fn claim_next_filtered(
+        &self,
+        owner: &str,
+        lease_ms: u64,
+        filter: &ClaimFilter,
+    ) -> Result<Option<Claim>> {
         self.wrote();
-        self.store.claim_next(owner, self.now_ms(), lease_ms).await
+        self.store
+            .claim_next_filtered(owner, self.now_ms(), lease_ms, filter)
+            .await
+    }
+
+    /// The zone of the budget day.
+    pub(crate) fn zone(&self) -> LocalZone {
+        self.clock.zone()
+    }
+
+    /// The budget day now, `YYYY-MM-DD`.
+    pub(crate) fn today(&self) -> String {
+        self.zone().day_of(self.now_ms())
+    }
+
+    pub(crate) async fn record_usage(
+        &self,
+        run: &RunId,
+        fence: u64,
+        bot: Option<&str>,
+        add: Tokens,
+    ) -> Result<Tokens> {
+        self.wrote();
+        let now = self.now_ms();
+        let day = self.zone().day_of(now);
+        self.store
+            .record_usage(run, fence, bot, &day, add, now)
+            .await
+    }
+
+    pub(crate) async fn bot_usage(&self, day: &str) -> Result<BTreeMap<String, Tokens>> {
+        self.store.bot_usage(day).await
+    }
+
+    pub(crate) async fn claimable_leases(&self, filter: &ClaimFilter) -> Result<Vec<(RunId, i64)>> {
+        self.store.claimable_leases(self.now_ms(), filter).await
+    }
+
+    pub(crate) async fn occupancy(&self) -> Result<BTreeMap<String, Occupancy>> {
+        self.store.occupancy().await
+    }
+
+    pub(crate) async fn token_blocked_bots(&self, day: &str) -> Result<Vec<String>> {
+        self.store.token_blocked_bots(day).await
+    }
+
+    pub(crate) async fn pause(&self, scope: &str) -> Result<bool> {
+        self.wrote();
+        self.store.pause(scope, self.now_ms()).await
+    }
+
+    pub(crate) async fn resume(&self, scope: &str) -> Result<bool> {
+        self.wrote();
+        self.store.resume(scope, self.now_ms()).await
+    }
+
+    pub(crate) async fn pauses(&self) -> Result<BTreeMap<String, i64>> {
+        self.store.pauses().await
+    }
+
+    pub(crate) async fn skip_trigger_occurrence(
+        &self,
+        trigger: &str,
+        scheduled_at: i64,
+        missed: u32,
+        next_due_at: Option<i64>,
+        reason: &str,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .skip_trigger_occurrence(
+                trigger,
+                scheduled_at,
+                missed,
+                next_due_at,
+                reason,
+                self.now_ms(),
+            )
+            .await
+    }
+
+    pub(crate) async fn hold_trigger_occurrence(&self, trigger: &str, due_at: i64) -> Result<()> {
+        self.wrote();
+        self.store
+            .hold_trigger_occurrence(trigger, due_at, self.now_ms())
+            .await
     }
 
     pub(crate) async fn heartbeat(&self, run: &RunId, fence: u64, lease_ms: u64) -> Result<()> {

@@ -2921,6 +2921,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -4976,6 +4977,7 @@ name = "reno-store"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "jiff",
  "proptest",
  "reno-proto",
  "rusqlite",

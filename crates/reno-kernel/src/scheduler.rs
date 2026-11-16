@@ -55,12 +55,15 @@ use reno_proto::defs::DefKind;
 use reno_proto::defs::{
     PromptVars, TriggerDef, TriggerKind, format_instant, format_span, lateness_note, render_prompt,
 };
-use reno_proto::{FiringOutcome, RunId, TaskId, TriggerFireResult, TriggerInfo, TriggerStatus};
+use reno_proto::{
+    BudgetStop, FiringOutcome, RunId, TaskId, TriggerFireResult, TriggerInfo, TriggerStatus,
+};
 use reno_store::{FiringRun, NewFiring, NewTask, StoreError, TriggerRow};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+use crate::budget::{self, Pauses};
 use crate::defs::CurrentDefs;
 use crate::error::{KernelError, Result};
 use crate::kernel::{bot_launch, mint};
@@ -131,6 +134,9 @@ struct Plan {
     pending_fs: Option<i64>,
     /// When to try again after the store failed.
     retry_at: Option<i64>,
+    /// A pause holds this trigger and the hold has been recorded; no timer is armed for it until
+    /// the pause is lifted.
+    held: bool,
 }
 
 impl Plan {
@@ -138,9 +144,16 @@ impl Plan {
         self.def.enabled && self.error.is_none()
     }
 
-    /// When the scheduler must next act for this trigger, in wall-clock milliseconds.
-    fn deadline(&self) -> Option<i64> {
-        if !self.running() {
+    /// Whether a pause holds this trigger back: everything is paused, or its bot is.
+    fn paused(&self, pauses: &Pauses) -> bool {
+        pauses.holds(&self.def.target.bot)
+    }
+
+    /// When the scheduler must next act for this trigger, in wall-clock milliseconds. A held
+    /// trigger has none: nothing is armed while a pause lasts, and its due time stays as it was,
+    /// so lifting the pause finds the occurrences due and merges them into one run.
+    fn deadline(&self, pauses: &Pauses) -> Option<i64> {
+        if !self.running() || (self.held && self.paused(pauses)) {
             return None;
         }
         let backoff = self.row.backoff_until.unwrap_or(i64::MIN);
@@ -217,6 +230,9 @@ pub(crate) struct Scheduler {
     plans: BTreeMap<String, Plan>,
     commands: mpsc::Receiver<SchedCmd>,
     defs: watch::Receiver<Arc<CurrentDefs>>,
+    /// What is paused; a change makes the loop read the clock again, so a lifted pause catches
+    /// up at once.
+    pauses: watch::Receiver<Arc<Pauses>>,
     /// The system's wake-ups, when the daemon reports them.
     wake: Option<watch::Receiver<u64>>,
     next_generation: u64,
@@ -238,6 +254,7 @@ pub(crate) async fn start(
         plans: BTreeMap::new(),
         commands,
         defs: shared.defs_tx.subscribe(),
+        pauses: shared.pauses_tx.subscribe(),
         wake: wake.map(|signal| signal.subscribe()),
         next_generation: 0,
     };
@@ -278,6 +295,20 @@ impl Scheduler {
                         tracing::error!(%error, "could not plan the triggers");
                     }
                 }
+                changed = self.pauses.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    // A trigger that is no longer held is due again at once (the loop's next
+                    // turn fires what is due); the rest stay held.
+                    let pauses = self.pauses.borrow_and_update().clone();
+                    for plan in self.plans.values_mut() {
+                        if !plan.paused(&pauses) {
+                            plan.held = false;
+                        }
+                    }
+                    self.publish();
+                }
                 alive = woke => {
                     // The loop's next turn reads the clock and fires what came due.
                     if !alive {
@@ -297,7 +328,12 @@ impl Scheduler {
     /// How long to sleep: until the earliest deadline, or `None` when there is none, in which
     /// case no timer is armed.
     fn sleep_for(&self) -> Option<Duration> {
-        let earliest = self.plans.values().filter_map(Plan::deadline).min();
+        let pauses = self.pauses.borrow().clone();
+        let earliest = self
+            .plans
+            .values()
+            .filter_map(|plan| plan.deadline(&pauses))
+            .min();
         until_deadline(earliest, self.now())
     }
 
@@ -362,6 +398,7 @@ impl Scheduler {
                 watch: None,
                 pending_fs: before.as_ref().and_then(|p| p.pending_fs),
                 retry_at: None,
+                held: before.as_ref().is_some_and(|p| p.held),
             };
             if let Some(mut old) = before {
                 plan.watch = old.watch.take();
@@ -540,17 +577,84 @@ impl Scheduler {
     /// Fires every trigger that is due now.
     async fn fire_due(&mut self) {
         let now = self.now();
-        let due: Vec<String> = self
-            .plans
-            .iter()
-            .filter(|(_, plan)| plan.deadline().is_some_and(|at| at <= now))
-            .map(|(name, _)| name.clone())
-            .collect();
+        let pauses = self.pauses.borrow().clone();
+        let mut held = Vec::new();
+        let mut due = Vec::new();
+        for (name, plan) in &self.plans {
+            let Some(at) = plan.deadline(&pauses).filter(|at| *at <= now) else {
+                continue;
+            };
+            if plan.paused(&pauses) {
+                held.push((name.clone(), at));
+            } else {
+                due.push(name.clone());
+            }
+        }
+        for (name, at) in held {
+            self.hold(&name, at).await;
+        }
         for name in due {
             self.fire_scheduled(&name, now).await;
         }
         if !self.plans.is_empty() {
             self.publish();
+        }
+    }
+
+    /// A pause holds `name`, which came due at `due_at`: say so once, and arm nothing for it
+    /// until the pause is lifted. Its due time stays, so the catch-up finds every occurrence
+    /// that came due meanwhile and merges them into one run.
+    async fn hold(&mut self, name: &str, due_at: i64) {
+        // An `fs` trigger has no due time of its own; its deadline is the end of a backoff.
+        let due_at = if due_at == i64::MIN {
+            self.plans
+                .get(name)
+                .and_then(|plan| plan.pending_fs)
+                .unwrap_or_else(|| self.now())
+        } else {
+            due_at
+        };
+        if let Some(plan) = self.plans.get_mut(name) {
+            plan.held = true;
+        }
+        match self.shared.db.hold_trigger_occurrence(name, due_at).await {
+            Ok(()) => tracing::info!(trigger = %name, "paused: the trigger waits for the resume"),
+            Err(error) => tracing::warn!(trigger = %name, %error, "could not record the hold"),
+        }
+    }
+
+    /// An occurrence whose bot has used its daily tokens: recorded as skipped and not run. The
+    /// trigger moves on to its next due time, and it is not backed off: the bot is not failing
+    /// to start, it is out of budget.
+    async fn skip(&mut self, name: &str, occurrence: &Occurrence, stop: BudgetStop) {
+        let reason = format!("budget_{}", stop.kind.as_str());
+        let recorded = self
+            .shared
+            .db
+            .skip_trigger_occurrence(
+                name,
+                occurrence.scheduled_at,
+                occurrence.missed,
+                occurrence.next_due_at,
+                &reason,
+            )
+            .await;
+        match recorded {
+            Ok(()) => {
+                if let Some(plan) = self.plans.get_mut(name) {
+                    plan.row.next_due_at = occurrence.next_due_at;
+                }
+                tracing::warn!(trigger = %name, %stop, "skipped an occurrence: the bot is out of budget");
+            }
+            Err(error) => {
+                tracing::error!(trigger = %name, %error, "could not record a skipped occurrence");
+                self.restore_pending(name, occurrence);
+                if let Some(plan) = self.plans.get_mut(name) {
+                    plan.retry_at = Some(self.shared.db.now_ms().saturating_add(
+                        i64::try_from(self.shared.config.store_retry.as_millis()).unwrap_or(1_000),
+                    ));
+                }
+            }
         }
     }
 
@@ -582,6 +686,9 @@ impl Scheduler {
         };
         match self.fire(name, &occurrence, now).await {
             Ok(_) => {}
+            Err(KernelError::BudgetExhausted { stop, .. }) => {
+                self.skip(name, &occurrence, stop).await;
+            }
             Err(KernelError::NoExecutor(message)) => {
                 tracing::warn!(trigger = %name, %message, "no executor for the trigger's bot");
                 // The occurrence stays due; it fires, merged with the ones after it, when the
@@ -653,6 +760,12 @@ impl Scheduler {
             .get(name)
             .ok_or_else(|| KernelError::TriggerNotFound(name.to_owned()))?;
         let prompt = prompt_for(plan, occurrence, now);
+        if let Some(stop) = budget::token_refusal(&self.shared, &plan.def.target.bot).await? {
+            return Err(KernelError::BudgetExhausted {
+                bot: plan.def.target.bot.clone(),
+                stop,
+            });
+        }
         let (executor, bot, routing) = bot_launch(&self.shared, &plan.def.target.bot)?;
         let cwd = self
             .shared

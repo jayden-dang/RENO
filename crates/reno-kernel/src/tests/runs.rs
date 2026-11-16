@@ -634,6 +634,9 @@ async fn a_lease_held_by_someone_else_is_claimed_when_it_expires_and_not_before(
     for _ in 0..50 {
         tokio::task::yield_now().await;
     }
+    // The dispatcher reads the store (on another thread) to learn which lease to sleep until;
+    // let that read finish before time moves, or the timer would be armed after the jump.
+    fx.idle().await;
     assert_eq!(fx.status(&run).await, RunStatus::Leased);
 
     fx.clock.advance(60_001);

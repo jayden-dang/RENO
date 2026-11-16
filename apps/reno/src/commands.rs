@@ -17,8 +17,8 @@ use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorInstall, ExecutorRefresh,
-    RunCancel, RunCommand, RunList, RunShow, RunTail, TaskCommand, TaskRun, TriggerCommand,
-    TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
+    Pause, Resume, RunCancel, RunCommand, RunList, RunShow, RunTail, TaskCommand, TaskRun,
+    TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
@@ -330,6 +330,47 @@ async fn trigger_list(env: &Env) -> anyhow::Result<ExitCode> {
     } else {
         for trigger in &triggers {
             print_line(render::trigger_line(trigger))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) async fn pause(env: &Env, args: Pause) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let paused = client
+        .pause(args.bot.as_deref(), args.stop_live)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&paused)?;
+    } else {
+        print_line(render::pause_line(args.bot.as_deref(), &paused))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) async fn resume(env: &Env, args: Resume) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let resumed = client
+        .resume(args.bot.as_deref())
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&resumed)?;
+    } else {
+        print_line(render::resume_line(args.bot.as_deref(), &resumed))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) async fn budget(env: &Env) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let status = client.budget_status().await.map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&status)?;
+    } else {
+        for line in render::budget_lines(&status) {
+            print_line(line)?;
         }
     }
     Ok(ExitCode::SUCCESS)

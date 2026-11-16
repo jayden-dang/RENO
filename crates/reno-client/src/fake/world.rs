@@ -62,6 +62,10 @@ pub(super) struct World {
     pub(super) defs: DefsSnapshot,
     records: Vec<DefRecord>,
     history: Vec<ApprovalRecord>,
+    /// Everything is paused (`budget.pause` with no bot).
+    paused: bool,
+    /// Bots paused by themselves.
+    paused_bots: std::collections::BTreeSet<String>,
 }
 
 /// Why the fake daemon refuses an install.
@@ -98,6 +102,8 @@ impl World {
             defs: seed.extras.defs,
             records: seed.extras.records,
             history: seed.extras.history,
+            paused: false,
+            paused_bots: std::collections::BTreeSet::new(),
         };
         for at in 0..world.runs.len() {
             let routing = world.seed_routing(at);
@@ -575,6 +581,94 @@ impl World {
         let done = data::done(StopReason::Interrupted, None, reason);
         self.push(id, done);
         Some(RunStatus::Cancelled)
+    }
+
+    /// `budget.status`: each demo bot with its live and queued runs and its pause. The fake
+    /// counts no tokens (every bot shows none spent) and enforces nothing: the pause flags and
+    /// `stop_live` are all it models.
+    pub(super) fn budget_status(&self) -> reno_proto::BudgetStatusResult {
+        let bots = data::BOTS
+            .iter()
+            .map(|name| {
+                let of_bot =
+                    |r: &&RunRecord| r.summary.bot.as_ref().is_some_and(|pin| pin.name == *name);
+                let live = self
+                    .runs
+                    .iter()
+                    .filter(of_bot)
+                    .filter(|r| {
+                        let s = r.summary.status;
+                        s != RunStatus::Queued && !s.is_terminal() && s != RunStatus::Interrupted
+                    })
+                    .count();
+                let queued = self
+                    .runs
+                    .iter()
+                    .filter(of_bot)
+                    .filter(|r| r.summary.status == RunStatus::Queued)
+                    .count();
+                reno_proto::BotBudgetStatus {
+                    bot: (*name).to_owned(),
+                    live_runs: u32::try_from(live).unwrap_or(u32::MAX),
+                    max_concurrent_runs: 1,
+                    queued_runs: u32::try_from(queued).unwrap_or(u32::MAX),
+                    tokens_today: 0,
+                    daily_token_ceiling: None,
+                    max_wall_time_ms: 45 * 60_000,
+                    paused: self.paused_bots.contains(*name),
+                }
+            })
+            .collect();
+        reno_proto::BudgetStatusResult {
+            paused: self.paused,
+            day: "2026-11-16".to_owned(),
+            day_ends_at_ms: self.now_ms + 24 * 3_600_000,
+            default_wall_time_ms: 4 * 3_600_000,
+            bots,
+        }
+    }
+
+    /// `budget.pause`. `Err` for a bot the fake does not have.
+    pub(super) fn pause(
+        &mut self,
+        bot: Option<&str>,
+        stop_live: bool,
+    ) -> Result<reno_proto::BudgetPauseResult, String> {
+        let changed = match bot {
+            Some(name) if data::BOTS.contains(&name) => self.paused_bots.insert(name.to_owned()),
+            Some(name) => return Err(format!("no such bot {name:?}")),
+            None => !std::mem::replace(&mut self.paused, true),
+        };
+        let mut stopped = Vec::new();
+        if stop_live {
+            let live: Vec<RunId> = self
+                .runs
+                .iter()
+                .filter(|r| {
+                    let s = r.summary.status;
+                    s != RunStatus::Queued && !s.is_terminal() && s != RunStatus::Interrupted
+                })
+                .filter(|r| {
+                    bot.is_none_or(|name| r.summary.bot.as_ref().is_some_and(|b| b.name == name))
+                })
+                .map(|r| r.summary.run_id.clone())
+                .collect();
+            for id in live {
+                if self.cancel(&id, Some("paused")).is_some() {
+                    stopped.push(id);
+                }
+            }
+        }
+        Ok(reno_proto::BudgetPauseResult { changed, stopped })
+    }
+
+    /// `budget.resume`.
+    pub(super) fn resume(&mut self, bot: Option<&str>) -> reno_proto::BudgetResumeResult {
+        let changed = match bot {
+            Some(name) => self.paused_bots.remove(name),
+            None => std::mem::replace(&mut self.paused, false),
+        };
+        reno_proto::BudgetResumeResult { changed }
     }
 
     /// Counts for `daemon.status`: runs awake (not queued, not terminal) and runs queued.

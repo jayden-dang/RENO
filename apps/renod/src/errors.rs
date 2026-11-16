@@ -25,6 +25,7 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         }
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
+        KernelError::BudgetExhausted { .. } => ErrorCode::BudgetExceeded,
         KernelError::Definitions(_) => ErrorCode::Internal,
         KernelError::WorkspaceNotFound(_) => ErrorCode::NotFound,
         KernelError::Workspace(workspace) => workspace_code(workspace),
@@ -66,7 +67,19 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
     if code == ErrorCode::Internal {
         tracing::error!(%error, "internal error while serving a request");
     }
-    ErrorObject::new(code, error.to_string())
+    let object = ErrorObject::new(code, error.to_string());
+    match error {
+        // The limit and the use, typed, so a client never parses the message.
+        KernelError::BudgetExhausted { bot, stop } => ErrorObject {
+            data: serde_json::to_value(reno_proto::BudgetRefusal {
+                bot: bot.clone(),
+                stop: *stop,
+            })
+            .ok(),
+            ..object
+        },
+        _ => object,
+    }
 }
 
 /// The code an install error crosses the socket with.
@@ -129,6 +142,17 @@ mod tests {
             ),
             (KernelError::Invalid("x".into()), ErrorCode::InvalidParams),
             (
+                KernelError::BudgetExhausted {
+                    bot: "keeper".into(),
+                    stop: reno_proto::BudgetStop {
+                        kind: reno_proto::BudgetKind::Tokens,
+                        limit: 10,
+                        used: 12,
+                    },
+                },
+                ErrorCode::BudgetExceeded,
+            ),
+            (
                 KernelError::NoExecutor("b".into()),
                 ErrorCode::InvalidParams,
             ),
@@ -187,6 +211,22 @@ mod tests {
             assert_eq!(code_of(&error), code, "{error}");
             assert_eq!(kernel_error(&error).code, code, "{error}");
         }
+    }
+
+    #[test]
+    fn a_budget_refusal_carries_its_typed_payload() {
+        let stop = reno_proto::BudgetStop {
+            kind: reno_proto::BudgetKind::Tokens,
+            limit: 10,
+            used: 12,
+        };
+        let object = kernel_error(&KernelError::BudgetExhausted {
+            bot: "keeper".into(),
+            stop,
+        });
+        let data: reno_proto::BudgetRefusal =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!((data.bot.as_str(), data.stop), ("keeper", stop));
     }
 
     #[test]

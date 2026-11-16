@@ -14,6 +14,7 @@
 //! says so, in `until` (1 ms per probe) or `tokio::time::advance`.
 
 mod approvals;
+mod budget;
 mod defs;
 mod health;
 mod queue;

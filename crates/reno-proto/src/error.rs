@@ -48,6 +48,8 @@ pub enum ErrorCode {
     Unavailable,
     /// -32008: an unexpected failure inside the daemon.
     Internal,
+    /// -32009: a budget refuses the request: the bot has used its token ceiling for the day.
+    BudgetExceeded,
     /// A code this version does not know. Never produced by this crate's own servers.
     Other(i32),
 }
@@ -69,6 +71,7 @@ impl ErrorCode {
             Self::ProtocolVersionMismatch => -32006,
             Self::Unavailable => -32007,
             Self::Internal => -32008,
+            Self::BudgetExceeded => -32009,
             Self::Other(code) => code,
         }
     }
@@ -89,6 +92,7 @@ impl ErrorCode {
             -32006 => Self::ProtocolVersionMismatch,
             -32007 => Self::Unavailable,
             -32008 => Self::Internal,
+            -32009 => Self::BudgetExceeded,
             other => Self::Other(other),
         }
     }
@@ -159,6 +163,7 @@ mod tests {
         (ErrorCode::ProtocolVersionMismatch, -32006),
         (ErrorCode::Unavailable, -32007),
         (ErrorCode::Internal, -32008),
+        (ErrorCode::BudgetExceeded, -32009),
     ];
 
     #[test]

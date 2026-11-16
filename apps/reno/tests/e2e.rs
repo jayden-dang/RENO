@@ -754,6 +754,71 @@ fn trigger_list_and_fire_through_the_cli() {
 }
 
 #[test]
+fn pause_resume_and_budget_through_the_cli() {
+    let world = World::new();
+    write_def(&world.defs_dir(), "bots/tester.toml", TESTER);
+    world.start_daemon();
+
+    let budget = world.json(&["budget"]);
+    assert_eq!(budget["paused"], false);
+    let tester = budget["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["bot"] == "tester")
+        .unwrap()
+        .clone();
+    assert_eq!(tester["maxConcurrentRuns"], 1);
+    assert_eq!(tester["paused"], false);
+    let text_out = text(&world.reno(&["budget"]).stdout);
+    assert!(
+        text_out.starts_with("running") && text_out.contains("tester: 0/1 live"),
+        "{text_out}"
+    );
+
+    // Pausing one bot, then everything.
+    let one = world.reno(&["pause", "--bot", "tester"]);
+    assert!(one.status.success(), "{}", text(&one.stderr));
+    assert!(
+        text(&one.stdout).starts_with("paused bot tester"),
+        "{}",
+        text(&one.stdout)
+    );
+    let all = world.json(&["pause"]);
+    assert_eq!(all["changed"], true);
+    assert_eq!(world.json(&["pause"])["changed"], false, "already paused");
+    let shown = text(&world.reno(&["budget"]).stdout);
+    assert!(
+        shown.starts_with("PAUSED") && shown.contains("tester (paused)"),
+        "{shown}"
+    );
+    let status = text(&world.reno(&["daemon", "status"]).stdout);
+    assert!(status.contains("paused: nothing new starts"), "{status}");
+    assert_eq!(world.json(&["daemon", "status"])["paused"], true);
+
+    // A run submitted now is queued, and stays so until the resume.
+    let queued = world.json(&["budget"]);
+    assert_eq!(queued["paused"], true);
+
+    let ghost = world.reno(&["pause", "--bot", "ghost"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    assert!(
+        text(&ghost.stderr).contains("not found"),
+        "{}",
+        text(&ghost.stderr)
+    );
+
+    let resumed = world.reno(&["resume"]);
+    assert!(resumed.status.success(), "{}", text(&resumed.stderr));
+    assert_eq!(text(&resumed.stdout).trim(), "resumed everything");
+    let again = world.reno(&["resume"]);
+    assert_eq!(text(&again.stdout).trim(), "everything was not paused");
+    assert_eq!(world.json(&["resume", "--bot", "tester"])["changed"], true);
+    assert_eq!(world.json(&["budget"])["paused"], false);
+    assert_eq!(world.json(&["daemon", "status"])["paused"], false);
+}
+
+#[test]
 fn executor_list_and_refresh_through_the_cli() {
     let world = World::new();
     world.start_daemon();

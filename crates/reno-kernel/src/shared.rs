@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::approvals::Approvals;
+use crate::budget::Pauses;
 use crate::config::KernelConfig;
 use crate::db::Db;
 use crate::defs::CurrentDefs;
@@ -75,6 +76,8 @@ pub(crate) struct LiveRun {
     /// executor has started.
     pub(crate) cancel: CancellationToken,
     pub(crate) cmd: mpsc::Sender<SupCmd>,
+    /// The bot the run is pinned to, which a bot's pause (`stop_live`) is matched against.
+    pub(crate) bot: Option<String>,
 }
 
 /// A run's place in the `live` table. Dropping it frees the slot and wakes the dispatcher, on
@@ -137,6 +140,9 @@ pub(crate) struct Shared {
     sched_rx: Mutex<Option<mpsc::Receiver<SchedCmd>>>,
     /// Every trigger and its state, as the scheduler last published it.
     pub(crate) triggers_tx: watch::Sender<Arc<Vec<TriggerInfo>>>,
+    /// What is paused. Written by `pause` and `resume` only; the dispatcher and the scheduler
+    /// read it.
+    pub(crate) pauses_tx: watch::Sender<Arc<Pauses>>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -180,6 +186,7 @@ impl Shared {
             sched_tx,
             sched_rx: Mutex::new(Some(sched_rx)),
             triggers_tx: watch::channel(Arc::default()).0,
+            pauses_tx: watch::channel(Arc::default()).0,
         }
     }
 
@@ -252,6 +259,15 @@ impl Shared {
 
     pub(crate) fn live_cancel_token(&self, run: &RunId) -> Option<CancellationToken> {
         self.live_lock().get(run).map(|live| live.cancel.clone())
+    }
+
+    /// The cancel tokens of the live runs of `bot` (every live run when `None`), with their ids.
+    pub(crate) fn live_of(&self, bot: Option<&str>) -> Vec<(RunId, CancellationToken)> {
+        self.live_lock()
+            .iter()
+            .filter(|(_, live)| bot.is_none_or(|name| live.bot.as_deref() == Some(name)))
+            .map(|(run, live)| (run.clone(), live.cancel.clone()))
+            .collect()
     }
 
     pub(crate) fn live_commands(&self, run: &RunId) -> Option<mpsc::Sender<SupCmd>> {

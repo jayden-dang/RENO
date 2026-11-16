@@ -614,7 +614,8 @@ expression: protocol_schema()
     "executor.install",
     "approval.message",
     "routing",
-    "attachments"
+    "attachments",
+    "budget"
   ],
   "methods": [
     {
@@ -2481,6 +2482,205 @@ expression: protocol_schema()
           "decision"
         ],
         "title": "RoutePreviewResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "budget.status",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `budget.status`: none.",
+        "title": "BudgetStatusParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BotBudgetStatus": {
+            "description": "One bot's budget and what it has used.",
+            "properties": {
+              "bot": {
+                "description": "The bot.",
+                "type": "string"
+              },
+              "dailyTokenCeiling": {
+                "description": "The most it may use per day; absent for no ceiling.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "liveRuns": {
+                "description": "Runs of the bot that hold a slot now (claimed and not ended).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxConcurrentRuns": {
+                "description": "The most it may have live: `budget.max_concurrent_runs` of its definition in force.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxWallTimeMs": {
+                "description": "The longest one run may take, in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "paused": {
+                "description": "Whether the bot is paused by itself (`budget.pause` with a bot). A global pause is\n`BudgetStatusResult::paused`.",
+                "type": "boolean"
+              },
+              "queuedRuns": {
+                "description": "Its runs waiting to be claimed.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "tokensToday": {
+                "description": "Tokens (input and output) its runs have used today.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bot",
+              "liveRuns",
+              "maxConcurrentRuns",
+              "queuedRuns",
+              "tokensToday",
+              "maxWallTimeMs",
+              "paused"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `budget.status`.",
+        "properties": {
+          "bots": {
+            "description": "Every bot in the definitions in force, and any other that is paused, by name.",
+            "items": {
+              "$ref": "#/$defs/BotBudgetStatus"
+            },
+            "type": "array"
+          },
+          "day": {
+            "description": "The local day the token counts are for, `YYYY-MM-DD`.",
+            "type": "string"
+          },
+          "dayEndsAtMs": {
+            "description": "When that day ends and the counts start again, in milliseconds since the epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "defaultWallTimeMs": {
+            "description": "The longest a run with no bot may take, in milliseconds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "paused": {
+            "description": "Whether everything is paused (`budget.pause` with no bot).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "paused",
+          "day",
+          "dayEndsAtMs",
+          "defaultWallTimeMs",
+          "bots"
+        ],
+        "title": "BudgetStatusResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "budget.pause",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `budget.pause`.",
+        "properties": {
+          "bot": {
+            "description": "The bot to pause; everything when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stopLive": {
+            "description": "Also stop the runs that are live now (each ends `interrupted`). Without it they go on.",
+            "type": "boolean"
+          }
+        },
+        "title": "BudgetPauseParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `budget.pause`.",
+        "properties": {
+          "changed": {
+            "description": "False when it was paused already (and nothing but `stop_live` was done).",
+            "type": "boolean"
+          },
+          "stopped": {
+            "default": [],
+            "description": "The live runs that were told to stop.",
+            "items": {
+              "$ref": "#/$defs/RunId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "changed"
+        ],
+        "title": "BudgetPauseResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "budget.resume",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `budget.resume`.",
+        "properties": {
+          "bot": {
+            "description": "The bot to resume; the global pause when absent. A global pause and a bot's own are\nseparate: resuming one leaves the other.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "BudgetResumeParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `budget.resume`.",
+        "properties": {
+          "changed": {
+            "description": "False when it was not paused.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "changed"
+        ],
+        "title": "BudgetResumeResult",
         "type": "object"
       }
     },
@@ -6561,7 +6761,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "Token usage so far.",
+                "description": "Tokens used since the previous `Usage` of the run (executors report per turn, or once at\nthe end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.",
                 "properties": {
                   "inputTokens": {
                     "description": "Input tokens.",

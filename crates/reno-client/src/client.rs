@@ -254,6 +254,45 @@ impl Client {
             .triggers)
     }
 
+    /// `budget.status`: every bot's limits and use today, and what is paused. Needs feature
+    /// `budget`.
+    pub async fn budget_status(&self) -> Result<reno_proto::BudgetStatusResult, ClientError> {
+        self.require(reno_proto::FEATURE_BUDGET)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::BudgetStatus>(reno_proto::BudgetStatusParams::default())
+            .await?)
+    }
+
+    /// `budget.pause`: the kill switch. Nothing new is claimed for `bot` (everything when
+    /// `None`), and its triggers are held; with `stop_live` its live runs are stopped too. Needs
+    /// feature `budget`.
+    pub async fn pause(
+        &self,
+        bot: Option<&str>,
+        stop_live: bool,
+    ) -> Result<reno_proto::BudgetPauseResult, ClientError> {
+        self.require(reno_proto::FEATURE_BUDGET)?;
+        let params = reno_proto::BudgetPauseParams {
+            bot: bot.map(str::to_owned),
+            stop_live,
+        };
+        Ok(self.rpc.call::<reno_proto::BudgetPause>(params).await?)
+    }
+
+    /// `budget.resume`: lifts the pause of `bot` (the global one when `None`). Needs feature
+    /// `budget`.
+    pub async fn resume(
+        &self,
+        bot: Option<&str>,
+    ) -> Result<reno_proto::BudgetResumeResult, ClientError> {
+        self.require(reno_proto::FEATURE_BUDGET)?;
+        let params = reno_proto::BudgetResumeParams {
+            bot: bot.map(str::to_owned),
+        };
+        Ok(self.rpc.call::<reno_proto::BudgetResume>(params).await?)
+    }
+
     /// `trigger.fire`: fires a manual trigger, or any enabled one, now. Needs feature
     /// `triggers`.
     pub async fn fire_trigger(

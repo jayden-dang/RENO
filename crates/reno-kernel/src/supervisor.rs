@@ -38,12 +38,13 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_harness::exec::{ExecHandle, SteerRejected};
-use reno_proto::{ExecEvent, RunId, RunStatus, Seq, StopReason};
-use reno_store::{JournalWriter, StoreError};
+use reno_proto::{BudgetKind, BudgetStop, ExecEvent, RunId, RunStatus, Seq, StopReason};
+use reno_store::{JournalWriter, StoreError, Tokens};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::time::{Sleep, sleep};
 use tokio_util::sync::CancellationToken;
@@ -81,6 +82,11 @@ pub(crate) struct RunInfo {
     pub(crate) cwd: PathBuf,
     /// The bot the run is pinned to, which policy rules are scoped by.
     pub(crate) bot: Option<String>,
+    /// The longest the run may take; the supervisor stops it when this has passed.
+    pub(crate) wall_time: Duration,
+    /// The daily token ceiling of the run's bot; the supervisor stops the run when its bot's
+    /// tokens for the day reach it.
+    pub(crate) token_ceiling: Option<u64>,
 }
 
 /// How the run ended, as the executor (or the supervisor, when it had to) said.
@@ -115,6 +121,12 @@ pub(crate) struct Supervisor {
     fatal: Option<String>,
     /// The lease was taken over: this supervisor no longer owns the run and writes nothing.
     lost: bool,
+    /// Fires when the run has used its wall time; `None` once it has, or once the run is
+    /// stopping for another budget.
+    wall: Option<Pin<Box<Sleep>>>,
+    /// The budget that stopped the run, which becomes the diagnostic of its `Done` when the
+    /// executor ends because of the cancel.
+    budget: Option<BudgetStop>,
     /// Last field: the slot is freed after everything else is dropped.
     _slot: Slot,
 }
@@ -177,12 +189,15 @@ impl Supervisor {
             open_inputs: HashSet::new(),
             fatal: None,
             lost: false,
+            wall: None,
+            budget: None,
             _slot: slot,
         }
     }
 
     pub(crate) async fn run(mut self) {
         self.open_journal().await;
+        self.wall = Some(Box::pin(sleep(self.info.wall_time)));
         let period = self.shared.config.heartbeat_period();
         let mut beat = Box::pin(sleep(period));
         let mut grace: Option<Pin<Box<Sleep>>> = None;
@@ -200,6 +215,7 @@ impl Supervisor {
                     beat.set(sleep(period));
                 }
                 () = expiry_elapsed(&mut self.expiry) => self.expire_due().await,
+                () = grace_elapsed(&mut self.wall) => self.wall_time_up(),
                 () = grace_elapsed(&mut grace) => {
                     // The executor ignored the cancel. Dropping its stream is what ends a
                     // harness that will not stop by itself.
@@ -289,6 +305,70 @@ impl Supervisor {
         }
         // Whatever the event is, it is recorded and broadcast.
         self.publish(&event);
+        if let ExecEvent::Usage {
+            input_tokens,
+            output_tokens,
+        } = event
+        {
+            self.charge(Tokens {
+                input: input_tokens,
+                output: output_tokens,
+            })
+            .await;
+        }
+    }
+
+    /// Stops the run for `stop`: the executor is told to cancel, and the run ends `interrupted`
+    /// with `stop` as its diagnostic. The first budget to stop a run is the one that is kept.
+    fn stop_for_budget(&mut self, stop: BudgetStop) {
+        if self.budget.is_some() {
+            return;
+        }
+        tracing::warn!(run = %self.run, %stop, "stopping the run: a budget is spent");
+        self.budget = Some(stop);
+        self.wall = None;
+        self.cancel.cancel();
+    }
+
+    /// The wall deadline passed.
+    fn wall_time_up(&mut self) {
+        self.wall = None;
+        let ms = |span: Duration| u64::try_from(span.as_millis()).unwrap_or(u64::MAX);
+        self.stop_for_budget(BudgetStop {
+            kind: BudgetKind::WallTime,
+            limit: ms(self.info.wall_time),
+            // The deadline is the measure: the run has had exactly its limit.
+            used: ms(self.info.wall_time),
+        });
+    }
+
+    /// Adds a `Usage` event to the run's and its bot's tokens for the day, and stops the run when
+    /// that takes the bot to its ceiling. A store failure is logged and the run goes on: the
+    /// count is behind, which errs toward letting work finish.
+    async fn charge(&mut self, add: Tokens) {
+        if self.lost {
+            return;
+        }
+        let bot = self.info.bot.clone();
+        let total = self
+            .shared
+            .db
+            .record_usage(&self.run, self.fence, bot.as_deref(), add)
+            .await;
+        match total {
+            Ok(total) => {
+                if let Some(limit) = self.info.token_ceiling
+                    && total.total() >= limit
+                {
+                    self.stop_for_budget(BudgetStop {
+                        kind: BudgetKind::Tokens,
+                        limit,
+                        used: total.total(),
+                    });
+                }
+            }
+            Err(error) => tracing::warn!(run = %self.run, %error, "could not record token usage"),
+        }
     }
 
     async fn transition(&mut self, to: RunStatus) -> bool {
@@ -412,6 +492,13 @@ impl Supervisor {
             result,
             mut diagnostic,
         } = end;
+        if let Some(budget) = self.budget
+            && stop == StopReason::Interrupted
+        {
+            // The cancel the budget asked for is what ended it; any other end (the harness
+            // finished first, or failed) is reported as it came.
+            diagnostic = Some(budget.to_diagnostic());
+        }
         if let Some(why) = self.fatal.take() {
             stop = StopReason::Error;
             diagnostic = Some(why);
