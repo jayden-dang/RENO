@@ -929,3 +929,30 @@ impl AcpExecutor {
         Err(HarnessError::Protocol(format!("{NEEDS_TERMINAL}{line}")))
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod opener_path_tests {
+    use super::*;
+
+    #[test]
+    fn the_opener_shim_dir_stays_first_on_the_composed_path() {
+        let shim = PathBuf::from("/tmp/reno-openers-test");
+        let mut cmd = Command::new("true");
+        // The allowlist (`child_env`) clears the environment before the PATH is composed; the
+        // shim is prepended after, so it must still lead.
+        crate::child_env::restrict(
+            &mut cmd,
+            crate::child_env::for_harness(crate::HarnessId::Grok),
+        );
+        crate::compose_child_path(&mut cmd, Path::new("/usr/bin/true"));
+        prepend_path(&mut cmd, &shim);
+        let path = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        assert_eq!(std::env::split_paths(path).next().unwrap(), shim);
+    }
+}
