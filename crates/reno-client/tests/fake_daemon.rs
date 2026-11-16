@@ -710,3 +710,44 @@ async fn the_fake_previews_routes_and_keeps_each_runs_decision() {
     let missing = client.run_routing(&run("nowhere")).await.unwrap_err();
     assert_eq!(missing.code(), Some(reno_proto::ErrorCode::NotFound));
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_fake_pauses_and_resumes_and_shows_it_in_the_budget() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    let status = client.budget_status().await.unwrap();
+    assert!(!status.paused);
+    assert!(status.bots.iter().any(|b| b.bot == "keeper" && !b.paused));
+
+    let global = client.pause(None, false).await.unwrap();
+    assert!(global.changed && global.stopped.is_empty());
+    assert!(!client.pause(None, false).await.unwrap().changed);
+    assert!(client.budget_status().await.unwrap().paused);
+
+    assert!(client.pause(Some("keeper"), false).await.unwrap().changed);
+    let status = client.budget_status().await.unwrap();
+    assert!(
+        status
+            .bots
+            .iter()
+            .find(|b| b.bot == "keeper")
+            .unwrap()
+            .paused
+    );
+    assert!(
+        !status
+            .bots
+            .iter()
+            .find(|b| b.bot == "scout")
+            .unwrap()
+            .paused
+    );
+
+    assert!(client.resume(None).await.unwrap().changed);
+    assert!(!client.resume(None).await.unwrap().changed);
+    assert!(client.resume(Some("keeper")).await.unwrap().changed);
+    let status = client.budget_status().await.unwrap();
+    assert!(!status.paused && status.bots.iter().all(|b| !b.paused));
+
+    let unknown = client.pause(Some("nobody"), false).await.unwrap_err();
+    assert_eq!(unknown.code(), Some(reno_proto::ErrorCode::NotFound));
+}

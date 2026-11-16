@@ -506,6 +506,34 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let budget_status = move |_: reno_proto::BudgetStatusParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "budget.status")?;
+            Ok(s.read(World::budget_status))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let budget_pause = move |p: reno_proto::BudgetPauseParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "budget.pause")?;
+            s.with(|w| w.pause(p.bot.as_deref(), p.stop_live))
+                .map_err(|why| ErrorObject::new(ErrorCode::NotFound, why))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let budget_resume = move |p: reno_proto::BudgetResumeParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "budget.resume")?;
+            Ok(s.with(|w| w.resume(p.bot.as_deref())))
+        }
+    };
+
+    let s = Arc::clone(shared);
     let run_list = move |p: reno_proto::RunListParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -807,6 +835,9 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunGet, _, _>(run_get)
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
+        .method::<reno_proto::BudgetStatus, _, _>(budget_status)
+        .method::<reno_proto::BudgetPause, _, _>(budget_pause)
+        .method::<reno_proto::BudgetResume, _, _>(budget_resume)
         .method::<RunList, _, _>(run_list)
         .method::<RunCancel, _, _>(run_cancel)
         .method::<RunSteer, _, _>(run_steer)

@@ -25,6 +25,7 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         }
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
+        KernelError::BudgetExhausted { .. } => ErrorCode::BudgetExceeded,
         KernelError::Definitions(_) => ErrorCode::Internal,
         KernelError::WorkspaceNotFound(_) => ErrorCode::NotFound,
         KernelError::Workspace(workspace) => workspace_code(workspace),
@@ -66,7 +67,15 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
     if code == ErrorCode::Internal {
         tracing::error!(%error, "internal error while serving a request");
     }
-    ErrorObject::new(code, error.to_string())
+    let object = ErrorObject::new(code, error.to_string());
+    match error {
+        // The limit and the use, typed, so a client never parses the message.
+        KernelError::BudgetExhausted { bot, stop } => ErrorObject {
+            data: Some(serde_json::json!({ "bot": bot, "stop": stop })),
+            ..object
+        },
+        _ => object,
+    }
 }
 
 /// The code an install error crosses the socket with.
@@ -128,6 +137,17 @@ mod tests {
                 ErrorCode::Unavailable,
             ),
             (KernelError::Invalid("x".into()), ErrorCode::InvalidParams),
+            (
+                KernelError::BudgetExhausted {
+                    bot: "keeper".into(),
+                    stop: reno_proto::BudgetStop {
+                        kind: reno_proto::BudgetKind::Tokens,
+                        limit: 10,
+                        used: 12,
+                    },
+                },
+                ErrorCode::BudgetExceeded,
+            ),
             (
                 KernelError::NoExecutor("b".into()),
                 ErrorCode::InvalidParams,
