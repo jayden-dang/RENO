@@ -1,7 +1,10 @@
 //! Reno's desktop app: the shell and the Home screen on GPUI.
 //!
 //! `reno-app --fake` runs an in-process fake daemon. With no flag the app connects to the real
-//! daemon's socket, and shows "Daemon not running — run `reno daemon start`" when nothing answers.
+//! daemon's socket and, when nothing answers, starts one (detached, or through launchd when a
+//! LaunchAgent is installed) on a 1 s to 60 s backoff, saying why on Home when it will not stay
+//! up. `RENO_NO_AUTOSTART=1` turns that off, and Home then says "Daemon not running — run
+//! `reno daemon start`".
 
 mod actions;
 mod app;

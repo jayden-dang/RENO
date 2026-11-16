@@ -107,6 +107,11 @@ impl DaemonKeeper {
         })
     }
 
+    /// Whether this keeper starts a daemon when none answers.
+    pub fn auto_start(&self) -> bool {
+        self.config.auto_start
+    }
+
     /// This keeper as the mirror's connector.
     pub fn connector(self: &Arc<Self>) -> Connector {
         let keeper = Arc::clone(self);

@@ -4866,6 +4866,7 @@ dependencies = [
  "reno-proto",
  "reno-syntax",
  "serde_json",
+ "tempfile",
  "tokio",
  "unicode-segmentation",
 ]

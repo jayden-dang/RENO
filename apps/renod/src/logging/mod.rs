@@ -102,7 +102,13 @@ pub fn bound_stderr_file(file: impl AsFd, limit: u64) -> bool {
     let regular =
         rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile;
     let too_big = u64::try_from(stat.st_size).is_ok_and(|size| size > limit);
-    regular && too_big && rustix::fs::ftruncate(&file, 0).is_ok()
+    if !(regular && too_big && rustix::fs::ftruncate(&file, 0).is_ok()) {
+        return false;
+    }
+    // A writer that did not open the file for appending (launchd may not) keeps its offset, and
+    // the next write would leave a hole of zeros. The offset is shared with ours: reset it.
+    let _ = rustix::fs::seek(&file, rustix::fs::SeekFrom::Start(0));
+    true
 }
 
 #[cfg(test)]
@@ -115,9 +121,11 @@ mod tests {
     fn an_oversized_stderr_file_is_emptied_and_other_files_are_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("renod.stderr");
+        // Not opened for appending, like a writer that keeps its own offset.
         let mut file = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(&path)
             .expect("open");
         file.write_all(&[b'x'; 100]).expect("write");
@@ -126,7 +134,7 @@ mod tests {
         file.write_all(b"y").expect("write");
         assert!(bound_stderr_file(&file, 100));
         assert_eq!(std::fs::metadata(&path).expect("meta").len(), 0);
-        // The append offset follows the end of the file, so a later write is not a hole.
+        // The offset went back to the start, so the next write is not a hole.
         file.write_all(b"after").expect("write");
         assert_eq!(std::fs::read(&path).expect("read"), b"after");
 

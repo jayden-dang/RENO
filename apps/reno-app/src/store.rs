@@ -32,6 +32,7 @@ use futures::StreamExt;
 use gpui::{Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
 use reno_client::fake::{FakeConfig, FakeDaemon};
+use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, RunPage, State, Transcript, Update, Updates, filter_key,
@@ -249,7 +250,25 @@ impl Store {
             self.go_offline("Cannot locate the daemon socket: HOME is not set.", cx);
             return;
         };
-        self.connect_socket(path, cx);
+        match daemon_keeper(&path, |key| std::env::var(key).ok()) {
+            Some(keeper) => {
+                self.socket = Some(path);
+                self.start_connector(keeper.connector(), cx);
+            }
+            None => self.connect_socket(path, cx),
+        }
+    }
+
+    /// Connects to `path` through `keeper`, which starts the daemon when nothing answers.
+    #[cfg(test)]
+    pub(crate) fn connect_keeper(
+        &mut self,
+        path: PathBuf,
+        keeper: &Arc<DaemonKeeper>,
+        cx: &mut Context<Self>,
+    ) {
+        self.socket = Some(path);
+        self.start_connector(keeper.connector(), cx);
     }
 
     /// Connects to the daemon socket at `path`, and reconnects when it is lost.
@@ -729,10 +748,29 @@ fn system_now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// The keeper that connects to the daemon at `socket` and starts it when nothing answers: the
+/// app starts a daemon when it finds none (see `reno_client::launcher::keeper`), unless
+/// `RENO_NO_AUTOSTART` is set. `None` when there is nowhere to keep a daemon's files.
+fn daemon_keeper(
+    socket: &std::path::Path,
+    var: impl Fn(&str) -> Option<String>,
+) -> Option<Arc<DaemonKeeper>> {
+    let data_dir = reno_client::default_data_dir()?;
+    let launcher = Launcher::from_env(data_dir, socket.to_path_buf()).ok()?;
+    let disabled = var("RENO_NO_AUTOSTART").is_some_and(|v| !v.is_empty() && v != "0");
+    let config = KeeperConfig {
+        auto_start: !disabled,
+        ..KeeperConfig::default()
+    };
+    Some(DaemonKeeper::new(socket.to_path_buf(), launcher, config))
+}
+
 /// The sentence the offline screens show.
 pub(crate) fn offline_reason(offline: &Offline) -> String {
     match offline.kind {
         OfflineKind::NotRunning => "Daemon not running — run `reno daemon start`".to_owned(),
+        OfflineKind::Starting => "Starting the daemon…".to_owned(),
+        OfflineKind::StartFailed => format!("The daemon did not start: {}", offline.detail),
         OfflineKind::Incompatible => format!(
             "The daemon cannot talk to this app ({}). Update one of them, then restart the daemon",
             offline.detail
@@ -747,6 +785,7 @@ pub(crate) fn retry_line(state: &State) -> Option<String> {
     let offline = state.offline()?;
     let line = match state.connection() {
         ConnectionStatus::Connecting => "Reconnecting…".to_owned(),
+        _ if offline.kind == OfflineKind::Starting => "Waiting for it to answer.".to_owned(),
         _ if offline.attempt <= 1 => "Retrying shortly.".to_owned(),
         _ => format!(
             "Tried {} times. Retrying with a growing pause, at most every 30 s.",
@@ -775,6 +814,44 @@ mod tests {
             offline_reason(&missing),
             "Daemon not running — run `reno daemon start`"
         );
+    }
+
+    #[test]
+    fn a_daemon_being_started_or_failing_to_start_says_so_with_the_reason() {
+        let starting = offline(OfflineKind::Starting, "starting the daemon", 1);
+        assert_eq!(offline_reason(&starting), "Starting the daemon…");
+        let failed = offline(
+            OfflineKind::StartFailed,
+            "renod exited (exit status: 3). Last log lines:\nrenod: locked",
+            2,
+        );
+        assert_eq!(
+            offline_reason(&failed),
+            "The daemon did not start: renod exited (exit status: 3). Last log lines:\nrenod: locked"
+        );
+        let mut state = State::new();
+        state.apply(Update::Offline(starting));
+        assert_eq!(
+            retry_line(&state).as_deref(),
+            Some("Waiting for it to answer.")
+        );
+    }
+
+    #[test]
+    fn auto_start_is_on_unless_the_environment_turns_it_off() {
+        // The keepers are only built here, never used.
+        let socket = std::path::Path::new("/nonexistent/reno.sock");
+        let on = daemon_keeper(socket, |_| None);
+        let off = daemon_keeper(socket, |key| {
+            (key == "RENO_NO_AUTOSTART").then(|| "1".to_owned())
+        });
+        let zero = daemon_keeper(socket, |key| {
+            (key == "RENO_NO_AUTOSTART").then(|| "0".to_owned())
+        });
+        // Without HOME there is no data directory, and no keeper at all.
+        if let (Some(on), Some(off), Some(zero)) = (on, off, zero) {
+            assert!(on.auto_start() && zero.auto_start() && !off.auto_start());
+        }
     }
 
     #[test]

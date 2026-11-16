@@ -730,3 +730,49 @@ fn the_run_screen_draws_in_both_appearances_and_toggles_details(cx: &mut TestApp
         assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
     }
 }
+
+#[gpui::test]
+fn a_daemon_that_will_not_start_is_explained_in_the_banner(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+
+    use reno_client::launcher::{DaemonKeeper, FakeLaunchctl, KeeperConfig, Launcher};
+
+    cx.update(gpui_tokio::init);
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let renod = root.path().join("renod");
+    std::fs::write(
+        &renod,
+        "#!/bin/sh\necho 'renod: cannot open the store' >&2\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&renod, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let socket = data.join("reno.sock");
+    let launcher = Launcher::new(
+        data,
+        socket.clone(),
+        root.path().join("LaunchAgents"),
+        Arc::new(FakeLaunchctl::new()),
+    )
+    .with_renod(renod);
+    let keeper = DaemonKeeper::new(socket.clone(), launcher, KeeperConfig::default());
+
+    let store = cx.new(|cx| {
+        let mut store = Store::connecting();
+        store.connect_keeper(socket, &keeper, cx);
+        store
+    });
+    // The mirror's own backoff retries the connection; the second look finds the daemon gone.
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.offline_reason()
+                .is_some_and(|reason| reason.contains("did not start"))
+        })
+    });
+    store.read_with(cx, |s, _| {
+        let reason = s.offline_reason().unwrap();
+        assert!(reason.contains("exit status: 3"), "{reason}");
+        assert!(reason.contains("cannot open the store"), "{reason}");
+    });
+}
