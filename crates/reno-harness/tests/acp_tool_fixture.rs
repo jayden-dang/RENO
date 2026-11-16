@@ -90,6 +90,7 @@ fn spec(prompt: &str, cwd: &Path, env: &[(&str, &str)], mcp: Vec<McpServerSpec>)
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
         output_schema: None,
+        instructions: None,
     }
 }
 

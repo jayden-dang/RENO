@@ -270,6 +270,7 @@ async fn run_for_bot(
         bot: Some(bot.into()),
         cwd: None,
         model: None,
+        in_place: false,
     }))
     .await
 }
@@ -321,17 +322,19 @@ daemon_test! {
         // An executor the daemon does not have.
         let e = run_for_bot(&fx.client, "example", Some("no-such-executor")).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::NotFound);
-        // Neither a bot nor an executor.
-        let e = within(fx.client.run_task(TaskRunParams {
+        // Neither a bot nor an executor: the router chooses (T1.5), so this is no longer refused.
+        let run = within(fx.client.run_task(TaskRunParams {
             prompt: "go".into(),
             executor: None,
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         }))
         .await
-        .unwrap_err();
-        assert_eq!(code(&e), ErrorCode::InvalidParams);
+        .unwrap();
+        let routed = within(fx.client.run_routing(&run)).await.unwrap().unwrap();
+        assert_eq!(routed.rule_matched, reno_proto::RuleMatched::Default);
     }
 }
 

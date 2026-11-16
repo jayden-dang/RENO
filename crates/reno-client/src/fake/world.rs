@@ -27,6 +27,8 @@ pub(super) struct RunRecord {
     pub(super) cancel: CancellationToken,
     /// Notified by `run.steer`; a `/long` script waits on it.
     pub(super) steered: Arc<Notify>,
+    /// The routing decision the run was made with.
+    pub(super) routing: Option<reno_proto::RoutingDecision>,
 }
 
 impl RunRecord {
@@ -82,6 +84,7 @@ impl World {
                 journal: r.journal,
                 cancel: root.child_token(),
                 steered: Arc::new(Notify::new()),
+                routing: None,
             })
             .collect();
         Self {
@@ -187,11 +190,78 @@ impl World {
         all
     }
 
+    /// A simplified router: the named executor, else every executor by id; each is dropped for
+    /// what its health or access modes say. The real daemon's router is in `reno-kernel`.
+    pub(super) fn route(&self, params: &reno_proto::TaskRunParams) -> reno_proto::RoutingDecision {
+        use reno_proto::{Ineligible, RejectReason, Rejection, RuleMatched};
+        let (rule_matched, order) = match &params.executor {
+            Some(executor) => (RuleMatched::ExplicitExecutor, vec![executor.clone()]),
+            None => {
+                let mut ids: Vec<ExecutorId> = self
+                    .executors
+                    .iter()
+                    .map(|e| e.descriptor.id.clone())
+                    .collect();
+                ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                (RuleMatched::Default, ids)
+            }
+        };
+        let mut ranked = Vec::new();
+        let mut rejected = Vec::new();
+        for id in order {
+            let reason = match self.executors.iter().find(|e| e.descriptor.id == id) {
+                None => Some(RejectReason::NotRegistered),
+                Some(info)
+                    if !info
+                        .descriptor
+                        .caps
+                        .access_modes
+                        .contains(&reno_proto::AccessMode::Supervised) =>
+                {
+                    Some(RejectReason::AccessNotOffered {
+                        requested: reno_proto::AccessMode::Supervised,
+                        offered: info.descriptor.caps.access_modes.clone(),
+                    })
+                }
+                Some(info) => {
+                    info.health
+                        .as_ref()
+                        .and_then(|h| h.ineligible())
+                        .map(|why| match why {
+                            Ineligible::NotInstalled(why) => RejectReason::NotInstalled {
+                                detail: format!("{why:?}"),
+                            },
+                            Ineligible::TooOld { found, min } => {
+                                RejectReason::TooOld { found, min }
+                            }
+                            Ineligible::SignedOut(hint) => RejectReason::SignedOut { hint },
+                        })
+                }
+            };
+            match reason {
+                None => ranked.push(id),
+                Some(reason) => rejected.push(Rejection {
+                    executor: id,
+                    reason,
+                }),
+            }
+        }
+        reno_proto::RoutingDecision {
+            chosen: ranked.first().cloned(),
+            ranked,
+            rejected,
+            rule_matched,
+            fallbacks: Vec::new(),
+            at_ms: self.now_ms,
+        }
+    }
+
     /// Creates a queued run and returns its id.
     pub(super) fn create_run(
         &mut self,
         params: &reno_proto::TaskRunParams,
         executor: ExecutorId,
+        routing: reno_proto::RoutingDecision,
         root: &CancellationToken,
     ) -> Result<RunId, IdError> {
         let n = self.next_id;
@@ -225,6 +295,7 @@ impl World {
             journal_tx: watch::channel(0).0,
             cancel: root.child_token(),
             steered: Arc::new(Notify::new()),
+            routing: Some(routing),
         });
         Ok(run_id)
     }
@@ -398,10 +469,12 @@ impl World {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         };
         let executor = params.executor.clone().ok_or("no executor")?;
+        let routing = self.route(&params);
         let run_id = self
-            .create_run(&params, executor, root)
+            .create_run(&params, executor, routing, root)
             .map_err(|_| "could not create the run")?;
         if let Some(run) = self.run_mut(&run_id) {
             run.summary.bot = Some(reno_proto::defs::BotPin {

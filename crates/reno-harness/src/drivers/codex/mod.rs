@@ -1735,13 +1735,16 @@ async fn handshake(session: &Session, app: &mut AppServer) -> Result<(), Option<
     }
 }
 
-/// `thread/start` or `thread/resume`: the thread and what it runs with.
-async fn open_thread(
-    client: &RpcClient,
+/// What `thread/start` and `thread/resume` carry besides the thread id. The bot's `instructions`
+/// go as `developerInstructions`: extra developer-role guidance for the thread, which leaves
+/// Codex's own base instructions in place (so it is the closest to Claude's appended system
+/// prompt). The field is in the Codex 0.169 app-server schema for both `ThreadStartParams` and
+/// `ThreadResumeParams`.
+fn thread_params(
     spec: &ExecSpec,
     cwd: &str,
     policy: permission::Policy,
-) -> Result<(String, ThreadMode), HarnessError> {
+) -> serde_json::Map<String, Value> {
     let mut p = serde_json::Map::new();
     if !cwd.is_empty() {
         p.insert("cwd".into(), Value::String(cwd.to_owned()));
@@ -1768,6 +1771,23 @@ async fn open_thread(
     if let Some(model) = &spec.model {
         p.insert("model".into(), Value::String(model.clone()));
     }
+    if let Some(instructions) = &spec.instructions {
+        p.insert(
+            "developerInstructions".into(),
+            Value::String(instructions.clone()),
+        );
+    }
+    p
+}
+
+/// `thread/start` or `thread/resume`: the thread and what it runs with.
+async fn open_thread(
+    client: &RpcClient,
+    spec: &ExecSpec,
+    cwd: &str,
+    policy: permission::Policy,
+) -> Result<(String, ThreadMode), HarnessError> {
+    let p = thread_params(spec, cwd, policy);
     let thread = if let Some(resume) = &spec.resume {
         let mut resume_params = p.clone();
         resume_params.insert("threadId".into(), Value::String(resume.0.clone()));
@@ -2060,6 +2080,7 @@ mod tests {
             mcp: Vec::new(),
             env: Default::default(),
             output_schema: None,
+            instructions: None,
         }
     }
 
@@ -2070,6 +2091,19 @@ mod tests {
             args: vec!["mcp".into()],
             env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
         }
+    }
+
+    #[test]
+    fn a_bots_instructions_ride_the_thread_as_developer_instructions() {
+        let mut spec = spec(AccessMode::Supervised, SandboxLevel::Unrestricted);
+        let policy = permission::policy(spec.access, spec.sandbox);
+        assert!(!thread_params(&spec, "/work", policy).contains_key("developerInstructions"));
+        spec.instructions = Some("Be terse.".into());
+        let policy = permission::policy(spec.access, spec.sandbox);
+        let params = thread_params(&spec, "/work", policy);
+        assert_eq!(params["developerInstructions"], "Be terse.");
+        // The base instructions stay Codex's own.
+        assert!(!params.contains_key("baseInstructions"));
     }
 
     #[test]

@@ -54,6 +54,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
         )]
         .into(),
         output_schema: None,
+        instructions: None,
     };
     let (controls, _handle) = ExecControls::new(1);
     let stream = ClaudeExecutor::new()

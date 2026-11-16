@@ -82,6 +82,8 @@ pub struct FiringRun {
     pub executor: ExecutorId,
     /// The bot version the run is pinned to.
     pub bot: BotPin,
+    /// Where the router sent it and why, stored with the run.
+    pub routing: Option<reno_proto::RoutingDecision>,
 }
 
 /// One occurrence to fire.
@@ -312,6 +314,7 @@ fn tx_fire(conn: &Connection, fire: &NewFiring, now: i64) -> Result<FireResult> 
                 &fire.run.run,
                 &fire.run.executor,
                 Some(&fire.run.bot),
+                fire.run.routing.as_ref(),
                 now,
             )?;
             (FiringOutcome::Fired, fire.run.run.clone())

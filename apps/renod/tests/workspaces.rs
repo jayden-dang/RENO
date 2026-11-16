@@ -89,6 +89,7 @@ async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
         bot: None,
         cwd: Some(cwd.to_path_buf()),
         model: None,
+        in_place: false,
     }))
     .await
     .expect("task.run")
@@ -96,7 +97,13 @@ async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
 
 async fn until_status(fx: &Fixture, run: &RunId, want: RunStatus) {
     within(async {
-        while fx.status(run).await != want {
+        loop {
+            let now = fx.status(run).await;
+            if now == want {
+                return;
+            }
+            // A run that ended elsewhere will never get there: say where it ended.
+            assert!(!now.is_terminal(), "{run} ended {now:?}, not {want:?}");
             tokio::task::yield_now().await;
         }
     })
@@ -251,6 +258,39 @@ async fn a_write_run_outside_a_repository_is_refused_and_a_run_with_no_cwd_is_no
     // Reno's own scratch directory is not the user's: it is worked in place.
     let scratch = fx.run("mock", "hi").await;
     until_status(&fx, &scratch, RunStatus::Succeeded).await;
+    fx.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bot_less_task_opts_in_to_in_place_writes_and_a_repository_is_still_never_written_in_place()
+ {
+    let fx = Fixture::start().await;
+    assert!(FEATURES.contains(&"routing"));
+    let plain = fx.dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let in_place = |cwd: &Path| TaskRunParams {
+        prompt: "work".into(),
+        executor: Some(id("mock")),
+        bot: None,
+        cwd: Some(cwd.to_path_buf()),
+        model: None,
+        in_place: true,
+    };
+
+    // Opted in: the run works where it is, with no worktree.
+    let run = within(fx.client.run_task(in_place(&plain))).await.unwrap();
+    until_status(&fx, &run, RunStatus::Succeeded).await;
+    assert!(fx.client.get_workspace(run.clone()).await.is_err());
+
+    // Opting in changes nothing inside a repository: it still gets its own worktree.
+    let repo = repo(&fx);
+    let in_repo = within(fx.client.run_task(in_place(&repo))).await.unwrap();
+    until_status(&fx, &in_repo, RunStatus::Succeeded).await;
+    ended(&fx, &in_repo).await;
+    let info = within(fx.client.get_workspace(in_repo.clone()))
+        .await
+        .unwrap();
+    assert_eq!(info.repo, repo);
     fx.stop().await;
 }
 

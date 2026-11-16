@@ -311,6 +311,10 @@ impl ClaudeExecutor {
         if let Some(model) = &spec.model {
             args.extend(["--model".into(), model.clone()]);
         }
+        if let Some(instructions) = &spec.instructions {
+            // Appended to Claude Code's own system prompt, so its tool guidance stays.
+            args.extend(["--append-system-prompt".into(), instructions.clone()]);
+        }
         if let Some(effort) = spec.effort {
             let effort = match effort {
                 Effort::Low => "low",
@@ -1393,6 +1397,7 @@ mod tests {
             mcp: Vec::new(),
             env: Default::default(),
             output_schema: None,
+            instructions: None,
         }
     }
 
@@ -1434,6 +1439,22 @@ mod tests {
                 "{access:?}: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_bots_instructions_are_appended_to_the_system_prompt() {
+        let none = ClaudeExecutor::launch_args(&spec(AccessMode::Supervised));
+        assert_eq!(flag(&none, "--append-system-prompt"), None);
+        assert_eq!(flag(&none, "--system-prompt"), None);
+        let mut with = spec(AccessMode::Supervised);
+        with.instructions = Some("Be terse.\nAnswer in French.".into());
+        let args = ClaudeExecutor::launch_args(&with);
+        assert_eq!(
+            flag(&args, "--append-system-prompt"),
+            Some("Be terse.\nAnswer in French.")
+        );
+        // Appended, never a replacement of Claude Code's own system prompt.
+        assert_eq!(flag(&args, "--system-prompt"), None);
     }
 
     #[test]

@@ -47,6 +47,11 @@ pub struct KernelConfig {
     /// directory is under it works there in place, with no worktree: it is not the user's
     /// checkout. `None` for a kernel with no scratch directory.
     pub scratch_root: Option<PathBuf>,
+    /// The executors a task with neither a bot nor a named executor may go to, in order of
+    /// preference. The router's `Default` rule considers only these; any other executor is
+    /// reached by naming it or through a bot. Empty (the default) means no task goes to an
+    /// executor unasked.
+    pub default_executors: Vec<reno_proto::ExecutorId>,
 }
 
 impl Default for KernelConfig {
@@ -67,6 +72,7 @@ impl Default for KernelConfig {
             approval_ttl: Duration::from_secs(30 * 60),
             trigger_cwd: PathBuf::from("."),
             scratch_root: None,
+            default_executors: Vec::new(),
         }
     }
 }

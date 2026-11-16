@@ -15,6 +15,7 @@
 //! - `defs`: the `Definitions` port and the validated set in force; loading, storing versions
 //!   and publishing, with the last good set kept when files do not validate.
 //! - `dispatcher`: claims runs and starts them.
+//! - `router`: the pure router: filter, rules, the decision, and the fallback step.
 //! - `health`: what the last probe found about each executor, when probes run, and how the
 //!   findings keep an ineligible executor from being started.
 //! - `scheduler`, `schedule`: the trigger scheduler actor (timers are deadlines, definitions
@@ -69,6 +70,7 @@ mod lifecycle;
 mod procs;
 mod recovery;
 mod registry;
+mod router;
 mod schedule;
 mod scheduler;
 mod shared;
@@ -82,8 +84,9 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::KernelConfig;
 pub use defs::{CurrentDefs, DefSnapshot, Definitions, DefsSetup, StoredVersion};
 pub use error::{KernelError, Result};
-pub use kernel::{Kernel, ShutdownReport};
+pub use kernel::{Kernel, ShutdownReport, TaskRequest};
 pub use registry::ExecutorRegistry;
+pub use router::{BotPreference, Candidate, RouteRequest, fall_back, ineligibility, route};
 pub use wake::WakeSignal;
 pub use watch::{Watch, WatchSpec, WatchStream};
 pub use workspace::{

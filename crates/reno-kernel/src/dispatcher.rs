@@ -28,18 +28,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reno_harness::exec::{ExecControls, ExecError};
+use futures::stream::BoxStream;
+use reno_harness::exec::{ExecControls, ExecError, ExecHandle};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
-    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, RunId, RunStatus,
-    SandboxLevel, StopReason,
+    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
+    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, StartFailureKind, StopReason,
 };
 use reno_store::{Claim, RunRecord, StoreError};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
-use crate::health;
 use crate::lifecycle;
+use crate::router;
 use crate::scheduler::{SchedCmd, StartFailure};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
 use crate::supervisor::{RunInfo, Supervisor};
@@ -104,13 +106,25 @@ async fn next_lease_expiry(shared: &Arc<Shared>) -> Option<Duration> {
     Some(Duration::from_millis(wait))
 }
 
-/// The access and sandbox a run asks for: its pinned bot version's, else the kernel's defaults.
-async fn launch_settings(
-    shared: &Shared,
-    row: &RunRecord,
-) -> Result<(AccessMode, SandboxLevel), String> {
+/// What a run launches with, from its pinned bot version (else the kernel's defaults).
+struct LaunchSettings {
+    access: AccessMode,
+    sandbox: SandboxLevel,
+    /// The bot's standing instructions, handed to the executor with the run.
+    instructions: Option<String>,
+    /// Whether the bot lets a write run work in a directory that is not a git repository.
+    in_place_writes: bool,
+}
+
+/// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
+async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSettings, String> {
     let Some(pin) = &row.bot else {
-        return Ok((shared.config.access, shared.config.sandbox));
+        return Ok(LaunchSettings {
+            access: shared.config.access,
+            sandbox: shared.config.sandbox,
+            instructions: None,
+            in_place_writes: false,
+        });
     };
     let stored = shared
         .db
@@ -129,23 +143,24 @@ async fn launch_settings(
             pin.name, pin.version
         )
     })?;
-    Ok((bot.access, bot.sandbox))
+    Ok(LaunchSettings {
+        access: bot.access,
+        sandbox: bot.sandbox,
+        instructions: Some(bot.instructions).filter(|text| !text.trim().is_empty()),
+        in_place_writes: bot.in_place_writes,
+    })
 }
 
-/// Whether the run's pinned bot lets it write in a directory that is not a git repository.
-async fn in_place_opt_in(shared: &Shared, row: &RunRecord) -> bool {
-    let Some(pin) = &row.bot else {
-        return false;
-    };
-    let stored = shared
-        .db
-        .get_definition(DefKind::Bot, &pin.name, pin.version)
-        .await
-        .ok()
-        .flatten();
-    stored
-        .and_then(|stored| serde_json::from_value::<BotDef>(stored.body).ok())
-        .is_some_and(|bot| bot.in_place_writes)
+/// Whether the run may write in a directory that is not a git repository: its task opted in
+/// (`task.run` with `inPlace`), or its pinned bot allows it. A git repository is never written
+/// in place either way (see `workspaces::place`).
+fn in_place_opt_in(row: &RunRecord, settings: &LaunchSettings) -> bool {
+    settings.in_place_writes
+        || row
+            .spec
+            .get("inPlace")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
 }
 
 /// Why an executor may not start a run, and how a trigger's backoff accounts for it.
@@ -155,53 +170,55 @@ pub(crate) struct Refusal {
     pub(crate) why: String,
     /// The account-level failure the scheduler backs off on.
     pub(crate) account: StartFailure,
+    /// The same finding, typed, for the routing decision.
+    pub(crate) reason: RejectReason,
 }
 
 /// The refusal of a run that `descriptor` cannot honour, or `None` when it can: it must declare
 /// both the access mode and the sandbox level the run asks for (ARCH-15), and the health of its
 /// last probe, when this process has one, must not say it is not installed, too old or signed
-/// out. Unknown sign-in and an untested version never refuse.
+/// out. Unknown sign-in and an untested version never refuse. The finding is the router's
+/// ([`router::ineligibility`]), so what the router would not choose the dispatcher does not start.
 pub(crate) fn no_eligible_executor(
     descriptor: &ExecutorDescriptor,
     health: Option<&ExecutorHealth>,
     access: AccessMode,
     sandbox: SandboxLevel,
 ) -> Option<Refusal> {
-    let refuse = |why: String| Refusal {
-        why,
-        account: StartFailure::NoEligibleExecutor,
-    };
-    if !descriptor.caps.access_modes.contains(&access) {
-        return Some(refuse(format!(
-            "NoEligibleExecutor: the run asks for access mode {access:?}, and executor {} supports \
-             only {:?}; a run is never started with a different access mode than it asked for",
-            descriptor.id, descriptor.caps.access_modes
-        )));
-    }
-    // `Unrestricted` asks for no ceiling beyond the access mode, so it needs no declaration.
-    if sandbox != SandboxLevel::Unrestricted && !descriptor.caps.sandbox_levels.contains(&sandbox) {
-        return Some(refuse(format!(
-            "NoEligibleExecutor: the run asks for sandbox level {sandbox:?}, and executor {} \
-             declares only {:?}; a run is never started with a different sandbox than it asked for",
-            descriptor.id, descriptor.caps.sandbox_levels
-        )));
-    }
-    let ineligible = health?.ineligible()?;
-    Some(Refusal {
-        why: format!(
-            "NoEligibleExecutor: executor {} is not usable: {ineligible}",
-            descriptor.id
+    let reason = router::ineligibility(descriptor, health, access, sandbox)?;
+    let id = &descriptor.id;
+    let why = match &reason {
+        RejectReason::AccessNotOffered { requested, offered } => format!(
+            "NoEligibleExecutor: the run asks for access mode {requested:?}, and executor {id} \
+             supports only {offered:?}; a run is never started with a different access mode than \
+             it asked for"
         ),
-        account: health::start_failure(&ineligible),
+        RejectReason::SandboxNotEnforced { requested, offered } => format!(
+            "NoEligibleExecutor: the run asks for sandbox level {requested:?}, and executor {id} \
+             declares only {offered:?}; a run is never started with a different sandbox than it \
+             asked for"
+        ),
+        other => {
+            let finding = health
+                .and_then(ExecutorHealth::ineligible)
+                .map_or_else(|| other.to_string(), |found| found.to_string());
+            format!("NoEligibleExecutor: executor {id} is not usable: {finding}")
+        }
+    };
+    let account = match router::failure_kind(&reason) {
+        StartFailureKind::NotInstalled => StartFailure::NotInstalled,
+        StartFailureKind::NotSignedIn => StartFailure::NotSignedIn,
+        StartFailureKind::NoEligibleExecutor => StartFailure::NoEligibleExecutor,
+    };
+    Some(Refusal {
+        why,
+        account,
+        reason,
     })
 }
 
 /// The task's prompt, working directory and model, as `submit` stored them.
-fn exec_spec(
-    row: &RunRecord,
-    access: AccessMode,
-    sandbox: SandboxLevel,
-) -> Result<ExecSpec, String> {
+fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, String> {
     let cwd = row
         .spec
         .get("cwd")
@@ -218,14 +235,137 @@ fn exec_spec(
         prompt: row.goal.clone(),
         cwd: PathBuf::from(cwd),
         model,
+        instructions: settings.instructions.clone(),
         effort: None,
-        access,
-        sandbox,
+        access: settings.access,
+        sandbox: settings.sandbox,
         resume: None,
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
     })
+}
+
+/// What to say when a task that named no executor and no bot found none to go to.
+const NAME_ONE: &str =
+    "name an executor (task.run executor, `reno task run --executor`) or use a bot";
+
+/// What one try at starting a run on one executor came to.
+enum Attempt {
+    Started(BoxStream<'static, ExecEvent>, ExecHandle),
+    /// Cancelled before the executor answered: nothing ran.
+    Cancelled,
+    /// The executor will not take the run for an account or install reason: the next candidate
+    /// may. Never an executor that started: a run that ran is not a fallback case.
+    Declined {
+        why: String,
+        reason: RejectReason,
+        account: StartFailure,
+    },
+    /// The run cannot start, and no other executor would change that.
+    Failed {
+        why: String,
+        account: Option<StartFailure>,
+    },
+}
+
+/// Tries to start `spec` on executor `id`: the eligibility check against fresh health, then the
+/// executor's own start.
+async fn attempt(
+    shared: &Arc<Shared>,
+    cancel: &CancellationToken,
+    id: &ExecutorId,
+    spec: &ExecSpec,
+) -> Attempt {
+    let Some(executor) = shared.executors.get(id).cloned() else {
+        return Attempt::Failed {
+            why: format!("unknown executor {id}"),
+            account: None,
+        };
+    };
+    let descriptor = executor.descriptor();
+    let found = shared.health_for_dispatch(id).await;
+    if let Some(refusal) =
+        no_eligible_executor(&descriptor, found.as_ref(), spec.access, spec.sandbox)
+    {
+        return Attempt::Declined {
+            why: refusal.why,
+            reason: refusal.reason,
+            account: refusal.account,
+        };
+    }
+    let (controls, handle) = ExecControls::with_cancel(CONTROL_QUEUE, cancel.clone());
+    let started = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Attempt::Cancelled,
+        started = executor.start(spec.clone(), controls) => started,
+    };
+    match started {
+        Ok(stream) => Attempt::Started(stream, handle),
+        Err(error) => {
+            let why = format!("the executor refused the run: {error}");
+            match error {
+                ExecError::NotInstalled(detail) => {
+                    // A definite signal that what the board holds may be out of date.
+                    shared.probe_soon(id);
+                    Attempt::Declined {
+                        why,
+                        reason: RejectReason::NotInstalled { detail },
+                        account: StartFailure::NotInstalled,
+                    }
+                }
+                ExecError::NotSignedIn(hint) => {
+                    shared.probe_soon(id);
+                    Attempt::Declined {
+                        why,
+                        reason: RejectReason::SignedOut { hint },
+                        account: StartFailure::NotSignedIn,
+                    }
+                }
+                ExecError::UnsupportedAccess {
+                    requested,
+                    supported,
+                } => Attempt::Declined {
+                    why,
+                    reason: RejectReason::AccessNotOffered {
+                        requested,
+                        offered: supported,
+                    },
+                    account: StartFailure::NoEligibleExecutor,
+                },
+                ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => {
+                    Attempt::Failed { why, account: None }
+                }
+            }
+        }
+    }
+}
+
+/// The diagnostic of a run no executor would take: the single refusal as it was, or all of them.
+fn refused_by_all(refusals: &[(ExecutorId, String)]) -> String {
+    match refusals {
+        [(_, only)] => only.clone(),
+        many => {
+            let tried: Vec<String> = many
+                .iter()
+                .map(|(id, why)| {
+                    format!("{id}: {}", why.trim_start_matches("NoEligibleExecutor: "))
+                })
+                .collect();
+            format!(
+                "NoEligibleExecutor: no executor could take the run ({})",
+                tried.join("; ")
+            )
+        }
+    }
+}
+
+/// Records on the stored decision that `current` is the executor the run starts on, when the
+/// decision had none: a probe since the task was routed made it eligible.
+fn adopt(decision: &mut RoutingDecision, current: &ExecutorId) {
+    decision.rejected.retain(|r| &r.executor != current);
+    decision.ranked = vec![current.clone()];
+    decision.chosen = Some(current.clone());
 }
 
 async fn launch(shared: &Arc<Shared>, claim: Claim) {
@@ -260,15 +400,16 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     }
     shared.mark_runs_dirty();
 
-    let mut spec = match launch_settings(shared, &row)
-        .await
-        .and_then(|(access, sandbox)| exec_spec(&row, access, sandbox))
-    {
+    let settings = match launch_settings(shared, &row).await {
+        Ok(settings) => settings,
+        Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
+    };
+    let mut spec = match exec_spec(&row, &settings) {
         Ok(spec) => spec,
         Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
     };
     // Where the run works: its own worktree for a write run in a git repository (T1.3).
-    let opted_in = in_place_opt_in(shared, &row).await;
+    let opted_in = in_place_opt_in(&row, &settings);
     let placed = tokio::select! {
         biased;
         () = cancel.cancelled() => None,
@@ -288,82 +429,125 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         }
         Some(Ok(placement)) => spec.cwd = placement.cwd(),
     }
-    let Some(executor) = shared.executors.get(&row.executor).cloned() else {
-        let why = format!("unknown executor {}", row.executor);
-        return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
-    };
-    let found = shared.health_for_dispatch(&row.executor).await;
-    if let Some(refusal) = no_eligible_executor(
-        &executor.descriptor(),
-        found.as_ref(),
-        spec.access,
-        spec.sandbox,
-    ) {
-        let account = Some(refusal.account);
-        return fail_start(shared, &run_id, fence, refusal.why, account, cmd_rx, slot).await;
-    }
     let info = RunInfo {
         cwd: spec.cwd.clone(),
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
     };
 
-    let (controls, handle) = ExecControls::with_cancel(CONTROL_QUEUE, cancel.clone());
-    let started = tokio::select! {
-        biased;
-        () = cancel.cancelled() => None,
-        started = executor.start(spec, controls) => Some(started),
-    };
-    match started {
-        Some(Ok(stream)) => {
-            shared
-                .signal_scheduler(SchedCmd::RunStarted {
-                    run: run_id.clone(),
-                })
-                .await;
-            let supervisor = Supervisor::new(
-                Arc::clone(shared),
-                run_id,
-                fence,
-                info,
-                stream,
-                handle,
-                cancel,
-                cmd_rx,
-                slot,
-            );
-            shared.spawn(supervisor.run());
-        }
-        Some(Err(error)) => {
-            let why = format!("the executor refused the run: {error}");
-            let account = match error {
-                ExecError::NotInstalled(_) => {
-                    // A definite signal that what the board holds may be out of date.
-                    shared.probe_soon(&row.executor);
-                    Some(StartFailure::NotInstalled)
+    // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not
+    // start for an account or install reason, mark it rejected in the stored decision and try
+    // the next ranked candidate, within this attempt. Each step removes one candidate from the
+    // ranking, so the walk ends after at most as many steps as there were candidates.
+    let mut decision = shared.db.run_routing(&run_id).await.ok().flatten();
+    let mut current = row.executor.clone();
+    let mut refusals: Vec<(ExecutorId, String)> = Vec::new();
+    // A task that named nothing and has no default to go to (the router left every executor out
+    // as not a default): nothing is started, whatever the executor it is recorded against.
+    if let Some(left_out) = decision.as_ref().filter(|d| {
+        d.chosen.is_none()
+            && d.rejected
+                .iter()
+                .any(|r| r.executor == current && matches!(r.reason, RejectReason::Excluded { .. }))
+    }) {
+        let why = format!(
+            "NoEligibleExecutor: no default executor can take the task ({}); {NAME_ONE}",
+            left_out.explain()
+        );
+        let account = Some(StartFailure::NoEligibleExecutor);
+        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+    }
+    let (stream, handle) = loop {
+        match attempt(shared, &cancel, &current, &spec).await {
+            Attempt::Started(stream, handle) => {
+                if let Some(decision) = decision.as_mut()
+                    && decision.chosen.is_none()
+                {
+                    adopt(decision, &current);
+                    reroute(shared, &run_id, fence, &current, decision).await;
                 }
-                ExecError::NotSignedIn(_) => {
-                    shared.probe_soon(&row.executor);
-                    Some(StartFailure::NotSignedIn)
-                }
-                ExecError::UnsupportedAccess { .. } => Some(StartFailure::NoEligibleExecutor),
-                ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => None,
-            };
-            fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
-        }
-        None => {
-            // Cancelled before the executor answered: nothing ran, so it is `interrupted`.
-            let why = "cancelled while the executor was starting".to_owned();
-            conclude(
-                shared,
-                &run_id,
-                fence,
-                StopReason::Interrupted,
+                break (stream, handle);
+            }
+            Attempt::Cancelled => {
+                // Nothing ran, so it is `interrupted`.
+                let why = "cancelled while the executor was starting".to_owned();
+                let stop = StopReason::Interrupted;
+                return conclude(shared, &run_id, fence, stop, why, cmd_rx, slot).await;
+            }
+            Attempt::Failed { why, account } => {
+                return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+            }
+            Attempt::Declined {
                 why,
-                cmd_rx,
-                slot,
-            )
-            .await;
+                reason,
+                account,
+            } => {
+                tracing::warn!(run = %run_id, executor = %current, %why, "executor declined the run");
+                refusals.push((current.clone(), why.clone()));
+                let next = match decision.as_mut() {
+                    Some(decision) if decision.chosen.as_ref() == Some(&current) => {
+                        let at = u64::try_from(shared.db.now_ms()).unwrap_or(0);
+                        router::fall_back(decision, &current, &reason, &why, at);
+                        let next = decision.chosen.clone();
+                        reroute(
+                            shared,
+                            &run_id,
+                            fence,
+                            next.as_ref().unwrap_or(&current),
+                            decision,
+                        )
+                        .await;
+                        next
+                    }
+                    _ => None,
+                };
+                match next {
+                    Some(next) => current = next,
+                    None => {
+                        let mut why = refused_by_all(&refusals);
+                        if decision
+                            .as_ref()
+                            .is_some_and(|d| d.rule_matched == RuleMatched::Default)
+                        {
+                            why = format!("{why}; {NAME_ONE}");
+                        }
+                        let account = Some(account);
+                        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot)
+                            .await;
+                    }
+                }
+            }
         }
+    };
+    shared
+        .signal_scheduler(SchedCmd::RunStarted {
+            run: run_id.clone(),
+        })
+        .await;
+    let supervisor = Supervisor::new(
+        Arc::clone(shared),
+        run_id,
+        fence,
+        info,
+        stream,
+        handle,
+        cancel,
+        cmd_rx,
+        slot,
+    );
+    shared.spawn(supervisor.run());
+}
+
+/// Stores `decision` and the executor the run now stands on. A failure is logged: the walk
+/// goes on, and the diagnostic of the run still says what happened.
+async fn reroute(
+    shared: &Shared,
+    run: &RunId,
+    fence: u64,
+    executor: &ExecutorId,
+    decision: &RoutingDecision,
+) {
+    if let Err(error) = shared.db.reroute_run(run, fence, executor, decision).await {
+        tracing::error!(%run, %error, "could not store the routing decision");
     }
 }
 

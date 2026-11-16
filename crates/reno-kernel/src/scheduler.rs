@@ -653,7 +653,7 @@ impl Scheduler {
             .get(name)
             .ok_or_else(|| KernelError::TriggerNotFound(name.to_owned()))?;
         let prompt = prompt_for(plan, occurrence, now);
-        let (executor, bot) = bot_launch(&self.shared, &plan.def.target.bot, None)?;
+        let (executor, bot, routing) = bot_launch(&self.shared, &plan.def.target.bot)?;
         let cwd = self
             .shared
             .config
@@ -683,6 +683,7 @@ impl Scheduler {
                     run: mint(&self.shared, RunId::from_suffix)?,
                     executor: executor.clone(),
                     bot: bot.clone(),
+                    routing: Some(routing.clone()),
                 },
             };
             match self.shared.db.fire_trigger(fire).await {

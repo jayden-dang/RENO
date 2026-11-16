@@ -178,6 +178,7 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     };
     let events: Vec<ExecEvent> = executor
         .start(spec, controls)

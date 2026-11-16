@@ -23,10 +23,11 @@ use reno_proto::{
     Approval, ApprovalDecide, ApprovalDecideParams, ApprovalDecision, ApprovalList,
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
     DaemonStatus, DaemonStatusInfo, DefGet, DefList, DefValidate, DefsWatch, FEATURES, HelloParams,
-    HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams, RunEventItem, RunEvents,
-    RunEventsParams, RunGet, RunGetParams, RunId, RunList, RunListParams, RunListResult, RunStatus,
+    HelloResult, NoParams, PROTOCOL_VERSION, RoutePreview, RoutePreviewParams, RoutingDecision,
+    RunCancel, RunCancelParams, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams,
+    RunId, RunList, RunListParams, RunListResult, RunRouting, RunRoutingParams, RunStatus,
     RunSteer, RunSteerParams, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, Seq, TaskRun,
-    TaskRunParams,
+    TaskRunParams, TaskRunResult,
 };
 use reno_rpc::{RpcError, SubEvent, SubStream};
 use serde::de::DeserializeOwned;
@@ -154,13 +155,43 @@ impl Client {
         Ok(())
     }
 
-    /// `task.run`: creates a task and its first run. Running as a `bot`, or leaving the executor
-    /// to the bot, needs feature `defs`.
+    /// `task.run`: creates a task and its first run. Running as a `bot` needs feature `defs`;
+    /// leaving the executor to the router, or `in_place`, needs feature `routing`.
     pub async fn run_task(&self, params: TaskRunParams) -> Result<RunId, ClientError> {
-        if params.bot.is_some() || params.executor.is_none() {
+        Ok(self.submit_task(params).await?.run_id)
+    }
+
+    /// Like [`run_task`](Self::run_task), and keeps the daemon's answer: the run and the routing
+    /// decision that chose its executor (absent from a daemon that predates routing).
+    pub async fn submit_task(&self, params: TaskRunParams) -> Result<TaskRunResult, ClientError> {
+        if params.bot.is_some() {
             self.require(reno_proto::FEATURE_DEFS)?;
         }
-        Ok(self.rpc.call::<TaskRun>(params).await?.run_id)
+        if params.in_place || (params.executor.is_none() && params.bot.is_none()) {
+            self.require(reno_proto::FEATURE_ROUTING)?;
+        }
+        Ok(self.rpc.call::<TaskRun>(params).await?)
+    }
+
+    /// `route.preview`: the decision `task` would get now. Nothing is created. Needs feature
+    /// `routing`.
+    pub async fn route_preview(&self, task: TaskRunParams) -> Result<RoutingDecision, ClientError> {
+        self.require(reno_proto::FEATURE_ROUTING)?;
+        let params = RoutePreviewParams { task };
+        Ok(self.rpc.call::<RoutePreview>(params).await?.decision)
+    }
+
+    /// `run.routing`: the routing decision stored for a run, with its fallback steps. `None` for
+    /// a run made before routing existed. Needs feature `routing`.
+    pub async fn run_routing(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<RoutingDecision>, ClientError> {
+        self.require(reno_proto::FEATURE_ROUTING)?;
+        let params = RunRoutingParams {
+            run_id: run_id.clone(),
+        };
+        Ok(self.rpc.call::<RunRouting>(params).await?.decision)
     }
 
     /// `run.get`: one run's summary.

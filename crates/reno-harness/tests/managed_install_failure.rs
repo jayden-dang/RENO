@@ -64,6 +64,7 @@ async fn silent_npm_enoent_death_surfaces_decoded_error_from_the_explicit_instal
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     };
     let refused = executor.start(spec, controls).await.err().expect("refused");
     assert!(matches!(refused, ExecError::NotInstalled(_)), "{refused:?}");

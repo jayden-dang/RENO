@@ -50,6 +50,7 @@ fn spec(cwd: &Path) -> ExecSpec {
         mcp: Vec::new(),
         env: run_env(),
         output_schema: None,
+        instructions: None,
     }
 }
 

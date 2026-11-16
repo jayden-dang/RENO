@@ -42,6 +42,7 @@ fn spec(mode: &str) -> ExecSpec {
             .into_iter()
             .collect(),
         output_schema: None,
+        instructions: None,
     }
 }
 

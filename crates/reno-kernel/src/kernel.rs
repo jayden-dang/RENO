@@ -27,8 +27,8 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CleanItem, CleanTarget,
-    ExecutorId, ExecutorInfo, RunEventItem, RunId, RunStatus, RunSummary, Seq, TaskId,
-    TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
+    ExecutorId, ExecutorInfo, RoutingDecision, RunEventItem, RunId, RunStatus, RunSummary, Seq,
+    TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{NewTask, StoreError};
 use tokio::sync::{oneshot, watch};
@@ -45,6 +45,7 @@ use crate::events;
 use crate::health;
 use crate::recovery;
 use crate::registry::ExecutorRegistry;
+use crate::router::{self, BotPreference, Candidate, RouteRequest};
 use crate::scheduler::{self, SchedCmd};
 use crate::shared::{Shared, SupCmd};
 use crate::workspace::Workspace;
@@ -153,7 +154,8 @@ impl Kernel {
 
     /// Create a task for `prompt` and queue a run of it on `executor`. The kernel mints both
     /// ids. An executor id the kernel does not know is accepted: the run fails when it is
-    /// claimed, with the reason in its journal.
+    /// claimed, with the reason in its journal. The routing decision (the executor named, so
+    /// only it is a candidate) is stored with the run.
     pub async fn submit(
         &self,
         prompt: impl Into<String>,
@@ -161,22 +163,21 @@ impl Kernel {
         cwd: PathBuf,
         model: Option<String>,
     ) -> Result<RunId> {
-        self.submit_pinned(prompt.into(), executor, cwd, model, None)
-            .await
+        let request = TaskRequest::new(prompt, cwd)
+            .executor(executor)
+            .model(model);
+        Ok(self.submit_task(request).await?.0)
     }
 
     /// Create a task for `prompt` and queue a run of it as bot `bot`, pinned to the version of
     /// the bot's definition that is in force now; the pin never changes, whatever is edited
-    /// later. With no `executor` the run goes to the first executor in the bot's list that the
-    /// kernel has. An unknown bot is [`KernelError::DefinitionNotFound`].
+    /// later. With no `executor` the router chooses among the bot's executors (see
+    /// [`route`](crate::route)). An unknown bot is [`KernelError::DefinitionNotFound`].
     ///
-    /// The run launches with the `access` and `sandbox` of the pinned bot version. With no
-    /// `executor` given, the first executor in the bot's list that this kernel has **and that
-    /// declares the bot's access mode** is chosen; when none does, the first one it has is
-    /// recorded and the run fails at launch with a `NoEligibleExecutor` diagnostic rather than
-    /// being started with a different access mode (ARCH-15). Choosing among the bot's executors
-    /// by health and routing statistics is T1.5, and applying its instructions and budget is
-    /// T1.5 and T1.7.
+    /// The run launches with the `access`, `sandbox` and `instructions` of the pinned bot
+    /// version. When no executor of the bot is eligible the run is still recorded, with a
+    /// decision that has none chosen, and fails at launch with a `NoEligibleExecutor`
+    /// diagnostic rather than being started with a different access mode (ARCH-15).
     pub async fn submit_for_bot(
         &self,
         bot: &str,
@@ -185,30 +186,38 @@ impl Kernel {
         cwd: PathBuf,
         model: Option<String>,
     ) -> Result<RunId> {
-        let (executor, pin) = bot_launch(&self.shared, bot, executor).map_err(|e| match e {
-            KernelError::NoExecutor(_) => KernelError::Invalid(e.to_string()),
-            other => other,
-        })?;
-        self.submit_pinned(prompt.into(), executor, cwd, model, Some(pin))
-            .await
+        let mut request = TaskRequest::new(prompt, cwd).bot(bot).model(model);
+        request.executor = executor;
+        match self.submit_task(request).await {
+            Ok((run, _)) => Ok(run),
+            // A bot none of whose executors is here: the caller named a bot that cannot run.
+            Err(error @ KernelError::NoExecutor(_)) => Err(KernelError::Invalid(error.to_string())),
+            Err(error) => Err(error),
+        }
     }
 
-    async fn submit_pinned(
-        &self,
-        prompt: String,
-        executor: ExecutorId,
-        cwd: PathBuf,
-        model: Option<String>,
-        pin: Option<BotPin>,
-    ) -> Result<RunId> {
+    /// Route `request` and queue a run of it. The decision is stored with the run in one
+    /// transaction and returned. A task with neither an executor nor a bot goes to the router's
+    /// default order. [`KernelError::NoExecutor`] when there is nothing it could even be
+    /// recorded against: no executor is registered, or none of its bot's is.
+    pub async fn submit_task(&self, request: TaskRequest) -> Result<(RunId, RoutingDecision)> {
         if self.shared.root.is_cancelled() {
             return Err(KernelError::ShuttingDown);
         }
-        let cwd = cwd
+        let planned = plan_route(
+            &self.shared,
+            request.bot.as_deref(),
+            request.executor.clone(),
+        )?;
+        let cwd = request
+            .cwd
             .to_str()
             .ok_or_else(|| KernelError::Invalid("the working directory is not UTF-8".into()))?
             .to_owned();
-        let spec = serde_json::json!({ "cwd": cwd, "model": model });
+        let mut spec = serde_json::json!({ "cwd": cwd, "model": request.model });
+        if request.in_place {
+            spec["inPlace"] = serde_json::Value::Bool(true);
+        }
         let db = &self.shared.db;
 
         let mut minted = None;
@@ -216,7 +225,7 @@ impl Kernel {
             let id = mint(&self.shared, TaskId::from_suffix)?;
             let task = NewTask {
                 id: id.clone(),
-                goal: prompt.clone(),
+                goal: request.prompt.clone(),
                 class: None,
                 spec: spec.clone(),
             };
@@ -233,21 +242,44 @@ impl Kernel {
 
         for _ in 0..MINT_ATTEMPTS {
             let run = mint(&self.shared, RunId::from_suffix)?;
-            let enqueued = match &pin {
-                Some(pin) => db.enqueue_pinned_run(&task, &run, &executor, pin).await,
-                None => db.enqueue_run(&task, &run, &executor).await,
-            };
+            let enqueued = db
+                .enqueue_routed_run(
+                    &task,
+                    &run,
+                    &planned.executor,
+                    planned.pin.as_ref(),
+                    &planned.decision,
+                )
+                .await;
             match enqueued {
                 Ok(()) => {
                     self.shared.wake.notify_one();
                     self.shared.mark_runs_dirty();
-                    return Ok(run);
+                    return Ok((run, planned.decision));
                 }
                 Err(StoreError::AlreadyExists { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         }
         Err(KernelError::Invalid("no free run id".into()))
+    }
+
+    /// The decision `request` would get now: the router run over the executors and the health
+    /// this kernel holds. Nothing is created, stored or probed.
+    pub fn preview_route(&self, request: &TaskRequest) -> Result<RoutingDecision> {
+        Ok(plan_route(
+            &self.shared,
+            request.bot.as_deref(),
+            request.executor.clone(),
+        )?
+        .decision)
+    }
+
+    /// The routing decision stored for `run`, with the fallback steps taken so far. `None` for a
+    /// run made before routing existed.
+    pub async fn run_routing(&self, run: &RunId) -> Result<Option<RoutingDecision>> {
+        self.shared.run_record(run).await?;
+        Ok(self.shared.db.run_routing(run).await?)
     }
 
     /// The definitions in force, and the problems with the files on disk. Latest value wins: a
@@ -658,48 +690,165 @@ impl Kernel {
     }
 }
 
-/// The executor and bot pin a run for `bot` starts with: the executor given, or the first in the
-/// bot's list that this kernel has and that declares the bot's access mode, else the first it
-/// has (the run then fails at launch with `NoEligibleExecutor`, ARCH-15). The pin is the bot's
-/// version in force now.
+/// A task as a caller states it, before the router has chosen its executor.
+#[derive(Debug, Clone)]
+pub struct TaskRequest {
+    /// The prompt.
+    pub prompt: String,
+    /// The executor the task names. With it the router has one candidate; without it the bot's
+    /// list, or the default order, decides.
+    pub executor: Option<ExecutorId>,
+    /// The bot to run as; the run is pinned to the version in force now.
+    pub bot: Option<String>,
+    /// Where the task works.
+    pub cwd: PathBuf,
+    /// The model to ask for.
+    pub model: Option<String>,
+    /// Allow a write run in `cwd` when it is not a git repository, as a bot's `in_place_writes`
+    /// does. A git repository is never written in place.
+    pub in_place: bool,
+}
+
+impl TaskRequest {
+    /// A task for `prompt` in `cwd`: no executor named, no bot, no model.
+    pub fn new(prompt: impl Into<String>, cwd: PathBuf) -> Self {
+        Self {
+            prompt: prompt.into(),
+            executor: None,
+            bot: None,
+            cwd,
+            model: None,
+            in_place: false,
+        }
+    }
+
+    /// Names the executor.
+    #[must_use]
+    pub fn executor(mut self, executor: ExecutorId) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    /// Runs as `bot`.
+    #[must_use]
+    pub fn bot(mut self, bot: impl Into<String>) -> Self {
+        self.bot = Some(bot.into());
+        self
+    }
+
+    /// Asks for `model`.
+    #[must_use]
+    pub fn model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Opts in to writing in place in a directory that is not a git repository.
+    #[must_use]
+    pub fn in_place(mut self, in_place: bool) -> Self {
+        self.in_place = in_place;
+        self
+    }
+}
+
+/// What routing a task came to: the decision, the executor the run is recorded against, and the
+/// bot pin.
+pub(crate) struct Planned {
+    pub(crate) decision: RoutingDecision,
+    /// The decision's `chosen`; when none is eligible, the executor the run is recorded against
+    /// anyway so that it can fail at launch with the reason.
+    pub(crate) executor: ExecutorId,
+    pub(crate) pin: Option<BotPin>,
+}
+
+/// Routes a task: the access, sandbox and preference of its bot (else the kernel's defaults),
+/// every registered executor with the health this process found, and the router's rules.
+pub(crate) fn plan_route(
+    shared: &Shared,
+    bot: Option<&str>,
+    explicit: Option<ExecutorId>,
+) -> Result<Planned> {
+    let (access, sandbox, preference, pin) = match bot {
+        Some(name) => {
+            let current = shared.current_defs();
+            let def = current
+                .set()
+                .bot(name)
+                .ok_or_else(|| defs::not_found(DefKind::Bot, name, None))?;
+            let stored = current
+                .version_of(DefKind::Bot, name)
+                .ok_or_else(|| defs::not_found(DefKind::Bot, name, None))?;
+            let preference = BotPreference {
+                name: name.to_owned(),
+                executors: def.executors.clone(),
+            };
+            let pin = BotPin {
+                name: name.to_owned(),
+                version: stored.version,
+            };
+            (def.access, def.sandbox, Some(preference), Some(pin))
+        }
+        None => (shared.config.access, shared.config.sandbox, None, None),
+    };
+    let candidates: Vec<Candidate> = shared
+        .executors
+        .ids()
+        .filter_map(|id| {
+            Some(Candidate {
+                descriptor: shared.executors.get(id)?.descriptor(),
+                health: shared.live_health(id),
+            })
+        })
+        .collect();
+    let at_ms = u64::try_from(shared.db.now_ms()).unwrap_or(0);
+    let decision = router::route(
+        &RouteRequest {
+            access,
+            sandbox,
+            explicit: explicit.clone(),
+            bot: preference.clone(),
+            exclude: Vec::new(),
+            defaults: shared.config.default_executors.clone(),
+        },
+        &candidates,
+        at_ms,
+    );
+    let registered = |id: &&ExecutorId| shared.executors.get(id).is_some();
+    let executor = decision
+        .chosen
+        .clone()
+        .or(explicit)
+        .or_else(|| match &preference {
+            // A bot's run is recorded against one of its own executors.
+            Some(bot) => bot.executors.iter().find(registered).cloned(),
+            // Recorded against a default executor when one is here, so the run fails with its
+            // refusal; never against one the router left out as not a default.
+            None => shared
+                .config
+                .default_executors
+                .iter()
+                .find(registered)
+                .or_else(|| shared.executors.ids().min_by_key(|id| id.as_str()))
+                .cloned(),
+        })
+        .ok_or_else(|| KernelError::NoExecutor(bot.unwrap_or("(any)").to_owned()))?;
+    Ok(Planned {
+        decision,
+        executor,
+        pin,
+    })
+}
+
+/// What a trigger's run starts with: the executor, the bot pin and the routing decision.
 pub(crate) fn bot_launch(
     shared: &Shared,
     bot: &str,
-    executor: Option<ExecutorId>,
-) -> Result<(ExecutorId, BotPin)> {
-    let current = shared.current_defs();
-    let def = current
-        .set()
-        .bot(bot)
+) -> Result<(ExecutorId, BotPin, RoutingDecision)> {
+    let planned = plan_route(shared, Some(bot), None)?;
+    let pin = planned
+        .pin
         .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-    let stored = current
-        .version_of(DefKind::Bot, bot)
-        .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-    let eligible = |id: &&ExecutorId| {
-        shared.executors.get(id).is_some_and(|executor| {
-            dispatcher::no_eligible_executor(&executor.descriptor(), None, def.access, def.sandbox)
-                .is_none()
-        }) && shared.executor_is_healthy(id)
-    };
-    let executor = match executor {
-        Some(executor) => executor,
-        None => def
-            .executors
-            .iter()
-            .find(eligible)
-            .or_else(|| {
-                def.executors
-                    .iter()
-                    .find(|id| shared.executors.get(id).is_some())
-            })
-            .cloned()
-            .ok_or_else(|| KernelError::NoExecutor(bot.to_owned()))?,
-    };
-    let pin = BotPin {
-        name: bot.to_owned(),
-        version: stored.version,
-    };
-    Ok((executor, pin))
+    Ok((planned.executor, pin, planned.decision))
 }
 
 /// Mint an id until it parses (it always does: the suffix is hex).

@@ -99,6 +99,12 @@ pub(crate) fn print_line(text: impl std::fmt::Display) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Writes one line of text to stderr: notes that must not mix into a command's stdout.
+pub(crate) fn print_note(text: impl std::fmt::Display) -> anyhow::Result<()> {
+    writeln!(io::stderr().lock(), "{text}")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

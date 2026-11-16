@@ -16,6 +16,7 @@
 //!   content hashing, all pure. Its wire types are in the protocol.
 //! - [`health`]: what a probe found about an executor (installed, version gate, signed in, models)
 //!   and the wire types of `executor.list`, `executor.refresh` and `executors.watch`.
+//! - [`routing`]: the routing decision (which executor, and why), `route.preview`, `run.routing`.
 //! - [`triggers`]: the state of triggers on the wire (`trigger.list`, `trigger.fire`).
 //! - [`workspace`]: the worktree a write run works in (`workspace.list`, `workspace.clean`).
 //! - [`error`]: stable wire error codes.
@@ -52,6 +53,7 @@ pub mod exec;
 pub mod health;
 pub mod ids;
 pub mod protocol;
+pub mod routing;
 pub mod run;
 pub mod triggers;
 pub mod workspace;
@@ -61,6 +63,7 @@ pub use exec::*;
 pub use health::*;
 pub use ids::*;
 pub use protocol::*;
+pub use routing::*;
 pub use run::*;
 pub use triggers::*;
 pub use workspace::*;

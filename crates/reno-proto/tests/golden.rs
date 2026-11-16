@@ -202,11 +202,12 @@ fn exec_spec() {
         }],
         env: [("PATH".to_owned(), "/usr/bin".to_owned())].into(),
         output_schema: Some(json!({"type": "object"})),
+        instructions: Some("be brief".into()),
     };
     golden(
         &full,
         json!({
-            "runId": "run_01HZX9", "prompt": "fix it", "cwd": "/work/tree", "model": "opus",
+            "runId": "run_01HZX9", "prompt": "fix it", "cwd": "/work/tree", "model": "opus", "instructions": "be brief",
             "effort": "high", "access": "auto_accept_edits", "sandbox": "workspace_write",
             "resume": "sess-1",
             "mcp": [{"name": "reno", "command": "reno", "args": ["mcp"], "env": {"K": "V"}}],
@@ -226,6 +227,7 @@ fn exec_spec() {
         mcp: vec![],
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     };
     golden(
         &minimal,
@@ -281,7 +283,7 @@ fn daemon_hello() {
         json!({"serverVersion": "0.0.0", "protocolVersion": 1,
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
-                            "executor.install", "approval.message"],
+                            "executor.install", "approval.message", "routing"],
                "pid": 4242}),
     );
 }
@@ -621,6 +623,7 @@ fn task_run_params_old_and_new_shapes() {
             bot: None,
             cwd: None,
             model: None,
+            in_place: false,
         },
         json!({"prompt": "go", "executor": "mock"}),
     );
@@ -631,6 +634,7 @@ fn task_run_params_old_and_new_shapes() {
             bot: Some("keeper".into()),
             cwd: None,
             model: None,
+            in_place: false,
         },
         json!({"prompt": "go", "bot": "keeper"}),
     );

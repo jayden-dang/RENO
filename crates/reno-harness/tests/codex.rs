@@ -58,6 +58,7 @@ fn spec(prompt: &str) -> ExecSpec {
         mcp: Vec::new(),
         env: Default::default(),
         output_schema: None,
+        instructions: None,
     }
 }
 

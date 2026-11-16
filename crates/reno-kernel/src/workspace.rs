@@ -18,7 +18,7 @@
 //! | sandbox `read_only` | in place, [`InPlace::ReadOnly`] |
 //! | directory under the configured scratch root (the daemon's own `workspace/`) | in place, [`InPlace::Scratch`] |
 //! | write run in a git repository | a worktree on `reno/<run id>` ([`Placement::Isolated`]) |
-//! | write run, not a git repository, bot has `in_place_writes` | in place, [`InPlace::OptedIn`] |
+//! | write run, not a git repository, the bot has `in_place_writes` or the task opted in (`task.run` `inPlace`) | in place, [`InPlace::OptedIn`] |
 //! | write run, not a git repository, no opt-in | refused: [`WorkspaceError::NotAGitRepo`] |
 //!
 //! A git repository is never written in place, opt-in or not.
@@ -35,11 +35,11 @@ use reno_proto::{RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 /// and the wire error say which rule applied.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkspaceError {
-    /// A write run targeted a directory that is not in a git repository, and its bot does not
-    /// allow in-place writes.
+    /// A write run targeted a directory that is not in a git repository, and neither its bot nor
+    /// the task allows in-place writes.
     #[error(
         "{} is not in a git repository, so a write run cannot be isolated there; run it in a \
-         git repository, use a read-only sandbox, or let the bot opt in with `in_place_writes`",
+         git repository, use a read-only sandbox, or opt in: `in_place_writes` in the bot, or `--in-place` on the task",
         dir.display()
     )]
     NotAGitRepo {
