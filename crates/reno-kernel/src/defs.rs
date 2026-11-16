@@ -38,6 +38,7 @@ use reno_store::{DefinitionRecord, NewDefinition};
 use tokio::sync::{mpsc, watch};
 
 use crate::error::{KernelError, Result};
+use crate::secrets::Secrets;
 use crate::shared::Shared;
 use crate::wake::WakeSignal;
 use crate::watch::Watch;
@@ -80,6 +81,9 @@ pub struct DefsSetup {
     /// Raised when the system woke from sleep. Without it the scheduler cannot tell that the
     /// wall clock jumped while its timer was stopped.
     pub wake: Option<WakeSignal>,
+    /// Where a bot's `secrets` are resolved. Without it a run of a bot that lists any is
+    /// refused before it starts, naming them as missing.
+    pub secrets: Option<Arc<dyn Secrets>>,
 }
 
 impl DefsSetup {
@@ -90,7 +94,15 @@ impl DefsSetup {
             context,
             watch: None,
             wake: None,
+            secrets: None,
         }
+    }
+
+    /// The same, with `secrets` resolving the secrets bots list.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: Arc<dyn Secrets>) -> Self {
+        self.secrets = Some(secrets);
+        self
     }
 
     /// The same, with `watch` serving the `fs` triggers.
@@ -215,6 +227,7 @@ pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> 
         context,
         watch: _,
         wake: _,
+        secrets: _,
     } = setup;
     let stored = shared.db.current_definitions().await?;
     let known = versions_of(&stored);

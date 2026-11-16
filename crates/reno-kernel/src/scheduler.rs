@@ -31,7 +31,7 @@
 //!   starts nothing and is recorded as `coalesced` (the store decides, in the firing's
 //!   transaction).
 //! - **Backoff.** When the run a trigger started cannot start for an account-level reason
-//!   (`NotInstalled`, `NotSignedIn`, `NoEligibleExecutor`), or no executor of its bot is here
+//!   (`NotInstalled`, `NotSignedIn`, `NoEligibleExecutor`, `SecretMissing`), or no executor of its bot is here
 //!   at all, the trigger backs off 5 minutes, doubling per consecutive failure up to 24 hours.
 //!   Occurrences that come due meanwhile are merged into the one that fires when it ends. The
 //!   first failure of an episode writes the one `trigger.backoff_started` event; a run that
@@ -87,6 +87,9 @@ pub(crate) enum StartFailure {
     NotInstalled,
     NotSignedIn,
     NoEligibleExecutor,
+    /// A secret the bot lists is not set. Like `NotSignedIn`, only a person can fix it, so the
+    /// trigger backs off rather than starting a run that fails the same way every time.
+    SecretMissing,
 }
 
 impl StartFailure {
@@ -94,6 +97,7 @@ impl StartFailure {
         match self {
             Self::NotInstalled => "NotInstalled",
             Self::NotSignedIn => "NotSignedIn",
+            Self::SecretMissing => "SecretMissing",
             Self::NoEligibleExecutor => "NoEligibleExecutor",
         }
     }

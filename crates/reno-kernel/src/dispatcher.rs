@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::BoxStream;
+use reno_harness::ValueRedactor;
 use reno_harness::exec::{ExecControls, ExecError, ExecHandle};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
@@ -49,6 +50,7 @@ use crate::budget;
 use crate::lifecycle;
 use crate::router;
 use crate::scheduler::{SchedCmd, StartFailure};
+use crate::secrets::{SecretValue, SecretsError};
 use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
 use crate::supervisor::{RunInfo, Supervisor};
 use crate::workspaces;
@@ -178,6 +180,11 @@ struct LaunchSettings {
     wall_time: Duration,
     /// The daily token ceiling of the pinned bot version; none for a run with no bot.
     token_ceiling: Option<u64>,
+    /// The bot's name, for the run's `RENO_BOT` and the secrets' refusal.
+    bot: Option<String>,
+    /// The secrets the pinned bot version lists: the names its run receives as environment
+    /// variables.
+    secrets: Vec<String>,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -190,6 +197,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             in_place_writes: false,
             wall_time: shared.config.default_wall_time,
             token_ceiling: None,
+            bot: None,
+            secrets: Vec::new(),
         });
     };
     let stored = shared
@@ -216,6 +225,8 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         in_place_writes: bot.in_place_writes,
         wall_time: budget::wall_time(&bot.budget, shared.config.default_wall_time),
         token_ceiling: bot.budget.daily_token_ceiling,
+        bot: Some(pin.name.clone()),
+        secrets: bot.secrets,
     })
 }
 
@@ -309,8 +320,79 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         sandbox: settings.sandbox,
         resume: None,
         mcp: Vec::new(),
-        env: Default::default(),
+        // Reno's own variables for the run; the bot's secrets join them at launch.
+        env: run_env(&row.id, settings.bot.as_deref()),
         output_schema: None,
+    })
+}
+
+/// The `RENO_*` variables every run's child gets.
+fn run_env(run: &RunId, bot: Option<&str>) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("RENO_RUN_ID".to_owned(), run.to_string());
+    if let Some(bot) = bot {
+        env.insert("RENO_BOT".to_owned(), bot.to_owned());
+    }
+    env
+}
+
+/// Why a run's secrets could not be resolved, and how a trigger's backoff counts it.
+struct SecretsRefused {
+    /// The run's diagnostic. It names secrets, never their values.
+    why: String,
+    account: Option<StartFailure>,
+}
+
+/// The values of the secrets the run's bot lists, resolved through the `Secrets` port. A secret
+/// that is not set refuses the run before anything is spawned, naming it (not its value). It
+/// backs a trigger off like a signed-out account: a person has to act, and starting again would
+/// fail the same way. A store that cannot be reached (a locked Keychain) is the same kind of
+/// failure; any other store failure is not counted against the account.
+async fn resolve_secrets(
+    shared: &Shared,
+    settings: &LaunchSettings,
+) -> Result<std::collections::BTreeMap<String, SecretValue>, SecretsRefused> {
+    if settings.secrets.is_empty() {
+        return Ok(Default::default());
+    }
+    let bot = settings.bot.as_deref().unwrap_or("this run");
+    let found = match &shared.secrets {
+        Some(port) => match port.resolve(&settings.secrets).await {
+            Ok(found) => found,
+            Err(error) => {
+                let account = matches!(error, SecretsError::Unavailable(_))
+                    .then_some(StartFailure::SecretMissing);
+                return Err(SecretsRefused {
+                    why: format!(
+                        "SecretsUnavailable: the secrets of {bot} cannot be read: {error}"
+                    ),
+                    account,
+                });
+            }
+        },
+        None => Default::default(),
+    };
+    let missing: Vec<&str> = settings
+        .secrets
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !found.contains_key(*name))
+        .collect();
+    if missing.is_empty() {
+        return Ok(found);
+    }
+    let list = missing.join(", ");
+    let (noun, verb) = if missing.len() == 1 {
+        ("secret", "is")
+    } else {
+        ("secrets", "are")
+    };
+    Err(SecretsRefused {
+        why: format!(
+            "SecretMissing: {bot} needs {noun} {list}, which {verb} not set; set each with \
+             `reno secret set <NAME>`"
+        ),
+        account: Some(StartFailure::SecretMissing),
     })
 }
 
@@ -477,6 +559,27 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         Ok(spec) => spec,
         Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
     };
+    // The bot's secrets, before anything else is prepared: a missing one refuses the run here.
+    let mut redactor = None;
+    match resolve_secrets(shared, &settings).await {
+        Ok(found) if found.is_empty() => {}
+        Ok(found) => {
+            redactor = Some(Arc::new(ValueRedactor::new(
+                found
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.expose())),
+            )));
+            spec.env.extend(
+                found
+                    .into_iter()
+                    .map(|(name, value)| (name, value.expose().to_owned())),
+            );
+        }
+        Err(refused) => {
+            let why = refused.why;
+            return fail_start(shared, &run_id, fence, why, refused.account, cmd_rx, slot).await;
+        }
+    }
     // Where the run works: its own worktree for a write run in a git repository (T1.3).
     let opted_in = in_place_opt_in(&row, &settings);
     let placed = tokio::select! {
@@ -503,6 +606,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         wall_time: settings.wall_time,
         token_ceiling: settings.token_ceiling,
+        redactor,
     };
 
     // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not
