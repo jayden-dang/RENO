@@ -34,6 +34,22 @@ import subprocess
 import sys
 import time
 
+
+def open_url(url):
+    """Opens `url` the way an agent does, through the `open` on PATH.
+
+    Reno must intercept that `open` (a shim first on the sign-in's PATH). If the
+    one found is the system's own, the interception failed: record the leak so
+    the test fails, and never start the user's real browser."""
+    import shutil
+    found = shutil.which("open") or shutil.which("xdg-open")
+    real = {"/usr/bin/open", "/usr/bin/xdg-open", "/bin/open"}
+    if found is None or os.path.realpath(found) in real:
+        with open(os.path.join(os.environ.get("HOME", "/tmp"), "leaked-open"), "a") as leak:
+            leak.write(url + "\n")
+        return
+    subprocess.run([found, url], check=False)
+
 mode = os.environ.get("FAKE_SIGNIN", "droid")
 code = None
 state = os.environ.get("FAKE_STATE", "")
@@ -86,7 +102,7 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1, "agentCapabilities": caps, "authMethods": methods}})
     elif method == "authenticate":
         if mode in ("droid", "droid-stale") and code:
-            subprocess.run(["open", f"https://auth.example.com/device?user_code={code}"], check=False)
+            open_url(f"https://auth.example.com/device?user_code={code}")
             paired = os.path.join(os.environ.get("HOME", "/"), "paired")
             while not os.path.exists(paired):
                 time.sleep(0.05)
@@ -105,7 +121,7 @@ for line in sys.stdin:
             server.bind(("127.0.0.1", 0))
             server.listen(1)
             port = server.getsockname()[1]
-            subprocess.run(["open", f"https://accounts.example.com/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Foauth2callback"], check=False)
+            open_url(f"https://accounts.example.com/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A{port}%2Foauth2callback")
             conn, _ = server.accept()
             request = conn.recv(4096).decode("latin-1")
             conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
