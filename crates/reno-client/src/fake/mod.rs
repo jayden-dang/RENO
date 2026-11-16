@@ -459,6 +459,7 @@ fn router(shared: &Arc<Shared>) -> Router {
     let task_run = move |p: reno_proto::TaskRunParams, _| {
         let s = Arc::clone(&s);
         async move {
+            injected(&s, "task.run")?;
             // The fake knows the demo bots only.
             if p.bot
                 .as_deref()

@@ -491,4 +491,14 @@ mod tests {
         assert_eq!(subject_line(&net.subject), "GET https://x.example/feed");
         assert_eq!(action_word(&net.subject), "network request");
     }
+
+    #[test]
+    fn executors_are_named_not_shown_as_ids() {
+        assert_eq!(executor_name("claude-code"), "Claude Code");
+        assert_eq!(executor_name("codex"), "Codex");
+        assert_eq!(executor_name("acp.grok"), "Grok");
+        assert_eq!(executor_name("acp.own.mine"), "Mine");
+        assert_eq!(executor_name("acp.gemini-cli"), "Gemini Cli");
+        assert_eq!(executor_name("mock"), "Mock");
+    }
 }

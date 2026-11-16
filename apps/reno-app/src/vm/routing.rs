@@ -553,7 +553,7 @@ mod tests {
         let p = task_params("go", Class::Review, std::slice::from_ref(&file), &state);
         assert_eq!(p.executor, None);
         assert_eq!(p.bot.as_deref(), Some("reviewer"));
-        assert_eq!(p.attachments, [file.clone()]);
+        assert_eq!(p.attachments, std::slice::from_ref(&file));
         // A class whose bot the daemon lacks is only a label.
         let p = task_params("go", Class::Research, &[], &state);
         assert_eq!(p.bot, None);

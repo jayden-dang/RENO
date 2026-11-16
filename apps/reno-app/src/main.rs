@@ -18,6 +18,8 @@ mod ui;
 mod vm;
 
 #[cfg(test)]
+mod composer_tests;
+#[cfg(test)]
 mod screen_tests;
 #[cfg(test)]
 mod tests;
