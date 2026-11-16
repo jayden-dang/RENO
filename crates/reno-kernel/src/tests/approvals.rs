@@ -94,7 +94,11 @@ impl Rig {
         Self::with(policy_text, steps, config(1)).await
     }
 
-    pub(super) async fn with(policy_text: &str, steps: Vec<MockStep>, config: KernelConfig) -> Self {
+    pub(super) async fn with(
+        policy_text: &str,
+        steps: Vec<MockStep>,
+        config: KernelConfig,
+    ) -> Self {
         let mock = mock(steps);
         let port = FakePort::with(vec![
             bot("keeper", ""),

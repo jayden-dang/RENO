@@ -73,8 +73,8 @@ use reno_harness::exec::Decision;
 use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, RuleRef, evaluate};
 use reno_proto::{
     ActionClass, ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, MCP_SERVER_NAME,
-    MCP_TOOLS, Remember, RememberScope, ResolvedBy, RuleId, RuleMatcher, RunStatus,
-    StandingEffect, StandingRule, StandingScope, standing_rule_name,
+    MCP_TOOLS, Remember, RememberScope, ResolvedBy, RuleId, RuleMatcher, RunStatus, StandingEffect,
+    StandingRule, StandingScope, standing_rule_name,
 };
 use reno_store::{ExpireScope, NewApproval, NewRule, StoreError};
 use tokio::sync::oneshot;
@@ -276,7 +276,11 @@ impl Supervisor {
             .was_denied(&self.run, &subject.digest())
             .await?
         {
-            return Ok(auto(ApprovalOutcome::Denied, ResolvedBy::RepeatDenial, None));
+            return Ok(auto(
+                ApprovalOutcome::Denied,
+                ResolvedBy::RepeatDenial,
+                None,
+            ));
         }
         // 4. The policy allows it.
         if let PolicyDecision::Allow { rule } = decision {

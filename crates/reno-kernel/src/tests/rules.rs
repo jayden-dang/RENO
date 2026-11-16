@@ -13,8 +13,8 @@ use reno_proto::{
 };
 
 use super::approvals::{Rig, command, edit, resolved, rule, script};
-use reno_proto::{ActionClass, ApprovalSubject};
 use crate::KernelError;
+use reno_proto::{ActionClass, ApprovalSubject};
 
 fn edits(paths: &[&str]) -> ApprovalSubject {
     ApprovalSubject {
@@ -93,7 +93,12 @@ async fn a_supervised_shell_command_is_held_denied_by_a_person_and_denied_again_
     assert_eq!(
         resolved(&journal),
         [
-            ("r1".into(), ApprovalOutcome::Denied, ResolvedBy::Human, None),
+            (
+                "r1".into(),
+                ApprovalOutcome::Denied,
+                ResolvedBy::Human,
+                None
+            ),
             (
                 "r2".into(),
                 ApprovalOutcome::Denied,
@@ -129,7 +134,12 @@ async fn a_run_rule_covers_the_rest_of_that_run_and_no_other_run() {
     )
     .await;
     let first = rig.run_as("keeper").await;
-    answer(&rig, ApprovalDecision::ApproveOnce, remember(RememberScope::Run)).await;
+    answer(
+        &rig,
+        ApprovalDecision::ApproveOnce,
+        remember(RememberScope::Run),
+    )
+    .await;
 
     // r2 is the same subject: allowed unasked, by the rule. r3 is another subject: asked.
     let third = rig.pending().await;
@@ -166,7 +176,12 @@ async fn a_run_rule_covers_the_rest_of_that_run_and_no_other_run() {
 async fn a_bot_rule_covers_every_run_of_that_bot_only() {
     let rig = Rig::new(ASK, script(vec![("r1", command("git push"))])).await;
     let first = rig.run_as("keeper").await;
-    answer(&rig, ApprovalDecision::ApproveOnce, remember(RememberScope::Bot)).await;
+    answer(
+        &rig,
+        ApprovalDecision::ApproveOnce,
+        remember(RememberScope::Bot),
+    )
+    .await;
     finish(&rig, &first).await;
     let name = standing_name(&rig).await;
 
@@ -233,7 +248,10 @@ async fn a_bot_rule_for_a_run_with_no_bot_is_refused_and_decides_nothing() {
             remember(RememberScope::Bot),
         )
         .await;
-    assert!(matches!(refused, Err(KernelError::Invalid(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(KernelError::Invalid(_))),
+        "{refused:?}"
+    );
     assert!(rig.fx.kernel.list_rules(true).await.unwrap().is_empty());
     // Still held: the answer can be given again.
     assert_eq!(rig.pending().await.id, pending.id);
@@ -280,7 +298,10 @@ async fn a_remembered_denial_refuses_unasked_in_later_runs_with_a_message_naming
     };
     assert_eq!((*outcome, by), (ApprovalOutcome::Denied, &rule(&name)));
     let message = message.as_deref().unwrap();
-    assert!(message.contains("standing rule") && message.contains("rule revoke"), "{message}");
+    assert!(
+        message.contains("standing rule") && message.contains("rule revoke"),
+        "{message}"
+    );
     assert_eq!(rig.decisions(), [Decision::Deny, Decision::Deny]);
 }
 
@@ -290,10 +311,7 @@ async fn a_standing_deny_beats_a_standing_allow_whatever_their_scopes() {
     // needs any path to match, so it also catches [a, b]. Both are then in force for [a, b].
     let rig = Rig::new(
         ASK,
-        script(vec![
-            ("r1", edits(&["a", "b"])),
-            ("r2", edits(&["b", "c"])),
-        ]),
+        script(vec![("r1", edits(&["a", "b"])), ("r2", edits(&["b", "c"]))]),
     )
     .await;
     let first = rig.run_as("keeper").await;
@@ -303,7 +321,12 @@ async fn a_standing_deny_beats_a_standing_allow_whatever_their_scopes() {
         remember(RememberScope::Always),
     )
     .await;
-    answer(&rig, ApprovalDecision::Deny, remember(RememberScope::Always)).await;
+    answer(
+        &rig,
+        ApprovalDecision::Deny,
+        remember(RememberScope::Always),
+    )
+    .await;
     finish(&rig, &first).await;
     assert_eq!(rig.decisions(), [Decision::Allow, Decision::Deny]);
     assert_eq!(rig.fx.kernel.list_rules(false).await.unwrap().len(), 2);
@@ -350,7 +373,10 @@ async fn an_explicit_deny_in_the_policy_file_beats_a_standing_allow() {
     .await;
     let second = rig.run_as("keeper").await;
     finish(&rig, &second).await;
-    assert_eq!(rig.history(&second).await[0].decided_by, Some(rule("never push")));
+    assert_eq!(
+        rig.history(&second).await[0].decided_by,
+        Some(rule("never push"))
+    );
     assert_eq!(rig.decisions(), [Decision::Allow, Decision::Deny]);
 }
 
@@ -389,7 +415,10 @@ async fn a_standing_deny_beats_a_policy_allow_and_a_standing_allow_beats_a_polic
         effect = "ask"
         match = { action = "command", command = "git push" }
         "#,
-        script(vec![("r1", command("git status")), ("r2", command("git push"))]),
+        script(vec![
+            ("r1", command("git status")),
+            ("r2", command("git push")),
+        ]),
     )
     .await;
     // The run is held on `git push` (an ask rule), after `git status` was allowed by policy.
@@ -449,7 +478,12 @@ async fn always_allow_git_push_does_not_allow_force_push_or_a_chain() {
     finish(&rig, &run).await;
     assert_eq!(
         rig.decisions(),
-        [Decision::Allow, Decision::Deny, Decision::Deny, Decision::Allow]
+        [
+            Decision::Allow,
+            Decision::Deny,
+            Decision::Deny,
+            Decision::Allow
+        ]
     );
 }
 
@@ -485,7 +519,12 @@ async fn an_inside_path_rule_never_covers_a_path_outside_the_worktree() {
     finish(&rig, &run).await;
     assert_eq!(
         rig.decisions(),
-        [Decision::Allow, Decision::Allow, Decision::Deny, Decision::Deny]
+        [
+            Decision::Allow,
+            Decision::Allow,
+            Decision::Deny,
+            Decision::Deny
+        ]
     );
 }
 
@@ -602,5 +641,8 @@ async fn the_decision_that_makes_a_rule_leaves_its_events_and_the_journal_stays_
             )
         })
         .count();
-    assert_eq!(pairs, 2, "a rule made by a person is journaled like any answer");
+    assert_eq!(
+        pairs, 2,
+        "a rule made by a person is journaled like any answer"
+    );
 }

@@ -158,30 +158,43 @@ impl InboxScreen {
     ) {
         let id = row.approval.id.clone();
         let remember = self.remember(&id);
-        self.store
-            .update(cx, |store, cx| {
-                store.decide_remembering(id, decision, None, remember, cx);
-            });
+        self.store.update(cx, |store, cx| {
+            store.decide_remembering(id, decision, None, remember, cx);
+        });
     }
 
     /// The choice of how far an answer reaches, and the line that says what it keeps. Nothing
     /// when the daemon keeps no rules.
-    fn scope_choice(&self, row: &HeldRow, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.store.read(cx).state().supports(reno_proto::FEATURE_RULES) {
+    fn scope_choice(
+        &self,
+        row: &HeldRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self
+            .store
+            .read(cx)
+            .state()
+            .supports(reno_proto::FEATURE_RULES)
+        {
             return None;
         }
         let id = row.approval.id.clone();
         let current = self.scope_of(&id);
-        let chips = rules::choices(row.bot.is_some()).into_iter().map(|(scope, label)| {
-            let approval = id.clone();
-            kit::choice_chip(
-                theme,
-                format!("scope-{label}-{id}", label = label.replace(' ', "-")),
-                label,
-                scope == current,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.choose_scope(&approval, scope, cx)))
-        });
+        let chips = rules::choices(row.bot.is_some())
+            .into_iter()
+            .map(|(scope, label)| {
+                let approval = id.clone();
+                kit::choice_chip(
+                    theme,
+                    format!("scope-{label}-{id}", label = label.replace(' ', "-")),
+                    label,
+                    scope == current,
+                )
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.choose_scope(&approval, scope, cx)),
+                )
+            });
         let hint =
             current.map(|scope| rules::hint(&row.approval.subject, scope, row.bot.as_deref()));
         Some(
@@ -252,8 +265,8 @@ impl InboxScreen {
             if remembering { "Deny & keep" } else { "Deny" },
             Tone::Danger,
         )
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.on_click(deny));
+        .when(busy, |b| b.opacity(0.4))
+        .when(!busy, |b| b.on_click(deny));
         let approve_button = kit::pill_button(
             theme,
             format!("approve-{id}"),

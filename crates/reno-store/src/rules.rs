@@ -19,9 +19,7 @@
 //! rule; it simply stops being returned by [`Store::active_rules`].
 
 use reno_proto::defs::content_hash;
-use reno_proto::{
-    ApprovalId, RuleId, RuleMatcher, StandingEffect, StandingRule, StandingScope,
-};
+use reno_proto::{ApprovalId, RuleId, RuleMatcher, StandingEffect, StandingRule, StandingScope};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
 

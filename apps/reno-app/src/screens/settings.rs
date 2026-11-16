@@ -351,9 +351,11 @@ impl SettingsScreen {
                     .child(
                         div()
                             .map(|d| page::cell(d, None))
-                            .truncate()
+                            // What the rule holds is the point of the row: it wraps rather than
+                            // being cut, so the exact command is always readable.
                             .font_family(MONO)
                             .text_size(px(12.5))
+                            .line_height(px(18.0))
                             .child(row.matches.clone()),
                     )
                     .child(
@@ -366,7 +368,11 @@ impl SettingsScreen {
                     .child(
                         div()
                             .map(|d| page::cell(d, Some(90.0)))
-                            .text_color(if row.expired { theme.warning } else { theme.muted })
+                            .text_color(if row.expired {
+                                theme.warning
+                            } else {
+                                theme.muted
+                            })
                             .child(row.ends.clone()),
                     )
                     .child(div().flex_none().child(button))

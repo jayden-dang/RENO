@@ -129,7 +129,9 @@ pub(crate) fn hint(subject: &ApprovalSubject, scope: RememberScope, bot: Option<
         ),
         (None, true) => format!("every use of {}", subject.tool),
     };
-    format!("Your answer is kept as a rule for {what}, for {who}. Nothing broader; revoke it in Settings.")
+    format!(
+        "Your answer is kept as a rule for {what}, for {who}. Nothing broader; revoke it in Settings."
+    )
 }
 
 #[cfg(test)]
@@ -154,7 +156,9 @@ mod tests {
     fn rule(id: &str, effect: StandingEffect, expires: Option<u64>, revoked: bool) -> StandingRule {
         StandingRule {
             id: RuleId::from_suffix(id).unwrap(),
-            scope: StandingScope::Bot { bot: "keeper".into() },
+            scope: StandingScope::Bot {
+                bot: "keeper".into(),
+            },
             effect,
             matcher: RuleMatcher::derive(&subject(Some("git push"), &[]), "/w".as_ref()),
             created_by: "human".into(),

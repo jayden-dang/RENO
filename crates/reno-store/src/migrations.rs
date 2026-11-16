@@ -638,6 +638,37 @@ mod tests {
         .unwrap();
     }
 
+    /// Upgrading a database written before standing rules (schema 12): its approvals keep their
+    /// rows and the rules table starts empty and works.
+    #[test]
+    fn upgrade_from_a_version_twelve_database_adds_an_empty_rules_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 12).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_a', 'g', 1);
+             INSERT INTO runs (id, task_id, executor, status, created_at)
+             VALUES ('run_a', 'task_a', 'mock', 'running', 2);
+             INSERT INTO approvals (id, run_id, request_id, subject, subject_digest, created_at, expires_at)
+             VALUES ('appr_a', 'run_a', 'r', '{}', 'd', 3, 4);",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT 1 FROM standing_rules").is_err());
+        run(&mut conn).unwrap();
+        let (approvals, rules): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM approvals), (SELECT count(*) FROM standing_rules)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((approvals, rules), (1, 0));
+        conn.execute_batch(
+            "INSERT INTO standing_rules (id, scope, effect, matcher, created_by, created_at, source_approval)
+             VALUES ('rule_a', 'global', 'allow', '{}', 'human', 5, 'appr_a');",
+        )
+        .unwrap();
+    }
+
     /// Upgrading a database written before `reno mcp` (schema 10): its runs keep their rows and
     /// the token and board tables start empty and work.
     #[test]

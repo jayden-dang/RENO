@@ -977,7 +977,10 @@ async fn the_fake_keeps_a_remembered_answer_as_a_rule_that_can_be_listed_and_rev
     assert_eq!(new.source_approval, Some(appr("keeperpush")));
     assert!(new.expires_at_ms.is_some());
     let record = &client.approval_history(None, None).await.unwrap()[0];
-    assert_eq!(record.subject_digest.as_deref(), Some(record.subject.digest().as_str()));
+    assert_eq!(
+        record.subject_digest.as_deref(),
+        Some(record.subject.digest().as_str())
+    );
 
     client.revoke_rule(&new.id).await.unwrap();
     client.revoke_rule(&new.id).await.unwrap();

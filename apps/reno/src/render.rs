@@ -811,12 +811,16 @@ mod tests {
         };
         let rule = StandingRule {
             id: "rule_a1".parse().unwrap(),
-            scope: StandingScope::Bot { bot: "keeper".into() },
+            scope: StandingScope::Bot {
+                bot: "keeper".into(),
+            },
             effect: StandingEffect::Allow,
             matcher: RuleMatcher {
                 action: ActionClass::Command,
                 tool: "bash".into(),
-                command: Some(CommandPattern::Exact { command: "git push".into() }),
+                command: Some(CommandPattern::Exact {
+                    command: "git push".into(),
+                }),
                 paths: vec![],
             },
             created_by: "human".into(),
@@ -829,7 +833,10 @@ mod tests {
             rule_line(&rule, 10),
             "rule_a1  allow  bot keeper  command bash `git push`"
         );
-        let timed = StandingRule { expires_at_ms: Some(3_700_000), ..rule.clone() };
+        let timed = StandingRule {
+            expires_at_ms: Some(3_700_000),
+            ..rule.clone()
+        };
         assert!(rule_line(&timed, 100_000).ends_with("  expires in 1h 00m"));
         assert!(rule_line(&timed, 3_700_000).ends_with("  expired"));
         let edit = StandingRule {

@@ -1449,7 +1449,10 @@ fn standing_rules() {
     assert_eq!(<RuleList as Method>::NAME, "rule.list");
     assert_eq!(<RuleRevoke as Method>::NAME, "rule.revoke");
     assert!(FEATURES.contains(&FEATURE_RULES));
-    golden(&RuleListParams::default(), json!({"includeInactive": false}));
+    golden(
+        &RuleListParams::default(),
+        json!({"includeInactive": false}),
+    );
     golden(&RuleRevokeResult {}, json!({}));
     golden(
         &RuleRevokeParams {
@@ -1492,6 +1495,9 @@ fn standing_rules() {
         "sourceApproval": "appr_01K1"
     });
     golden(&rule, wire.clone());
-    golden(&RuleListResult { rules: vec![rule] }, json!({"rules": [wire]}));
+    golden(
+        &RuleListResult { rules: vec![rule] },
+        json!({"rules": [wire]}),
+    );
     golden(&StandingScope::Always, json!({"type": "always"}));
 }

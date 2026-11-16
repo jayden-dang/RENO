@@ -460,8 +460,8 @@ impl World {
         remember: Option<reno_proto::Remember>,
     ) -> Result<Approval, Option<String>> {
         use reno_proto::{
-            RULE_MAX_EXPIRY_SECS, RememberScope, RuleId, RuleMatcher, StandingEffect,
-            StandingRule, StandingScope,
+            RULE_MAX_EXPIRY_SECS, RememberScope, RuleId, RuleMatcher, StandingEffect, StandingRule,
+            StandingScope,
         };
         let at = self
             .approvals

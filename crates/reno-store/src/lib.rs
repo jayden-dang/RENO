@@ -74,9 +74,9 @@ mod executor_health_tests;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]
-mod rule_tests;
-#[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod rule_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

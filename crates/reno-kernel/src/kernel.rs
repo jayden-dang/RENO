@@ -27,9 +27,9 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
-    CleanTarget, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
-    RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StandingRule, StopDetail, TaskId, TriggerFireResult, TriggerInfo, WorkspaceInfo,
-    WorkspaceStatus,
+    CleanTarget, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision, RuleId,
+    RunEventItem, RunId, RunStatus, RunSummary, Seq, StandingRule, StopDetail, TaskId,
+    TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{NewTask, Note, StoreError};
 use tokio::sync::{oneshot, watch};

@@ -57,9 +57,7 @@
 
 use std::path::PathBuf;
 
-use reno_proto::{
-    AccessMode, ActionClass, ApprovalSubject, MCP_SERVER_NAME, MCP_TOOLS, Question,
-};
+use reno_proto::{AccessMode, ActionClass, ApprovalSubject, MCP_SERVER_NAME, MCP_TOOLS, Question};
 use serde_json::{Value, json};
 
 use crate::exec::InputAnswer;
@@ -328,9 +326,15 @@ mod tests {
                 }
                 let (class, name) = classify(&call);
                 assert_eq!(class, ActionClass::McpTool, "{title:?} {kind:?}");
-                assert_eq!(name, format!("mcp__reno__{}", title.trim().rsplit("__").next().unwrap()));
+                assert_eq!(
+                    name,
+                    format!("mcp__reno__{}", title.trim().rsplit("__").next().unwrap())
+                );
                 let subject = subject(&request(call));
-                assert_eq!((subject.action, subject.tool.as_str()), (class, name.as_str()));
+                assert_eq!(
+                    (subject.action, subject.tool.as_str()),
+                    (class, name.as_str())
+                );
             }
         }
     }

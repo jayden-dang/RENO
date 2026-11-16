@@ -387,7 +387,11 @@ fn a_held_action_offers_how_far_the_answer_reaches_and_the_rule_is_listed_and_re
     let rule = store.read_with(vcx, |s, _| {
         s.rules()
             .and_then(|r| r.as_ref().ok())
-            .and_then(|rules| rules.iter().find(|r| r.source_approval.as_ref() == Some(&keeper)))
+            .and_then(|rules| {
+                rules
+                    .iter()
+                    .find(|r| r.source_approval.as_ref() == Some(&keeper))
+            })
             .cloned()
             .unwrap()
     });
@@ -402,9 +406,10 @@ fn a_held_action_offers_how_far_the_answer_reaches_and_the_rule_is_listed_and_re
     wait_drawn(vcx, |vcx| painted(vcx, &revoke));
     click(vcx, &revoke);
     wait_drawn(vcx, |vcx| !painted(vcx, &revoke));
-    assert!(
-        store.read_with(vcx, |s, _| !matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.id == rule.id)))
-    );
+    assert!(store.read_with(
+        vcx,
+        |s, _| !matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.id == rule.id))
+    ));
 }
 
 #[gpui::test]

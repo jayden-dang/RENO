@@ -12,14 +12,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RuleId, RunId, RunStatus, SessionRef, StandingRule, TaskId, WorkspaceChanges, WorkspaceInfo,
-    WorkspaceStatus,
+    RoutingDecision, RuleId, RunId, RunStatus, SessionRef, StandingRule, TaskId, WorkspaceChanges,
+    WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
     FireResult, Journals, NewApproval, NewDefinition, NewFiring, NewRule, NewRunToken, NewTask,
-    Note,
-    Occupancy, Resumed, RunRecord, RunToken, Store, StoreError, StoredApproval, Tokens, TriggerRow,
+    Note, Occupancy, Resumed, RunRecord, RunToken, Store, StoreError, StoredApproval, Tokens,
+    TriggerRow,
 };
 
 use crate::clock::Clock;

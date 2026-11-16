@@ -654,7 +654,7 @@ async fn judged(subject: ApprovalSubject, policy: Option<&str>) -> (ApprovalOutc
 
 #[tokio::test(start_paused = true)]
 async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human_and_without_a_journal_pair()
-{
+ {
     for tool in ["report", "request_approval", "board_read", "board_write"] {
         let name = format!("mcp__reno__{tool}");
         let steps = vec![
@@ -692,7 +692,12 @@ async fn each_tool_of_renos_own_server_is_allowed_without_asking_a_human_and_wit
             )),
             "{tool}: the call is in the approval history only, not the journal: {journal:?}"
         );
-        let history = rig.fx.kernel.approval_history(Some(&run), None).await.unwrap();
+        let history = rig
+            .fx
+            .kernel
+            .approval_history(Some(&run), None)
+            .await
+            .unwrap();
         assert_eq!(history.len(), 1, "{tool}");
         assert_eq!(history[0].subject, mcp_call(&name));
         assert_eq!(

