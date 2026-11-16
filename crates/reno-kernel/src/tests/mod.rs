@@ -15,6 +15,7 @@
 
 mod approvals;
 mod defs;
+mod health;
 mod queue;
 mod recovery;
 mod runs;

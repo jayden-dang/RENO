@@ -8,11 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_harness::exec::{
-    ExecControls, ExecError, Executor, ExecutorHealth, MockExecutor, MockStep,
-};
+use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
 use reno_proto::defs::{DefFile, DefKind};
-use reno_proto::{ExecSpec, FiringOutcome, Seq, TriggerInfo, TriggerStatus};
+use reno_proto::{ExecSpec, FiringOutcome, HealthProbe, Seq, TriggerInfo, TriggerStatus};
 use tokio::sync::mpsc;
 
 use super::defs::{FakePort, file, setup};
@@ -451,8 +449,8 @@ impl Executor for Flaky {
     fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
         self.inner.descriptor()
     }
-    async fn probe(&self) -> ExecutorHealth {
-        ExecutorHealth::default()
+    async fn probe(&self) -> HealthProbe {
+        self.inner.probe().await
     }
     async fn start(
         &self,
@@ -569,6 +567,56 @@ async fn failing_to_start_backs_off_5_10_20_minutes_with_one_notification_then_r
             .count(),
         1
     );
+}
+
+/// An executor whose probe says it is signed out, and whose `start` must never be reached.
+struct SignedOut(MockExecutor);
+
+#[async_trait]
+impl Executor for SignedOut {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        self.0.descriptor()
+    }
+    async fn probe(&self) -> HealthProbe {
+        HealthProbe {
+            signed_in: reno_proto::SignedIn::No {
+                hint: "run `mock login`".into(),
+            },
+            ..self.0.probe().await
+        }
+    }
+    async fn start(
+        &self,
+        _: ExecSpec,
+        _: ExecControls,
+    ) -> Result<BoxStream<'static, reno_proto::ExecEvent>, ExecError> {
+        unreachable!("an executor known to be signed out is never started")
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_executor_known_to_be_signed_out_backs_the_trigger_off_like_a_refused_start() {
+    let registry = ExecutorRegistry::new().with(Arc::new(SignedOut(MockExecutor::new(id("mock")))));
+    let fx = start_flaky(
+        files(vec![trigger(
+            "tick",
+            "kind = \"every\"\nevery = \"1m\"",
+            "go",
+        )]),
+        registry,
+    )
+    .await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+
+    step(&fx, MIN).await;
+    until(async || info(&fx, "tick").failures.eq(&1).then_some(())).await;
+    let tick = info(&fx, "tick");
+    assert_eq!(tick.status, TriggerStatus::BackedOff);
+    assert_eq!(
+        tick.backoff_until_ms.map(|ms| i64::try_from(ms).unwrap()),
+        Some(START_MS + MIN + 5 * MIN)
+    );
+    assert_eq!(firings(&fx).await[0].outcome, FiringOutcome::BackedOff);
 }
 
 #[tokio::test(start_paused = true)]

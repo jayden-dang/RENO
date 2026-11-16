@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_harness::exec::{
-    Answer, Decision, ExecControls, ExecError, Executor, ExecutorHealth, MockExecutor, MockStep,
+    Answer, Decision, ExecControls, ExecError, Executor, MockExecutor, MockStep,
 };
 use reno_proto::{
-    AccessMode, ActionClass, ApprovalDecision, ApprovalSubject, ExecEvent, ExecSpec, RunStatus,
-    Seq, StopReason,
+    AccessMode, ActionClass, ApprovalDecision, ApprovalSubject, ExecEvent, ExecSpec, HealthProbe,
+    RunStatus, Seq, StopReason,
 };
 use tokio::time::advance;
 
@@ -469,8 +469,8 @@ impl Executor for Refusing {
         MockExecutor::default_descriptor(id("mock"))
     }
 
-    async fn probe(&self) -> ExecutorHealth {
-        ExecutorHealth::default()
+    async fn probe(&self) -> HealthProbe {
+        MockExecutor::new(id("mock")).probe().await
     }
 
     async fn start(
@@ -657,8 +657,8 @@ impl Executor for Stubborn {
         MockExecutor::default_descriptor(id("mock"))
     }
 
-    async fn probe(&self) -> ExecutorHealth {
-        ExecutorHealth::default()
+    async fn probe(&self) -> HealthProbe {
+        MockExecutor::new(id("mock")).probe().await
     }
 
     async fn start(

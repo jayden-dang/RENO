@@ -15,6 +15,8 @@
 //! - `defs`: the `Definitions` port and the validated set in force; loading, storing versions
 //!   and publishing, with the last good set kept when files do not validate.
 //! - `dispatcher`: claims runs and starts them.
+//! - `health`: what the last probe found about each executor, when probes run, and how the
+//!   findings keep an ineligible executor from being started.
 //! - `scheduler`, `schedule`: the trigger scheduler actor (timers are deadlines, definitions
 //!   changes re-plan, firings are deduplicated by nonce) and its pure arithmetic.
 //! - `watch`: the `Watch` port `fs` triggers use.
@@ -59,6 +61,7 @@ mod defs;
 mod dispatcher;
 mod error;
 mod events;
+mod health;
 mod ids;
 mod kernel;
 mod lifecycle;

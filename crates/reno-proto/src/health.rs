@@ -194,11 +194,18 @@ impl HealthProbe {
     }
 
     /// Why a run on this executor would be refused before anything is spawned, or `None` when it
-    /// may go ahead. Not installed, too old and signed out are refused; an unknown sign-in and
-    /// an untested version are not.
+    /// may go ahead. Not installed, too old and signed out are refused; an unknown sign-in, an
+    /// untested version and a probe that could not finish (it says nothing about the harness)
+    /// are not.
     pub fn ineligible(&self) -> Option<Ineligible> {
-        if let InstallStatus::NotInstalled { why } = &self.installed {
-            return Some(Ineligible::NotInstalled(why.clone()));
+        match &self.installed {
+            InstallStatus::NotInstalled {
+                why: NotInstalledReason::ProbeFailed { .. },
+            } => return None,
+            InstallStatus::NotInstalled { why } => {
+                return Some(Ineligible::NotInstalled(why.clone()));
+            }
+            InstallStatus::Installed { .. } => {}
         }
         if let VersionGate::TooOld { min } = &self.version_gate {
             return Some(Ineligible::TooOld {
@@ -471,5 +478,10 @@ mod tests {
             probe.ineligible(),
             Some(Ineligible::NotInstalled(_))
         ));
+        // A probe that could not finish says nothing about the harness.
+        probe.installed = InstallStatus::NotInstalled {
+            why: NotInstalledReason::ProbeFailed { detail: "x".into() },
+        };
+        assert_eq!(probe.ineligible(), None);
     }
 }
