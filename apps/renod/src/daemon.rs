@@ -104,10 +104,7 @@ pub struct DaemonConfig {
     /// cannot run. The binary sets the login Keychain.
     pub secrets: Option<Arc<dyn Secrets>>,
     /// How the platform file watchers (the definitions', and those of `fs` triggers) are
-    /// started. Tests that do not exercise file watching give [`NoWatchers`], because the
-    /// machine has only a few watch streams.
-    ///
-    /// [`NoWatchers`]: crate::watcher::NoWatchers
+    /// started. The binary uses the platform's; tests may inject one that refuses or counts.
     pub watchers: Arc<dyn WatcherFactory>,
 }
 
@@ -193,6 +190,9 @@ pub struct Daemon {
     socket: PathBuf,
     stop: CancellationToken,
     task: JoinHandle<Stopped>,
+    /// Dropping the daemon without waiting for it asks it to shut down, so its watchers and tasks
+    /// do not outlive their owner.
+    _shutdown_on_drop: tokio_util::sync::DropGuard,
 }
 
 impl Daemon {
@@ -384,7 +384,12 @@ impl Daemon {
             connection_grace,
             server_deadline,
         }));
-        Ok(Self { socket, stop, task })
+        Ok(Self {
+            socket,
+            _shutdown_on_drop: stop.clone().drop_guard(),
+            stop,
+            task,
+        })
     }
 
     /// The socket the daemon serves on.

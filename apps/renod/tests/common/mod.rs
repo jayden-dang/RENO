@@ -131,8 +131,8 @@ pub(crate) struct Fixture {
     pub(crate) client: Client,
 }
 
-/// Most watchers one test process holds at once. The machine has only a few file-watch streams
-/// (about sixteen, for every process on it), and a test binary runs its tests in parallel, each
+/// Most watchers one test process holds at once. The machine's pool of file-watch streams is
+/// finite and shared by every process on it (about sixteen were free when measured), and a test binary runs its tests in parallel, each
 /// with a daemon. Past the limit a start is refused like the platform refuses it, and the daemon
 /// retries (that is the behaviour under test in `watch_streams.rs`), so a daemon that must watch
 /// waits for a turn instead of failing.

@@ -1,6 +1,6 @@
 //! File watches that cannot start, and watchers that must not leak.
 //!
-//! The machine has only a few FSEvents streams for every process on it, so a start can be
+//! The machine's pool of FSEvents streams is finite and shared by every process on it, so a start can be
 //! refused for a while. These tests use a watcher factory under the test's control, so they do
 //! not use a platform stream and do not depend on how many others are in use: it refuses until
 //! it is opened, keeps the handlers it is given so the test can raise events, and is wrapped in
@@ -229,4 +229,47 @@ async fn dropping_a_watch_stream_stops_its_watcher() {
         "every dropped stream stopped its watcher"
     );
     within(fs_watch.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemon_dropped_without_shutdown_lets_go_of_every_stream() {
+    let switch = Arc::new(Switch::default());
+    switch.open();
+    let counting = Arc::new(Counting::new(Arc::clone(&switch)));
+    let dir = tempfile::tempdir().unwrap();
+    let watched = fs::canonicalize(dir.path()).unwrap().join("watched");
+    fs::create_dir(&watched).unwrap();
+    let fx = Fixture::with(|c| {
+        let defs = &c.paths.defs_dir;
+        write(defs, "bots/keeper.toml", &bot("keeper"));
+        write(
+            defs,
+            "triggers/inbox.toml",
+            &format!(
+                "name = \"inbox\"\n[when]\nkind = \"fs\"\npaths = [\"{}/*.txt\"]\ndebounce = \"100ms\"\n\
+                 [target]\nbot = \"keeper\"\nprompt = \"for inbox\"\n",
+                watched.display()
+            ),
+        );
+        c.watchers = counting.clone();
+    })
+    .await;
+    triggers_until(&fx, |all| {
+        named(all, "inbox").is_some_and(|t| t.status == TriggerStatus::Watching)
+    })
+    .await;
+    assert_eq!(
+        counting.live(),
+        2,
+        "the definitions' stream and the trigger's"
+    );
+
+    // No `stop()`: the owner just goes away. The daemon's own tasks must not keep a stream.
+    drop(fx);
+    within(async {
+        while counting.live() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 }

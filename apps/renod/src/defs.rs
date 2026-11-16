@@ -18,7 +18,7 @@
 //!
 //! # When the watch cannot start
 //!
-//! The platform hands out only a few watch streams to the whole machine (see
+//! The platform has a finite pool of watch streams shared by every process on the machine (see
 //! [`watcher`](crate::watcher)), so a start can fail for a while and work later. Then the daemon
 //! keeps serving the last good definitions, says so ([`FsDefinitions::watch_problem`], shown in
 //! `daemon.status`) and logs one warning, and tries again after a growing delay

@@ -6,7 +6,7 @@
 //! with no further signal the kernel is told once, with `debounce` taken from the definition.
 //! Nothing wakes on an interval.
 //!
-//! A watch the platform refuses to start (it gives the whole machine only a few streams) is an
+//! A watch the platform refuses to start (its pool of streams is shared by every process on the machine) is an
 //! error from [`FsWatch::watch`]; the scheduler shows the trigger as failed and starts it again
 //! after a growing delay. That timer exists only while a start is failing (ARCH-10).
 //!
@@ -329,8 +329,8 @@ mod tests {
             .is_ok_and(|signal| signal.is_some())
     }
 
-    /// Starts a real watch, waiting for the platform while it refuses: the machine has only a few
-    /// watch streams for every process on it, and these tests are about what a working watch
+    /// Starts a real watch, waiting for the platform while it refuses: the machine's pool of
+    /// watch streams is shared by every process on it, and these tests are about what a working watch
     /// reports. (The daemon's own answer to a refusal is the scheduler's retry.)
     async fn watch_for_real(port: &FsWatch, spec: &WatchSpec) -> WatchStream {
         tokio::time::timeout(FAILSAFE, async {

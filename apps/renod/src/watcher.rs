@@ -6,9 +6,11 @@
 //!
 //! # Streams are scarce
 //!
-//! On macOS each `notify` watcher is one FSEvents stream, and the system hands out only a few
-//! to the whole machine, not to a process: about sixteen were measured here, shared by every
-//! process of every user session. `FSEventStreamStart` refuses past that, and `notify` reports
+//! On macOS each `notify` watcher is one FSEvents stream, and the system has a finite pool of
+//! them shared by every process, not a share per process (measured on a development Mac: two
+//! processes each got 8 of about 16 free; the free count varied from 0 to 17 as other processes
+//! came and went, and stayed low for seconds after a burst was released).
+//! `FSEventStreamStart` refuses when none is free, and `notify` reports
 //! "unable to start FSEvent stream". A start can therefore fail for a while and work later, when
 //! another process lets go of its streams. The owners retry with backoff (see
 //! `reno_kernel::WatchBackoff`). Each stream is held by one [`WatcherGuard`], which stops it when
@@ -117,17 +119,6 @@ impl<F: WatcherFactory> WatcherFactory for Counting<F> {
             _guard: guard,
             _count: Release(Arc::clone(&self.live)),
         }))
-    }
-}
-
-/// Starts no watcher at all and reports no event. For tests that do not exercise file watching,
-/// so that they do not spend the machine's few streams.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoWatchers;
-
-impl WatcherFactory for NoWatchers {
-    fn start(&self, _roots: &[PathBuf], _handler: Handler) -> Result<WatcherGuard, String> {
-        Ok(WatcherGuard::new(()))
     }
 }
 
