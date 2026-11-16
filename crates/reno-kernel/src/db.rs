@@ -29,6 +29,21 @@ pub(crate) struct Db {
     store: Store,
     clock: Arc<dyn Clock>,
     writes: Arc<AtomicU64>,
+    /// Deadline timers armed so far, by kind. A test that advances paused time must first know
+    /// the timer it means to fire exists: the store's writer is a real thread, so a task can
+    /// still be waiting for a reply when its caller has run out of yields.
+    #[cfg(test)]
+    armed: Arc<[AtomicU64; 2]>,
+}
+
+/// The deadline timers a test can wait for.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum Armed {
+    /// A supervisor's `max_wall_time` deadline.
+    WallTime = 0,
+    /// A deadline of the dispatcher: a lease running out, or the next local midnight.
+    Dispatcher = 1,
 }
 
 impl std::fmt::Debug for Db {
@@ -47,7 +62,21 @@ impl Db {
             store,
             clock,
             writes: Arc::default(),
+            #[cfg(test)]
+            armed: Arc::default(),
         }
+    }
+
+    /// Records that a deadline timer of `kind` has just been armed (tests only).
+    #[cfg(test)]
+    pub(crate) fn armed(&self, kind: Armed) {
+        self.armed[kind as usize].fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many deadline timers of `kind` have been armed so far (tests only).
+    #[cfg(test)]
+    pub(crate) fn armed_count(&self, kind: Armed) -> u64 {
+        self.armed[kind as usize].load(Ordering::SeqCst)
     }
 
     pub(crate) fn now_ms(&self) -> i64 {

@@ -13,6 +13,7 @@ use reno_proto::{
 
 use super::defs::{FakePort, file, setup};
 use super::{Fx, START_MS, config, mock, registry, until};
+use crate::db::Armed;
 use crate::{Clock as _, KernelConfig, KernelError};
 
 const MIN: i64 = 60_000;
@@ -96,13 +97,6 @@ async fn events_of(fx: &Fx, prefix: &str) -> Vec<(String, serde_json::Value)> {
         .filter(|e| e.kind.starts_with(prefix))
         .map(|e| (e.kind, e.data))
         .collect()
-}
-
-/// Lets every woken task run to its next wait.
-async fn settle() {
-    for _ in 0..200 {
-        tokio::task::yield_now().await;
-    }
 }
 
 async fn step(fx: &Fx, ms: i64) {
@@ -203,7 +197,7 @@ async fn a_run_over_its_wall_time_is_interrupted_with_a_typed_reason() {
     .await;
     let run = as_bot(&fx, "keeper").await;
     fx.wait_status(&run, RunStatus::Running).await;
-    settle().await;
+    fx.wait_armed(Armed::WallTime, 0).await;
     step(&fx, 59_000).await;
     assert_eq!(fx.status(&run).await, RunStatus::Running, "not yet");
     step(&fx, 2_000).await;
@@ -225,7 +219,7 @@ async fn a_run_with_no_bot_has_the_kernels_default_wall_time() {
     let fx = Fx::new(cfg, registry(&[mock([MockStep::Sleep(secs(3600))])])).await;
     let run = fx.submit("long").await;
     fx.wait_status(&run, RunStatus::Running).await;
-    settle().await;
+    fx.wait_armed(Armed::WallTime, 0).await;
     step(&fx, 31_000).await;
     fx.wait_status(&run, RunStatus::Interrupted).await;
     let (_, budget) = ended_by_budget(&fx, &run).await;
@@ -318,6 +312,7 @@ async fn a_held_run_is_claimed_when_midnight_passes() {
     fx.wait_status(&spender, RunStatus::Interrupted).await;
     // Submit is refused now, so queue through the store as a restart would find it: a run
     // enqueued before the ceiling was spent.
+    let armed_before = fx.kernel.armed_count(Armed::Dispatcher);
     let (task, run) = (
         reno_proto::TaskId::from_suffix("late").unwrap(),
         reno_proto::RunId::from_suffix("late").unwrap(),
@@ -356,9 +351,8 @@ async fn a_held_run_is_claimed_when_midnight_passes() {
     fx.kernel.cancel(&spender).await.ok();
     // Nudge the dispatcher the way a submit would.
     fx.kernel.resume(Some("keeper")).await.unwrap();
-    for _ in 0..200 {
-        tokio::task::yield_now().await;
-    }
+    // The dispatcher has looked at the queued run, left it held, and armed its midnight deadline.
+    fx.wait_armed(Armed::Dispatcher, armed_before).await;
     assert_eq!(
         fx.status(&run).await,
         RunStatus::Queued,
@@ -563,6 +557,8 @@ async fn a_trigger_is_held_during_a_pause_and_caught_up_once_on_resume() {
     step(&fx, HOUR).await;
     step(&fx, HOUR).await;
     step(&fx, HOUR + 30 * MIN).await;
+    // The hold is a store write, and the writer is a real thread: wait for it to land.
+    until(async || (!events_of(&fx, "trigger.held").await.is_empty()).then_some(())).await;
     assert!(
         fx.store.list_runs(None).await.unwrap().is_empty(),
         "nothing fires"
@@ -572,18 +568,17 @@ async fn a_trigger_is_held_during_a_pause_and_caught_up_once_on_resume() {
         1,
         "the hold is recorded once"
     );
-    assert!(
-        trigger_info(&fx)
-            .next_due_at_ms
-            .is_some_and(|due| { u64::try_from(START_MS + HOUR).unwrap() == due }),
-        "the due time is left alone"
-    );
+    let first_due = u64::try_from(START_MS + HOUR).unwrap();
+    until(async || (trigger_info(&fx).next_due_at_ms == Some(first_due)).then_some(())).await;
 
     fx.kernel.resume(Some("keeper")).await.unwrap();
-    until(async || (!fx.store.list_runs(None).await.unwrap().is_empty()).then_some(())).await;
-    for _ in 0..200 {
-        tokio::task::yield_now().await;
-    }
+    // The catch-up is a run and its firing, written one after the other: wait for both.
+    until(async || {
+        let both = !fx.store.list_runs(None).await.unwrap().is_empty()
+            && !fx.store.firings(None, 10).await.unwrap().is_empty();
+        both.then_some(())
+    })
+    .await;
     let runs = fx.store.list_runs(None).await.unwrap();
     assert_eq!(runs.len(), 1, "the missed occurrences are one catch-up run");
     assert!(
@@ -595,9 +590,8 @@ async fn a_trigger_is_held_during_a_pause_and_caught_up_once_on_resume() {
     assert_eq!(firings.len(), 1);
     assert!(firings[0].missed >= 3, "{firings:?}");
     // The schedule goes on from there.
-    assert!(
-        trigger_info(&fx).next_due_at_ms.unwrap() > u64::try_from(START_MS + 3 * HOUR).unwrap()
-    );
+    let after = u64::try_from(START_MS + 3 * HOUR).unwrap();
+    until(async || trigger_info(&fx).next_due_at_ms.filter(|due| *due > after).map(|_| ())).await;
 }
 
 #[tokio::test(start_paused = true)]
