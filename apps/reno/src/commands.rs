@@ -1,6 +1,7 @@
 //! `reno task run`, `reno run ...`, `reno trigger list|fire`, `reno workspace list|show|clean`, `reno approval list`, `reno approval history`,
 //! `reno approve` and `reno deny`.
 
+use std::collections::HashSet;
 use std::io;
 use std::process::ExitCode;
 
@@ -178,10 +179,17 @@ async fn follow(
     let mut transcript = Transcript::new(io::stdout(), env.json);
     let mut events = Box::pin(client.run_events(run.clone(), from));
     let mut finished: Option<Finished> = None;
+    // Approval ids already pointed at, so two held requests never show the same one.
+    let mut claimed = HashSet::new();
     while let Some(item) = events.next().await {
         let item = item.map_err(|e| env.explain(e))?;
         finished = transcript.event(&item)?;
-        if matches!(item.event, ExecEvent::NeedsApproval { .. }) && !env.json {
+        if let ExecEvent::NeedsApproval {
+            request_id,
+            subject,
+        } = &item.event
+            && !env.json
+        {
             // The daemon records the approval before the event is published.
             let pending: Vec<_> = client
                 .list_approvals()
@@ -190,7 +198,22 @@ async fn follow(
                 .into_iter()
                 .filter(|approval| approval.run_id == run)
                 .collect();
-            transcript.approval_hint(&pending)?;
+            // Requests answered since (a replay of an old run) are in the history, with who
+            // decided; a daemon without it only knows the held ones.
+            let history = if client.supports(reno_proto::FEATURE_APPROVAL_HISTORY) {
+                client
+                    .approval_history(
+                        Some(run.clone()),
+                        Some(reno_proto::APPROVAL_HISTORY_MAX_LIMIT),
+                    )
+                    .await
+                    .map_err(|e| env.explain(e))?
+            } else {
+                Vec::new()
+            };
+            let hint =
+                render::approval_hint_for(request_id, subject, &pending, &history, &mut claimed);
+            transcript.approval_hint(&hint)?;
         }
         if finished.is_some() {
             break;

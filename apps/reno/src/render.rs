@@ -4,14 +4,16 @@
 //! call, result, question and message. JSON output is the protocol's own types, one object per
 //! line for streams.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use reno_proto::defs::format_instant;
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalRecord, CleanItem, CleanOutcome, DaemonStatusInfo,
-    ExecEvent, ExecutorInfo, FiringOutcome, InstallStatus, ModelSource, NotInstalledReason,
-    ResolvedBy, RoutingDecision, RunEventItem, RunStatus, RunSummary, SignedIn, StopReason,
-    TriggerFireResult, TriggerInfo, TriggerStatus, VersionGate, WorkspaceInfo,
+    Approval, ApprovalId, ApprovalOutcome, ApprovalRecord, ApprovalStatus, ApprovalSubject,
+    CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
+    InstallStatus, ModelSource, NotInstalledReason, ResolvedBy, RoutingDecision, RunEventItem,
+    RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo, TriggerStatus,
+    VersionGate, WorkspaceInfo,
 };
 use serde::Serialize;
 
@@ -174,19 +176,68 @@ impl<W: Write> Transcript<W> {
         Ok(())
     }
 
-    /// How to answer the approvals a run is waiting on (human output only).
-    pub(crate) fn approval_hint(&mut self, approvals: &[Approval]) -> io::Result<()> {
+    /// What to do about one held request (human output only): the command that answers it, or
+    /// who already did.
+    pub(crate) fn approval_hint(&mut self, hint: &ApprovalHint) -> io::Result<()> {
         if self.json {
             return Ok(());
         }
-        for approval in approvals {
-            writeln!(
-                self.out,
-                "  reno approve {id}   reno deny {id}",
-                id = approval.id
-            )?;
+        match hint {
+            ApprovalHint::Pending(id) => {
+                writeln!(self.out, "  reno approve {id}   reno deny {id}")?;
+            }
+            ApprovalHint::Decided(text) => writeln!(self.out, "  already decided: {text}")?,
+            ApprovalHint::Unknown => {}
         }
         self.out.flush()
+    }
+}
+
+/// What the hint after a `NeedsApproval` event says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ApprovalHint {
+    /// Still held: the id that answers this request.
+    Pending(ApprovalId),
+    /// Already answered, and by whom.
+    Decided(String),
+    /// The daemon has no record of it (yet); say nothing rather than point at another request.
+    Unknown,
+}
+
+/// The hint for the request `request_id` with `subject`.
+///
+/// A decided request is found in `history` by its request id and says who decided. A held one is
+/// not listed with its request id, so it is the oldest pending approval of the same subject that
+/// an earlier request of this transcript has not claimed (`claimed` records the ids handed out).
+/// Requests are recorded in the order they are raised, so this pairs each with its own id.
+pub(crate) fn approval_hint_for(
+    request_id: &str,
+    subject: &ApprovalSubject,
+    pending: &[Approval],
+    history: &[ApprovalRecord],
+    claimed: &mut HashSet<ApprovalId>,
+) -> ApprovalHint {
+    if let Some(record) = history.iter().find(|r| r.request_id == request_id) {
+        let outcome = match record.status {
+            ApprovalStatus::Approved => ApprovalOutcome::Approved,
+            _ => ApprovalOutcome::Denied,
+        };
+        return match &record.decided_by {
+            Some(by) => {
+                ApprovalHint::Decided(resolved_text(outcome, by, record.message.as_deref()))
+            }
+            None => ApprovalHint::Decided(wire_name(&record.status)),
+        };
+    }
+    match pending
+        .iter()
+        .find(|a| &a.subject == subject && !claimed.contains(&a.id))
+    {
+        Some(approval) => {
+            claimed.insert(approval.id.clone());
+            ApprovalHint::Pending(approval.id.clone())
+        }
+        None => ApprovalHint::Unknown,
     }
 }
 
@@ -844,6 +895,93 @@ mod tests {
                 "type": "approval_resolved", "requestId": "r",
                 "decision": "denied", "by": {"type": "expired"}
             }})
+        );
+    }
+
+    fn held(id: &str, command: &str) -> Approval {
+        Approval {
+            id: id.parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            subject: subject(command),
+            requested_at_ms: 1,
+        }
+    }
+
+    fn subject(command: &str) -> ApprovalSubject {
+        ApprovalSubject {
+            action: ActionClass::Command,
+            tool: "bash".into(),
+            command: Some(command.into()),
+            paths: vec![],
+            raw: json!(null),
+        }
+    }
+
+    fn decided(id: &str, request: &str, command: &str, by: ResolvedBy) -> ApprovalRecord {
+        ApprovalRecord {
+            id: id.parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            request_id: request.into(),
+            subject: subject(command),
+            subject_digest: None,
+            status: ApprovalStatus::Approved,
+            decided_by: Some(by),
+            created_at_ms: 1,
+            decided_at_ms: Some(2),
+            expires_at_ms: 9,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn each_held_request_gets_its_own_approval_id() {
+        let pending = [
+            held("appr_a1", "git push"),
+            held("appr_a2", "cargo update"),
+            held("appr_a3", "cargo update"),
+        ];
+        let mut claimed = HashSet::new();
+        let hint = |request: &str, command: &str, claimed: &mut HashSet<_>| {
+            approval_hint_for(request, &subject(command), &pending, &[], claimed)
+        };
+        let id = |s: &str| ApprovalHint::Pending(s.parse().unwrap());
+        assert_eq!(hint("r1", "git push", &mut claimed), id("appr_a1"));
+        assert_eq!(hint("r2", "cargo update", &mut claimed), id("appr_a2"));
+        assert_eq!(hint("r3", "cargo update", &mut claimed), id("appr_a3"));
+        // Nothing left to claim: no hint, never another request's id.
+        assert_eq!(
+            hint("r4", "cargo update", &mut claimed),
+            ApprovalHint::Unknown
+        );
+    }
+
+    #[test]
+    fn a_resolved_request_shows_who_decided_instead_of_commands() {
+        let history = [decided(
+            "appr_a1",
+            "r1",
+            "git push",
+            ResolvedBy::Rule {
+                name: "cargo is fine".into(),
+            },
+        )];
+        let pending = [held("appr_a2", "git push")];
+        let mut claimed = HashSet::new();
+        let hint = approval_hint_for("r1", &subject("git push"), &pending, &history, &mut claimed);
+        assert_eq!(
+            hint,
+            ApprovalHint::Decided("approved by rule cargo is fine".into())
+        );
+        assert!(claimed.is_empty());
+        let mut out = Vec::new();
+        let mut transcript = Transcript::new(&mut out, false);
+        transcript.approval_hint(&hint).unwrap();
+        transcript
+            .approval_hint(&ApprovalHint::Pending("appr_a2".parse().unwrap()))
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "  already decided: approved by rule cargo is fine\n  reno approve appr_a2   reno deny appr_a2\n"
         );
     }
 
