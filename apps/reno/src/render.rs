@@ -217,13 +217,17 @@ pub(crate) fn history_line(record: &ApprovalRecord) -> String {
         .decided_by
         .as_ref()
         .map_or_else(|| "nobody yet".to_owned(), by_text);
-    format!(
+    let line = format!(
         "{}  run {}  {:<8}  by {by}  {} {what}",
         record.id,
         record.run_id,
         wire_name(&record.status),
         subject.tool
-    )
+    );
+    match &record.message {
+        Some(message) => format!("{line} ({message})"),
+        None => line,
+    }
 }
 
 /// One pending approval on one line, in the columns of [`history_line`]: nobody has decided it
@@ -648,6 +652,7 @@ mod tests {
             created_at_ms: 1,
             decided_at_ms: Some(2),
             expires_at_ms: 3,
+            message: None,
         };
         assert_eq!(
             history_line(&record(
@@ -664,6 +669,12 @@ mod tests {
                 Some(ResolvedBy::Human)
             )),
             "appr_a1  run run_r1  denied    by you  bash cargo test"
+        );
+        let mut denied = record(reno_proto::ApprovalStatus::Denied, Some(ResolvedBy::Human));
+        denied.message = Some("use a branch".into());
+        assert_eq!(
+            history_line(&denied),
+            "appr_a1  run run_r1  denied    by you  bash cargo test (use a branch)"
         );
         assert_eq!(
             history_line(&record(

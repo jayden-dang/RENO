@@ -39,11 +39,13 @@ use reno_store::{Store, StoreError};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::defs::{self, FsDefinitions, GitInit};
 use crate::executors::{self, ExecutorSet};
 use crate::fswatch::FsWatch;
 use crate::handlers::{self, Ctx};
+use crate::install::Installer;
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
 use crate::power::{self, PowerWatch};
@@ -201,6 +203,9 @@ impl Daemon {
             registry,
             harnesses,
         } = executors;
+        let stop = CancellationToken::new();
+        let installer = Installer::new(&registry, stop.clone());
+        let installs = installer.tasks();
         let mut ids: Vec<ExecutorId> = registry.ids().cloned().collect();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
@@ -265,9 +270,9 @@ impl Daemon {
             None
         };
 
-        let stop = CancellationToken::new();
         let ctx = Arc::new(Ctx {
             kernel: kernel.clone(),
+            installer,
             started: Instant::now(),
             executors: ids,
             default_cwd: scratch,
@@ -313,6 +318,7 @@ impl Daemon {
             fs_watch,
             power,
             harnesses,
+            installs,
             socket: paths.socket,
             lock,
             connection_grace,
@@ -356,6 +362,7 @@ struct Shutdown {
     fs_watch: Arc<FsWatch>,
     power: Option<PowerWatch>,
     harnesses: Vec<Arc<dyn Executor>>,
+    installs: TaskTracker,
     socket: PathBuf,
     lock: DataDirLock,
     connection_grace: Duration,
@@ -369,7 +376,10 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     // 1. Stop accepting. The listener drops inside `serve_until`; open connections stay.
     s.stop_accepting.cancel();
 
-    // 2. The kernel ends every live run `interrupted`, within its own deadline.
+    // 2. Installs in flight end (they stop with the daemon), then the kernel ends every live run
+    // `interrupted`, within its own deadline.
+    s.installs.close();
+    s.installs.wait().await;
     drop(s.power.take());
     let report = s.kernel.shutdown().await;
     s.fs_defs.shutdown().await;

@@ -62,6 +62,15 @@ pub(super) struct World {
     history: Vec<ApprovalRecord>,
 }
 
+/// Why the fake daemon refuses an install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InstallRefused {
+    /// No such executor.
+    NotFound,
+    /// Its health does not say `needs_install`.
+    NothingToInstall,
+}
+
 impl World {
     pub(super) fn from_seed(seed: Seed, root: &CancellationToken) -> Self {
         let runs = seed
@@ -106,6 +115,40 @@ impl World {
                 health.checked_at_ms = now;
             }
         }
+        Ok(())
+    }
+
+    /// Installs the adapter of `id`, which must be an executor whose health says `needs_install`:
+    /// nothing is fetched. The health becomes installed, signed in unknown. `Err` says why not.
+    pub(super) fn install_executor(
+        &mut self,
+        id: &reno_proto::ExecutorId,
+    ) -> Result<(), InstallRefused> {
+        let now = self.tick();
+        let info = self
+            .executors
+            .iter_mut()
+            .find(|e| &e.descriptor.id == id)
+            .ok_or(InstallRefused::NotFound)?;
+        let health = info
+            .health
+            .as_mut()
+            .ok_or(InstallRefused::NothingToInstall)?;
+        if !matches!(
+            health.installed,
+            reno_proto::InstallStatus::NotInstalled {
+                why: reno_proto::NotInstalledReason::NeedsInstall { .. }
+            }
+        ) {
+            return Err(InstallRefused::NothingToInstall);
+        }
+        health.installed = reno_proto::InstallStatus::Installed {
+            path: format!("/fake/adapters/{id}/bin").into(),
+            version: Some("1.0.0".to_owned()),
+        };
+        health.version_gate = reno_proto::VersionGate::Ok;
+        health.signed_in = reno_proto::SignedIn::Unknown;
+        health.checked_at_ms = now;
         Ok(())
     }
 
@@ -263,6 +306,7 @@ impl World {
         &mut self,
         id: &ApprovalId,
         decision: ApprovalDecision,
+        message: Option<String>,
     ) -> Option<Approval> {
         let at = self.approvals.iter().position(|a| &a.id == id)?;
         let approval = self.approvals.remove(at);
@@ -280,6 +324,9 @@ impl World {
             created_at_ms: approval.requested_at_ms,
             decided_at_ms: Some(now),
             expires_at_ms: approval.requested_at_ms + 30 * 60_000,
+            message: message
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty()),
         });
         Some(approval)
     }

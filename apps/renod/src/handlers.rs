@@ -24,6 +24,7 @@
 //! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
+//! | `executor.install` | `install_executor` |
 //! | `executors.watch` | `watch_executors` |
 //!
 //! `sub.gap` is sent by `reno-rpc` when a socket reader falls behind; the daemon registers no
@@ -59,8 +60,9 @@ use reno_proto::{
     TriggersWatchParams,
 };
 use reno_proto::{
-    ExecutorInfo, ExecutorList, ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams,
-    ExecutorsSnapshot, ExecutorsWatch, ExecutorsWatchParams,
+    ExecutorInfo, ExecutorInstall, ExecutorInstallParams, ExecutorInstallResult, ExecutorList,
+    ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatch,
+    ExecutorsWatchParams,
 };
 use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
@@ -70,7 +72,8 @@ use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::errors::{invalid, kernel_error};
+use crate::errors::{install_error, invalid, kernel_error};
+use crate::install::Installer;
 
 /// How many times in a row a `run.events` stream may be cut off by the kernel without delivering
 /// an event before the daemon gives up on it.
@@ -89,6 +92,8 @@ const ACTIVE: [RunStatus; 5] = [
 #[derive(Debug)]
 pub(crate) struct Ctx {
     pub(crate) kernel: Kernel,
+    /// Installs the executors that need one.
+    pub(crate) installer: Installer,
     pub(crate) started: Instant,
     /// The executors a `task.run` may name, sorted.
     pub(crate) executors: Vec<ExecutorId>,
@@ -128,6 +133,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<TriggerFire, _, _>(bind(ctx, trigger_fire))
         .method::<ExecutorList, _, _>(bind(ctx, executor_list))
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
+        .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
         .method::<WorkspaceList, _, _>(bind(ctx, workspace_list))
         .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
         .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
@@ -314,7 +320,7 @@ async fn approval_history(ctx: Arc<Ctx>, p: ApprovalHistoryParams) -> Reply<Appr
 
 async fn approval_decide(ctx: Arc<Ctx>, p: ApprovalDecideParams) -> Reply<ApprovalDecideResult> {
     ctx.kernel
-        .decide(&p.approval_id, p.decision)
+        .decide_with_message(&p.approval_id, p.decision, p.message)
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(ApprovalDecideResult {})
@@ -365,6 +371,18 @@ async fn executor_refresh(ctx: Arc<Ctx>, p: ExecutorRefreshParams) -> Reply<Exec
             .await
             .map_err(|e| kernel_error(&e))?,
     })
+}
+
+/// Fetches and verifies the executor's managed adapter, probes it again and answers with the
+/// result. Waits for the install, which can take a while.
+async fn executor_install(ctx: Arc<Ctx>, p: ExecutorInstallParams) -> Reply<ExecutorInstallResult> {
+    tracing::info!(executor = %p.id, "executor install requested");
+    let executor = ctx
+        .installer
+        .install(&ctx.kernel, &p.id)
+        .await
+        .map_err(|e| install_error(&e))?;
+    Ok(ExecutorInstallResult { executor })
 }
 
 async fn workspace_list(ctx: Arc<Ctx>, p: WorkspaceListParams) -> Reply<WorkspaceListResult> {

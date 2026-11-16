@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reno_proto::defs::{DefKind, DefRecord, DefValidateResult, DefsSnapshot};
 use reno_proto::{
-    Approval, ApprovalRecord, DaemonStatusInfo, ExecEvent, HelloResult, RunId, RunStatus,
-    RunSummary, Seq, TriggerInfo,
+    Approval, ApprovalRecord, DaemonStatusInfo, ExecEvent, ExecutorInfo, HelloResult, RunId,
+    RunStatus, RunSummary, Seq, TriggerInfo,
 };
 
 /// The state of the connection to the daemon.
@@ -81,6 +81,8 @@ pub enum Feed {
     Triggers,
     /// `defs.watch`.
     Defs,
+    /// `executors.watch`.
+    Executors,
     /// `approval.history`, fetched on demand.
     ApprovalHistory,
 }
@@ -169,6 +171,8 @@ pub enum Update {
     Approvals(Vec<Approval>),
     /// Every trigger and its state (`triggers.watch`).
     Triggers(Vec<TriggerInfo>),
+    /// Every executor and its last health (`executors.watch`).
+    Executors(Vec<ExecutorInfo>),
     /// The definitions in force and the file problems (`defs.watch`).
     Defs(DefsSnapshot),
     /// Decided approvals, newest decision first (`approval.history`).
@@ -225,6 +229,8 @@ pub struct Changed {
     pub approvals: bool,
     /// The triggers changed.
     pub triggers: bool,
+    /// The executors or their health changed.
+    pub executors: bool,
     /// The definitions, their file problems, their stored bodies or validations changed.
     pub defs: bool,
     /// The approval history changed.
@@ -242,6 +248,7 @@ impl Changed {
             || self.runs
             || self.approvals
             || self.triggers
+            || self.executors
             || self.defs
             || self.history
             || self.feeds)
@@ -265,6 +272,7 @@ impl Changed {
         self.runs |= other.runs;
         self.approvals |= other.approvals;
         self.triggers |= other.triggers;
+        self.executors |= other.executors;
         self.defs |= other.defs;
         self.history |= other.history;
         self.feeds |= other.feeds;
@@ -284,6 +292,7 @@ pub struct State {
     fetched: BTreeMap<RunId, RunSummary>,
     pages: BTreeMap<Vec<RunStatus>, Option<RunId>>,
     triggers: Vec<TriggerInfo>,
+    executors: Vec<ExecutorInfo>,
     defs: DefsSnapshot,
     def_records: BTreeMap<(DefKind, String, u32), DefRecord>,
     validations: BTreeMap<(DefKind, String), DefValidateResult>,
@@ -349,6 +358,14 @@ impl State {
                     changed.triggers = true;
                 }
                 self.set_feed(Feed::Triggers, FeedState::Live, &mut changed);
+            }
+            Update::Executors(mut list) => {
+                list.sort_by(|a, b| a.descriptor.id.as_str().cmp(b.descriptor.id.as_str()));
+                if self.executors != list {
+                    self.executors = list;
+                    changed.executors = true;
+                }
+                self.set_feed(Feed::Executors, FeedState::Live, &mut changed);
             }
             Update::Defs(mut snapshot) => {
                 snapshot
@@ -498,6 +515,11 @@ impl State {
     /// Every trigger, by name.
     pub fn triggers(&self) -> &[TriggerInfo] {
         &self.triggers
+    }
+
+    /// Every executor with its last health, by id.
+    pub fn executors(&self) -> &[ExecutorInfo] {
+        &self.executors
     }
 
     /// The definitions in force and the file problems.
@@ -824,6 +846,51 @@ mod tests {
         let c = s.apply(Update::Connection(ConnectionStatus::Connected));
         assert!(c.connection);
         assert!(s.offline().is_none());
+    }
+
+    #[test]
+    fn executors_are_sorted_idempotent_and_make_their_feed_live() {
+        use reno_proto::{ExecutorCaps, ExecutorDescriptor, Steering, VersionRange};
+        let executor = |id: &str| ExecutorInfo {
+            descriptor: ExecutorDescriptor {
+                id: id.parse().unwrap(),
+                contract_version: 1,
+                adapter_version: "t".into(),
+                cli_verified: VersionRange {
+                    min: "0".into(),
+                    verified: "0".into(),
+                },
+                caps: ExecutorCaps {
+                    steering: Steering::None,
+                    resume: false,
+                    access_modes: vec![],
+                    sandbox_levels: vec![],
+                    mcp_injection: false,
+                    structured_output: false,
+                    deterministic_turn_end: false,
+                    plan_mode: false,
+                    models: vec![],
+                },
+            },
+            health: None,
+        };
+        let mut s = State::new();
+        assert_eq!(s.feed(Feed::Executors), FeedState::Loading);
+        let c = s.apply(Update::Executors(vec![executor("mock"), executor("codex")]));
+        assert!(c.executors && c.feeds && !c.is_empty());
+        assert_eq!(s.feed(Feed::Executors), FeedState::Live);
+        assert_eq!(s.executors()[0].descriptor.id.as_str(), "codex");
+        let same = s.apply(Update::Executors(vec![executor("codex"), executor("mock")]));
+        assert!(same.is_empty());
+        let c = s.apply(Update::Executors(vec![]));
+        assert!(c.executors, "an executor that went away is a change");
+        assert_eq!(s.feed(Feed::Executors), FeedState::Live);
+        let mut merged = Changed::default();
+        merged.merge(Changed {
+            executors: true,
+            ..Changed::default()
+        });
+        assert!(merged.executors);
     }
 
     #[test]

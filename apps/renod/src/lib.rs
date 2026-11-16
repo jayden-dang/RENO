@@ -29,6 +29,7 @@ pub mod errors;
 pub mod executors;
 pub mod fswatch;
 mod handlers;
+pub mod install;
 pub mod lock;
 pub mod logging;
 pub mod paths;

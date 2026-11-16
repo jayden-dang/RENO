@@ -126,6 +126,7 @@ fn decided(
         created_at_ms: NOW_MS - age - 4 * MINUTE,
         decided_at_ms: Some(NOW_MS - age),
         expires_at_ms: NOW_MS - age + 26 * MINUTE,
+        message: None,
     })
 }
 
@@ -352,6 +353,24 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     hint: "run `codex login`".to_owned(),
                 },
                 models: ModelCatalog::live(models(&[("gpt-6-astra", "GPT-6-Astra")])),
+                checked_at_ms: at,
+            },
+        )?,
+        info(
+            "acp.grok",
+            "Grok",
+            &all,
+            &unrestricted,
+            ("0.9.0", "0.12.0"),
+            ExecutorHealth {
+                installed: installed("/usr/local/bin/grok", "0.4.0"),
+                version_gate: VersionGate::TooOld {
+                    min: "0.9.0".to_owned(),
+                },
+                signed_in: SignedIn::Yes {
+                    account: Some("ada@example.com".to_owned()),
+                },
+                models: ModelCatalog::curated(models(&[("grok-4", "Grok 4")])),
                 checked_at_ms: at,
             },
         )?,

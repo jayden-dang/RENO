@@ -576,7 +576,10 @@ async fn executors_are_listed_refreshed_and_watched() {
 
     let listed = client.list_executors().await.unwrap();
     let ids: Vec<&str> = listed.iter().map(|e| e.descriptor.id.as_str()).collect();
-    assert_eq!(ids, ["claude-code", "codex", "acp.hermes", "mock"]);
+    assert_eq!(
+        ids,
+        ["claude-code", "codex", "acp.grok", "acp.hermes", "mock"]
+    );
     let codex = listed
         .iter()
         .find(|e| e.descriptor.id.as_str() == "codex")
@@ -616,4 +619,58 @@ async fn executors_are_listed_refreshed_and_watched() {
     assert_eq!(error.code(), Some(reno_proto::ErrorCode::NotFound));
     daemon.set_executors(vec![]);
     assert!(client.list_executors().await.unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_executor_that_needs_its_adapter_is_installed_on_request_and_only_then() {
+    use reno_proto::{ErrorCode, InstallStatus, VersionGate};
+    let daemon = FakeDaemon::start(FakeConfig::default()).unwrap();
+    let client = daemon.connect().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_EXECUTOR_INSTALL));
+    let hermes: reno_proto::ExecutorId = "acp.hermes".parse().unwrap();
+
+    let installed = client.install_executor(&hermes).await.unwrap();
+    let health = installed.health.unwrap();
+    assert!(matches!(health.installed, InstallStatus::Installed { .. }));
+    assert_eq!(health.version_gate, VersionGate::Ok);
+    assert!(health.ineligible().is_none());
+
+    // Installed already: nothing to install. Unknown id: not found.
+    let again = client.install_executor(&hermes).await.unwrap_err();
+    assert_eq!(again.code(), Some(ErrorCode::Conflict));
+    let nowhere = client
+        .install_executor(&"nowhere".parse().unwrap())
+        .await
+        .unwrap_err();
+    assert_eq!(nowhere.code(), Some(ErrorCode::NotFound));
+
+    // A failure can be injected, and a daemon without the feature is refused up front.
+    daemon.fail(
+        "executor.install",
+        reno_proto::ErrorObject::new(ErrorCode::Unavailable, "registry unreachable"),
+    );
+    let failed = client.install_executor(&hermes).await.unwrap_err();
+    assert_eq!(failed.code(), Some(ErrorCode::Unavailable));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_denial_carries_its_reason_into_the_history() {
+    use reno_proto::{ApprovalDecision, ApprovalStatus};
+    let daemon = FakeDaemon::start(FakeConfig::default()).unwrap();
+    let client = daemon.connect().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_APPROVAL_MESSAGE));
+    let pending = client.list_approvals().await.unwrap();
+    let first = pending.first().expect("a pending approval").id.clone();
+    client
+        .decide_with_message(
+            &first,
+            ApprovalDecision::Deny,
+            Some("  use the staging bucket ".into()),
+        )
+        .await
+        .unwrap();
+    let history = client.approval_history(None, None).await.unwrap();
+    let record = history.iter().find(|r| r.id == first).unwrap();
+    assert_eq!(record.status, ApprovalStatus::Denied);
+    assert_eq!(record.message.as_deref(), Some("use the staging bucket"));
 }

@@ -893,3 +893,23 @@ fn workspace_list_show_and_clean_through_the_cli() {
         text(&ghost.stderr)
     );
 }
+
+#[test]
+fn executor_install_refuses_what_has_nothing_to_install_and_never_fetches() {
+    let world = World::new();
+    world.start_daemon();
+
+    // The mock is installed already: the daemon says so and runs no install.
+    let mock = world.reno(&["executor", "install", "mock"]);
+    assert_eq!(mock.status.code(), Some(1));
+    let err = text(&mock.stderr);
+    assert!(err.contains("nothing to install"), "{err}");
+
+    let ghost = world.reno(&["executor", "install", "nowhere"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    assert!(
+        text(&ghost.stderr).contains("not found"),
+        "{}",
+        text(&ghost.stderr)
+    );
+}

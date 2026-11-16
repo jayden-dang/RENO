@@ -549,7 +549,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         async move {
             injected(&s, "approval.decide")?;
             let approval = s
-                .with(|w| w.take_approval(&p.approval_id, p.decision))
+                .with(|w| w.take_approval(&p.approval_id, p.decision, p.message))
                 .ok_or_else(|| not_found("approval"))?;
             s.tracker
                 .spawn(script::resume(Arc::clone(&s), approval.run_id, p.decision));
@@ -689,6 +689,31 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let executor_install = move |p: reno_proto::ExecutorInstallParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.install")?;
+            s.with(|w| w.install_executor(&p.id))
+                .map_err(|why| match why {
+                    world::InstallRefused::NotFound => not_found("executor"),
+                    world::InstallRefused::NothingToInstall => ErrorObject::new(
+                        ErrorCode::Conflict,
+                        format!("executor {} has nothing to install", p.id),
+                    ),
+                })?;
+            let executor = s
+                .read(|w| {
+                    w.executors
+                        .iter()
+                        .find(|e| e.descriptor.id == p.id)
+                        .cloned()
+                })
+                .ok_or_else(|| not_found("executor"))?;
+            Ok(reno_proto::ExecutorInstallResult { executor })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let executors_watch = move |_: reno_proto::ExecutorsWatchParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -764,6 +789,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .subscription::<reno_proto::TriggersWatch, _, _, _>(triggers_watch)
         .method::<reno_proto::ExecutorList, _, _>(executor_list)
         .method::<reno_proto::ExecutorRefresh, _, _>(executor_refresh)
+        .method::<reno_proto::ExecutorInstall, _, _>(executor_install)
         .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
         .method::<reno_proto::DefList, _, _>(def_list)
         .method::<reno_proto::DefGet, _, _>(def_get)

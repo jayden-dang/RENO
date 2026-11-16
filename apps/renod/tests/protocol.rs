@@ -224,6 +224,57 @@ daemon_test! {
 }
 
 daemon_test! {
+    async fn a_denial_with_a_reason_reaches_the_executor_the_journal_and_the_history() {
+        let fx = Fixture::start().await;
+        let mut watch = within(fx.client.watch_approvals()).await.unwrap();
+        let _ = within(watch.next()).await;
+        let run = fx.run("mock-approval", "delete the build").await;
+        let pending = loop {
+            let snapshot = within(watch.next()).await.unwrap().unwrap();
+            if let Some(approval) = snapshot.approvals.first() {
+                break approval.clone();
+            }
+        };
+
+        // A reason with an approval, or none that fits, is refused and the approval stays open.
+        let with_approve = within(fx.client.decide_with_message(
+            &pending.id,
+            ApprovalDecision::ApproveOnce,
+            Some("because".into()),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(code(&with_approve), ErrorCode::InvalidParams);
+        assert_eq!(within(fx.client.list_approvals()).await.unwrap().len(), 1);
+
+        within(fx.client.decide_with_message(
+            &pending.id,
+            ApprovalDecision::Deny,
+            Some("push to a branch, not main".into()),
+        ))
+        .await
+        .unwrap();
+        let events = fx.events(&run, None).await;
+        let answers = fx.executors.approval.log().answers;
+        assert_eq!(
+            answers[0].answer,
+            reno_harness::exec::Answer::Decision(
+                reno_harness::exec::Decision::Deny,
+                Some("push to a branch, not main".into())
+            )
+        );
+        assert!(events.iter().any(|e| matches!(
+            &e.event,
+            ExecEvent::ApprovalResolved { decision: reno_proto::ApprovalOutcome::Denied, by: reno_proto::ResolvedBy::Human, message: Some(m), .. }
+                if m == "push to a branch, not main"
+        )));
+        let history = within(fx.client.approval_history(Some(run), None)).await.unwrap();
+        assert_eq!(history[0].message.as_deref(), Some("push to a branch, not main"));
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
     async fn the_default_policy_denies_a_dangerous_command_without_asking_anyone() {
         let fx = Fixture::start().await;
         let mut watch = within(fx.client.watch_approvals()).await.unwrap();

@@ -181,6 +181,16 @@ pub(crate) enum ExecutorCommand {
     /// Probe one executor (or all) again, wait for the answer and show it. Nothing probes on a
     /// timer: run this after installing or signing in.
     Refresh(ExecutorRefresh),
+    /// Fetch and verify the managed adapter of an executor that `reno executor list` says needs
+    /// one, wait for the probe that follows and show the result. The only step that installs:
+    /// runs never do. It can take a while, and needs the network.
+    Install(ExecutorInstall),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorInstall {
+    /// The executor, as `reno executor list` shows it.
+    pub(crate) id: ExecutorId,
 }
 
 #[derive(Debug, Args)]

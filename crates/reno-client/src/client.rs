@@ -258,6 +258,23 @@ impl Client {
             .executors)
     }
 
+    /// `executor.install`: fetches and verifies the managed adapter of an executor whose last
+    /// probe said it needs one, waits for the probe that follows and returns the executor. Can
+    /// take minutes. Needs feature `executor.install`.
+    pub async fn install_executor(
+        &self,
+        id: &reno_proto::ExecutorId,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_INSTALL)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorInstall>(reno_proto::ExecutorInstallParams {
+                id: id.clone(),
+            })
+            .await?
+            .executor)
+    }
+
     /// `executors.watch`: every executor and its health, then a new full list on every change.
     /// Latest-value, like [`Client::watch_runs`]. Needs feature `executors`.
     pub async fn watch_executors(
@@ -355,10 +372,25 @@ impl Client {
         approval_id: &reno_proto::ApprovalId,
         decision: ApprovalDecision,
     ) -> Result<(), ClientError> {
+        self.decide_with_message(approval_id, decision, None).await
+    }
+
+    /// `approval.decide` with the reason for a denial, which reaches the harness and shows in
+    /// the approval history. A `message` needs feature `approval.message`.
+    pub async fn decide_with_message(
+        &self,
+        approval_id: &reno_proto::ApprovalId,
+        decision: ApprovalDecision,
+        message: Option<String>,
+    ) -> Result<(), ClientError> {
         self.require(reno_proto::FEATURE_APPROVALS)?;
+        if message.is_some() {
+            self.require(reno_proto::FEATURE_APPROVAL_MESSAGE)?;
+        }
         let params = ApprovalDecideParams {
             approval_id: approval_id.clone(),
             decision,
+            message,
         };
         self.rpc.call::<ApprovalDecide>(params).await?;
         Ok(())

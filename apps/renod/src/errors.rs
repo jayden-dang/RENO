@@ -8,6 +8,8 @@ use reno_kernel::{KernelError, WorkspaceError};
 use reno_proto::{ErrorCode, ErrorObject};
 use reno_store::StoreError;
 
+use crate::install::InstallError;
+
 /// The code a kernel error crosses the socket with.
 pub fn code_of(error: &KernelError) -> ErrorCode {
     match error {
@@ -63,6 +65,26 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
     let code = code_of(error);
     if code == ErrorCode::Internal {
         tracing::error!(%error, "internal error while serving a request");
+    }
+    ErrorObject::new(code, error.to_string())
+}
+
+/// The code an install error crosses the socket with.
+pub fn install_code_of(error: &InstallError) -> ErrorCode {
+    match error {
+        InstallError::NotFound(_) => ErrorCode::NotFound,
+        InstallError::NothingToInstall { .. } | InstallError::InProgress(_) => ErrorCode::Conflict,
+        InstallError::Failed { .. } | InstallError::ShuttingDown => ErrorCode::Unavailable,
+        InstallError::Broken { .. } => ErrorCode::Internal,
+        InstallError::Kernel(kernel) => code_of(kernel),
+    }
+}
+
+/// The error object for an install error. Internal failures are logged with their detail.
+pub fn install_error(error: &InstallError) -> ErrorObject {
+    let code = install_code_of(error);
+    if code == ErrorCode::Internal {
+        tracing::error!(%error, "internal error while installing an executor");
     }
     ErrorObject::new(code, error.to_string())
 }
@@ -164,6 +186,49 @@ mod tests {
         for (error, code) in cases {
             assert_eq!(code_of(&error), code, "{error}");
             assert_eq!(kernel_error(&error).code, code, "{error}");
+        }
+    }
+
+    #[test]
+    fn every_install_error_has_its_code() {
+        let id = || -> reno_proto::ExecutorId { "acp.hermes".parse().expect("id") };
+        let cases: Vec<(InstallError, ErrorCode)> = vec![
+            (InstallError::NotFound(id()), ErrorCode::NotFound),
+            (
+                InstallError::NothingToInstall {
+                    id: id(),
+                    state: "it is installed".into(),
+                },
+                ErrorCode::Conflict,
+            ),
+            (InstallError::InProgress(id()), ErrorCode::Conflict),
+            (
+                InstallError::Failed {
+                    id: id(),
+                    detail: "registry unreachable".into(),
+                },
+                ErrorCode::Unavailable,
+            ),
+            (
+                InstallError::Broken {
+                    id: id(),
+                    detail: "x".into(),
+                },
+                ErrorCode::Internal,
+            ),
+            (InstallError::ShuttingDown, ErrorCode::Unavailable),
+            (
+                InstallError::Kernel(KernelError::ShuttingDown),
+                ErrorCode::Unavailable,
+            ),
+            (
+                InstallError::Kernel(KernelError::ExecutorNotFound(id())),
+                ErrorCode::NotFound,
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(install_code_of(&error), code, "{error}");
+            assert_eq!(install_error(&error).code, code, "{error}");
         }
     }
 
