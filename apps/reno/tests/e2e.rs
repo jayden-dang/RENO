@@ -921,6 +921,24 @@ fn executor_list_and_refresh_through_the_cli() {
     );
 }
 
+#[test]
+fn executor_frames_through_the_cli_say_none_for_a_clean_executor() {
+    let world = World::new();
+    world.start_daemon();
+    let shown = world.reno(&["executor", "frames"]);
+    assert!(shown.status.success(), "{}", text(&shown.stderr));
+    assert!(
+        text(&shown.stdout).contains("no unrecognised frames"),
+        "{}",
+        text(&shown.stdout)
+    );
+    let json = world.json(&["executor", "frames", "mock"]);
+    assert_eq!(json["executors"][0]["id"], "mock");
+    assert_eq!(json["executors"][0]["frames"], serde_json::json!([]));
+    let ghost = world.reno(&["executor", "frames", "nowhere"]);
+    assert_eq!(ghost.status.code(), Some(1));
+}
+
 // ---- workspaces ---------------------------------------------------------------------------
 
 /// A hermetic `git`: nothing from the user's own configuration leaks in.

@@ -28,8 +28,8 @@ use crate::defs::{
 use crate::exec::SessionRef;
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::health::{
-    ExecutorInstallParams, ExecutorInstallResult, ExecutorListResult, ExecutorRefreshParams,
-    ExecutorsSnapshot, ExecutorsWatchParams,
+    ExecutorFramesParams, ExecutorFramesResult, ExecutorInstallParams, ExecutorInstallResult,
+    ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatchParams,
 };
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
@@ -109,6 +109,8 @@ pub const FEATURE_BUDGET: &str = "budget";
 /// Feature: `secret.list`, `secret.set` and `secret.delete` exist, and a bot's `secrets` reach
 /// its runs as environment variables.
 pub const FEATURE_SECRETS: &str = "secrets";
+/// Feature: `executor.frames` exists.
+pub const FEATURE_EXECUTOR_FRAMES: &str = "executor.frames";
 /// Feature: `run.resume` exists, journals may carry `ExecEvent::Resumed`, and a run that was
 /// interrupted may be resumed by the daemon itself.
 pub const FEATURE_RUN_RESUME: &str = "run.resume";
@@ -138,6 +140,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_RESUME,
     FEATURE_STOP_DETAIL,
     FEATURE_SECRETS,
+    FEATURE_EXECUTOR_FRAMES,
 ];
 
 /// A request with a single reply.
@@ -798,6 +801,12 @@ method!(
     ExecutorInstall, "executor.install", ExecutorInstallParams => ExecutorInstallResult
 );
 method!(
+    /// `executor.frames`: the frames each executor's wire layer did not recognise, by kind, since
+    /// the daemon started, and the CLI version they were first seen under. A rising number is
+    /// the early sign that a harness CLI moved. Needs feature `executor.frames`.
+    ExecutorFrames, "executor.frames", ExecutorFramesParams => ExecutorFramesResult
+);
+method!(
     /// `approval.list`: the pending approvals. Needs feature `approvals`.
     ApprovalList, "approval.list", NoParams => ApprovalListResult
 );
@@ -915,6 +924,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),
+            method_entry::<ExecutorFrames>(),
             method_entry::<crate::agent::AgentAuth>(),
             method_entry::<crate::agent::AgentReport>(),
             method_entry::<crate::agent::AgentRequestApproval>(),

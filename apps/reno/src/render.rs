@@ -375,6 +375,38 @@ pub(crate) fn clean_line(item: &CleanItem) -> String {
     }
 }
 
+/// The unrecognised frames, a line per executor and an indented line per kind.
+pub(crate) fn frames_lines(executors: &[reno_proto::ExecutorFrameCounts]) -> Vec<String> {
+    if executors.is_empty() {
+        return vec!["no executors".to_owned()];
+    }
+    let mut lines = Vec::new();
+    for executor in executors {
+        let version = executor.cli_version.as_deref().unwrap_or("version unknown");
+        if executor.frames.is_empty() {
+            lines.push(format!(
+                "{:<16} {version}: no unrecognised frames",
+                executor.id.as_str()
+            ));
+            continue;
+        }
+        lines.push(format!(
+            "{:<16} {version}: {} unrecognised frame kind(s)",
+            executor.id.as_str(),
+            executor.frames.len()
+        ));
+        for frame in &executor.frames {
+            lines.push(format!(
+                "  {:<40} {:>6}  first seen {}",
+                frame.kind,
+                frame.count,
+                format_instant(i64::try_from(frame.first_seen_ms).unwrap_or(0), None),
+            ));
+        }
+    }
+    lines
+}
+
 /// One executor on one line: id, whether it is installed (and at which version), the version
 /// gate, whether it is signed in, and the models with where the list came from.
 pub(crate) fn executor_line(info: &ExecutorInfo) -> String {
@@ -621,6 +653,37 @@ mod tests {
             executor_line(&executor(Some(health))),
             "codex            needs install: the adapter"
         );
+    }
+
+    #[test]
+    fn frames_are_listed_per_executor_with_their_kinds() {
+        use reno_proto::{ExecutorFrameCounts, UnknownFrameKind};
+        assert_eq!(frames_lines(&[]), ["no executors"]);
+        let quiet = ExecutorFrameCounts {
+            id: "claude-code".parse().unwrap(),
+            cli_version: None,
+            frames: vec![],
+        };
+        let loud = ExecutorFrameCounts {
+            id: "codex".parse().unwrap(),
+            cli_version: Some("0.170.0".into()),
+            frames: vec![UnknownFrameKind {
+                kind: "method:thread/new".into(),
+                count: 3,
+                first_seen_ms: 0,
+            }],
+        };
+        let lines = frames_lines(&[quiet, loud]);
+        assert_eq!(
+            lines[0],
+            "claude-code      version unknown: no unrecognised frames"
+        );
+        assert_eq!(
+            lines[1],
+            "codex            0.170.0: 1 unrecognised frame kind(s)"
+        );
+        assert!(lines[2].starts_with("  method:thread/new"), "{}", lines[2]);
+        assert!(lines[2].contains("1970-01-01"), "{}", lines[2]);
     }
 
     use reno_proto::{ActionClass, Question, Seq, ToolCall};

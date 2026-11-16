@@ -54,6 +54,8 @@ struct Probed {
     overlapped: Arc<AtomicBool>,
     refuse_start: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
+    /// What the wire layer says it has not recognised.
+    frames: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
 }
 
 impl Probed {
@@ -71,6 +73,7 @@ impl Probed {
             overlapped: Arc::default(),
             refuse_start: Arc::default(),
             hang: Arc::default(),
+            frames: Arc::default(),
         }
     }
 
@@ -95,6 +98,10 @@ impl Probed {
 impl Executor for Probed {
     fn descriptor(&self) -> ExecutorDescriptor {
         self.inner.descriptor()
+    }
+
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.frames.lock().unwrap().clone()
     }
 
     async fn probe(&self) -> HealthProbe {
@@ -423,4 +430,86 @@ async fn a_bot_goes_to_the_first_of_its_executors_that_is_not_known_to_be_unusab
         id("mock")
     );
     fx.wait_status(&second, RunStatus::Succeeded).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_frames_are_reported_per_executor_with_when_each_kind_was_first_seen() {
+    let probed = Probed::new(signed_in());
+    let fx = Fx::new(config(1), probed.registry()).await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let before = fx.kernel.executor_frames(None).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].id, id("mock"));
+    assert_eq!(before[0].cli_version.as_deref(), Some("1.0.0"));
+    assert!(before[0].frames.is_empty(), "a clean executor reports none");
+
+    probed.frames.lock().unwrap().insert("type:new".into(), 2);
+    let first = fx.kernel.executor_frames(Some(&id("mock"))).unwrap();
+    assert_eq!(first[0].frames.len(), 1);
+    assert_eq!(first[0].frames[0].kind, "type:new");
+    assert_eq!(first[0].frames[0].count, 2);
+    let seen_at = first[0].frames[0].first_seen_ms;
+
+    // A run that ends notes the frames too, and a kind keeps the time it was first seen.
+    fx.clock.advance(5_000);
+    probed.frames.lock().unwrap().insert("type:new".into(), 5);
+    probed.frames.lock().unwrap().insert("method:x".into(), 1);
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let later = fx.kernel.executor_frames(None).unwrap();
+    let kinds: Vec<(&str, u64)> = later[0]
+        .frames
+        .iter()
+        .map(|f| (f.kind.as_str(), f.count))
+        .collect();
+    assert_eq!(kinds, [("method:x", 1), ("type:new", 5)]);
+    let new = later[0].frames.iter().find(|f| f.kind == "type:new");
+    assert_eq!(new.map(|f| f.first_seen_ms), Some(seen_at));
+    let x = later[0].frames.iter().find(|f| f.kind == "method:x");
+    assert!(x.is_some_and(|f| f.first_seen_ms > seen_at));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_cli_version_makes_every_kind_new_again() {
+    let probed = Probed::new(signed_in());
+    let fx = Fx::new(config(1), probed.registry()).await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+    probed.frames.lock().unwrap().insert("type:a".into(), 1);
+    let old = fx.kernel.executor_frames(None).unwrap()[0].frames[0].first_seen_ms;
+
+    fx.clock.advance(60_000);
+    let mut newer = signed_in();
+    if let InstallStatus::Installed { version, .. } = &mut newer.installed {
+        *version = Some("1.1.0".into());
+    }
+    probed.say(newer);
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let now = fx.kernel.executor_frames(None).unwrap();
+    assert_eq!(now[0].cli_version.as_deref(), Some("1.1.0"));
+    assert!(
+        now[0].frames.is_empty(),
+        "what the old CLI sent is not the new one's: {:?}",
+        now[0].frames
+    );
+    // Only what rises from here counts, and it is new under the new version.
+    probed.frames.lock().unwrap().insert("type:a".into(), 3);
+    probed.frames.lock().unwrap().insert("type:b".into(), 1);
+    let rose = fx.kernel.executor_frames(None).unwrap();
+    let seen: Vec<(&str, u64)> = rose[0]
+        .frames
+        .iter()
+        .map(|f| (f.kind.as_str(), f.count))
+        .collect();
+    assert_eq!(seen, [("type:a", 2), ("type:b", 1)]);
+    assert!(rose[0].frames.iter().all(|f| f.first_seen_ms > old));
+}
+
+#[tokio::test(start_paused = true)]
+async fn frames_of_an_unknown_executor_are_not_found() {
+    let fx = Fx::new(config(1), Probed::new(signed_in()).registry()).await;
+    let error = fx.kernel.executor_frames(Some(&id("nowhere"))).unwrap_err();
+    assert!(
+        matches!(error, KernelError::ExecutorNotFound(_)),
+        "{error:?}"
+    );
 }

@@ -26,6 +26,8 @@ struct Scripted {
     says: Arc<Mutex<HealthProbe>>,
     /// Never answer a probe.
     silent: bool,
+    /// What the wire layer says it did not recognise.
+    frames: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
 }
 
 impl Scripted {
@@ -34,6 +36,7 @@ impl Scripted {
             inner: MockExecutor::new(id(name)),
             says: Arc::new(Mutex::new(says)),
             silent: false,
+            frames: Arc::default(),
         }
     }
 
@@ -51,6 +54,10 @@ impl Scripted {
 impl Executor for Scripted {
     fn descriptor(&self) -> ExecutorDescriptor {
         self.inner.descriptor()
+    }
+
+    fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
+        self.frames.lock().unwrap().clone()
     }
 
     async fn probe(&self) -> HealthProbe {
@@ -223,5 +230,29 @@ daemon_test! {
         assert!(health_of(&listed, "mock").is_some(), "stored health is shown");
         daemon.request_shutdown();
         within(daemon.wait()).await.unwrap();
+    }
+}
+
+daemon_test! {
+    async fn frames_a_wire_layer_did_not_recognise_are_asked_for_by_kind() {
+        let noisy = Scripted::new("mock", healthy());
+        noisy.frames.lock().unwrap().insert("type:brand_new".into(), 4);
+        let fx = Fixture::with(|c| c.executors = set(&[&noisy])).await;
+        within(fx.client.refresh_executors(None)).await.unwrap();
+
+        let all = within(fx.client.executor_frames(None)).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, id("mock"));
+        assert_eq!(all[0].cli_version.as_deref(), Some("1.0.0"));
+        assert_eq!(all[0].frames.len(), 1);
+        assert_eq!(all[0].frames[0].kind, "type:brand_new");
+        assert_eq!(all[0].frames[0].count, 4);
+        assert!(all[0].frames[0].first_seen_ms > 0);
+
+        let one = within(fx.client.executor_frames(Some(id("mock")))).await.unwrap();
+        assert_eq!(one, all);
+        let error = within(fx.client.executor_frames(Some(id("nowhere")))).await.unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::NotFound));
+        fx.stop().await;
     }
 }

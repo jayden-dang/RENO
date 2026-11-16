@@ -15,12 +15,14 @@
 //! # Modules
 //!
 //! - [`agent`]: the plist, and whether an installed one is ours.
+//! - [`job`]: the plist of a job launchd runs once a day (the nightly conformance run).
 //! - [`launchctl`]: `launchctl` behind a trait, with a fake.
 //! - [`policy`]: the restart backoff, pure.
 //! - [`logs`]: the log files: paths, tails, and a JSON line as text.
 //! - [`keeper`]: [`DaemonKeeper`], connect-or-start for the app's connection.
 
 pub mod agent;
+pub mod job;
 pub mod keeper;
 pub mod launchctl;
 pub mod logs;
@@ -34,6 +36,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 pub use agent::{LABEL, LaunchAgent};
+pub use job::ScheduledJob;
 pub use keeper::{DaemonKeeper, KeeperConfig};
 #[cfg(any(test, feature = "fake"))]
 pub use launchctl::FakeLaunchctl;
@@ -55,6 +58,14 @@ pub enum LauncherError {
     /// A path the LaunchAgent needs is relative or not UTF-8.
     #[error("{} must be an absolute path made of text, for launchd", .0.display())]
     Path(PathBuf),
+    /// A time of day launchd cannot run a job at.
+    #[error("{hour}:{minute} is not a time of day")]
+    Time {
+        /// The hour asked for.
+        hour: u8,
+        /// The minute asked for.
+        minute: u8,
+    },
     /// `HOME` is not set, so there is nowhere for a LaunchAgent to go.
     #[error("cannot find ~/Library/LaunchAgents: HOME is not set")]
     NoHome,

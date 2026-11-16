@@ -39,7 +39,7 @@ pub struct LaunchAgent {
     defs_dir: Option<PathBuf>,
 }
 
-fn text(path: &Path) -> Result<&str, LauncherError> {
+pub(super) fn text(path: &Path) -> Result<&str, LauncherError> {
     match path.to_str() {
         Some(text) if path.is_absolute() => Ok(text),
         _ => Err(LauncherError::Path(path.to_path_buf())),
@@ -126,7 +126,7 @@ impl LaunchAgent {
     }
 }
 
-fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {

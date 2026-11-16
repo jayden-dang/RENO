@@ -850,6 +850,32 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let executor_frames = move |p: reno_proto::ExecutorFramesParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.frames")?;
+            let known = s.read(|w| w.executors.clone());
+            if let Some(id) = &p.id
+                && !known.iter().any(|e| e.descriptor.id == *id)
+            {
+                return Err(not_found("executor"));
+            }
+            // The fake daemon runs no real harness, so nothing was ever unrecognised.
+            Ok(reno_proto::ExecutorFramesResult {
+                executors: known
+                    .into_iter()
+                    .filter(|e| p.id.as_ref().is_none_or(|id| e.descriptor.id == *id))
+                    .map(|e| reno_proto::ExecutorFrameCounts {
+                        id: e.descriptor.id,
+                        cli_version: None,
+                        frames: Vec::new(),
+                    })
+                    .collect(),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let executor_install = move |p: reno_proto::ExecutorInstallParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -960,6 +986,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::ExecutorList, _, _>(executor_list)
         .method::<reno_proto::ExecutorRefresh, _, _>(executor_refresh)
         .method::<reno_proto::ExecutorInstall, _, _>(executor_install)
+        .method::<reno_proto::ExecutorFrames, _, _>(executor_frames)
         .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
         .method::<reno_proto::DefList, _, _>(def_list)
         .method::<reno_proto::DefGet, _, _>(def_get)

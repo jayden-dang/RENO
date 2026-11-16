@@ -51,6 +51,23 @@ pub struct CaseResult {
     pub took: Duration,
 }
 
+/// What a live run knows about the CLI, for the nightly job's record.
+#[derive(Debug, Clone)]
+pub struct LiveMeta {
+    /// The model the run used.
+    pub model: String,
+    /// The installed CLI's version, when the probe read one.
+    pub cli_version: Option<String>,
+    /// `cli_verified.min` of the driver.
+    pub cli_min: String,
+    /// `cli_verified.verified` of the driver.
+    pub cli_verified: String,
+    /// The probe's version gate: `ok`, `too_old`, `untested` or `unchecked`.
+    pub version_gate: String,
+    /// The estimated number of model runs.
+    pub estimated_runs: usize,
+}
+
 /// One target's results, in suite order.
 #[derive(Debug, Clone)]
 pub struct TargetReport {
@@ -85,6 +102,46 @@ impl TargetReport {
     /// Whether no case failed.
     pub fn is_green(&self) -> bool {
         self.failures().is_empty()
+    }
+
+    /// The report as JSON, for the nightly job's dated file: the target, a record per case
+    /// (`case`, `status` as `pass`, `skip`, `waived` or `fail`, `reason`, `tookMs`) and the
+    /// unrecognised-frame counters by kind.
+    pub fn to_json(&self) -> serde_json::Value {
+        let cases: Vec<serde_json::Value> = self
+            .results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "case": r.case.name(),
+                    "status": match r.status {
+                        Status::Pass => "pass",
+                        Status::Skip(_) => "skip",
+                        Status::Waived(_) => "waived",
+                        Status::Fail(_) => "fail",
+                    },
+                    "reason": r.status.reason(),
+                    "tookMs": u64::try_from(r.took.as_millis()).unwrap_or(u64::MAX),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "target": self.target,
+            "cases": cases,
+            "unknownFrames": self.unknown_frames,
+        })
+    }
+
+    /// [`Self::to_json`] with the CLI's facts: the record `cargo xtask conformance-live` reads.
+    pub fn to_live_json(&self, meta: &LiveMeta) -> serde_json::Value {
+        let mut value = self.to_json();
+        value["model"] = serde_json::json!(meta.model);
+        value["cliVersion"] = serde_json::json!(meta.cli_version);
+        value["cliMin"] = serde_json::json!(meta.cli_min);
+        value["cliVerified"] = serde_json::json!(meta.cli_verified);
+        value["versionGate"] = serde_json::json!(meta.version_gate);
+        value["estimatedRuns"] = serde_json::json!(meta.estimated_runs);
+        value
     }
 
     /// The labels, in suite order, as `case=label`: what a test pins.

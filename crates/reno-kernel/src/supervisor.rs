@@ -81,6 +81,8 @@ impl Sub {
 /// What the supervisor must know about the run to judge its approvals.
 #[derive(Debug, Clone)]
 pub(crate) struct RunInfo {
+    /// The executor the run stands on: where its unrecognised frames are counted (T1.14).
+    pub(crate) executor: reno_proto::ExecutorId,
     /// The run's worktree, which policy paths are judged against.
     pub(crate) cwd: PathBuf,
     /// The bot the run is pinned to, which policy rules are scoped by.
@@ -580,6 +582,7 @@ impl Supervisor {
             diagnostic = Some(why);
         }
         let reason = self.stop_reason(stop);
+        self.shared.note_unknown_frames(&self.info.executor);
         if self.lost {
             tracing::warn!(run = %self.run, "not ending a run whose lease was lost");
         } else {

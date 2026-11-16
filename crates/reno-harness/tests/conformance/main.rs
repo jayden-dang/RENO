@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod broken;
+mod modes;
 mod targets;
 
 use reno_harness::conformance::{CaseId, Status, Target, TargetReport, render_table, run_suite};

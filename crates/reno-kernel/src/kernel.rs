@@ -406,6 +406,16 @@ impl Kernel {
         Ok(self.executors())
     }
 
+    /// The frames each executor's wire layer did not recognise since the daemon started, by kind,
+    /// for `id` or for every executor. Errors with [`KernelError::ExecutorNotFound`] for an id
+    /// that is not registered.
+    pub fn executor_frames(
+        &self,
+        id: Option<&ExecutorId>,
+    ) -> Result<Vec<reno_proto::ExecutorFrameCounts>> {
+        self.shared.executor_frames(id)
+    }
+
     /// Probes every executor in the background, on the kernel's own tasks. The daemon calls it
     /// once when it starts; nothing probes on a timer (ARCH-10).
     pub fn probe_executors_in_background(&self) {

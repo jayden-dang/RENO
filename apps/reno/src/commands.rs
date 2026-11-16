@@ -9,17 +9,17 @@ use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
-    ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult, RunId, RunListParams,
-    RunListResult, RunSummary, Seq, StopReason, TaskRunParams, TriggerListResult,
-    WorkspaceCleanResult, WorkspaceListResult,
+    ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult,
+    RunId, RunListParams, RunListResult, RunSummary, Seq, StopReason, TaskRunParams,
+    TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
-    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorInstall, ExecutorRefresh,
-    Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail, TaskCommand,
-    TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList,
-    WorkspaceShow,
+    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall,
+    ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail,
+    TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
+    WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
@@ -52,6 +52,7 @@ pub(crate) async fn executor(env: &Env, command: ExecutorCommand) -> anyhow::Res
         ExecutorCommand::List => executor_list(env).await,
         ExecutorCommand::Refresh(args) => executor_refresh(env, args).await,
         ExecutorCommand::Install(args) => executor_install(env, args).await,
+        ExecutorCommand::Frames(args) => executor_frames(env, args).await,
     }
 }
 
@@ -325,6 +326,22 @@ async fn executor_install(env: &Env, args: ExecutorInstall) -> anyhow::Result<Ex
         print_json(&reno_proto::ExecutorInstallResult { executor })?;
     } else {
         print_line(render::executor_line(&executor))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_frames(env: &Env, args: ExecutorFrames) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let executors = client
+        .executor_frames(args.id)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&ExecutorFramesResult { executors })?;
+    } else {
+        for line in render::frames_lines(&executors) {
+            print_line(line)?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -38,6 +38,15 @@ libc.workspace = true
 # production builds; the harness's own tests turn it on through the dev-dependency below.
 conformance = []
 
+# The MCP server the live conformance run injects (`tests/conformance_live.rs`). Integration
+# tests find it through `CARGO_BIN_EXE_conformance-ping-mcp`, so building the test builds it.
+[[bin]]
+name = "conformance-ping-mcp"
+path = "tests/support/ping_mcp.rs"
+required-features = ["conformance"]
+test = false
+doc = false
+
 [dev-dependencies]
 # Turns the `conformance` feature on for this crate's own integration tests, so the suite runs
 # in plain `cargo test`.

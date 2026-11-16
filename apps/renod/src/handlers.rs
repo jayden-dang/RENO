@@ -30,6 +30,7 @@
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
+//! | `executor.frames` | `executor_frames` |
 //! | `executor.install` | `install_executor` |
 //! | `executors.watch` | `watch_executors` |
 //! | `agent.auth` | `agent_authenticate` |
@@ -86,8 +87,9 @@ use reno_proto::{
     TriggersWatchParams,
 };
 use reno_proto::{
-    ExecutorInfo, ExecutorInstall, ExecutorInstallParams, ExecutorInstallResult, ExecutorList,
-    ExecutorListResult, ExecutorRefresh, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatch,
+    ExecutorFrames, ExecutorFramesParams, ExecutorFramesResult, ExecutorInfo, ExecutorInstall,
+    ExecutorInstallParams, ExecutorInstallResult, ExecutorList, ExecutorListResult,
+    ExecutorRefresh, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatch,
     ExecutorsWatchParams,
 };
 use reno_proto::{
@@ -191,6 +193,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ExecutorList, _, _>(bind(ctx, executor_list))
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
+        .method::<ExecutorFrames, _, _>(bind(ctx, executor_frames))
         .method::<SecretList, _, _>(bind(ctx, secret_list))
         .method::<SecretSet, _, _>(bind(ctx, secret_set))
         .method::<SecretDelete, _, _>(bind(ctx, secret_delete))
@@ -682,6 +685,16 @@ async fn budget_resume(ctx: Arc<Ctx>, p: BudgetResumeParams) -> Reply<BudgetResu
 async fn executor_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<ExecutorListResult> {
     Ok(ExecutorListResult {
         executors: ctx.kernel.executors(),
+    })
+}
+
+/// The frames each executor's wire layer did not recognise, by kind (T1.14).
+async fn executor_frames(ctx: Arc<Ctx>, p: ExecutorFramesParams) -> Reply<ExecutorFramesResult> {
+    Ok(ExecutorFramesResult {
+        executors: ctx
+            .kernel
+            .executor_frames(p.id.as_ref())
+            .map_err(|e| kernel_error(&e))?,
     })
 }
 
