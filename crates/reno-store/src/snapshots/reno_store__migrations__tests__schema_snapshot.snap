@@ -67,7 +67,7 @@ CREATE TABLE bot_usage (
     bot           TEXT NOT NULL,
     day           TEXT NOT NULL,
     input_tokens  INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
-    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0), cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0), cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0),
     PRIMARY KEY (bot, day)
 ) WITHOUT ROWID;
 
@@ -160,7 +160,7 @@ CREATE TABLE run_usage (
     input_tokens  INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
     output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
     updated_at    INTEGER NOT NULL
-) WITHOUT ROWID;
+, cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0), cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0)) WITHOUT ROWID;
 
 CREATE TABLE runs (
     id               TEXT PRIMARY KEY,

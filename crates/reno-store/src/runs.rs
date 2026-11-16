@@ -381,7 +381,7 @@ pub(crate) fn tx_claim_next(
                AND (r.status = 'queued' OR r.lease_expires_at <= ?1)
                AND {}
              ORDER BY r.created_at, r.rowid LIMIT 1",
-            claim_terms()
+            claim_terms(filter.cache_read_permille)
         ))
         .db()?
         .query_row(params![now, paused, day], |r| {

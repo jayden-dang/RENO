@@ -1398,7 +1398,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -3007,6 +3007,20 @@ expression: protocol_schema()
                 "description": "The bot.",
                 "type": "string"
               },
+              "cacheReadTokensToday": {
+                "default": 0,
+                "description": "Of what its runs read today, the input served from the prompt cache, as the harnesses\nreported it (unweighted). `tokens_today` counts only a share of it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cacheWriteTokensToday": {
+                "default": 0,
+                "description": "Of what its runs sent today, the input written to the prompt cache (unweighted; counted\nin full by `tokens_today`).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "dailyTokenCeiling": {
                 "description": "The most it may use per day; absent for no ceiling.",
                 "format": "uint64",
@@ -3045,7 +3059,7 @@ expression: protocol_schema()
                 "type": "integer"
               },
               "tokensToday": {
-                "description": "Tokens (input and output) its runs have used today.",
+                "description": "The tokens its runs have used today as the ceiling counts them: input, output and cache\nwrites in full, plus the cache reads at the weight in\n`BudgetStatusResult::cache_read_weight_permille`.",
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
@@ -3072,6 +3086,13 @@ expression: protocol_schema()
               "$ref": "#/$defs/BotBudgetStatus"
             },
             "type": "array"
+          },
+          "cacheReadWeightPermille": {
+            "default": 0,
+            "description": "How much of a cache read counts toward a daily token ceiling, in thousandths (100 means a\ntenth). Cache reads are about a tenth of the price of input, so they weigh that much.\nAbsent from a daemon that predates the weight, which counted no cache tokens at all.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           },
           "day": {
             "description": "The local day the token counts are for, `YYYY-MM-DD`.",
@@ -3322,7 +3343,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -8791,7 +8812,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]
@@ -9592,7 +9613,7 @@ expression: protocol_schema()
               },
               {
                 "const": "tokens",
-                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:\ninput, output and cache writes in full, and cache reads at a fraction of their count\n(`BudgetStatusResult::cache_read_weight_permille`).",
                 "type": "string"
               }
             ]

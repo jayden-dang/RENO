@@ -61,6 +61,7 @@ fn budget_types_on_the_wire() {
             day: "2026-11-16".into(),
             day_ends_at_ms: 1_700_000_000_000,
             default_wall_time_ms: 14_400_000,
+            cache_read_weight_permille: 100,
             bots: vec![
                 BotBudgetStatus {
                     bot: "keeper".into(),
@@ -68,6 +69,8 @@ fn budget_types_on_the_wire() {
                     max_concurrent_runs: 2,
                     queued_runs: 3,
                     tokens_today: 120,
+                    cache_read_tokens_today: 5_000,
+                    cache_write_tokens_today: 40,
                     daily_token_ceiling: Some(1000),
                     max_wall_time_ms: 2_700_000,
                     paused: false,
@@ -78,6 +81,8 @@ fn budget_types_on_the_wire() {
                     max_concurrent_runs: 1,
                     queued_runs: 0,
                     tokens_today: 0,
+                    cache_read_tokens_today: 0,
+                    cache_write_tokens_today: 0,
                     daily_token_ceiling: None,
                     max_wall_time_ms: 60_000,
                     paused: true,
@@ -86,15 +91,35 @@ fn budget_types_on_the_wire() {
         },
         json!({
             "paused": true, "day": "2026-11-16", "dayEndsAtMs": 1_700_000_000_000_u64,
-            "defaultWallTimeMs": 14_400_000,
+            "defaultWallTimeMs": 14_400_000, "cacheReadWeightPermille": 100,
             "bots": [
                 {"bot": "keeper", "liveRuns": 1, "maxConcurrentRuns": 2, "queuedRuns": 3,
-                 "tokensToday": 120, "dailyTokenCeiling": 1000, "maxWallTimeMs": 2_700_000,
-                 "paused": false},
+                 "tokensToday": 120, "cacheReadTokensToday": 5_000, "cacheWriteTokensToday": 40,
+                 "dailyTokenCeiling": 1000, "maxWallTimeMs": 2_700_000, "paused": false},
                 {"bot": "scribe", "liveRuns": 0, "maxConcurrentRuns": 1, "queuedRuns": 0,
-                 "tokensToday": 0, "maxWallTimeMs": 60_000, "paused": true}
+                 "tokensToday": 0, "cacheReadTokensToday": 0, "cacheWriteTokensToday": 0,
+                 "maxWallTimeMs": 60_000, "paused": true}
             ]
         }),
+    );
+}
+
+#[test]
+fn a_status_from_a_daemon_that_predates_cache_tokens_reads_as_zero() {
+    let old: BudgetStatusResult = serde_json::from_value(json!({
+        "paused": false, "day": "2026-11-16", "dayEndsAtMs": 1, "defaultWallTimeMs": 2,
+        "bots": [{"bot": "keeper", "liveRuns": 0, "maxConcurrentRuns": 1, "queuedRuns": 0,
+                  "tokensToday": 7, "maxWallTimeMs": 3, "paused": false}]
+    }))
+    .unwrap();
+    assert_eq!(old.cache_read_weight_permille, 0);
+    assert_eq!(old.bots[0].tokens_today, 7);
+    assert_eq!(
+        (
+            old.bots[0].cache_read_tokens_today,
+            old.bots[0].cache_write_tokens_today
+        ),
+        (0, 0)
     );
 }
 

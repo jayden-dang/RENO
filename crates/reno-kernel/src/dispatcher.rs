@@ -106,6 +106,7 @@ async fn fill(shared: &Arc<Shared>) -> Result<(), StoreError> {
         let filter = ClaimFilter {
             day: shared.db.today(),
             paused_bots: pauses.bots.iter().cloned().collect(),
+            cache_read_permille: shared.config.cache_read_permille(),
         };
         let Some(claim) = shared
             .db
@@ -137,7 +138,11 @@ async fn next_day_start(shared: &Arc<Shared>) -> Option<Duration> {
     }
     let now = shared.db.now_ms();
     let zone = shared.db.zone();
-    let blocked = shared.db.token_blocked_bots(&zone.day_of(now)).await.ok()?;
+    let blocked = shared
+        .db
+        .token_blocked_bots(&zone.day_of(now), shared.config.cache_read_permille())
+        .await
+        .ok()?;
     if blocked.is_empty() {
         return None;
     }
@@ -161,6 +166,7 @@ async fn next_lease_expiry(shared: &Arc<Shared>) -> Option<Duration> {
     let filter = ClaimFilter {
         day: shared.db.today(),
         paused_bots: pauses.bots.iter().cloned().collect(),
+        cache_read_permille: shared.config.cache_read_permille(),
     };
     // Only leases a claim would take once they run out: a run the filter passes over is woken
     // by what lifts the filter (a resume, a run's end, midnight), not by its lease.

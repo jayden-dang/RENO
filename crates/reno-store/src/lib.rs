@@ -50,7 +50,9 @@ mod writer;
 
 pub use agent::{BoardRow, BoardWrite, NewRunToken, RunToken};
 pub use approvals::{ExpireScope, Expired, NewApproval, StoredApproval};
-pub use budget::{ClaimFilter, GLOBAL as GLOBAL_PAUSE, Occupancy, Tokens};
+pub use budget::{
+    ClaimFilter, DEFAULT_CACHE_READ_PERMILLE, GLOBAL as GLOBAL_PAUSE, Occupancy, Tokens,
+};
 pub use db::Store;
 pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOutcome};
 pub use error::{Result, StoreError};

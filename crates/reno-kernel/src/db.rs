@@ -217,8 +217,14 @@ impl Db {
         self.store.occupancy().await
     }
 
-    pub(crate) async fn token_blocked_bots(&self, day: &str) -> Result<Vec<String>> {
-        self.store.token_blocked_bots(day).await
+    pub(crate) async fn token_blocked_bots(
+        &self,
+        day: &str,
+        cache_read_permille: u32,
+    ) -> Result<Vec<String>> {
+        self.store
+            .token_blocked_bots(day, cache_read_permille)
+            .await
     }
 
     pub(crate) async fn pause(&self, scope: &str) -> Result<bool> {

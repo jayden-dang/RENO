@@ -30,8 +30,9 @@ use crate::ids::RunId;
 pub enum BudgetKind {
     /// How long one run may take (`budget.max_wall_time`). Limits are in milliseconds.
     WallTime,
-    /// What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,
-    /// input and output together.
+    /// What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens:
+    /// input, output and cache writes in full, and cache reads at a fraction of their count
+    /// (`BudgetStatusResult::cache_read_weight_permille`).
     Tokens,
 }
 
@@ -185,8 +186,18 @@ pub struct BotBudgetStatus {
     pub max_concurrent_runs: u32,
     /// Its runs waiting to be claimed.
     pub queued_runs: u32,
-    /// Tokens (input and output) its runs have used today.
+    /// The tokens its runs have used today as the ceiling counts them: input, output and cache
+    /// writes in full, plus the cache reads at the weight in
+    /// `BudgetStatusResult::cache_read_weight_permille`.
     pub tokens_today: u64,
+    /// Of what its runs read today, the input served from the prompt cache, as the harnesses
+    /// reported it (unweighted). `tokens_today` counts only a share of it.
+    #[serde(default)]
+    pub cache_read_tokens_today: u64,
+    /// Of what its runs sent today, the input written to the prompt cache (unweighted; counted
+    /// in full by `tokens_today`).
+    #[serde(default)]
+    pub cache_write_tokens_today: u64,
     /// The most it may use per day; absent for no ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daily_token_ceiling: Option<u64>,
@@ -209,6 +220,11 @@ pub struct BudgetStatusResult {
     pub day_ends_at_ms: u64,
     /// The longest a run with no bot may take, in milliseconds.
     pub default_wall_time_ms: u64,
+    /// How much of a cache read counts toward a daily token ceiling, in thousandths (100 means a
+    /// tenth). Cache reads are about a tenth of the price of input, so they weigh that much.
+    /// Absent from a daemon that predates the weight, which counted no cache tokens at all.
+    #[serde(default)]
+    pub cache_read_weight_permille: u32,
     /// Every bot in the definitions in force, and any other that is paused, by name.
     pub bots: Vec<BotBudgetStatus>,
 }

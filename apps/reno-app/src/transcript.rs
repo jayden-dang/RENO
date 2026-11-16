@@ -121,7 +121,9 @@ impl Row {
     }
 }
 
-/// Token usage so far.
+/// Token usage so far. `input` is the whole input of the calls, the cached part included: the
+/// harness reports the uncached remainder apart, and showing only that would undercount a long
+/// run by orders of magnitude.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Usage {
     pub(crate) input: u64,
@@ -201,10 +203,13 @@ pub(crate) fn build_rows(
             ExecEvent::Usage {
                 input_tokens,
                 output_tokens,
-                ..
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
                 built.facts.usage = Some(Usage {
-                    input: *input_tokens,
+                    input: input_tokens
+                        .saturating_add(*cache_read_tokens)
+                        .saturating_add(*cache_write_tokens),
                     output: *output_tokens,
                 });
             }
@@ -532,6 +537,22 @@ mod tests {
         assert_eq!(built.facts.model.as_deref(), Some("opus"));
         let usage = built.facts.usage.unwrap();
         assert_eq!((usage.input, usage.output, usage.total()), (30, 9, 39));
+    }
+
+    #[test]
+    fn a_usage_with_cache_tokens_shows_the_whole_input() {
+        let built = build(
+            vec![ExecEvent::Usage {
+                input_tokens: 16,
+                output_tokens: 9_120,
+                cache_read_tokens: 1_270_554,
+                cache_write_tokens: 48_213,
+            }],
+            &[],
+        );
+        let usage = built.facts.usage.unwrap();
+        assert_eq!(usage.input, 1_318_783);
+        assert_eq!(usage.total(), 1_327_903);
     }
 
     #[test]

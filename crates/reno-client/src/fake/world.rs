@@ -744,6 +744,8 @@ impl World {
                     max_concurrent_runs: 1,
                     queued_runs: u32::try_from(queued).unwrap_or(u32::MAX),
                     tokens_today: 0,
+                    cache_read_tokens_today: 0,
+                    cache_write_tokens_today: 0,
                     daily_token_ceiling: None,
                     max_wall_time_ms: 45 * 60_000,
                     paused: self.paused_bots.contains(*name),
@@ -755,6 +757,7 @@ impl World {
             day: "2026-11-16".to_owned(),
             day_ends_at_ms: self.now_ms + 24 * 3_600_000,
             default_wall_time_ms: 4 * 3_600_000,
+            cache_read_weight_permille: 100,
             bots,
         }
     }
