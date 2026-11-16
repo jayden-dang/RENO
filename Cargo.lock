@@ -5206,6 +5206,7 @@ dependencies = [
  "globset",
  "insta",
  "jiff",
+ "proptest",
  "schemars",
  "semver",
  "serde",

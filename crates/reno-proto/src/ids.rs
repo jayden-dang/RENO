@@ -175,6 +175,10 @@ prefixed_id!(
     ApprovalId, "appr"
 );
 prefixed_id!(
+    /// A standing rule: a decision a person made to hold beyond one action (`rule_...`).
+    RuleId, "rule"
+);
+prefixed_id!(
     /// A candidate change to a definition (`prop_...`).
     ProposalId, "prop"
 );

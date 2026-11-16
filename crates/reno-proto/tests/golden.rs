@@ -294,7 +294,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets"],
+                            "run.resume", "run.stop_detail", "secrets", "rules"],
                "pid": 4242}),
     );
 }
@@ -378,6 +378,7 @@ fn approval_decide() {
             approval_id: "appr_01K1".parse().unwrap(),
             decision: ApprovalDecision::ApproveOnce,
             message: None,
+            remember: None,
         },
         json!({"approvalId": "appr_01K1", "decision": "approve_once"}),
     );
@@ -386,6 +387,7 @@ fn approval_decide() {
             approval_id: "appr_01K1".parse().unwrap(),
             decision: ApprovalDecision::Deny,
             message: None,
+            remember: None,
         },
         json!({"approvalId": "appr_01K1", "decision": "deny"}),
     );
@@ -394,9 +396,36 @@ fn approval_decide() {
             approval_id: "appr_01K1".parse().unwrap(),
             decision: ApprovalDecision::Deny,
             message: Some("use the staging bucket".into()),
+            remember: None,
         },
         json!({"approvalId": "appr_01K1", "decision": "deny",
                "message": "use the staging bucket"}),
+    );
+    golden(
+        &ApprovalDecideParams {
+            approval_id: "appr_01K1".parse().unwrap(),
+            decision: ApprovalDecision::ApproveOnce,
+            message: None,
+            remember: Some(Remember {
+                scope: RememberScope::Bot,
+                expires_in_secs: Some(3600),
+            }),
+        },
+        json!({"approvalId": "appr_01K1", "decision": "approve_once",
+               "remember": {"scope": "bot", "expiresInSecs": 3600}}),
+    );
+    golden(
+        &ApprovalDecideParams {
+            approval_id: "appr_01K1".parse().unwrap(),
+            decision: ApprovalDecision::Deny,
+            message: None,
+            remember: Some(Remember {
+                scope: RememberScope::Always,
+                expires_in_secs: None,
+            }),
+        },
+        json!({"approvalId": "appr_01K1", "decision": "deny",
+               "remember": {"scope": "always"}}),
     );
     assert!(
         serde_json::from_value::<ApprovalDecision>(json!("approve_always")).is_err(),
@@ -420,6 +449,7 @@ fn approval_history() {
         run_id: run_id(),
         request_id: "r1".into(),
         subject: approval().subject,
+        subject_digest: None,
         status: ApprovalStatus::Approved,
         decided_by: Some(ResolvedBy::Human),
         created_at_ms: 1_794_700_000_000,
@@ -1412,4 +1442,56 @@ fn a_bot_without_a_resume_setting_keeps_its_hash() {
             .is_none()
     );
     assert_eq!(serde_json::to_value(&never).unwrap()["resume"], "never");
+}
+
+#[test]
+fn standing_rules() {
+    assert_eq!(<RuleList as Method>::NAME, "rule.list");
+    assert_eq!(<RuleRevoke as Method>::NAME, "rule.revoke");
+    assert!(FEATURES.contains(&FEATURE_RULES));
+    golden(&RuleListParams::default(), json!({"includeInactive": false}));
+    golden(&RuleRevokeResult {}, json!({}));
+    golden(
+        &RuleRevokeParams {
+            id: "rule_01K1".parse().unwrap(),
+        },
+        json!({"id": "rule_01K1"}),
+    );
+    let rule = StandingRule {
+        id: "rule_01K1".parse().unwrap(),
+        scope: StandingScope::Bot {
+            bot: "scout".into(),
+        },
+        effect: StandingEffect::Allow,
+        matcher: RuleMatcher {
+            action: ActionClass::Command,
+            tool: "bash".into(),
+            command: Some(CommandPattern::Exact {
+                command: "git push".into(),
+            }),
+            paths: vec![],
+        },
+        created_by: "human".into(),
+        created_at_ms: 1_794_700_000_000,
+        expires_at_ms: None,
+        revoked_at_ms: None,
+        source_approval: Some("appr_01K1".parse().unwrap()),
+    };
+    let wire = json!({
+        "id": "rule_01K1",
+        "scope": {"type": "bot", "bot": "scout"},
+        "effect": "allow",
+        "matcher": {
+            "action": "command",
+            "tool": "bash",
+            "command": {"type": "exact", "command": "git push"},
+            "paths": []
+        },
+        "createdBy": "human",
+        "createdAtMs": 1_794_700_000_000u64,
+        "sourceApproval": "appr_01K1"
+    });
+    golden(&rule, wire.clone());
+    golden(&RuleListResult { rules: vec![rule] }, json!({"rules": [wire]}));
+    golden(&StandingScope::Always, json!({"type": "always"}));
 }
