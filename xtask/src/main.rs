@@ -58,14 +58,17 @@ const ALLOWED_DEV_EDGES: &[(&str, &str)] = &[("renod", "reno-client")];
 /// Members outside the layering.
 const EXEMPT: &[&str] = &["xtask"];
 
-/// External packages and the only member allowed to depend on them directly.
+/// External packages and the members allowed to depend on them directly.
 /// A trailing `*` matches a name prefix.
-const OWNERS: &[(&str, &str)] = &[
-    ("rusqlite", "reno-store"),
-    ("libsqlite3-sys", "reno-store"),
-    ("gpui*", "reno-app"),
-    ("notify", "renod"),
-    ("security-framework", "renod"),
+///
+/// `notify` is the daemon's (it watches definitions and `fs` triggers) and also the CLI's, for
+/// `reno daemon logs -f`, which follows a log file by file events instead of polling it.
+const OWNERS: &[(&str, &[&str])] = &[
+    ("rusqlite", &["reno-store"]),
+    ("libsqlite3-sys", &["reno-store"]),
+    ("gpui*", &["reno-app"]),
+    ("notify", &["renod", "reno"]),
+    ("security-framework", &["renod"]),
 ];
 
 /// Packages that some members must never use.
@@ -296,12 +299,12 @@ fn ownership_violations(metadata: &Metadata) -> Vec<Violation> {
         let name = package.name.as_str();
         for dependency in &package.dependencies {
             let used = dependency.name.as_str();
-            for (pattern, owner) in OWNERS {
-                if pattern_matches(pattern, used) && name != *owner {
+            for (pattern, owners) in OWNERS {
+                if pattern_matches(pattern, used) && !owners.contains(&name) {
                     violations.push(Violation::new(
                         "ownership",
                         name,
-                        format!("{used} is only allowed in {owner}"),
+                        format!("{used} is only allowed in {}", owners.join(", ")),
                     ));
                 }
             }
@@ -552,6 +555,7 @@ mod tests {
             package("reno-proto", &[("tokio", None)]),
             package("renod", &[("notify", None), ("security-framework", None)]),
             package("reno", &[("notify", None)]),
+            package("reno-client", &[("notify", None)]),
         ]);
         assert_eq!(
             rendered(&ownership_violations(&m)),
@@ -559,7 +563,7 @@ mod tests {
                 "ownership: reno-kernel -> rusqlite is only allowed in reno-store",
                 "ownership: reno-kernel -> gpui_tokio is only allowed in reno-app",
                 "ownership: reno-proto -> tokio is not allowed here",
-                "ownership: reno -> notify is only allowed in renod",
+                "ownership: reno-client -> notify is only allowed in renod, reno",
             ]
         );
     }

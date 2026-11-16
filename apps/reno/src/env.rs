@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::anyhow;
+use reno_client::launcher::Launcher;
 use reno_client::{Client, ClientError};
 
 use crate::cli::Cli;
@@ -39,9 +40,14 @@ impl Env {
         })
     }
 
-    /// Where `renod` writes its logs.
-    pub(crate) fn logs(&self) -> Option<PathBuf> {
-        self.data_dir.as_ref().map(|dir| dir.join("logs"))
+    /// The launcher for this data directory: starts `renod`, and installs its LaunchAgent.
+    pub(crate) fn launcher(&self) -> anyhow::Result<Launcher> {
+        let Some(data_dir) = self.data_dir.clone() else {
+            return Err(anyhow!(
+                "cannot tell where the daemon keeps its files: set --data-dir, or HOME"
+            ));
+        };
+        Ok(Launcher::from_env(data_dir, self.socket.clone())?)
     }
 
     /// Connects to the daemon. `None` means nothing is listening.
@@ -109,7 +115,6 @@ mod tests {
     fn a_data_dir_puts_the_socket_inside_it() {
         let env = env(&["--data-dir", "/tmp/reno-x"]);
         assert_eq!(env.socket, PathBuf::from("/tmp/reno-x/reno.sock"));
-        assert_eq!(env.logs(), Some(PathBuf::from("/tmp/reno-x/logs")));
     }
 
     #[test]

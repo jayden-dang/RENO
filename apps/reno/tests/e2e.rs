@@ -79,6 +79,12 @@ impl World {
             .env("RENO_DEFS_DIR", self.defs_dir())
             .env_remove("RENO_LOG")
             .env_remove("RENO_MOCK_HOLD")
+            // Never look at, let alone run, the real launchd.
+            .env(
+                "RENO_LAUNCH_AGENTS_DIR",
+                self._root.path().join("LaunchAgents"),
+            )
+            .env("RENO_LAUNCHCTL", "/usr/bin/false")
             // `reno daemon start` passes its environment on to `renod`: never probe a real
             // harness CLI from a test.
             .env("RENO_NO_HARNESSES", "1")

@@ -5,6 +5,7 @@
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(any(test, feature = "fake"))]
 use std::sync::Mutex;
 
 /// What `launchctl` does for us. The domain is `gui/<uid>`; the service is `<domain>/<label>`.

@@ -4841,6 +4841,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "notify",
  "reno-client",
  "reno-proto",
  "rustix",
