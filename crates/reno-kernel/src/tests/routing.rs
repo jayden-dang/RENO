@@ -118,6 +118,13 @@ impl Executor for Fake {
     }
 }
 
+fn with_defaults(names: &[&str]) -> KernelConfig {
+    KernelConfig {
+        default_executors: names.iter().map(|n| id(n)).collect(),
+        ..config(1)
+    }
+}
+
 fn registry_of(fakes: &[&Fake]) -> ExecutorRegistry {
     fakes
         .iter()
@@ -255,7 +262,11 @@ async fn the_walk_is_bounded_by_the_candidates_and_ends_with_no_eligible_executo
     let a = Fake::new("a-first").refusing(Refusal::NotSignedIn);
     let b = Fake::new("b-second").refusing(Refusal::NotInstalled);
     let c = Fake::new("c-third").refusing(Refusal::NotSignedIn);
-    let fx = Fx::new(config(1), registry_of(&[&a, &b, &c])).await;
+    let fx = Fx::new(
+        with_defaults(&["a-first", "b-second", "c-third"]),
+        registry_of(&[&a, &b, &c]),
+    )
+    .await;
 
     let (run, decision) = fx
         .kernel
@@ -289,7 +300,11 @@ async fn a_failure_after_the_executor_started_is_not_a_fallback_case() {
         ..first
     };
     let second = Fake::new("b-second");
-    let fx = Fx::new(config(1), registry_of(&[&first, &second])).await;
+    let fx = Fx::new(
+        with_defaults(&["a-first", "b-second"]),
+        registry_of(&[&first, &second]),
+    )
+    .await;
 
     let run = fx
         .kernel
@@ -309,7 +324,7 @@ async fn a_failure_after_the_executor_started_is_not_a_fallback_case() {
 #[tokio::test(start_paused = true)]
 async fn a_supervised_task_never_reaches_a_full_access_only_executor() {
     let yolo = Fake::new("yolo").access(&[AccessMode::FullAccess]);
-    let fx = Fx::new(config(1), registry_of(&[&yolo])).await;
+    let fx = Fx::new(with_defaults(&["yolo"]), registry_of(&[&yolo])).await;
 
     // The router refuses it, by name or by default.
     for request in [
@@ -342,7 +357,11 @@ async fn a_supervised_task_never_reaches_a_full_access_only_executor() {
     // A full-access executor beside it changes nothing for a Supervised task: it goes to the
     // one that offers Supervised.
     let safe = Fake::new("safe");
-    let fx = Fx::new(config(1), registry_of(&[&yolo, &safe])).await;
+    let fx = Fx::new(
+        with_defaults(&["yolo", "safe"]),
+        registry_of(&[&yolo, &safe]),
+    )
+    .await;
     let (run, decision) = fx
         .kernel
         .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
@@ -453,4 +472,73 @@ async fn a_bot_less_task_writes_in_place_only_when_it_opts_in_and_never_in_a_rep
     let in_repo = go("/repo", true).await;
     fx.wait_status(&in_repo, RunStatus::Succeeded).await;
     assert_ne!(m.log().specs[1].cwd, PathBuf::from("/repo"));
+}
+
+/// A task with no bot and no named executor goes only to the configured defaults, in order:
+/// never to an `acp.*` agent or the mock, however they sort.
+#[tokio::test(start_paused = true)]
+async fn a_task_naming_nothing_goes_to_claude_code_then_codex_and_never_to_acp_or_mock() {
+    let claude = Fake::new("claude-code");
+    let codex = Fake::new("codex");
+    let acp = Fake::new("acp.antigravity");
+    let mock = Fake::new("mock");
+    let all = [&claude, &codex, &acp, &mock];
+    let fx = Fx::new(with_defaults(&["claude-code", "codex"]), registry_of(&all)).await;
+    let request = || TaskRequest::new("go", PathBuf::from("/work"));
+
+    let (run, decision) = fx.kernel.submit_task(request()).await.unwrap();
+    assert_eq!(decision.rule_matched, RuleMatched::Default);
+    assert_eq!(decision.chosen, Some(id("claude-code")));
+    assert_eq!(decision.ranked, [id("claude-code"), id("codex")]);
+    let left_out: Vec<&str> = decision
+        .rejected
+        .iter()
+        .map(|r| r.executor.as_str())
+        .collect();
+    assert_eq!(left_out, ["acp.antigravity", "mock"]);
+    assert!(
+        decision
+            .rejected
+            .iter()
+            .all(|r| matches!(r.reason, RejectReason::Excluded { .. }))
+    );
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    // Signed out, Claude Code falls to Codex.
+    *claude.health.lock().unwrap() = signed_out();
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let (run, decision) = fx.kernel.submit_task(request()).await.unwrap();
+    assert_eq!(decision.chosen, Some(id("codex")));
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!((acp.starts(), mock.starts()), (0, 0));
+
+    // With both signed out nothing runs, and the diagnostic says what to do.
+    *codex.health.lock().unwrap() = signed_out();
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let (run, decision) = fx.kernel.submit_task(request()).await.unwrap();
+    assert_eq!(decision.chosen, None);
+    fx.wait_status(&run, RunStatus::Failed).await;
+    let why = diagnostic_of(&fx, &run).await;
+    assert!(why.starts_with("NoEligibleExecutor:"), "{why}");
+    assert!(why.contains("name an executor"), "{why}");
+    assert_eq!((acp.starts(), mock.starts()), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_no_default_executors_a_task_naming_nothing_fails_and_says_to_name_one() {
+    let acp = Fake::new("acp.antigravity");
+    let fx = Fx::new(config(1), registry_of(&[&acp])).await;
+    let (run, decision) = fx
+        .kernel
+        .submit_task(TaskRequest::new("go", PathBuf::from("/work")))
+        .await
+        .unwrap();
+    assert_eq!(decision.chosen, None);
+    fx.wait_status(&run, RunStatus::Failed).await;
+    let why = diagnostic_of(&fx, &run).await;
+    assert!(
+        why.starts_with("NoEligibleExecutor:") && why.contains("use a bot"),
+        "{why}"
+    );
+    assert_eq!(acp.starts(), 0);
 }

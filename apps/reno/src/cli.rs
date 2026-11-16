@@ -108,9 +108,11 @@ pub(crate) enum TaskCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct TaskRun {
-    /// The executor to run on [default: the daemon's router chooses: the bot's first eligible
-    /// executor with --bot, else the first eligible one by name]. Naming one means no fallback to
-    /// another.
+    /// The executor to run on. Without it, and without --bot, the daemon tries its default
+    /// executors in order (Claude Code, then Codex; only the mock when no real harness is
+    /// installed) and falls back to the next when one is signed out or missing; other executors
+    /// (ACP agents, the mock beside real harnesses) are reached only by naming them or through a
+    /// bot. With --bot, the bot's executors in order. Naming one means no fallback to another.
     #[arg(long)]
     pub(crate) executor: Option<String>,
     /// Run as this bot: the run is pinned to the version of the bot's definition in force now.

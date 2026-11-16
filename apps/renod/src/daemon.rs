@@ -217,6 +217,9 @@ impl Daemon {
             Arc::new(FsDefinitions::open(&paths.defs_dir, defs_debounce).map_err(defs_error)?);
 
         kernel.owner = format!("renod-{}", std::process::id());
+        if kernel.default_executors.is_empty() {
+            kernel.default_executors = default_executors(&ids);
+        }
         // Resolved once, so that it is comparable with the resolved working directories that
         // `task.run` hands the kernel (a symlinked data directory must still count as scratch).
         let scratch = tokio::fs::canonicalize(paths.workspace())
@@ -426,6 +429,25 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
         kernel_aborted: report.aborted,
         server_aborted,
     }
+}
+
+/// Where a task with no bot and no named executor may go: Claude Code, then Codex, when the
+/// daemon has real harnesses; the mock only when it has nothing else (`RENO_NO_HARNESSES`, tests).
+/// The mock is never a default beside real harnesses: it would "succeed" without doing anything.
+fn default_executors(registered: &[ExecutorId]) -> Vec<ExecutorId> {
+    let real: Vec<ExecutorId> = ["claude-code", "codex"]
+        .iter()
+        .filter_map(|name| registered.iter().find(|id| id.as_str() == *name))
+        .cloned()
+        .collect();
+    if !real.is_empty() {
+        return real;
+    }
+    registered
+        .iter()
+        .filter(|id| id.as_str() == "mock")
+        .cloned()
+        .collect()
 }
 
 fn log_serve_end(joined: Result<Result<(), RpcError>, tokio::task::JoinError>) {

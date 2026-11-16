@@ -230,7 +230,7 @@ daemon_test! {
     /// ROADMAP T1.5: a Supervised task is never routed to a full-access-only executor, and with
     /// no eligible executor it fails with `NoEligibleExecutor`.
     async fn a_supervised_task_with_only_a_full_access_executor_fails_with_no_eligible_executor() {
-        let yolo = Scripted::new("yolo").full_access_only();
+        let yolo = Scripted::new("claude-code").full_access_only();
         let fx = Fixture::with(|c| c.executors = set(&[&yolo])).await;
         within(fx.client.refresh_executors(None)).await.unwrap();
 
@@ -251,6 +251,34 @@ daemon_test! {
         assert!(yolo.inner.log().specs.is_empty(), "nothing was started");
         let stored = within(fx.client.run_routing(&submitted.run_id)).await.unwrap().unwrap();
         assert_eq!(stored.chosen, None);
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
+    /// A task naming nothing goes to Claude Code, then Codex, and never to an `acp.*` agent or
+    /// the mock, whatever their ids sort like.
+    async fn a_task_naming_nothing_goes_to_claude_code_then_codex_and_never_to_acp_or_mock() {
+        let claude = Scripted::new("claude-code");
+        let codex = Scripted::new("codex");
+        let acp = Scripted::new("acp.antigravity");
+        let mock = Scripted::new("mock");
+        let fx = Fixture::with(|c| c.executors = set(&[&claude, &codex, &acp, &mock])).await;
+        within(fx.client.refresh_executors(None)).await.unwrap();
+
+        let first = within(fx.client.submit_task(task(None))).await.unwrap();
+        let decision = first.routing.unwrap();
+        assert_eq!(decision.chosen, Some(id("claude-code")));
+        assert_eq!(decision.ranked, [id("claude-code"), id("codex")]);
+        assert_eq!(finished(&fx, &first.run_id).await, RunStatus::Succeeded);
+
+        // Claude Code signed out: Codex.
+        *claude.says.lock().unwrap() = probe(SignedIn::No { hint: "login".into() });
+        within(fx.client.refresh_executors(None)).await.unwrap();
+        let second = within(fx.client.submit_task(task(None))).await.unwrap();
+        assert_eq!(second.routing.unwrap().chosen, Some(id("codex")));
+        assert_eq!(finished(&fx, &second.run_id).await, RunStatus::Succeeded);
+        assert!(acp.inner.log().specs.is_empty() && mock.inner.log().specs.is_empty());
         fx.stop().await;
     }
 }

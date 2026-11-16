@@ -1738,7 +1738,8 @@ async fn handshake(session: &Session, app: &mut AppServer) -> Result<(), Option<
 /// What `thread/start` and `thread/resume` carry besides the thread id. The bot's `instructions`
 /// go as `developerInstructions`: extra developer-role guidance for the thread, which leaves
 /// Codex's own base instructions in place (so it is the closest to Claude's appended system
-/// prompt).
+/// prompt). The field is in the Codex 0.169 app-server schema for both `ThreadStartParams` and
+/// `ThreadResumeParams`.
 fn thread_params(
     spec: &ExecSpec,
     cwd: &str,

@@ -13,7 +13,8 @@
 //!    1. the task names its executor: only that one is a candidate (no fallback beyond it);
 //!    2. the task runs as a bot: the bot's `executors` list, in its order, is the preference and
 //!       the whole candidate set;
-//!    3. otherwise the eligible executors in id order (`Default`).
+//!    3. otherwise only the daemon's default executors, in their order (`Default`); any other
+//!       executor is rejected as not a default, reachable by naming it or through a bot.
 //!
 //!    Rules from definitions (a `[routing]` section) and scoring by past results are not part of
 //!    this change; the rule list is where they go.
@@ -63,6 +64,8 @@ pub struct RouteRequest {
     pub bot: Option<BotPreference>,
     /// Executors the task must not go to.
     pub exclude: Vec<ExecutorId>,
+    /// The executors a task with neither a bot nor a named executor may go to, in order.
+    pub defaults: Vec<ExecutorId>,
 }
 
 /// Why `descriptor` cannot take a task that asks for `access` and `sandbox`, given what its last
@@ -116,7 +119,16 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
                 },
                 bot.executors.clone(),
             ),
-            (None, None) => (RuleMatched::Default, Vec::new()),
+            (None, None) => (
+                RuleMatched::Default,
+                // A default this daemon does not have is not worth a line: it is not a candidate.
+                request
+                    .defaults
+                    .iter()
+                    .filter(|id| candidates.iter().any(|c| &c.descriptor.id == *id))
+                    .cloned()
+                    .collect(),
+            ),
         };
     // Preferred executors first, in their order; then every other candidate by id.
     let mut rest: Vec<&Candidate> = candidates.iter().collect();
@@ -171,11 +183,12 @@ fn excluded(request: &RouteRequest, id: &ExecutorId) -> Option<RejectReason> {
         }
         format!("the task names {explicit}")
     } else {
-        let bot = request.bot.as_ref()?;
-        if bot.executors.contains(id) {
-            return None;
+        match request.bot.as_ref() {
+            Some(bot) if bot.executors.contains(id) => return None,
+            Some(bot) => format!("bot {} does not list it", bot.name),
+            None if request.defaults.contains(id) => return None,
+            None => "not a default executor: name it, or use a bot that lists it".to_owned(),
         }
-        format!("bot {} does not list it", bot.name)
     };
     Some(RejectReason::Excluded { why })
 }
@@ -278,6 +291,17 @@ mod tests {
             explicit: None,
             bot: None,
             exclude: vec![],
+            defaults: [
+                "claude-code",
+                "codex",
+                "a-missing",
+                "b-old",
+                "c-out",
+                "d-unknown",
+                "yolo",
+            ]
+            .map(id)
+            .to_vec(),
         }
     }
 

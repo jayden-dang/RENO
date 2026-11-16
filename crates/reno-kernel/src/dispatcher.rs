@@ -33,7 +33,7 @@ use reno_harness::exec::{ExecControls, ExecError, ExecHandle};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
-    RoutingDecision, RunId, RunStatus, SandboxLevel, StartFailureKind, StopReason,
+    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, StartFailureKind, StopReason,
 };
 use reno_store::{Claim, RunRecord, StoreError};
 use tokio::sync::mpsc;
@@ -246,6 +246,10 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
     })
 }
 
+/// What to say when a task that named no executor and no bot found none to go to.
+const NAME_ONE: &str =
+    "name an executor (task.run executor, `reno task run --executor`) or use a bot";
+
 /// What one try at starting a run on one executor came to.
 enum Attempt {
     Started(BoxStream<'static, ExecEvent>, ExecHandle),
@@ -437,6 +441,21 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     let mut decision = shared.db.run_routing(&run_id).await.ok().flatten();
     let mut current = row.executor.clone();
     let mut refusals: Vec<(ExecutorId, String)> = Vec::new();
+    // A task that named nothing and has no default to go to (the router left every executor out
+    // as not a default): nothing is started, whatever the executor it is recorded against.
+    if let Some(left_out) = decision.as_ref().filter(|d| {
+        d.chosen.is_none()
+            && d.rejected
+                .iter()
+                .any(|r| r.executor == current && matches!(r.reason, RejectReason::Excluded { .. }))
+    }) {
+        let why = format!(
+            "NoEligibleExecutor: no default executor can take the task ({}); {NAME_ONE}",
+            left_out.explain()
+        );
+        let account = Some(StartFailure::NoEligibleExecutor);
+        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+    }
     let (stream, handle) = loop {
         match attempt(shared, &cancel, &current, &spec).await {
             Attempt::Started(stream, handle) => {
@@ -484,7 +503,13 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 match next {
                     Some(next) => current = next,
                     None => {
-                        let why = refused_by_all(&refusals);
+                        let mut why = refused_by_all(&refusals);
+                        if decision
+                            .as_ref()
+                            .is_some_and(|d| d.rule_matched == RuleMatched::Default)
+                        {
+                            why = format!("{why}; {NAME_ONE}");
+                        }
                         let account = Some(account);
                         return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot)
                             .await;

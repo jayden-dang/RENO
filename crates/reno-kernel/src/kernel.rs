@@ -779,6 +779,7 @@ pub(crate) fn plan_route(
             explicit: explicit.clone(),
             bot: preference.clone(),
             exclude: Vec::new(),
+            defaults: shared.config.default_executors.clone(),
         },
         &candidates,
         at_ms,
@@ -791,11 +792,14 @@ pub(crate) fn plan_route(
         .or_else(|| match &preference {
             // A bot's run is recorded against one of its own executors.
             Some(bot) => bot.executors.iter().find(registered).cloned(),
-            None => decision
-                .rejected
+            // Recorded against a default executor when one is here, so the run fails with its
+            // refusal; never against one the router left out as not a default.
+            None => shared
+                .config
+                .default_executors
                 .iter()
-                .map(|rejection| &rejection.executor)
                 .find(registered)
+                .or_else(|| shared.executors.ids().min_by_key(|id| id.as_str()))
                 .cloned(),
         })
         .ok_or_else(|| KernelError::NoExecutor(bot.unwrap_or("(any)").to_owned()))?;
