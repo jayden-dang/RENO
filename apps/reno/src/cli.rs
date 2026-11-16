@@ -61,12 +61,41 @@ pub(crate) enum Command {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DaemonCommand {
-    /// Start `renod` in the background and wait until it answers.
+    /// Start `renod` in the background and wait until it answers. Does nothing when it is
+    /// already running. With a LaunchAgent installed, asks launchd to start it instead.
     Start,
     /// Ask the daemon to stop and wait until it has.
     Stop,
     /// Show whether the daemon is running. Exits 1 when it is not.
     Status,
+    /// Stop the daemon if it is running, then start it.
+    Restart,
+    /// Show the daemon's log: the last lines, and with --follow the lines as they are written.
+    Logs(DaemonLogs),
+    /// Install a LaunchAgent that starts the daemon at login and restarts it after a crash.
+    ///
+    /// Writes ~/Library/LaunchAgents/dev.reno.renod.plist, stops a daemon started by hand so
+    /// that launchd owns it, and loads the agent with `launchctl bootstrap gui/<uid>`.
+    Install(DaemonInstall),
+    /// Unload the LaunchAgent and delete its plist. This stops the daemon.
+    Uninstall(DaemonInstall),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DaemonLogs {
+    /// Keep printing new lines as they are written, until interrupted.
+    #[arg(short, long)]
+    pub(crate) follow: bool,
+    /// How many of the last lines to show first.
+    #[arg(short = 'n', long, default_value_t = 50, value_name = "N")]
+    pub(crate) lines: usize,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DaemonInstall {
+    /// Print what would be written and run, and change nothing.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]

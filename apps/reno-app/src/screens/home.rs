@@ -259,12 +259,18 @@ impl Render for HomeScreen {
                 col.child(
                     div()
                         .max_w(px(560.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(4.0))
                         .text_size(px(13.5))
                         .text_color(theme.muted)
-                        .child(format!(
-                            "{}. Or run reno-app --fake for a demo daemon.",
-                            reason.trim_end_matches('.')
-                        )),
+                        .children(
+                            reason
+                                .lines()
+                                .map(|line| div().child(line.trim_end().to_owned())),
+                        )
+                        .child("Or run reno-app --fake for a demo daemon."),
                 )
             })
             .child(context_chips)

@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 use super::defs::{FakePort, file, setup};
 use super::{Fx, START_MS, id, mock, registry, until};
 use crate::Clock as _;
-use crate::{ExecutorRegistry, KernelConfig, KernelError, Watch, WatchSpec, WatchStream};
+use crate::{
+    ExecutorRegistry, KernelConfig, KernelError, WakeSignal, Watch, WatchSpec, WatchStream,
+};
 
 const MIN: i64 = 60_000;
 const HOUR: i64 = 3_600_000;
@@ -374,25 +376,73 @@ async fn downtime_across_three_occurrences_is_one_catch_up_run() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_clock_that_jumped_is_noticed_within_the_guard() {
-    let (fx, _port) = start(
-        files(vec![trigger(
-            "tick",
-            "kind = \"every\"\nevery = \"1h\"",
-            "go",
-        )]),
-        &[mock([])],
+/// The scheduler of `files` with a wake signal wired in, the clock at `START_MS`.
+async fn start_with_wake(files: Vec<DefFile>) -> (Fx, WakeSignal) {
+    let port = FakePort::with(files);
+    let wake = WakeSignal::new();
+    let fx = Fx::with_definitions_at(
+        START_MS,
+        KernelConfig::default(),
+        registry(&[mock([])]),
+        setup(&port).with_wake(wake.clone()),
     )
     .await;
-    // Only the wall clock moves (the machine slept): the timer has not fired.
-    fx.clock.advance(3 * HOUR + 10 * MIN);
-    assert!(runs(&fx).await.is_empty());
-    tokio::time::advance(crate::scheduler::CLOCK_GUARD).await;
+    (fx, wake)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cron_due_while_the_machine_slept_fires_on_the_wake_signal() {
+    // Due at 03:00 UTC; it is 22:13 UTC, 4 h 47 min away.
+    let when = "kind = \"cron\"\ncron = \"0 3 * * *\"\ntimezone = \"UTC\"";
+    let (fx, wake) = start_with_wake(files(vec![trigger("nightly", when, "go")])).await;
+    until(async || caught_up(&fx).then_some(())).await;
+
+    // The machine sleeps through the due time: the wall clock moves 6 h, the timer only 2 h. The
+    // old one-hour guard would have looked at the clock by now; nothing else does.
+    fx.clock.advance(6 * HOUR);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(30 * 60)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        runs(&fx).await.is_empty(),
+        "no periodic wake reads the clock"
+    );
+
+    // It wakes up, and the system says so.
+    wake.notify();
     until(async || (!runs(&fx).await.is_empty()).then_some(())).await;
     until(async || caught_up(&fx).then_some(())).await;
-    assert_eq!(runs(&fx).await.len(), 1, "three occurrences, one run");
-    assert_eq!(firings(&fx).await[0].missed, 3);
+    assert_eq!(runs(&fx).await.len(), 1, "one occurrence, one run");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_with_nothing_due_changes_nothing() {
+    let when = "kind = \"cron\"\ncron = \"0 3 * * *\"\ntimezone = \"UTC\"";
+    let (fx, wake) = start_with_wake(files(vec![trigger("nightly", when, "go")])).await;
+    let before = fx.idle().await;
+    fx.clock.advance(MIN);
+    wake.notify();
+    wake.notify();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        fx.idle().await,
+        before,
+        "a wake reads the clock and writes nothing"
+    );
+    assert!(runs(&fx).await.is_empty());
+}
+
+#[test]
+fn the_scheduler_arms_one_timer_for_the_earliest_deadline_and_none_when_idle() {
+    use crate::scheduler::until_deadline;
+    assert_eq!(until_deadline(None, 5), None, "no deadline, no timer");
+    assert_eq!(
+        until_deadline(Some(5 + 30 * HOUR), 5),
+        Some(Duration::from_millis(u64::try_from(30 * HOUR).unwrap())),
+        "not capped to an hour"
+    );
+    assert_eq!(until_deadline(Some(5), 9), Some(Duration::from_millis(1)));
 }
 
 // ---- reused target -----------------------------------------------------------------------

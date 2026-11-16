@@ -25,9 +25,14 @@ struct Renod {
 
 impl Renod {
     fn spawn(data_dir: &Path) -> Self {
+        Self::spawn_with(data_dir, &[])
+    }
+
+    fn spawn_with(data_dir: &Path, extra: &[&std::ffi::OsStr]) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_renod"))
             .arg("--data-dir")
             .arg(data_dir)
+            .args(extra)
             .env("RENO_MOCK_HOLD", "1")
             // Keep the definitions inside the test's own directory.
             .env("RENO_DEFS_DIR", data_dir.join("defs"))
@@ -238,6 +243,93 @@ process_test! {
         let events: Vec<_> = within(client.run_events(run, None).collect::<Vec<_>>()).await;
         let last = events.last().expect("events").as_ref().expect("ok");
         assert!(is_done(&last.event, StopReason::Interrupted));
+        next.signal("TERM");
+        assert!(next.exit().await.success());
+    }
+}
+
+/// A stand-in for the Claude Code CLI that starts a grandchild (as an MCP server or a tool would
+/// be) and then wedges without reading its input, so that only the daemon's process-group kill
+/// can end it. The grandchild's pid is written to `pidfile`.
+fn wedged_claude(dir: &Path, pidfile: &Path) -> PathBuf {
+    let script = dir.join("claude");
+    let text = format!(
+        r#"#!/bin/sh
+case "$1" in --version) echo "2.1.228 (Claude Code)"; exit 0 ;; esac
+read -r first
+while :; do
+  case "$first" in
+    *'"request_id":"reno_initialize"'*)
+      printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"reno_initialize","response":{{}}}}}}'
+      read -r first || exit 1 ;;
+    *) break ;;
+  esac
+done
+sleep 300 </dev/null >/dev/null 2>&1 &
+printf '%s' "$!" > '{pidfile}'
+printf '%s\n' '{{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-term"}}'
+printf '%s\n' '{{"type":"stream_event","parent_tool_use_id":null,"event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":"working"}}}}}}'
+exec sleep 600
+"#,
+        pidfile = pidfile.display()
+    );
+    std::fs::write(&script, text).expect("write the fake claude");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+fn alive(pid: u32) -> bool {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, test_kill_process};
+    let pid = Pid::from_raw(i32::try_from(pid).expect("pid")).expect("pid");
+    !matches!(test_kill_process(pid), Err(Errno::SRCH))
+}
+
+process_test! {
+    async fn sigterm_leaves_no_agent_process_behind() {
+        let (root, dir) = data_dir();
+        let pidfile = root.path().join("grandchild.pid");
+        let claude = wedged_claude(root.path(), &pidfile);
+        let mut daemon = Renod::spawn_with(
+            &dir,
+            &["--claude-executable".as_ref(), claude.as_os_str()],
+        );
+        let client = daemon.client().await;
+        let run = within(client.run_task(TaskRunParams {
+            prompt: "hold".into(),
+            executor: Some(id("claude-code")),
+            bot: None,
+            cwd: None,
+            model: None,
+        }))
+        .await
+        .expect("task.run");
+        let mut events = Box::pin(client.run_events(run.clone(), None));
+        while !matches!(
+            within(events.next()).await.expect("event").expect("ok").event,
+            ExecEvent::Text { .. }
+        ) {}
+        let grandchild: u32 = std::fs::read_to_string(&pidfile)
+            .expect("the grandchild's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(alive(grandchild), "the agent's child is running");
+        drop(events);
+        drop(client);
+
+        daemon.signal("TERM");
+        assert!(daemon.exit().await.success(), "a clean exit");
+
+        // The agent's process group was ended before the daemon let go of the lock.
+        assert!(!alive(grandchild), "pid {grandchild} outlived the daemon");
+        assert!(!dir.join("reno.sock").exists());
+        let mut next = Renod::spawn(&dir);
+        let client = next.client().await;
+        assert_eq!(
+            within(client.get_run(&run)).await.expect("run.get").status,
+            RunStatus::Interrupted
+        );
         next.signal("TERM");
         assert!(next.exit().await.success());
     }

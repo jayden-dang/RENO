@@ -3,12 +3,16 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use reno_harness::ClaudeExecutor;
+use reno_harness::exec::Executor;
+use reno_kernel::ExecutorRegistry;
 use renod::defs::{self, DEFS_DIR_ENV};
 use renod::paths::{self, DATA_DIR_ENV, SOCKET_ENV, ensure_private_dir};
-use renod::{Daemon, DaemonConfig, ExecutorSource, Paths, logging};
+use renod::{Daemon, DaemonConfig, ExecutorSet, ExecutorSource, Paths, executors, logging};
 use tokio::signal::unix::{SignalKind, signal};
 
 /// The allocator is chosen by measurement (ARCHITECTURE 17.8): the `mimalloc` feature selects v2.
@@ -45,6 +49,10 @@ struct Args {
     /// Register only the mock executor: look for no harness CLI, for tests.
     #[arg(long, env = "RENO_NO_HARNESSES", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
     no_harnesses: bool,
+    /// Register only the mock and Claude Code, the latter driven through this program: for tests
+    /// that need a run with a real child process, and for pinning a binary. Looks for no other CLI.
+    #[arg(long, env = "RENO_CLAUDE_EXECUTABLE", hide = true, value_name = "PATH")]
+    claude_executable: Option<PathBuf>,
     /// How many runs may be live at once [default: the kernel's own], for benchmarks.
     #[arg(long, env = "RENO_MAX_CONCURRENT", hide = true, value_name = "N")]
     max_concurrent: Option<usize>,
@@ -85,6 +93,8 @@ fn run(args: Args) -> anyhow::Result<()> {
         .with_context(|| format!("cannot prepare {}", paths.data_dir.display()))?;
     let logs = paths.logs();
     ensure_private_dir(&logs).with_context(|| format!("cannot prepare {}", logs.display()))?;
+    // A launcher that points our stderr at a file only ever appends to it.
+    logging::bound_stderr_file(std::io::stderr(), logging::STDERR_LIMIT);
     let _logs = logging::init(&logs)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -98,6 +108,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         paths,
         args.mock_hold,
         !args.no_harnesses,
+        args.claude_executable,
         args.max_concurrent,
     ));
     if let Err(error) = &outcome {
@@ -110,15 +121,18 @@ async fn serve(
     paths: Paths,
     mock_hold: bool,
     harnesses: bool,
+    claude_executable: Option<PathBuf>,
     max_concurrent: Option<usize>,
 ) -> anyhow::Result<()> {
-    let mut config = DaemonConfig::new(
-        paths,
-        ExecutorSource::Discover {
+    let executors = match claude_executable {
+        Some(program) => ExecutorSource::Given(pinned_claude(mock_hold, program)?),
+        None => ExecutorSource::Discover {
             hold_mock: mock_hold,
             harnesses,
         },
-    );
+    };
+    let mut config = DaemonConfig::new(paths, executors);
+    config.system_wake = true;
     if let Some(limit) = max_concurrent {
         config.kernel.max_concurrent = limit;
     }
@@ -138,4 +152,16 @@ async fn serve(
         bail!("shut down past a deadline: {stopped:?}");
     }
     Ok(())
+}
+
+/// The mock, and Claude Code through `program`.
+fn pinned_claude(mock_hold: bool, program: PathBuf) -> anyhow::Result<ExecutorSet> {
+    let claude: Arc<dyn Executor> = Arc::new(ClaudeExecutor::new().with_executable(program));
+    let registry = ExecutorRegistry::new()
+        .with(Arc::new(executors::mock_executor(mock_hold)?))
+        .with(claude.clone());
+    Ok(ExecutorSet {
+        registry,
+        harnesses: vec![claude],
+    })
 }

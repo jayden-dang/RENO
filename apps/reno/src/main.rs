@@ -12,6 +12,7 @@ mod commands;
 mod daemon;
 mod defs;
 mod env;
+mod follow;
 mod policy;
 mod render;
 

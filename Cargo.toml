@@ -41,7 +41,7 @@ tempfile = "3"
 proptest = "1"
 unicode-segmentation = "1"
 
-# Definitions (T1.4): TOML files, globs, time zones, and the file watcher (renod only).
+# Definitions (T1.4): TOML files, globs, time zones, and the file watcher (renod, and the CLI for `daemon logs -f`).
 toml = "1"
 globset = { version = "0.4", default-features = false }
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }

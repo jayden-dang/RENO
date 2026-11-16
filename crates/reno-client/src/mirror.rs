@@ -291,7 +291,11 @@ fn offline_of(error: &ClientError, attempt: u32) -> Offline {
         ClientError::NotRunning(_) => OfflineKind::NotRunning,
         ClientError::Incompatible { .. } => OfflineKind::Incompatible,
         ClientError::Disconnected => OfflineKind::Lost,
-        _ => OfflineKind::Other,
+        ClientError::Starting => OfflineKind::Starting,
+        ClientError::StartFailed(_) => OfflineKind::StartFailed,
+        ClientError::Remote(_) | ClientError::Protocol(_) | ClientError::Transport(_) => {
+            OfflineKind::Other
+        }
     };
     Offline {
         kind,
