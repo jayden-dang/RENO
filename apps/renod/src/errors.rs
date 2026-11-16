@@ -13,7 +13,8 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
     match error {
         KernelError::RunNotFound(_)
         | KernelError::ApprovalNotFound(_)
-        | KernelError::TriggerNotFound(_) => ErrorCode::NotFound,
+        | KernelError::TriggerNotFound(_)
+        | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
         KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
         KernelError::NoExecutor(_) => ErrorCode::InvalidParams,
         KernelError::NotCancellable { .. } | KernelError::RunEnded(_) => ErrorCode::Conflict,
@@ -111,6 +112,10 @@ mod tests {
             ),
             (
                 KernelError::TriggerNotFound("t".into()),
+                ErrorCode::NotFound,
+            ),
+            (
+                KernelError::ExecutorNotFound("codex".parse().expect("id")),
                 ErrorCode::NotFound,
             ),
             (

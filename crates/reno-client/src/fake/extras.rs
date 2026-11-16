@@ -5,8 +5,10 @@
 
 use reno_proto::defs::{DefKind, DefRecord, DefSummary, DefsSnapshot};
 use reno_proto::{
-    ApprovalId, ApprovalRecord, ApprovalStatus, IdError, ResolvedBy, RunId, TriggerInfo,
-    TriggerStatus,
+    AccessMode, ApprovalId, ApprovalRecord, ApprovalStatus, ExecutorCaps, ExecutorDescriptor,
+    ExecutorHealth, ExecutorInfo, IdError, InstallStatus, ModelCatalog, ModelInfo,
+    NotInstalledReason, ResolvedBy, RunId, SandboxLevel, SignedIn, Steering, TriggerInfo,
+    TriggerStatus, VersionGate, VersionRange,
 };
 use serde_json::{Value, json};
 
@@ -18,6 +20,7 @@ const HOUR: u64 = 60 * MINUTE;
 /// Everything beyond runs and pending approvals that the fake serves.
 #[derive(Default)]
 pub(super) struct Extras {
+    pub(super) executors: Vec<ExecutorInfo>,
     pub(super) triggers: Vec<TriggerInfo>,
     pub(super) defs: DefsSnapshot,
     pub(super) records: Vec<DefRecord>,
@@ -246,6 +249,7 @@ pub(super) fn seed() -> Result<Extras, IdError> {
         )?,
     ];
     Ok(Extras {
+        executors: executors()?,
         triggers,
         defs: DefsSnapshot {
             defs: summaries,
@@ -254,4 +258,134 @@ pub(super) fn seed() -> Result<Extras, IdError> {
         records,
         history,
     })
+}
+
+/// The demo executors: one healthy, one signed out, one with a newer CLI than the adapter was
+/// verified on, one that needs its adapter installed, and the mock.
+fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
+    let info = |id: &str,
+                name: &str,
+                access: &[AccessMode],
+                sandbox: &[SandboxLevel],
+                range: (&str, &str),
+                health: ExecutorHealth|
+     -> Result<ExecutorInfo, IdError> {
+        Ok(ExecutorInfo {
+            descriptor: ExecutorDescriptor {
+                id: id.parse()?,
+                contract_version: 1,
+                adapter_version: format!("reno-harness demo, {name}"),
+                cli_verified: VersionRange {
+                    min: range.0.to_owned(),
+                    verified: range.1.to_owned(),
+                },
+                caps: ExecutorCaps {
+                    steering: Steering::StepBoundary,
+                    resume: true,
+                    access_modes: access.to_vec(),
+                    sandbox_levels: sandbox.to_vec(),
+                    mcp_injection: true,
+                    structured_output: false,
+                    deterministic_turn_end: true,
+                    plan_mode: false,
+                    models: health.models.models.clone(),
+                },
+            },
+            health: Some(health),
+        })
+    };
+    let models = |ids: &[(&str, &str)]| {
+        ids.iter()
+            .map(|(id, name)| ModelInfo {
+                id: (*id).to_owned(),
+                display_name: Some((*name).to_owned()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let installed = |path: &str, version: &str| InstallStatus::Installed {
+        path: path.into(),
+        version: Some(version.to_owned()),
+    };
+    let all = [
+        AccessMode::Supervised,
+        AccessMode::AutoAcceptEdits,
+        AccessMode::FullAccess,
+    ];
+    let unrestricted = [SandboxLevel::Unrestricted];
+    let at = NOW_MS - 5 * MINUTE;
+    Ok(vec![
+        info(
+            "claude-code",
+            "Claude Code",
+            &all,
+            &unrestricted,
+            ("2.1.228", "2.1.325"),
+            ExecutorHealth {
+                installed: installed("/usr/local/bin/claude", "2.1.325"),
+                version_gate: VersionGate::Ok,
+                signed_in: SignedIn::Yes {
+                    account: Some("ada@example.com".to_owned()),
+                },
+                models: ModelCatalog::curated(models(&[
+                    ("claude-opus-5-5", "Opus 5.5"),
+                    ("claude-sonnet-5-5", "Sonnet 5.5"),
+                ])),
+                checked_at_ms: at,
+            },
+        )?,
+        info(
+            "codex",
+            "Codex",
+            &all,
+            &[
+                SandboxLevel::ReadOnly,
+                SandboxLevel::WorkspaceWrite,
+                SandboxLevel::Unrestricted,
+            ],
+            ("0.146.0", "0.169.0"),
+            ExecutorHealth {
+                installed: installed("/opt/homebrew/bin/codex", "0.171.0"),
+                version_gate: VersionGate::Untested {
+                    verified: "0.169.0".to_owned(),
+                },
+                signed_in: SignedIn::No {
+                    hint: "run `codex login`".to_owned(),
+                },
+                models: ModelCatalog::live(models(&[("gpt-6-astra", "GPT-6-Astra")])),
+                checked_at_ms: at,
+            },
+        )?,
+        info(
+            "acp.hermes",
+            "Hermes",
+            &all,
+            &unrestricted,
+            ("0", "unverified"),
+            ExecutorHealth {
+                installed: InstallStatus::NotInstalled {
+                    why: NotInstalledReason::NeedsInstall {
+                        what: "the Hermes adapter (npm)".to_owned(),
+                    },
+                },
+                version_gate: VersionGate::Unchecked,
+                signed_in: SignedIn::Unknown,
+                models: ModelCatalog::curated(vec![]),
+                checked_at_ms: at,
+            },
+        )?,
+        info(
+            "mock",
+            "mock",
+            &all,
+            &unrestricted,
+            ("0", "0"),
+            ExecutorHealth {
+                installed: installed("mock", "mock"),
+                version_gate: VersionGate::Unchecked,
+                signed_in: SignedIn::Yes { account: None },
+                models: ModelCatalog::curated(models(&[("mock-1", "Mock 1")])),
+                checked_at_ms: at,
+            },
+        )?,
+    ])
 }

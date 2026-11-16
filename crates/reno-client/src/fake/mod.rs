@@ -103,6 +103,7 @@ pub(crate) struct Shared {
     runs_tx: watch::Sender<Vec<RunSummary>>,
     approvals_tx: watch::Sender<Vec<Approval>>,
     triggers_tx: watch::Sender<Vec<reno_proto::TriggerInfo>>,
+    executors_tx: watch::Sender<Vec<reno_proto::ExecutorInfo>>,
     defs_tx: watch::Sender<DefsSnapshot>,
     /// Errors a method answers with, until cleared.
     injected: Mutex<HashMap<String, ErrorObject>>,
@@ -150,6 +151,14 @@ impl Shared {
             let changed = *current != triggers;
             if changed {
                 *current = triggers;
+            }
+            changed
+        });
+        let executors = world.executors.clone();
+        self.executors_tx.send_if_modified(|current| {
+            let changed = *current != executors;
+            if changed {
+                *current = executors;
             }
             changed
         });
@@ -204,12 +213,14 @@ impl FakeDaemon {
         let (runs_tx, _) = watch::channel(world.summaries());
         let (approvals_tx, _) = watch::channel(world.pending());
         let (triggers_tx, _) = watch::channel(world.triggers.clone());
+        let (executors_tx, _) = watch::channel(world.executors.clone());
         let (defs_tx, _) = watch::channel(world.defs.clone());
         let shared = Arc::new(Shared {
             world: Mutex::new(world),
             runs_tx,
             approvals_tx,
             triggers_tx,
+            executors_tx,
             defs_tx,
             injected: Mutex::new(HashMap::new()),
             connections: Mutex::new(Vec::new()),
@@ -253,6 +264,11 @@ impl FakeDaemon {
     /// Replaces the triggers and publishes them to `triggers.watch`.
     pub fn set_triggers(&self, triggers: Vec<reno_proto::TriggerInfo>) {
         self.shared.with(|w| w.triggers = triggers);
+    }
+
+    /// Replaces the executors and their health and publishes them to `executors.watch`.
+    pub fn set_executors(&self, executors: Vec<reno_proto::ExecutorInfo>) {
+        self.shared.with(|w| w.executors = executors);
     }
 
     /// Replaces the definitions snapshot (and its file problems) and publishes it to
@@ -649,6 +665,43 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let executor_list = move |_: NoParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.list")?;
+            Ok(reno_proto::ExecutorListResult {
+                executors: s.read(|w| w.executors.clone()),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executor_refresh = move |p: reno_proto::ExecutorRefreshParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.refresh")?;
+            s.with(|w| w.refresh_executors(p.id.as_ref()))
+                .map_err(|()| not_found("executor"))?;
+            Ok(reno_proto::ExecutorListResult {
+                executors: s.read(|w| w.executors.clone()),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executors_watch = move |_: reno_proto::ExecutorsWatchParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            Ok(latest(
+                s.executors_tx.subscribe(),
+                |all: &Vec<reno_proto::ExecutorInfo>| reno_proto::ExecutorsSnapshot {
+                    executors: all.clone(),
+                },
+            ))
+        }
+    };
+
+    let s = Arc::clone(shared);
     let def_list = move |p: reno_proto::defs::DefListParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -709,6 +762,9 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::TriggerList, _, _>(trigger_list)
         .method::<reno_proto::TriggerFire, _, _>(trigger_fire)
         .subscription::<reno_proto::TriggersWatch, _, _, _>(triggers_watch)
+        .method::<reno_proto::ExecutorList, _, _>(executor_list)
+        .method::<reno_proto::ExecutorRefresh, _, _>(executor_refresh)
+        .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
         .method::<reno_proto::DefList, _, _>(def_list)
         .method::<reno_proto::DefGet, _, _>(def_get)
         .method::<reno_proto::DefValidate, _, _>(def_validate)
