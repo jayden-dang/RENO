@@ -142,6 +142,28 @@ impl RunLog {
             }
             Expect::PathAbsent(rel) if !self.cwd.join(rel).exists() => Ok(()),
             Expect::PathAbsent(rel) => Err(format!("{rel} exists in {}", self.cwd.display())),
+            Expect::FileContains { path, text } => {
+                let full = self.cwd.join(path);
+                match std::fs::read_to_string(&full) {
+                    Ok(content) if content.contains(text.as_str()) => Ok(()),
+                    Ok(content) => Err(format!(
+                        "{} does not contain {text:?} (it holds {content:?})",
+                        full.display()
+                    )),
+                    Err(error) => Err(format!("{} cannot be read: {error}", full.display())),
+                }
+            }
+            Expect::NoApprovalOf(class) => {
+                let asked = self.approvals.iter().filter(|s| s.action == *class).count();
+                if asked == 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "the run asked {asked} time(s) for approval of a {class:?} action, which the \
+                         mode must accept unasked"
+                    ))
+                }
+            }
             Expect::ApprovalClass(class) => {
                 if self.approvals.iter().any(|s| s.action == *class) {
                     Ok(())

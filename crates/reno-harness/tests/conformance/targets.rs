@@ -239,6 +239,7 @@ pub(crate) fn mock_target_for(executor: Arc<dyn Executor>) -> Target {
                 .expect(Expect::TextContains("conf-mcp".into())),
         ),
         output_schema: None,
+        mode_runs: Vec::new(),
         unknown_frames: None,
     };
     Target::new(
@@ -321,6 +322,7 @@ pub(crate) fn claude_target() -> Target {
                 .expect(Expect::ResultContains("mcp:conf-server".into())),
         ),
         output_schema: None,
+        mode_runs: Vec::new(),
         unknown_frames: Some(UnknownFramePlan {
             scenario: Scenario::new("scenario:conf-unknown")
                 .expect(Expect::ResultContains("unknown-done".into())),
@@ -399,6 +401,7 @@ pub(crate) fn codex_target() -> Target {
                 .expect(Expect::ResultContains("configured".into())),
         ),
         output_schema: None,
+        mode_runs: Vec::new(),
         unknown_frames: Some(UnknownFramePlan {
             scenario: Scenario::new("scenario:conf-unknown")
                 .expect(Expect::ResultContains("unknown-done".into())),
@@ -465,6 +468,7 @@ fn acp_plan() -> Plan {
                 .expect(Expect::TextContains("mcp configured".into())),
         ),
         output_schema: None,
+        mode_runs: Vec::new(),
         unknown_frames: Some(UnknownFramePlan {
             scenario: Scenario::new("scenario:happy"),
             keys: vec![

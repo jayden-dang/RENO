@@ -10,7 +10,7 @@ use reno_proto::{
 
 use super::drive::{Behaviour, RunLog};
 use super::report::{CaseResult, Status, TargetReport};
-use super::{CaseId, Expect, Scenario, Target};
+use super::{ApprovalAnswer, CaseId, Expect, ModeRun, Proof, Scenario, Target};
 use crate::exec::{Decision, ExecError};
 
 /// Why a case did not pass.
@@ -494,8 +494,15 @@ impl Cx<'_> {
             let mut spec = self.target.spec(scenario)?;
             spec.access = mode;
             if self.caps().access_modes.contains(&mode) {
+                let proof = Proof::Access(mode);
+                let ran_modes = self.run_mode_runs(proof).await?;
+                // Supervised is also what the approval cases run in: when both of them passed,
+                // that is a real run of the mode.
+                let by_approval = mode == AccessMode::Supervised && self.approval_cases_passed();
                 if mode != scenario.access && !self.target.exhaustive {
-                    skipped.push(format!("{mode:?}"));
+                    if !(ran_modes || by_approval) {
+                        skipped.push(format!("{mode:?}"));
+                    }
                     continue;
                 }
                 let log = self.target.drive(spec, Behaviour::Passive).await?;
@@ -521,6 +528,71 @@ impl Cx<'_> {
         waived_if(skipped, "access modes claimed but not run on this target")
     }
 
+    /// Whether the allow and the deny of the approval scenario both passed, and it runs in
+    /// `Supervised`.
+    fn approval_cases_passed(&self) -> bool {
+        let passed = |case| matches!(self.statuses.get(&case), Some(Status::Pass));
+        self.target
+            .plan
+            .approval
+            .as_ref()
+            .is_some_and(|plan| plan.scenario.access == AccessMode::Supervised)
+            && passed(CaseId::ApprovalAllow)
+            && passed(CaseId::ApprovalDeny)
+    }
+
+    /// Runs every mode run that proves `proof`. `Ok(true)` when there was at least one and all
+    /// of them held; the first that did not is the failure.
+    async fn run_mode_runs(&self, proof: Proof) -> Result<bool, Failure> {
+        let mut ran = false;
+        for mode_run in self
+            .target
+            .plan
+            .mode_runs
+            .iter()
+            .filter(|m| m.proves == proof)
+        {
+            self.mode_run(mode_run).await?;
+            ran = true;
+        }
+        Ok(ran)
+    }
+
+    async fn mode_run(&self, run: &ModeRun) -> Result<(), Failure> {
+        let scenario = &run.scenario;
+        let runs_in_it = match run.proves {
+            Proof::Access(mode) => scenario.access == mode,
+            Proof::Sandbox(level) => scenario.sandbox == level,
+        };
+        if !runs_in_it {
+            return Err(Failure::Broken(format!(
+                "a mode run says it proves {:?} but its scenario runs with access {:?} and \
+                 sandbox {:?}",
+                run.proves, scenario.access, scenario.sandbox
+            )));
+        }
+        if run.expect.is_empty() && scenario.expect.is_empty() {
+            return Err(Failure::Unplanned(format!(
+                "the mode run of {:?} declares no expectation, so it shows nothing",
+                run.proves
+            )));
+        }
+        let decision = match run.answer {
+            ApprovalAnswer::Allow => Decision::Allow,
+            ApprovalAnswer::Deny => Decision::Deny,
+        };
+        let log = self
+            .run_completed(scenario, Behaviour::Decide(decision, None))
+            .await
+            .map_err(|f| match f {
+                Failure::Broken(why) => Failure::Broken(format!("{:?} run: {why}", run.proves)),
+                other => other,
+            })?;
+        log.check_all(run.expect.iter().chain(&scenario.expect))
+            .map_err(|why| Failure::Broken(format!("{:?} run: {why}", run.proves)))?;
+        Ok(())
+    }
+
     async fn sandbox_levels(&mut self) -> CaseResultOf {
         let scenario = self.need(&self.target.plan.lifecycle, "lifecycle")?;
         let mut skipped = Vec::new();
@@ -532,8 +604,11 @@ impl Cx<'_> {
             let mut spec = self.target.spec(scenario)?;
             spec.sandbox = level;
             if level == SandboxLevel::Unrestricted || self.caps().sandbox_levels.contains(&level) {
+                let ran_modes = self.run_mode_runs(Proof::Sandbox(level)).await?;
                 if level != scenario.sandbox && !self.target.exhaustive {
-                    skipped.push(format!("{level:?}"));
+                    if !ran_modes {
+                        skipped.push(format!("{level:?}"));
+                    }
                     continue;
                 }
                 let log = self.target.drive(spec, Behaviour::Passive).await?;

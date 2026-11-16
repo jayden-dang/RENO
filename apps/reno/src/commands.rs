@@ -9,17 +9,17 @@ use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
-    ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult, RunId, RunListParams,
-    RunListResult, RunSummary, Seq, StopReason, TaskRunParams, TriggerListResult,
-    WorkspaceCleanResult, WorkspaceListResult,
+    ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult,
+    RunId, RunListParams, RunListResult, RunSummary, Seq, StopReason, TaskRunParams,
+    TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
-    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall, ExecutorRefresh,
-    Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail, TaskCommand,
-    TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList,
-    WorkspaceShow,
+    ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall,
+    ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail,
+    TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
+    WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};

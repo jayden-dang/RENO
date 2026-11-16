@@ -218,6 +218,17 @@ pub enum Expect {
     PathExists(String),
     /// This path, relative to the run's working directory, does not exist afterwards.
     PathAbsent(String),
+    /// This file, relative to the run's working directory, exists afterwards and its text
+    /// contains `text`. An absolute path is taken as it is.
+    FileContains {
+        /// The file.
+        path: String,
+        /// What it must contain.
+        text: String,
+    },
+    /// The run asked for no approval of this class. Used where a mode must accept an action
+    /// unasked (an edit under `AutoAcceptEdits`).
+    NoApprovalOf(ActionClass),
 }
 
 /// One run to make: a prompt, how to start it, and what it must show.
@@ -272,6 +283,13 @@ impl Scenario {
     #[must_use]
     pub fn access(mut self, access: AccessMode) -> Self {
         self.access = access;
+        self
+    }
+
+    /// Run at `sandbox`.
+    #[must_use]
+    pub fn sandbox(mut self, sandbox: SandboxLevel) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -338,6 +356,40 @@ pub struct ApprovalPlan {
     pub on_deny_message: Vec<Expect>,
 }
 
+/// What a [`ModeRun`] shows about one access mode or sandbox level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proof {
+    /// The run exercises this access mode (its scenario runs in it).
+    Access(AccessMode),
+    /// The run exercises this sandbox level (its scenario runs at it).
+    Sandbox(SandboxLevel),
+}
+
+/// How a [`ModeRun`] answers the approvals it is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalAnswer {
+    /// Allow every approval.
+    Allow,
+    /// Deny every approval: what a sandbox run uses, so that a request to leave the sandbox is
+    /// never granted by the test itself.
+    Deny,
+}
+
+/// One run that shows what an access mode or a sandbox level really does: an edit accepted
+/// unasked, a command that asks, a write that does not land. A live target gives one per mode it
+/// can drive cheaply; without it the mode is not run on that target and is reported `waived`.
+#[derive(Debug, Clone)]
+pub struct ModeRun {
+    /// The mode or level it proves. The scenario must run in it.
+    pub proves: Proof,
+    /// The run.
+    pub scenario: Scenario,
+    /// How approvals are answered.
+    pub answer: ApprovalAnswer,
+    /// What must hold afterwards, besides the scenario's own expectations.
+    pub expect: Vec<Expect>,
+}
+
 /// A run that makes the wire layer see one frame it does not know.
 #[derive(Debug, Clone)]
 pub struct UnknownFramePlan {
@@ -371,6 +423,37 @@ pub struct Plan {
     pub output_schema: Option<Scenario>,
     /// A run that makes the wire see an unknown frame.
     pub unknown_frames: Option<UnknownFramePlan>,
+    /// Runs that show what an access mode or sandbox level does. They stand in for the plain run
+    /// of the lifecycle scenario under that mode when the target is not exhaustive.
+    pub mode_runs: Vec<ModeRun>,
+}
+
+impl Plan {
+    /// About how many model runs the whole suite makes with this plan: one per scenario, two for
+    /// the approval (allow and deny), one per mode run, and the plain runs of the access-mode and
+    /// sandbox cases that every target makes. An estimate for the line a live run prints first;
+    /// the cases that reuse an earlier run are not counted twice.
+    pub fn estimated_runs(&self) -> usize {
+        let scenarios = [
+            &self.lifecycle,
+            &self.input,
+            &self.steer,
+            &self.cancel,
+            &self.crash,
+            &self.resume,
+            &self.mcp,
+            &self.output_schema,
+        ]
+        .into_iter()
+        .filter(|s| s.is_some())
+        .count();
+        let approvals = if self.approval.is_some() { 2 } else { 0 };
+        let unknown = usize::from(self.unknown_frames.is_some());
+        // The access-mode and sandbox cases each run the lifecycle scenario once at its own
+        // mode, when there is a lifecycle scenario.
+        let baselines = if self.lifecycle.is_some() { 2 } else { 0 };
+        scenarios + approvals + unknown + baselines + self.mode_runs.len()
+    }
 }
 
 /// Facts about an executor that the descriptor has no field for.

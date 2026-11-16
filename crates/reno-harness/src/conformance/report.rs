@@ -87,6 +87,34 @@ impl TargetReport {
         self.failures().is_empty()
     }
 
+    /// The report as JSON, for the nightly job's dated file: the target, a record per case
+    /// (`case`, `status` as `pass`, `skip`, `waived` or `fail`, `reason`, `tookMs`) and the
+    /// unrecognised-frame counters by kind.
+    pub fn to_json(&self) -> serde_json::Value {
+        let cases: Vec<serde_json::Value> = self
+            .results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "case": r.case.name(),
+                    "status": match r.status {
+                        Status::Pass => "pass",
+                        Status::Skip(_) => "skip",
+                        Status::Waived(_) => "waived",
+                        Status::Fail(_) => "fail",
+                    },
+                    "reason": r.status.reason(),
+                    "tookMs": u64::try_from(r.took.as_millis()).unwrap_or(u64::MAX),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "target": self.target,
+            "cases": cases,
+            "unknownFrames": self.unknown_frames,
+        })
+    }
+
     /// The labels, in suite order, as `case=label`: what a test pins.
     pub fn labels(&self) -> Vec<String> {
         self.results
