@@ -371,6 +371,71 @@ fn a_cancelled_run_ends_the_task_command_non_zero() {
     assert!(stop.status.success());
 }
 
+#[test]
+fn an_interrupted_run_is_resumed_from_the_command_line() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    world.start_daemon();
+    let mut task = world
+        .command(&["task", "run", "wait for me"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+
+    // A live run is not resumable, and the refusal says why in words and as a typed reason.
+    let early = world.reno(&["run", "resume", &id]);
+    assert_eq!(early.status.code(), Some(1));
+    assert!(
+        text(&early.stderr).contains("cannot be resumed"),
+        "{}",
+        text(&early.stderr)
+    );
+    assert_eq!(
+        world.reno(&["run", "resume", "run_nothere"]).status.code(),
+        Some(1)
+    );
+
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    task.wait_with_output().expect("task run ends");
+
+    // The run says who stopped it and that the daemon will not take it back.
+    let shown = text(&world.reno(&["run", "show", &id]).stdout);
+    assert!(shown.contains("stopped: the run was cancelled"), "{shown}");
+    assert!(
+        shown.contains("not resumed: it was cancelled on request"),
+        "{shown}"
+    );
+    let json = world.json(&["run", "show", &id]);
+    assert_eq!(json["run"]["stop"]["type"], "cancelled");
+    assert_eq!(json["run"]["notResumed"]["type"], "cancelled");
+    assert_eq!(json["run"]["session"], "mock-session");
+
+    let resumed = world.reno(&["run", "resume", &id, "--prompt", "carry on"]);
+    assert!(resumed.status.success(), "{}", text(&resumed.stderr));
+    assert!(
+        text(&resumed.stdout).starts_with(&format!("resuming {id} as attempt 2")),
+        "{}",
+        text(&resumed.stdout)
+    );
+    // Following the run shows the resume in its transcript, and the second attempt is live.
+    // The first attempt's Done is seq 3, so the resume is seq 4: follow from there.
+    let mut follow = world
+        .command(&["run", "tail", &id, "--from", "4"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn run tail");
+    read_until(&mut follow, "resumed: attempt 2 continues the session");
+    assert_eq!(world.runs()[0]["attempt"], 2);
+    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    let rest = follow.wait_with_output().expect("tail ends");
+    assert!(text(&rest.stdout).contains("done (interrupted)"));
+
+    assert!(world.reno(&["daemon", "stop"]).status.success());
+}
+
 // ---- definitions --------------------------------------------------------------------------
 
 fn write_def(dir: &Path, rel: &str, text: &str) {

@@ -236,6 +236,7 @@ fn done(events: &[ExecEvent]) -> (StopReason, Option<String>, Option<String>) {
             stop,
             result,
             diagnostic,
+            ..
         }) => (*stop, result.clone(), diagnostic.clone()),
         other => panic!("the stream did not end with Done: {other:?} in {events:?}"),
     }

@@ -56,6 +56,7 @@ impl RunLog {
                 stop,
                 result,
                 diagnostic,
+                ..
             }) => Some((*stop, result.as_deref(), diagnostic.as_deref())),
             _ => None,
         }

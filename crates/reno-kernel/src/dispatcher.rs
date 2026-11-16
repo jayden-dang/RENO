@@ -39,20 +39,21 @@ use reno_harness::exec::{ExecControls, ExecError, ExecHandle};
 use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
-    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, SecretsMissing, StartFailureKind,
-    StopReason,
+    RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, SecretsMissing, SessionRef,
+    StartFailureKind, StartRefusal, StopDetail, StopReason,
 };
 use reno_store::{Claim, ClaimFilter, RunRecord, StoreError};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent;
 use crate::budget;
 use crate::lifecycle;
 use crate::router;
 use crate::scheduler::{SchedCmd, StartFailure};
 use crate::secrets::{SecretValue, SecretsError};
-use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot};
+use crate::shared::{COMMAND_QUEUE, CONTROL_QUEUE, LiveRun, Shared, Slot, StopCause};
 use crate::supervisor::{RunInfo, Supervisor};
 use crate::workspaces;
 
@@ -297,7 +298,13 @@ pub(crate) fn no_eligible_executor(
     })
 }
 
-/// The task's prompt, working directory and model, as `submit` stored them.
+/// What a resumed run is told when nobody gave it a prompt of its own.
+pub(crate) const RESUME_PROMPT: &str = "Your previous attempt at this task was interrupted. \
+    Continue from where you left off, and finish the task.";
+
+/// The task's prompt, working directory and model, as `submit` stored them. A run that holds a
+/// session continues it: its prompt is the one given at resume, else the standard continue
+/// prompt.
 fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, String> {
     let cwd = row
         .spec
@@ -310,16 +317,24 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .or_else(|| row.model.clone());
+    let resume = row.session_ref.clone().map(SessionRef);
+    let prompt = match &resume {
+        Some(_) => row
+            .resume_prompt
+            .clone()
+            .unwrap_or_else(|| RESUME_PROMPT.to_owned()),
+        None => row.goal.clone(),
+    };
     Ok(ExecSpec {
         run_id: row.id.clone(),
-        prompt: row.goal.clone(),
+        prompt,
         cwd: PathBuf::from(cwd),
         model,
         instructions: settings.instructions.clone(),
         effort: None,
         access: settings.access,
         sandbox: settings.sandbox,
-        resume: None,
+        resume,
         mcp: Vec::new(),
         // Reno's own variables for the run; the bot's secrets join them at launch.
         env: run_env(&row.id, settings.bot.as_deref()),
@@ -341,6 +356,8 @@ fn run_env(run: &RunId, bot: Option<&str>) -> std::collections::BTreeMap<String,
 struct SecretsRefused {
     /// The run's diagnostic. It names secrets, never their values.
     why: String,
+    /// The typed refusal the run's `Done` carries.
+    refusal: StartRefusal,
     account: Option<StartFailure>,
 }
 
@@ -361,9 +378,15 @@ async fn resolve_secrets(
         Some(port) => match port.resolve(&settings.secrets).await {
             Ok(found) => found,
             Err(error) => {
-                let account = matches!(error, SecretsError::Unavailable(_))
-                    .then_some(StartFailure::SecretMissing);
+                let unavailable = matches!(error, SecretsError::Unavailable(_));
+                let account = unavailable.then_some(StartFailure::SecretMissing);
+                let refusal = if unavailable {
+                    StartRefusal::SecretMissing
+                } else {
+                    StartRefusal::Invalid
+                };
                 return Err(SecretsRefused {
+                    refusal,
                     why: format!(
                         "SecretsUnavailable: the secrets of {bot} cannot be read: {error}"
                     ),
@@ -387,7 +410,8 @@ async fn resolve_secrets(
         missing: missing.iter().map(|name| (*name).to_owned()).collect(),
     };
     Err(SecretsRefused {
-        why: finding.to_diagnostic(),
+        why: finding.to_string(),
+        refusal: StartRefusal::SecretMissing,
         account: Some(StartFailure::SecretMissing),
     })
 }
@@ -411,6 +435,7 @@ enum Attempt {
     /// The run cannot start, and no other executor would change that.
     Failed {
         why: String,
+        refusal: StartRefusal,
         account: Option<StartFailure>,
     },
 }
@@ -434,10 +459,29 @@ async fn attempt(
     let Some(executor) = shared.executors.get(id).cloned() else {
         return Attempt::Failed {
             why: format!("unknown executor {id}"),
+            refusal: StartRefusal::Invalid,
             account: None,
         };
     };
     let descriptor = executor.descriptor();
+    // An executor that cannot inject MCP servers gets none: Reno's own server is left out, and
+    // the run can only work alone.
+    let mut spec = spec.clone();
+    if !descriptor.caps.mcp_injection && !spec.mcp.is_empty() {
+        tracing::warn!(executor = %id, "the executor does not inject MCP servers; Reno's is left out");
+        spec.mcp.clear();
+    }
+    let spec = &spec;
+    if spec.resume.is_some() && !descriptor.caps.resume {
+        // A session belongs to the executor that made it; there is no other to go to.
+        return Attempt::Failed {
+            why: format!(
+                "NoEligibleExecutor: executor {id} cannot resume a session, and the run has one"
+            ),
+            refusal: StartRefusal::NoEligibleExecutor,
+            account: None,
+        };
+    }
     let found = shared.health_for_dispatch(id).await;
     if let Some(refusal) =
         no_eligible_executor(&descriptor, found.as_ref(), spec.access, spec.sandbox)
@@ -489,9 +533,11 @@ async fn attempt(
                     },
                     account: StartFailure::NoEligibleExecutor,
                 },
-                ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => {
-                    Attempt::Failed { why, account: None }
-                }
+                ExecError::UnsupportedOutputSchema | ExecError::InvalidSpec(_) => Attempt::Failed {
+                    why,
+                    refusal: StartRefusal::Invalid,
+                    account: None,
+                },
             }
         }
     }
@@ -536,12 +582,14 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
 
     // The run holds a slot, and can be cancelled, from here on.
     let cancel = shared.root.child_token();
+    let cause = StopCause::default();
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_QUEUE);
     let slot = Slot::take(
         shared,
         run_id.clone(),
         LiveRun {
             cancel: cancel.clone(),
+            cause: cause.clone(),
             cmd: cmd_tx,
             bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         },
@@ -559,11 +607,17 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
 
     let settings = match launch_settings(shared, &row).await {
         Ok(settings) => settings,
-        Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
+        Err(why) => {
+            let refusal = StartRefusal::Invalid;
+            return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
+        }
     };
     let mut spec = match exec_spec(&row, &settings) {
         Ok(spec) => spec,
-        Err(why) => return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await,
+        Err(why) => {
+            let refusal = StartRefusal::Invalid;
+            return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
+        }
     };
     // The bot's secrets, before anything else is prepared: a missing one refuses the run here.
     let mut redactor = None;
@@ -583,9 +637,21 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         }
         Err(refused) => {
             let why = refused.why;
-            return fail_start(shared, &run_id, fence, why, refused.account, cmd_rx, slot).await;
+            let refusal = refused.refusal;
+            return fail_start(
+                shared,
+                &run_id,
+                fence,
+                why,
+                refusal,
+                refused.account,
+                cmd_rx,
+                slot,
+            )
+            .await;
         }
     }
+    let resuming = spec.resume.is_some();
     // Where the run works: its own worktree for a write run in a git repository (T1.3).
     let opted_in = in_place_opt_in(&row, &settings);
     let placed = tokio::select! {
@@ -599,13 +665,20 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         None => {
             let why = "cancelled while the workspace was being prepared".to_owned();
             let stop = StopReason::Interrupted;
-            return conclude(shared, &run_id, fence, stop, why, cmd_rx, slot).await;
+            let reason = cancelled_for(shared, &cause);
+            return conclude(shared, &run_id, fence, stop, why, reason, cmd_rx, slot).await;
         }
         Some(Err(error)) => {
             let why = format!("WorkspaceRefused: {error}");
-            return fail_start(shared, &run_id, fence, why, None, cmd_rx, slot).await;
+            let refusal = StartRefusal::WorkspaceRefused;
+            return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
         }
         Some(Ok(placement)) => spec.cwd = placement.cwd(),
+    }
+    // Reno's own MCP server, with a token for this run (T1.9).
+    if let Err(why) = agent::provision(shared, &row, settings.wall_time, &mut spec).await {
+        let refusal = StartRefusal::Invalid;
+        return fail_start(shared, &run_id, fence, why, refusal, None, cmd_rx, slot).await;
     }
     let info = RunInfo {
         cwd: spec.cwd.clone(),
@@ -613,13 +686,27 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         wall_time: settings.wall_time,
         token_ceiling: settings.token_ceiling,
         redactor: redactor.clone(),
+        // This claim is the attempt after the one that ended.
+        resumed: spec.resume.clone().map(|session| {
+            (
+                u32::try_from(fence.saturating_sub(1)).unwrap_or(u32::MAX),
+                session,
+            )
+        }),
     };
 
     // The fallback walk (ARCHITECTURE 5.2): try the executor the router chose; when it will not
     // start for an account or install reason, mark it rejected in the stored decision and try
     // the next ranked candidate, within this attempt. Each step removes one candidate from the
     // ranking, so the walk ends after at most as many steps as there were candidates.
-    let mut decision = shared.db.run_routing(&run_id).await.ok().flatten();
+    // A resumed run goes back to the executor whose session it holds: there is no fallback walk.
+    let mut decision = shared
+        .db
+        .run_routing(&run_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|_| !resuming);
     let mut current = row.executor.clone();
     let mut refusals: Vec<(ExecutorId, String)> = Vec::new();
     // A task that named nothing and has no default to go to (the router left every executor out
@@ -635,7 +722,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
             left_out.explain()
         );
         let account = Some(StartFailure::NoEligibleExecutor);
-        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+        let refusal = StartRefusal::NoEligibleExecutor;
+        return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot).await;
     }
     let (stream, handle) = loop {
         match attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await {
@@ -652,10 +740,16 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 // Nothing ran, so it is `interrupted`.
                 let why = "cancelled while the executor was starting".to_owned();
                 let stop = StopReason::Interrupted;
-                return conclude(shared, &run_id, fence, stop, why, cmd_rx, slot).await;
+                let reason = cancelled_for(shared, &cause);
+                return conclude(shared, &run_id, fence, stop, why, reason, cmd_rx, slot).await;
             }
-            Attempt::Failed { why, account } => {
-                return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot).await;
+            Attempt::Failed {
+                why,
+                refusal,
+                account,
+            } => {
+                return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot)
+                    .await;
             }
             Attempt::Declined {
                 why,
@@ -691,9 +785,12 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                         {
                             why = format!("{why}; {NAME_ONE}");
                         }
+                        let refusal = refusal_of(account);
                         let account = Some(account);
-                        return fail_start(shared, &run_id, fence, why, account, cmd_rx, slot)
-                            .await;
+                        return fail_start(
+                            shared, &run_id, fence, why, refusal, account, cmd_rx, slot,
+                        )
+                        .await;
                     }
                 }
             }
@@ -712,6 +809,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         stream,
         handle,
         cancel,
+        cause,
         cmd_rx,
         slot,
     );
@@ -732,17 +830,57 @@ async fn reroute(
     }
 }
 
+/// The typed refusal an account-level start failure is.
+fn refusal_of(failure: StartFailure) -> StartRefusal {
+    match failure {
+        StartFailure::NotInstalled => StartRefusal::NotInstalled,
+        StartFailure::NotSignedIn => StartRefusal::NotSignedIn,
+        StartFailure::NoEligibleExecutor => StartRefusal::NoEligibleExecutor,
+        StartFailure::SecretMissing => StartRefusal::SecretMissing,
+    }
+}
+
+/// Why a run that was cancelled before its executor ran ended: the reason its canceller gave, or
+/// the shutdown, or (nobody said) a person's cancel.
+fn cancelled_for(shared: &Shared, cause: &StopCause) -> StopDetail {
+    cause.get().unwrap_or_else(|| {
+        if shared.root.is_cancelled() {
+            StopDetail::Shutdown
+        } else {
+            StopDetail::Cancelled {
+                by: reno_proto::CancelledBy::User,
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn fail_start(
     shared: &Arc<Shared>,
     run: &RunId,
     fence: u64,
     why: String,
+    refusal: StartRefusal,
     account: Option<StartFailure>,
     cmd_rx: mpsc::Receiver<crate::shared::SupCmd>,
     slot: Slot,
 ) {
     tracing::warn!(%run, %why, "run failed to start");
-    conclude(shared, run, fence, StopReason::Error, why, cmd_rx, slot).await;
+    let reason = StopDetail::StartRefused {
+        failure: refusal,
+        detail: why.clone(),
+    };
+    conclude(
+        shared,
+        run,
+        fence,
+        StopReason::Error,
+        why,
+        reason,
+        cmd_rx,
+        slot,
+    )
+    .await;
     // After the run's end has committed, so the trigger's next occurrence finds it finished.
     if let Some(why) = account {
         shared
@@ -757,22 +895,36 @@ async fn fail_start(
 /// End a run that has no supervisor: commit its state, then journal its `Done`, then free the
 /// slot (ARCH-8). `cmd_rx` stays open until the `Done` is written, so a subscriber that
 /// registered in the meantime finds the finished journal when its request is dropped.
+#[allow(clippy::too_many_arguments)]
 async fn conclude(
     shared: &Arc<Shared>,
     run: &RunId,
     fence: u64,
     stop: StopReason,
     diagnostic: String,
+    reason: StopDetail,
     cmd_rx: mpsc::Receiver<crate::shared::SupCmd>,
     slot: Slot,
 ) {
-    match lifecycle::end_run(&shared.db, run, fence, RunStatus::Running, stop).await {
+    // The run has no executor to speak for it any more: its token goes first.
+    agent::revoke(shared, run).await;
+    match lifecycle::end_run(
+        &shared.db,
+        run,
+        fence,
+        RunStatus::Running,
+        stop,
+        Some(&reason),
+    )
+    .await
+    {
         Ok(_) => {
             workspaces::release_after_run(shared, run).await;
             let done = ExecEvent::Done {
                 stop,
                 result: None,
                 diagnostic: Some(diagnostic),
+                reason: Some(reason),
             };
             lifecycle::append_done(&shared.db, run, done).await;
         }

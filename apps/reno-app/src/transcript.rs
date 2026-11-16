@@ -23,7 +23,8 @@
 //! - `Done` is the last row; anything after it is ignored.
 
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ResolvedBy, Seq, StopReason,
+    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ReportStatus, ResolvedBy, Seq,
+    StopReason,
 };
 
 use crate::summary;
@@ -99,6 +100,8 @@ pub(crate) enum Row {
         stop: StopReason,
         result: Option<String>,
         diagnostic: Option<String>,
+        /// The typed reason the daemon gave, which the line shows in words.
+        reason: Option<reno_proto::StopDetail>,
     },
 }
 
@@ -140,6 +143,8 @@ pub(crate) struct Facts {
     pub(crate) model: Option<String>,
     /// Why the run failed, when `Done` says so in words.
     pub(crate) diagnostic: Option<String>,
+    /// The typed reason `Done` gave.
+    pub(crate) reason: Option<reno_proto::StopDetail>,
 }
 
 /// Puts the routing card after the prompt (first, when the prompt is not known), if there is a
@@ -181,7 +186,15 @@ pub(crate) fn build_rows(
         });
     }
     let mut used = vec![false; pending.len()];
+    // A `Done` ends the list, unless the run is resumed: then its next attempt goes on below.
+    let mut ended = false;
     for (seq, event) in events {
+        if ended {
+            if !matches!(event, ExecEvent::Resumed { .. }) {
+                continue;
+            }
+            ended = false;
+        }
         let key = Key::at(*seq);
         match event {
             ExecEvent::Started { model, .. } => built.facts.model = Some(model.clone()),
@@ -267,6 +280,12 @@ pub(crate) fn build_rows(
                 text: text.clone(),
                 steer: true,
             }),
+            ExecEvent::AgentReport {
+                status, summary, ..
+            } => built.rows.push(Row::Asked {
+                key,
+                line: format!("Reported {}: {summary}", report_word(*status)),
+            }),
             ExecEvent::NeedsInput {
                 request_id,
                 questions,
@@ -306,15 +325,29 @@ pub(crate) fn build_rows(
                 stop,
                 result,
                 diagnostic,
+                reason,
             } => {
+                built.facts.reason.clone_from(reason);
                 built.facts.diagnostic.clone_from(diagnostic);
                 built.rows.push(Row::Done {
                     key,
                     stop: *stop,
                     result: result.clone(),
                     diagnostic: diagnostic.clone(),
+                    reason: reason.clone(),
                 });
-                break;
+                ended = true;
+            }
+            ExecEvent::Resumed { from_attempt, .. } => {
+                built.facts.reason = None;
+                built.facts.diagnostic = None;
+                built.rows.push(Row::Asked {
+                    key,
+                    line: format!(
+                        "Resumed: attempt {} continues the session",
+                        from_attempt.saturating_add(1)
+                    ),
+                });
             }
         }
     }
@@ -335,6 +368,16 @@ fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&st
         },
         ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
+    }
+}
+
+/// The word a report's status goes by in the transcript.
+fn report_word(status: ReportStatus) -> &'static str {
+    match status {
+        ReportStatus::Progress => "progress",
+        ReportStatus::Done => "done",
+        ReportStatus::Blocked => "blocked",
+        ReportStatus::Failed => "failed",
     }
 }
 
@@ -608,6 +651,22 @@ mod tests {
     }
 
     #[test]
+    fn a_report_is_a_one_line_note_with_its_status() {
+        let built = build(
+            vec![ExecEvent::AgentReport {
+                status: ReportStatus::Blocked,
+                summary: "need the staging key".into(),
+                details: Some("tried the vault".into()),
+            }],
+            &[],
+        );
+        assert!(matches!(
+            &built.rows[0],
+            Row::Asked { line, .. } if line == "Reported blocked: need the staging key"
+        ));
+    }
+
+    #[test]
     fn questions_are_rows() {
         let q = Question {
             id: "a".into(),
@@ -760,6 +819,7 @@ mod tests {
                     stop: StopReason::Completed,
                     result: Some("fine".into()),
                     diagnostic: None,
+                    reason: None,
                 },
                 text("ignored"),
                 bash("t9", "ls"),
@@ -771,6 +831,48 @@ mod tests {
             built.rows.last(),
             Some(Row::Done { stop: StopReason::Completed, result: Some(r), .. }) if r == "fine"
         ));
+    }
+
+    #[test]
+    fn a_resumed_run_goes_on_below_the_attempt_that_ended() {
+        let built = build(
+            vec![
+                text("first"),
+                ExecEvent::Done {
+                    stop: StopReason::Interrupted,
+                    result: None,
+                    diagnostic: Some("cancelled".into()),
+                    reason: Some(reno_proto::StopDetail::Shutdown),
+                },
+                text("ignored: nothing resumed yet"),
+                ExecEvent::Resumed {
+                    from_attempt: 1,
+                    session: reno_proto::SessionRef("s".into()),
+                },
+                text("second"),
+                ExecEvent::Done {
+                    stop: StopReason::Completed,
+                    result: Some("fine".into()),
+                    diagnostic: None,
+                    reason: None,
+                },
+            ],
+            &[],
+        );
+        let shape: Vec<&str> = built
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Prose { .. } => "prose",
+                Row::Done { .. } => "done",
+                Row::Asked { .. } => "resumed",
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(shape, ["prose", "done", "resumed", "prose", "done"]);
+        // The facts are the last attempt's: the first one's stop reason is not carried over.
+        assert_eq!(built.facts.reason, None);
+        assert_eq!(built.facts.diagnostic, None);
     }
 
     #[test]
@@ -803,6 +905,7 @@ mod tests {
                     stop: StopReason::Error,
                     result: None,
                     diagnostic: Some("boom".into()),
+                    reason: None,
                 },
             ],
             &[],

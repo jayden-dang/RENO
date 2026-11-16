@@ -62,6 +62,9 @@ struct Args {
     /// How many runs may be live at once [default: the kernel's own], for benchmarks.
     #[arg(long, env = "RENO_MAX_CONCURRENT", hide = true, value_name = "N")]
     max_concurrent: Option<usize>,
+    /// The `reno` binary Reno's own MCP server runs [default: `reno` next to this program].
+    #[arg(long, env = "RENO_BIN", hide = true, value_name = "PATH")]
+    reno_bin: Option<PathBuf>,
 }
 
 #[allow(clippy::print_stderr)]
@@ -117,6 +120,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         args.claude_executable,
         args.max_concurrent,
         args.memory_secrets,
+        args.reno_bin,
     ));
     if let Err(error) = &outcome {
         tracing::error!(%error, "renod failed");
@@ -131,6 +135,7 @@ async fn serve(
     claude_executable: Option<PathBuf>,
     max_concurrent: Option<usize>,
     memory_secrets: bool,
+    reno_bin: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let executors = match claude_executable {
         Some(program) => ExecutorSource::Given(pinned_claude(mock_hold, program)?),
@@ -147,6 +152,7 @@ async fn serve(
         secrets::login_keychain()
     };
     config.secrets = Some(Arc::new(secrets::KeychainSecrets::new(keychain)));
+    config.reno_bin = reno_bin;
     if let Some(limit) = max_concurrent {
         config.kernel.max_concurrent = limit;
     }

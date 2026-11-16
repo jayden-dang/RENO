@@ -159,11 +159,15 @@ daemon_test! {
 
         let run = within(fx.client.run_task(bot_task("keeper"))).await.unwrap();
         let events = finished(&fx.client, &run).await;
-        let Some(ExecEvent::Done { stop, diagnostic, .. }) = events.last() else {
+        let Some(ExecEvent::Done { stop, diagnostic, reason, .. }) = events.last() else {
             panic!("no Done: {events:?}");
         };
         assert_eq!(*stop, StopReason::Interrupted);
-        let budget = BudgetStop::from_diagnostic(diagnostic.as_deref().unwrap()).unwrap();
+        // The typed reason is the contract; the diagnostic still says the same for display.
+        let budget = reason.as_ref().and_then(reno_proto::StopDetail::budget).unwrap();
+        assert_eq!(BudgetStop::from_diagnostic(diagnostic.as_deref().unwrap()), Some(budget));
+        let summary = within(fx.client.get_run(&run)).await.unwrap();
+        assert_eq!(summary.stop.as_ref().and_then(reno_proto::StopDetail::budget), Some(budget));
         assert_eq!(
             (budget.kind, budget.limit, budget.used),
             (BudgetKind::Tokens, 100, 120)

@@ -52,14 +52,9 @@ pub fn check_secret_name(name: &str) -> Result<(), SecretNameError> {
     Ok(())
 }
 
-/// The tag a missing-secret diagnostic starts with.
-pub const SECRET_MISSING_DIAGNOSTIC_TAG: &str = "SecretMissing:";
-
-/// Why a run did not start: secrets its bot lists are not set. It is the `diagnostic` of the run's
-/// `Done { stop: error }`, as [`SecretsMissing::to_diagnostic`] writes it: the tag
-/// [`SECRET_MISSING_DIAGNOSTIC_TAG`], a space and this value as JSON. A client reads it with
-/// [`SecretsMissing::from_diagnostic`], the one decoder; nobody matches the text. It names the
-/// secrets and never carries a value.
+/// Which secrets a run's bot lists are not set. The run is refused with
+/// `StartRefusal::SecretMissing`; its diagnostic is this value's `Display`, a sentence that names
+/// the secrets and never carries a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretsMissing {
@@ -67,20 +62,6 @@ pub struct SecretsMissing {
     pub bot: String,
     /// The names that are not set, in the order the bot lists them.
     pub missing: Vec<String>,
-}
-
-impl SecretsMissing {
-    /// The diagnostic of a run refused for these.
-    pub fn to_diagnostic(&self) -> String {
-        let body = serde_json::to_string(self).unwrap_or_default();
-        format!("{SECRET_MISSING_DIAGNOSTIC_TAG} {body}")
-    }
-
-    /// The finding a `Done` diagnostic carries, or `None` for any other diagnostic.
-    pub fn from_diagnostic(diagnostic: &str) -> Option<Self> {
-        let body = diagnostic.strip_prefix(SECRET_MISSING_DIAGNOSTIC_TAG)?;
-        serde_json::from_str(body.trim()).ok()
-    }
 }
 
 impl fmt::Display for SecretsMissing {
@@ -200,25 +181,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_secret_diagnostic_round_trips_and_other_text_is_not_one() {
+    fn a_missing_secret_sentence_names_them_and_how_to_set_each() {
         let missing = SecretsMissing {
             bot: "keeper".into(),
             missing: vec!["GITHUB_TOKEN".into(), "NPM_TOKEN".into()],
         };
-        let text = missing.to_diagnostic();
-        assert!(text.starts_with("SecretMissing: {"), "{text}");
-        assert_eq!(
-            SecretsMissing::from_diagnostic(&text),
-            Some(missing.clone())
-        );
-        assert_eq!(
-            SecretsMissing::from_diagnostic("NoEligibleExecutor: x"),
-            None
-        );
-        assert_eq!(
-            SecretsMissing::from_diagnostic("SecretMissing: not json"),
-            None
-        );
         assert_eq!(
             missing.to_string(),
             "keeper needs secrets GITHUB_TOKEN, NPM_TOKEN, which are not set; set each with `reno secret set <NAME>`"

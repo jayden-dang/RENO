@@ -44,6 +44,9 @@ fn summary(n: u64) -> RunSummary {
         bot: None,
         created_at_ms: 0,
         updated_at_ms: n,
+        stop: None,
+        not_resumed: None,
+        session: None,
     }
 }
 
@@ -691,4 +694,60 @@ async fn an_open_parent_directory_is_refused() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let err = UnixServer::bind(dir.path().join("reno.sock")).await;
     assert!(matches!(err, Err(RpcError::Insecure { .. })), "{err:?}");
+}
+
+/// Connection state and the guard: a handler marks its connection, and from then on the guard
+/// refuses the methods that mark does not allow, on that connection only.
+#[tokio::test]
+async fn a_guard_sees_the_state_a_handler_set_and_refuses_on_that_connection_only() {
+    #[derive(Debug, PartialEq)]
+    struct Marked;
+
+    let router = Router::new()
+        .method::<DaemonStatus, _, _>(|_: NoParams, ctx| async move {
+            // `daemon.status` marks the connection (a stand-in for an authentication).
+            assert!(ctx.set_state(Marked));
+            // A second value is refused and the first stays.
+            assert!(!ctx.set_state(7_u32));
+            assert!(ctx.state::<u32>().is_none());
+            Ok(DaemonStatusInfo {
+                version: "test".into(),
+                pid: 0,
+                uptime_secs: 0,
+                active_runs: 0,
+                queued_runs: 0,
+                executors: vec![],
+            })
+        })
+        .method::<RunGet, _, _>(|_, _| async move {
+            Err(ErrorObject::new(ErrorCode::NotFound, "no such run"))
+        })
+        .guard(|ctx, method| {
+            if ctx.state::<Marked>().is_some() && method != "daemon.status" {
+                return Err(ErrorObject::new(ErrorCode::Unauthorized, "marked"));
+            }
+            Ok(())
+        });
+    let server = Server::new(router);
+    let cancel = CancellationToken::new();
+    let marked = connect_in_memory(&server, cancel.clone());
+    let other = connect_in_memory(&server, cancel.clone());
+    let get = || reno_proto::RunGetParams {
+        run_id: run_id("a"),
+    };
+
+    // Before the mark, `run.get` reaches its handler.
+    let error = marked.call::<RunGet>(get()).await.expect_err("not found");
+    assert!(matches!(error, RpcError::Remote(e) if e.code == ErrorCode::NotFound));
+    marked
+        .call::<DaemonStatus>(NoParams {})
+        .await
+        .expect("marks");
+    // After it, the guard answers instead of the handler.
+    let error = marked.call::<RunGet>(get()).await.expect_err("guarded");
+    assert!(matches!(error, RpcError::Remote(e) if e.code == ErrorCode::Unauthorized));
+    // Another connection is untouched.
+    let error = other.call::<RunGet>(get()).await.expect_err("not found");
+    assert!(matches!(error, RpcError::Remote(e) if e.code == ErrorCode::NotFound));
+    cancel.cancel();
 }

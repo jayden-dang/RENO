@@ -123,21 +123,44 @@ impl<W: Write> Transcript<W> {
                 writeln!(self.out, "  (the CLI cannot answer questions yet)")
             }
             ExecEvent::UserMessage { text } => writeln!(self.out, "you: {text}"),
-            ExecEvent::Done {
-                stop, diagnostic, ..
+            ExecEvent::AgentReport {
+                status,
+                summary,
+                details,
             } => {
-                writeln!(self.out, "done ({})", wire_name(stop))?;
-                let diagnostic = diagnostic.as_deref();
-                if let Some(budget) = diagnostic.and_then(reno_proto::BudgetStop::from_diagnostic) {
-                    writeln!(self.out, "  {budget}")
-                } else if let Some(missing) =
-                    diagnostic.and_then(reno_proto::SecretsMissing::from_diagnostic)
-                {
-                    writeln!(self.out, "  {missing}")
-                } else {
-                    Ok(())
+                writeln!(self.out, "report ({}): {summary}", wire_name(status))?;
+                match details {
+                    Some(details) => writeln!(self.out, "  {}", shorten(details, INPUT_WIDTH)),
+                    None => Ok(()),
                 }
             }
+            ExecEvent::Done {
+                stop,
+                diagnostic,
+                reason,
+                ..
+            } => {
+                writeln!(self.out, "done ({})", wire_name(stop))?;
+                // The typed reason; a daemon that predates it only has the diagnostic's tag.
+                let budget = reason.as_ref().map_or_else(
+                    || {
+                        diagnostic
+                            .as_deref()
+                            .and_then(reno_proto::BudgetStop::from_diagnostic)
+                            .map(|stop| stop.to_string())
+                    },
+                    |reason| Some(reason.to_string()),
+                );
+                match budget {
+                    Some(why) => writeln!(self.out, "  {why}"),
+                    None => Ok(()),
+                }
+            }
+            ExecEvent::Resumed { from_attempt, .. } => writeln!(
+                self.out,
+                "resumed: attempt {} continues the session",
+                from_attempt.saturating_add(1)
+            ),
             // Text and the quiet kinds returned above; a kind added later prints nothing.
             _ => Ok(()),
         }
@@ -210,6 +233,22 @@ pub(crate) fn run_line(run: &RunSummary) -> String {
         run.executor.as_str(),
         run.title
     )
+}
+
+/// What a run's stop and resume state add to its one line, as extra lines: why it stopped, and
+/// why it was not resumed.
+pub(crate) fn stop_lines(run: &RunSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(stop) = &run.stop {
+        lines.push(format!("stopped: {stop}"));
+    }
+    if let Some(why) = &run.not_resumed {
+        lines.push(format!(
+            "not resumed: {why}; `reno run resume {}` continues it",
+            run.run_id
+        ));
+    }
+    lines
 }
 
 pub(crate) fn status_name(status: RunStatus) -> String {
@@ -618,6 +657,7 @@ mod tests {
             stop,
             result: None,
             diagnostic: Some("boom".into()),
+            reason: None,
         }
     }
 
@@ -811,6 +851,19 @@ mod tests {
         );
         assert!(out.contains("? the run asks: Which branch?\n"));
         assert!(out.ends_with("you: go on\n"));
+    }
+
+    #[test]
+    fn a_report_prints_its_status_and_summary_and_a_shortened_detail() {
+        let (out, _) = render(
+            false,
+            vec![ExecEvent::AgentReport {
+                status: reno_proto::ReportStatus::Done,
+                summary: "tests pass".into(),
+                details: Some("ran cargo test".into()),
+            }],
+        );
+        assert_eq!(out, "report (done): tests pass\n  ran cargo test\n");
     }
 
     #[test]

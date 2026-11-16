@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use futures::StreamExt;
 use reno_harness::ClaudeExecutor;
 use reno_harness::exec::{ExecControls, Executor};
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, RunId, SandboxLevel};
+use reno_proto::{AccessMode, ExecEvent, ExecSpec, McpServerSpec, RunId, SandboxLevel};
 
 fn fixture() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -54,7 +54,21 @@ async fn the_child_gets_the_allowlist_the_run_env_and_nothing_else() {
         access: AccessMode::FullAccess,
         sandbox: SandboxLevel::Unrestricted,
         resume: None,
-        mcp: Vec::new(),
+        // Reno's own MCP server: its variables travel in the server's own env, in the config the
+        // CLI starts it from, not through the CLI's environment.
+        mcp: vec![McpServerSpec {
+            name: "reno".into(),
+            command: "reno".into(),
+            args: vec!["mcp".into()],
+            env: [
+                ("RENO_SOCKET", "/data/reno.sock"),
+                ("RENO_RUN_ID", "run_01HZX9"),
+                ("RENO_TOKEN_FILE", "/data/runs/run_01HZX9/token"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect(),
+        }],
         env,
         output_schema: None,
         instructions: None,
@@ -95,4 +109,25 @@ async fn the_child_gets_the_allowlist_the_run_env_and_nothing_else() {
     assert_eq!(seen["RENO_RUN_ID"], "run_01HZX9");
     assert_eq!(seen["BOT_SECRET"], "bot-secret-value");
     assert_eq!(seen["CLAUDE_CODE_ENTRYPOINT"], "reno");
+
+    // The injected `reno mcp` server gets its three variables from its own config entry, so the
+    // allowlist on the CLI's environment does not touch them; and the CLI itself is not given
+    // the socket or token file.
+    let server = &mcp_config(&out)["mcpServers"]["reno"];
+    assert_eq!(server["env"]["RENO_SOCKET"], "/data/reno.sock");
+    assert_eq!(server["env"]["RENO_RUN_ID"], "run_01HZX9");
+    assert_eq!(
+        server["env"]["RENO_TOKEN_FILE"],
+        "/data/runs/run_01HZX9/token"
+    );
+    assert!(!seen.contains_key("RENO_SOCKET") && !seen.contains_key("RENO_TOKEN_FILE"));
+}
+
+/// Reads the `--mcp-config` the fake CLI was started with (the one the real CLI starts its MCP
+/// servers from) out of its recorded arguments.
+fn mcp_config(out: &std::path::Path) -> serde_json::Value {
+    let args = std::fs::read_to_string(format!("{}.args", out.display())).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines.iter().position(|l| *l == "--mcp-config").unwrap();
+    serde_json::from_str(lines[at + 1]).unwrap()
 }

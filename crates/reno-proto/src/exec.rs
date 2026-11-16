@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{ExecutorId, RunId};
-use crate::run::StopReason;
+use crate::run::{StopDetail, StopReason};
 
 /// How much a harness may do without asking. Never run with more than requested (ARCH-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -375,6 +375,17 @@ pub enum ExecEvent {
         /// The message text.
         text: String,
     },
+    /// The run called Reno's `report` tool: a structured status, shown in the transcript. Only
+    /// daemons that negotiate the `agent` feature emit it.
+    AgentReport {
+        /// How the work stands.
+        status: crate::agent::ReportStatus,
+        /// A short summary.
+        summary: String,
+        /// Anything longer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+    },
     /// The run ended; always the last event.
     Done {
         /// Why it stopped.
@@ -382,9 +393,22 @@ pub enum ExecEvent {
         /// Final result text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
-        /// Failure detail, when `stop` is `error`.
+        /// Failure detail, when `stop` is `error`. For people: read `reason` to decide.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnostic: Option<String>,
+        /// The typed reason, when the daemon knows one (a budget, a refused start, a cancel, a
+        /// shutdown). Absent from an executor's own `Done` and from daemons that predate it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<StopDetail>,
+    },
+    /// The run was resumed: a new attempt continues the harness session. Follows the
+    /// `Done` of the attempt that ended, and precedes the new attempt's `Started`. Only daemons
+    /// that negotiate the `run.resume` feature emit it.
+    Resumed {
+        /// The attempt that ended and is continued.
+        from_attempt: u32,
+        /// The session the new attempt resumes.
+        session: SessionRef,
     },
 }
 

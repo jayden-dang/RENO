@@ -124,6 +124,7 @@ fn a_done_diagnostic_carries_a_budget_stop() {
         stop: StopReason::Interrupted,
         result: None,
         diagnostic: Some(stop.to_diagnostic()),
+        reason: None,
     };
     let wire = serde_json::to_value(&done).unwrap();
     let diagnostic = wire["diagnostic"].as_str().unwrap();

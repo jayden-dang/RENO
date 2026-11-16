@@ -25,6 +25,7 @@ use crate::defs::{
     BotDef, BotPin, DefGetParams, DefListParams, DefRecord, DefValidateParams, DefValidateResult,
     DefsSnapshot, DefsWatchParams, PolicyDef, TriggerDef,
 };
+use crate::exec::SessionRef;
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::health::{
     ExecutorInstallParams, ExecutorInstallResult, ExecutorListResult, ExecutorRefreshParams,
@@ -34,7 +35,7 @@ use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
 };
-use crate::run::{RunStatus, StopReason};
+use crate::run::{NotResumed, RunStatus, StopDetail, StopReason};
 use crate::secrets::{
     SecretDeleteParams, SecretDeleteResult, SecretListResult, SecretSetParams, SecretSetResult,
 };
@@ -108,6 +109,12 @@ pub const FEATURE_BUDGET: &str = "budget";
 /// Feature: `secret.list`, `secret.set` and `secret.delete` exist, and a bot's `secrets` reach
 /// its runs as environment variables.
 pub const FEATURE_SECRETS: &str = "secrets";
+/// Feature: `run.resume` exists, journals may carry `ExecEvent::Resumed`, and a run that was
+/// interrupted may be resumed by the daemon itself.
+pub const FEATURE_RUN_RESUME: &str = "run.resume";
+/// Feature: `ExecEvent::Done` carries a typed `reason` and `RunSummary` a typed `stop`, so a
+/// client never reads the diagnostic's text to learn why a run stopped.
+pub const FEATURE_STOP_DETAIL: &str = "run.stop_detail";
 
 /// Every feature string defined at [`PROTOCOL_VERSION`].
 pub const FEATURES: &[&str] = &[
@@ -127,6 +134,9 @@ pub const FEATURES: &[&str] = &[
     FEATURE_ROUTING,
     FEATURE_ATTACHMENTS,
     FEATURE_BUDGET,
+    crate::agent::FEATURE_AGENT,
+    FEATURE_RUN_RESUME,
+    FEATURE_STOP_DETAIL,
     FEATURE_SECRETS,
 ];
 
@@ -189,6 +199,19 @@ pub struct RunSummary {
     /// Why it stopped, once it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    /// The typed reason behind the run's last stop, when the daemon knows one: a budget, a
+    /// refused start, a cancel, a shutdown, a crash. Needs feature `run.stop_detail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopDetail>,
+    /// Why an `interrupted` run was not resumed, once the daemon has looked. Absent while the
+    /// run may still be resumed, and for any run that is not interrupted. Needs feature
+    /// `run.resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_resumed: Option<NotResumed>,
+    /// The harness session of the run, once its executor has reported one: what a resume
+    /// continues. Needs feature `run.resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionRef>,
     /// The bot the run was submitted for, and the version of its definition the run is pinned
     /// to. Absent for a run submitted without a bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,6 +404,39 @@ pub struct RunCancelParams {
 pub struct RunCancelResult {
     /// The run's status once the cancel was accepted.
     pub status: RunStatus,
+}
+
+/// Params of `run.resume`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunResumeParams {
+    /// The run to resume: `interrupted`, or `failed` with a session.
+    pub run_id: RunId,
+    /// What to tell the harness when the session continues; the daemon's standard "continue"
+    /// prompt when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+/// Result of `run.resume`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunResumeResult {
+    /// The run's status once it was queued again (`queued`).
+    pub status: RunStatus,
+    /// The attempt it will be, from 2.
+    pub attempt: u32,
+}
+
+/// The `data` of the `Conflict` error `run.resume` answers with when the run cannot be resumed.
+/// Read it with `serde_json::from_value`; the message is for people.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotResumable {
+    /// The run.
+    pub run_id: RunId,
+    /// Why it cannot be resumed.
+    pub why: NotResumed,
 }
 
 /// Params of `run.steer`.
@@ -665,6 +721,12 @@ method!(
     RunCancel, "run.cancel", RunCancelParams => RunCancelResult
 );
 method!(
+    /// `run.resume`: queues an `interrupted` run, or a `failed` one that has a session, to continue
+    /// its harness session. Refused with `Conflict` and a [`NotResumed`] in `data` when it cannot
+    /// be. Needs feature `run.resume`.
+    RunResume, "run.resume", RunResumeParams => RunResumeResult
+);
+method!(
     /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
     RunSteer, "run.steer", RunSteerParams => RunSteerResult
 );
@@ -834,6 +896,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<BudgetResume>(),
             method_entry::<RunList>(),
             method_entry::<RunCancel>(),
+            method_entry::<RunResume>(),
             method_entry::<RunSteer>(),
             method_entry::<ApprovalList>(),
             method_entry::<ApprovalDecide>(),
@@ -852,6 +915,11 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),
+            method_entry::<crate::agent::AgentAuth>(),
+            method_entry::<crate::agent::AgentReport>(),
+            method_entry::<crate::agent::AgentRequestApproval>(),
+            method_entry::<crate::agent::AgentBoardRead>(),
+            method_entry::<crate::agent::AgentBoardWrite>(),
         ],
         "notifications": [
             notification_entry::<SubGap>(),

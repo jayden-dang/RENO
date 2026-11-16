@@ -21,6 +21,7 @@
 //! - [`workspace`]: the worktree a write run works in (`workspace.list`, `workspace.clean`).
 //! - [`secrets`]: named secrets (`secret.list`, `secret.set`, `secret.delete`) and the rule for a
 //!   secret's name.
+//! - [`agent`]: the `agent.*` methods a run's own `reno mcp` process calls, and the run token digest.
 //! - [`error`]: stable wire error codes.
 //!
 //! # Serde conventions
@@ -49,6 +50,7 @@
 //!
 //! A new method, notification or subscription must also be added to [`protocol_schema`].
 
+pub mod agent;
 pub mod budget;
 pub mod defs;
 pub mod error;
@@ -62,6 +64,7 @@ pub mod secrets;
 pub mod triggers;
 pub mod workspace;
 
+pub use agent::*;
 pub use budget::*;
 pub use error::*;
 pub use exec::*;

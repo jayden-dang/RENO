@@ -209,6 +209,10 @@ mod tests {
             stop: StopReason::Error,
             result: Some(format!("used {TOKEN}")),
             diagnostic: Some(format!("failed with {TOKEN}")),
+            reason: Some(reno_proto::StopDetail::StartRefused {
+                failure: reno_proto::StartRefusal::Invalid,
+                detail: format!("refused with {TOKEN}"),
+            }),
         });
         let ExecEvent::Done {
             result, diagnostic, ..
@@ -218,6 +222,26 @@ mod tests {
         };
         assert_eq!(result.unwrap(), "used [secret:GITHUB_TOKEN]");
         assert_eq!(diagnostic.unwrap(), "failed with [secret:GITHUB_TOKEN]");
+    }
+
+    #[test]
+    fn an_agent_report_is_redacted_in_its_summary_and_details() {
+        let report = redactor().redact_event(ExecEvent::AgentReport {
+            status: reno_proto::agent::ReportStatus::Blocked,
+            summary: format!("cannot log in with {TOKEN}"),
+            details: Some(format!("the token {TOKEN} was rejected")),
+        });
+        let ExecEvent::AgentReport {
+            summary, details, ..
+        } = report
+        else {
+            panic!("a report stays a report");
+        };
+        assert_eq!(summary, "cannot log in with [secret:GITHUB_TOKEN]");
+        assert_eq!(
+            details.unwrap(),
+            "the token [secret:GITHUB_TOKEN] was rejected"
+        );
     }
 
     #[test]

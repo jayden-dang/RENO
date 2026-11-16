@@ -266,8 +266,15 @@ impl RunScreen {
                 stop,
                 result,
                 diagnostic,
+                reason,
                 ..
-            } => done_line(&theme, *stop, result.as_deref(), diagnostic.as_deref()),
+            } => done_line(
+                &theme,
+                *stop,
+                result.as_deref(),
+                diagnostic.as_deref(),
+                reason.as_ref(),
+            ),
         };
         div()
             .w_full()
@@ -631,12 +638,7 @@ impl RunScreen {
         let now = store.now_ms();
         // A run its executor could not take shows that executor's health, as the daemon has it
         // now, so the reason and the way out are on the same screen.
-        let failed = executor_facts::failed_executor(
-            store.state(),
-            &self.run,
-            self.facts.diagnostic.as_deref(),
-            now,
-        );
+        let failed = executor_facts::failed_executor(store.state(), &self.run, now);
 
         let section = |title: &'static str| {
             div()
@@ -997,6 +999,7 @@ fn done_line(
     stop: StopReason,
     result: Option<&str>,
     diagnostic: Option<&str>,
+    reason: Option<&reno_proto::StopDetail>,
 ) -> AnyElement {
     let (glyph, tone, head) = match stop {
         StopReason::Completed => (Icon::Check, theme.success, "Finished"),
@@ -1005,7 +1008,10 @@ fn done_line(
         StopReason::Refusal => (Icon::X, theme.warning, "The model declined"),
         StopReason::MaxTokens => (Icon::X, theme.warning, "Hit the output limit"),
     };
-    let detail = diagnostic.or(result);
+    // The typed reason says it in words (a budget stop reads as the limit, not as JSON); the
+    // daemon's own diagnostic and the result are what is left.
+    let said = reason.map(ToString::to_string);
+    let detail = said.as_deref().or(diagnostic).or(result);
     div()
         .flex()
         .items_start()

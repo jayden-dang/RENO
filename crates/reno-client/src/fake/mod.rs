@@ -650,6 +650,34 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let run_resume = move |p: reno_proto::RunResumeParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "run.resume")?;
+            if s.read(|w| w.run(&p.run_id).is_none()) {
+                return Err(not_found("run"));
+            }
+            let attempt = s
+                .with(|w| w.resume_run(&p.run_id))
+                .map_err(|why| ErrorObject {
+                    code: ErrorCode::Conflict,
+                    message: format!("run {} cannot be resumed: {why}", p.run_id),
+                    data: serde_json::to_value(reno_proto::NotResumable {
+                        run_id: p.run_id.clone(),
+                        why,
+                    })
+                    .ok(),
+                })?;
+            s.tracker
+                .spawn(script::run_resumed(Arc::clone(&s), p.run_id.clone()));
+            Ok(reno_proto::RunResumeResult {
+                status: reno_proto::RunStatus::Queued,
+                attempt,
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let run_steer = move |p: reno_proto::RunSteerParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -918,6 +946,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::BudgetResume, _, _>(budget_resume)
         .method::<RunList, _, _>(run_list)
         .method::<RunCancel, _, _>(run_cancel)
+        .method::<reno_proto::RunResume, _, _>(run_resume)
         .method::<RunSteer, _, _>(run_steer)
         .method::<ApprovalList, _, _>(approval_list)
         .method::<ApprovalDecide, _, _>(approval_decide)

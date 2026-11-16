@@ -13,6 +13,7 @@
 //! - `writer`: the writer thread, group commit, durable writes, idle checkpoint
 //!   ([`StoreConfig`] holds the tunables).
 //! - `migrations`: the schema, versioned with `user_version`.
+//! - `agent`: run tokens (stored as digests) and the private boards of `reno mcp`.
 //! - `approvals`: durable approval records, decided with `synchronous=FULL`.
 //! - `runs`: tasks and runs, claims, fences and transitions.
 //! - `definitions`: versioned bots, triggers and policy, idempotent on content hash.
@@ -29,6 +30,7 @@
 //! The store never reads the clock. Every call that depends on time takes `now`, in milliseconds
 //! since the epoch.
 
+pub mod agent;
 pub mod approvals;
 pub mod budget;
 pub mod db;
@@ -44,6 +46,7 @@ pub mod triggers;
 mod workspaces;
 mod writer;
 
+pub use agent::{BoardRow, BoardWrite, NewRunToken, RunToken};
 pub use approvals::{ExpireScope, Expired, NewApproval, StoredApproval};
 pub use budget::{ClaimFilter, GLOBAL as GLOBAL_PAUSE, Occupancy, Tokens};
 pub use db::Store;
@@ -51,10 +54,12 @@ pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOu
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
-pub use runs::{Claim, NewTask, RunRecord};
+pub use runs::{Claim, NewTask, Note, Resumed, RunRecord};
 pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};
 pub use writer::StoreConfig;
 
+#[cfg(test)]
+mod agent_tests;
 #[cfg(test)]
 mod approval_tests;
 #[cfg(test)]
@@ -63,6 +68,8 @@ mod budget_tests;
 mod definition_tests;
 #[cfg(test)]
 mod executor_health_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]

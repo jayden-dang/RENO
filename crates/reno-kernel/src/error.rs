@@ -1,7 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, BudgetStop, ExecutorId, RunId, RunStatus, Seq};
+use reno_proto::{ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;
@@ -25,6 +25,14 @@ pub enum KernelError {
         run: RunId,
         /// Its status.
         status: RunStatus,
+    },
+    /// The run cannot be resumed, for the reason given.
+    #[error("run {run} cannot be resumed: {why}")]
+    NotResumable {
+        /// The run.
+        run: RunId,
+        /// Why not.
+        why: NotResumed,
     },
     /// The run's steering queue is full; try again once the executor has taken some.
     #[error("run {0} has too many steering prompts queued")]
@@ -74,6 +82,23 @@ pub enum KernelError {
         bot: String,
         /// The limit and what had been used.
         stop: BudgetStop,
+    },
+    /// A run token was refused: it is unknown, belongs to another run, was revoked, has expired,
+    /// or its run is no longer live. One answer for every cause, so a caller learns nothing
+    /// about which tokens exist.
+    #[error("the run token is not valid")]
+    AgentDenied,
+    /// A board write named a version that is not the key's current one. Nothing was written.
+    #[error("the board entry changed since the version this write was based on")]
+    BoardStale {
+        /// The entry as it stands, with its value; `None` when the key does not exist.
+        current: Option<Box<reno_proto::BoardEntry>>,
+    },
+    /// A board scope already holds as many keys as it may, and this key is new.
+    #[error("board scope {scope:?} is full")]
+    BoardFull {
+        /// The scope.
+        scope: String,
     },
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]

@@ -13,12 +13,14 @@
 //! test therefore runs a spinner task that keeps the runtime busy: time moves only when the test
 //! says so, in `until` (1 ms per probe) or `tokio::time::advance`.
 
+mod agent;
 mod approvals;
 mod budget;
 mod defs;
 mod health;
 mod queue;
 mod recovery;
+mod resume;
 mod routing;
 mod runs;
 mod secrets;
@@ -37,7 +39,7 @@ use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
 use crate::{
-    DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock, Workspace,
+    DefsSetup, ExecutorRegistry, Kernel, KernelConfig, KernelError, ManualClock, RunLink, Workspace,
 };
 
 pub(super) fn id(name: &str) -> ExecutorId {
@@ -223,7 +225,52 @@ impl Fx {
         definitions: Option<DefsSetup>,
         now_ms: i64,
     ) -> Self {
-        Self::start_over_with(dir, store, config, executors, definitions, None, now_ms).await
+        Self::start_over_with(
+            dir,
+            store,
+            config,
+            executors,
+            definitions,
+            None,
+            None,
+            now_ms,
+        )
+        .await
+    }
+
+    /// A kernel over a fresh store with `link` as its `RunLink` port.
+    pub(super) async fn with_link(
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+        link: Arc<dyn RunLink>,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("reno.db")).unwrap();
+        Self::over_link(dir, store, config, executors, definitions, link, START_MS).await
+    }
+
+    /// A kernel over an existing store with `link` as its `RunLink` port, its clock at `now_ms`.
+    pub(super) async fn over_link(
+        dir: TempDir,
+        store: Store,
+        config: KernelConfig,
+        executors: ExecutorRegistry,
+        definitions: Option<DefsSetup>,
+        link: Arc<dyn RunLink>,
+        now_ms: i64,
+    ) -> Self {
+        Self::start_over_with(
+            Some(dir),
+            store,
+            config,
+            executors,
+            definitions,
+            None,
+            Some(link),
+            now_ms,
+        )
+        .await
     }
 
     /// A kernel over a fresh store with `workspace` as its `Workspace` port.
@@ -254,11 +301,13 @@ impl Fx {
             executors,
             definitions,
             Some(workspace),
+            None,
             START_MS,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_over_with(
         dir: Option<TempDir>,
         store: Store,
@@ -266,17 +315,19 @@ impl Fx {
         executors: ExecutorRegistry,
         definitions: Option<DefsSetup>,
         workspace: Option<Arc<dyn Workspace>>,
+        link: Option<Arc<dyn RunLink>>,
         now_ms: i64,
     ) -> Self {
         let spinner = spin();
         let clock = Arc::new(ManualClock::new(now_ms));
-        let start = tokio::spawn(Kernel::start_with(
+        let start = tokio::spawn(Kernel::start_linked(
             config,
             store.clone(),
             executors,
             clock.clone(),
             definitions,
             workspace,
+            link,
         ));
         // Start-up may sleep on paused time (the orphan sweep), so drive it.
         until(async || start.is_finished().then_some(())).await;

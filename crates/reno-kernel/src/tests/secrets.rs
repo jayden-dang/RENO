@@ -57,6 +57,17 @@ async fn done_diagnostic(fx: &Fx, run: &RunId) -> String {
     }
 }
 
+/// The run's `Done` carries the typed refusal, so no client reads the diagnostic's text.
+async fn assert_secret_missing(fx: &Fx, run: &RunId) {
+    match fx.journal_with_done(run).await.last().unwrap().1.clone() {
+        ExecEvent::Done {
+            reason: Some(reno_proto::StopDetail::StartRefused { failure, .. }),
+            ..
+        } => assert_eq!(failure, reno_proto::StartRefusal::SecretMissing),
+        other => panic!("not a typed secret refusal: {other:?}"),
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_bots_secrets_reach_its_run_as_environment_variables_and_no_others_do() {
     let secrets = Arc::new(
@@ -121,7 +132,7 @@ async fn a_missing_secret_fails_the_run_before_anything_is_spawned_and_names_it(
     fx.wait_status(&run, RunStatus::Failed).await;
 
     let why = done_diagnostic(&fx, &run).await;
-    assert!(why.starts_with("SecretMissing:"), "{why}");
+    assert_secret_missing(&fx, &run).await;
     assert!(why.contains("GITHUB_TOKEN"), "{why}");
     assert!(
         !why.contains("NPM_TOKEN"),
@@ -145,7 +156,7 @@ async fn a_daemon_with_no_secret_store_treats_every_listed_secret_as_missing() {
     fx.wait_status(&run, RunStatus::Failed).await;
 
     let why = done_diagnostic(&fx, &run).await;
-    assert!(why.starts_with("SecretMissing:"), "{why}");
+    assert_secret_missing(&fx, &run).await;
     assert!(why.contains("GITHUB_TOKEN"), "{why}");
     assert!(m.log().specs.is_empty());
 }
@@ -189,6 +200,7 @@ async fn the_values_are_redacted_from_everything_the_run_journals() {
             stop: StopReason::Error,
             result: Some(format!("result {TOKEN}")),
             diagnostic: Some(format!("failed using {TOKEN}")),
+            reason: None,
         }),
     ]);
     let fx = fx_with(
@@ -314,4 +326,47 @@ async fn what_an_executor_refuses_with_is_redacted_before_it_is_journaled_or_sto
             .unwrap();
         assert!(!format!("{events:?}").contains(TOKEN));
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_run_gets_its_secrets_again_and_stays_redacted() {
+    // A resume is a new start: the bot's secrets are resolved again, and the second attempt's
+    // events are redacted like the first's.
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let m = mock([
+        MockStep::started("sess-1", "mock-1"),
+        MockStep::text(format!("token {TOKEN}")),
+        MockStep::Sleep(std::time::Duration::from_secs(3600)),
+    ]);
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]"),
+        Some(secrets.clone()),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    until(async || {
+        fx.store
+            .get_run(&run)
+            .await
+            .unwrap()
+            .and_then(|row| row.session_ref)
+    })
+    .await;
+    fx.kernel.cancel(&run).await.unwrap();
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.journal_with_done(&run).await;
+
+    assert_eq!(fx.kernel.resume_run(&run, None).await.unwrap(), 2);
+    until(async || (m.log().specs.len() == 2).then_some(())).await;
+    let specs = m.log().specs;
+    assert!(specs[1].resume.is_some());
+    assert_eq!(specs[1].env["GITHUB_TOKEN"], TOKEN);
+    assert_eq!(specs[1].env["RENO_RUN_ID"], run.as_str());
+    assert_eq!(secrets.asked().len(), 2, "resolved once per attempt");
+
+    fx.kernel.cancel(&run).await.unwrap();
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    let shown = serde_json::to_string(&fx.journal_with_done(&run).await).unwrap();
+    assert!(!shown.contains(TOKEN), "{shown}");
 }

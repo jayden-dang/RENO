@@ -68,6 +68,9 @@ case "$first" in
   # Prints the environment the child was given to the file the run's own env names, so a test
   # can read what reached it (tests/child_env.rs).
   env | sort > "$RENO_FAKE_ENV_OUT"
+  # The arguments, one per line: the `--mcp-config` JSON names the env of the MCP servers the
+  # real CLI would start, which is how Reno's own server gets its variables.
+  printf '%s\n' "$@" > "$RENO_FAKE_ENV_OUT.args"
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":["Bash"],"cwd":"/tmp","session_id":"sess-env"}'
   emit '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-env"}'
   ;;

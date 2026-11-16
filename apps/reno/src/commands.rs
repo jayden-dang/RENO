@@ -17,8 +17,9 @@ use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorInstall, ExecutorRefresh,
-    Pause, Resume, RunCancel, RunCommand, RunList, RunShow, RunTail, TaskCommand, TaskRun,
-    TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList, WorkspaceShow,
+    Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail, TaskCommand,
+    TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceList,
+    WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
@@ -35,6 +36,7 @@ pub(crate) async fn run(env: &Env, command: RunCommand) -> anyhow::Result<ExitCo
         RunCommand::Show(args) => run_show(env, args).await,
         RunCommand::Tail(args) => run_tail(env, args).await,
         RunCommand::Cancel(args) => run_cancel(env, args).await,
+        RunCommand::Resume(args) => run_resume(env, args).await,
     }
 }
 
@@ -145,6 +147,9 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     print_line(render::run_line(&run))?;
+    for line in render::stop_lines(&run) {
+        print_line(line)?;
+    }
     match &routing {
         Some(decision) => {
             for line in render::routing_lines(decision) {
@@ -249,6 +254,26 @@ async fn run_list(env: &Env, args: RunList) -> anyhow::Result<ExitCode> {
         if next.is_some() {
             print_line("more runs exist: raise --limit, or use --all")?;
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_resume(env: &Env, args: RunResume) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let attempt = client
+        .resume_run(&args.run, args.prompt)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&reno_proto::RunResumeResult {
+            status: reno_proto::RunStatus::Queued,
+            attempt,
+        })?;
+    } else {
+        print_line(format_args!(
+            "resuming {} as attempt {attempt}; follow it with `reno run tail {}`",
+            args.run, args.run
+        ))?;
     }
     Ok(ExitCode::SUCCESS)
 }

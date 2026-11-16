@@ -233,6 +233,27 @@ impl Client {
         Ok(self.rpc.call::<RunCancel>(params).await?.status)
     }
 
+    /// `run.resume`: queues an `interrupted` run (or a `failed` one that has a session) to
+    /// continue its harness session, with `prompt` when given. Returns the attempt it will be.
+    /// A run that cannot be resumed is a `Conflict` error whose `data` is a
+    /// [`reno_proto::NotResumable`]. Needs feature `run.resume`.
+    pub async fn resume_run(
+        &self,
+        run_id: &RunId,
+        prompt: Option<String>,
+    ) -> Result<u32, ClientError> {
+        self.require(reno_proto::FEATURE_RUN_RESUME)?;
+        let params = reno_proto::RunResumeParams {
+            run_id: run_id.clone(),
+            prompt,
+        };
+        Ok(self
+            .rpc
+            .call::<reno_proto::RunResume>(params)
+            .await?
+            .attempt)
+    }
+
     /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
     pub async fn steer(&self, run_id: &RunId, prompt: String) -> Result<(), ClientError> {
         self.require(reno_proto::FEATURE_RUN_STEER)?;
@@ -502,6 +523,70 @@ impl Client {
         };
         self.rpc.call::<ApprovalDecide>(params).await?;
         Ok(())
+    }
+
+    /// `agent.auth`: binds this connection to the run `run` with its token. From then on the
+    /// connection may call only the `agent.*` methods (the daemon refuses every other), so use a
+    /// connection of its own for it. Needs feature `agent`.
+    ///
+    /// The token is a secret: it is sent once, here, and never kept.
+    pub async fn agent_auth(
+        &self,
+        run: &RunId,
+        token: String,
+    ) -> Result<reno_proto::AgentAuthResult, ClientError> {
+        self.require(reno_proto::FEATURE_AGENT)?;
+        let params = reno_proto::AgentAuthParams {
+            run_id: run.clone(),
+            token,
+        };
+        Ok(self.rpc.call::<reno_proto::AgentAuth>(params).await?)
+    }
+
+    /// `agent.report`: a structured status of the run, journaled in its transcript. After
+    /// [`Client::agent_auth`].
+    pub async fn agent_report(
+        &self,
+        params: reno_proto::AgentReportParams,
+    ) -> Result<(), ClientError> {
+        self.require(reno_proto::FEATURE_AGENT)?;
+        self.rpc.call::<reno_proto::AgentReport>(params).await?;
+        Ok(())
+    }
+
+    /// `agent.request_approval`: asks for an approval for the run and waits until it is decided,
+    /// expires or the run ends. After [`Client::agent_auth`].
+    pub async fn agent_request_approval(
+        &self,
+        params: reno_proto::AgentApprovalParams,
+    ) -> Result<reno_proto::AgentApprovalResult, ClientError> {
+        self.require(reno_proto::FEATURE_AGENT)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::AgentRequestApproval>(params)
+            .await?)
+    }
+
+    /// `agent.board_read`: one key of the run's own board scope, or every key without values.
+    /// After [`Client::agent_auth`].
+    pub async fn agent_board_read(
+        &self,
+        key: Option<String>,
+    ) -> Result<reno_proto::AgentBoardReadResult, ClientError> {
+        self.require(reno_proto::FEATURE_AGENT)?;
+        let params = reno_proto::AgentBoardReadParams { key };
+        Ok(self.rpc.call::<reno_proto::AgentBoardRead>(params).await?)
+    }
+
+    /// `agent.board_write`: writes a key of the run's own board scope. A stale
+    /// `expected_version` is a `Conflict` error whose `data` is a [`reno_proto::BoardConflict`].
+    /// After [`Client::agent_auth`].
+    pub async fn agent_board_write(
+        &self,
+        params: reno_proto::AgentBoardWriteParams,
+    ) -> Result<reno_proto::AgentBoardWriteResult, ClientError> {
+        self.require(reno_proto::FEATURE_AGENT)?;
+        Ok(self.rpc.call::<reno_proto::AgentBoardWrite>(params).await?)
     }
 
     /// `def.list`: the definitions in force and the problems with the files on disk, optionally

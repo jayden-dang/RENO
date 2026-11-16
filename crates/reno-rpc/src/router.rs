@@ -3,11 +3,12 @@
 //! `router.method::<M>(handler)` captures `M::Params` and `M::Result` in a closure that works on
 //! `serde_json::Value`, so the dispatch loop in `server` never sees a generic parameter.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::{Stream, StreamExt};
 use reno_proto::{ErrorCode, ErrorObject, Method, Notification, Seq, Subscription};
@@ -30,6 +31,7 @@ type MethodFn = dyn Fn(Value, Context) -> BoxFuture<Result<Value, ErrorObject>> 
 type SubscribeFn =
     dyn Fn(Value, Context) -> BoxFuture<Result<ErasedStream, ErrorObject>> + Send + Sync;
 type NotifyFn = dyn Fn(Value, Context) -> BoxFuture<()> + Send + Sync;
+type GuardFn = dyn Fn(&Context, &str) -> Result<(), ErrorObject> + Send + Sync;
 
 /// What kind of transport a connection arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,7 @@ pub struct Context {
     conn_id: u64,
     peer: PeerInfo,
     cancel: CancellationToken,
+    state: Arc<OnceLock<Arc<dyn Any + Send + Sync>>>,
 }
 
 impl Context {
@@ -76,6 +79,7 @@ impl Context {
             conn_id,
             peer,
             cancel,
+            state: Arc::new(OnceLock::new()),
         }
     }
 
@@ -87,6 +91,20 @@ impl Context {
     /// Who is on the other end.
     pub fn peer(&self) -> &PeerInfo {
         &self.peer
+    }
+
+    /// Attaches `value` to this connection, once: what a handler learned about the peer (who it
+    /// authenticated as) that later handlers and the router's guard read with
+    /// [`state`](Self::state). Returns false, and keeps the first value, when one is attached
+    /// already. Every clone of the context, on any request of the connection, sees it.
+    pub fn set_state<T: Any + Send + Sync>(&self, value: T) -> bool {
+        self.state.set(Arc::new(value)).is_ok()
+    }
+
+    /// The value [`set_state`](Self::set_state) attached, when it is a `T`.
+    pub fn state<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        let value = Arc::clone(self.state.get()?);
+        value.downcast::<T>().ok()
     }
 
     /// Cancelled when the connection closes or the server shuts down. Handlers are dropped at
@@ -135,6 +153,7 @@ pub(crate) enum Handler {
 pub struct Router {
     pub(crate) handlers: HashMap<&'static str, Handler>,
     pub(crate) notifications: HashMap<&'static str, Arc<NotifyFn>>,
+    pub(crate) guard: Option<Arc<GuardFn>>,
 }
 
 impl fmt::Debug for Router {
@@ -161,6 +180,20 @@ impl Router {
     /// An empty router.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets the guard every request and notification passes before its handler runs: it sees
+    /// the connection's [`Context`] and the method name, and an error is the answer (a
+    /// notification that fails it is dropped). It is how a daemon keeps a connection that
+    /// authenticated as one kind of peer to that kind's methods. `sub.cancel`, which is the
+    /// connection's own, is not guarded.
+    #[must_use]
+    pub fn guard<F>(mut self, guard: F) -> Self
+    where
+        F: Fn(&Context, &str) -> Result<(), ErrorObject> + Send + Sync + 'static,
+    {
+        self.guard = Some(Arc::new(guard));
+        self
     }
 
     /// Registers a request handler for `M`.
@@ -244,6 +277,14 @@ impl Router {
         });
         self.notifications.insert(N::NAME, erased);
         self
+    }
+
+    /// Runs the guard, when there is one.
+    pub(crate) fn check(&self, ctx: &Context, method: &str) -> Result<(), ErrorObject> {
+        match &self.guard {
+            Some(guard) => guard(ctx, method),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn handler(&self, name: &str) -> Option<&Handler> {

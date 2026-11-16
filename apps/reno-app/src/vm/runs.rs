@@ -213,6 +213,9 @@ mod tests {
             }),
             created_at_ms: NOW - age_min * 60_000,
             updated_at_ms: NOW - age_min * 60_000 + 120_000,
+            stop: None,
+            not_resumed: None,
+            session: None,
         }
     }
 

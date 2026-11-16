@@ -846,3 +846,99 @@ async fn the_fake_lists_sets_and_deletes_secrets_and_never_returns_a_value() {
     let bad = client.set_secret("lower", "x").await.unwrap_err();
     assert_eq!(bad.code(), Some(reno_proto::ErrorCode::InvalidParams));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_run_and_a_cancelled_one_carry_their_typed_stop() {
+    use reno_proto::{CancelledBy, StartRefusal, StopDetail};
+    let client = FakeDaemon::spawn().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_STOP_DETAIL));
+    let refused = client.run_task(task("/refused")).await.unwrap();
+    let transcript = events(&client, &refused).await;
+    let Some((
+        _,
+        ExecEvent::Done {
+            reason: Some(reason),
+            ..
+        },
+    )) = transcript.last()
+    else {
+        panic!("no typed reason: {transcript:?}");
+    };
+    assert!(matches!(
+        reason,
+        StopDetail::StartRefused {
+            failure: StartRefusal::NotSignedIn,
+            ..
+        }
+    ));
+    assert_eq!(
+        client.get_run(&refused).await.unwrap().stop.as_ref(),
+        Some(reason)
+    );
+
+    client
+        .cancel_run(&run("builder1"), Some("not needed".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        client.get_run(&run("builder1")).await.unwrap().stop,
+        Some(StopDetail::Cancelled {
+            by: CancelledBy::User
+        })
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_run_with_a_session_resumes_and_other_runs_are_refused_with_a_reason() {
+    use reno_proto::{ErrorCode, NotResumable, NotResumed};
+    let client = FakeDaemon::spawn().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_RUN_RESUME));
+
+    let failing = client.run_task(task("/fails")).await.unwrap();
+    events(&client, &failing).await;
+    let failed = client.get_run(&failing).await.unwrap();
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert_eq!(
+        failed.session.as_ref().map(|s| s.0.as_str()),
+        Some("sess-fake")
+    );
+
+    assert_eq!(client.resume_run(&failing, None).await.unwrap(), 2);
+    let transcript = events(&client, &failing).await;
+    assert!(transcript.iter().any(|(_, e)| matches!(
+        e,
+        ExecEvent::Resumed {
+            from_attempt: 1,
+            ..
+        }
+    )));
+    assert!(is_done(
+        &transcript.last().unwrap().1,
+        StopReason::Completed
+    ));
+    let resumed = client.get_run(&failing).await.unwrap();
+    assert_eq!((resumed.status, resumed.attempt), (RunStatus::Succeeded, 2));
+
+    // A run that is done, and a run that never had a session, say why they cannot.
+    let why = |error: ClientError| match error {
+        ClientError::Remote(object) => {
+            assert_eq!(object.code, ErrorCode::Conflict);
+            serde_json::from_value::<NotResumable>(object.data.unwrap())
+                .unwrap()
+                .why
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        why(client.resume_run(&failing, None).await.unwrap_err()),
+        NotResumed::WrongStatus {
+            status: RunStatus::Succeeded
+        }
+    );
+    let refused = client.run_task(task("/refused")).await.unwrap();
+    events(&client, &refused).await;
+    assert_eq!(
+        why(client.resume_run(&refused, None).await.unwrap_err()),
+        NotResumed::NoSession
+    );
+}

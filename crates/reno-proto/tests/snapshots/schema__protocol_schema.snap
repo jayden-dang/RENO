@@ -58,6 +58,21 @@ expression: protocol_schema()
           "pattern": "^[A-Za-z0-9._-]{1,64}$",
           "type": "string"
         },
+        "ResumePolicy": {
+          "description": "What a bot allows the daemon to do with its interrupted runs.",
+          "oneOf": [
+            {
+              "const": "auto",
+              "description": "Resume an interrupted run on its own when it can be.",
+              "type": "string"
+            },
+            {
+              "const": "never",
+              "description": "Leave an interrupted run for a person.",
+              "type": "string"
+            }
+          ]
+        },
         "SandboxLevel": {
           "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
           "oneOf": [
@@ -81,7 +96,7 @@ expression: protocol_schema()
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nsecrets = [\"GITHUB_TOKEN\"]             # optional: Keychain secrets its runs get as env vars\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
+      "description": "A bot: the instructions it works from and the limits it works within.\n\n```toml\nname = \"keeper\"\ninstructions = \"\"\"\nKeep dependencies current. Never push without a human.\n\"\"\"\nexecutors = [\"claude-code\", \"codex\"]   # most preferred first\naccess = \"supervised\"\nsandbox = \"workspace_write\"          # optional: only executors that enforce it\nteam = \"core\"                          # optional\ntriggers = [\"nightly\"]                 # names of triggers/<name>.toml\nin_place_writes = false                # optional: allow writes in a non-git directory\nsecrets = [\"GITHUB_TOKEN\"]             # optional: Keychain secrets its runs get as env vars\nresume = \"auto\"                        # optional: \"auto\" (default) or \"never\"\n\n[budget]\nmax_concurrent_runs = 2\nmax_wall_time = \"45m\"\ndaily_token_ceiling = 2000000          # optional\n```",
       "properties": {
         "access": {
           "$ref": "#/$defs/AccessMode",
@@ -114,6 +129,10 @@ expression: protocol_schema()
         "name": {
           "description": "The bot's name; it must equal the file stem.",
           "type": "string"
+        },
+        "resume": {
+          "$ref": "#/$defs/ResumePolicy",
+          "description": "Whether a run of this bot that was interrupted (the daemon crashed or was stopped) is\nresumed by the daemon on its own at the next start. `auto`, the default, resumes it when\nits executor supports resume, the run has a session, it is under its attempt cap and not\npast its wall-time budget; `never` leaves it `interrupted` for a person to resume with\n`run.resume`. A person's cancel and a budget stop are never resumed on their own."
         },
         "sandbox": {
           "$ref": "#/$defs/SandboxLevel",
@@ -623,6 +642,9 @@ expression: protocol_schema()
     "routing",
     "attachments",
     "budget",
+    "agent",
+    "run.resume",
+    "run.stop_detail",
     "secrets"
   ],
   "methods": [
@@ -1339,9 +1361,254 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "BudgetKind": {
+            "description": "What a budget limits.",
+            "oneOf": [
+              {
+                "const": "wall_time",
+                "description": "How long one run may take (`budget.max_wall_time`). Limits are in milliseconds.",
+                "type": "string"
+              },
+              {
+                "const": "tokens",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "type": "string"
+              }
+            ]
+          },
+          "CancelledBy": {
+            "description": "Who cancelled a run.",
+            "oneOf": [
+              {
+                "const": "user",
+                "description": "A person (`run.cancel`).",
+                "type": "string"
+              },
+              {
+                "const": "pause",
+                "description": "The kill switch (`budget.pause` with `stopLive`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
+          },
+          "NotResumed": {
+            "description": "Why a run was not resumed, or cannot be: set on an `interrupted` run that recovery looked at\nand left, and the reason `run.resume` gives when it refuses.",
+            "oneOf": [
+              {
+                "description": "A person cancelled it; their word stands.",
+                "properties": {
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The kill switch stopped it.",
+                "properties": {
+                  "type": {
+                    "const": "paused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A budget stopped it; resuming would spend the same budget again.",
+                "properties": {
+                  "type": {
+                    "const": "budget_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended it by itself; a loop of those is not retried unasked.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It never started on an executor.",
+                "properties": {
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness never reported a session, so there is nothing to resume.",
+                "properties": {
+                  "type": {
+                    "const": "no_session",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor does not declare resume support.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_cannot_resume",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor is not registered in this daemon.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_missing",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's bot has `resume = \"never\"`.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_forbids",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run has used its attempts.",
+                "properties": {
+                  "attempts": {
+                    "description": "Attempts made.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "max": {
+                    "description": "Attempts allowed.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "attempts_exhausted",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "attempts",
+                  "max"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run is past its wall-time budget.",
+                "properties": {
+                  "limitMs": {
+                    "description": "The limit, in milliseconds.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "wall_time_spent",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "limitMs"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor has not finished stopping; ask again in a moment.",
+                "properties": {
+                  "type": {
+                    "const": "still_stopping",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Only `interrupted` runs, and `failed` ones that have a session, can be resumed.",
+                "properties": {
+                  "status": {
+                    "$ref": "#/$defs/RunStatus",
+                    "description": "The run's status."
+                  },
+                  "type": {
+                    "const": "wrong_status",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "status"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
@@ -1399,6 +1666,162 @@ expression: protocol_schema()
                 "const": "cancelled",
                 "description": "Cancelled before or after interruption. Terminal.",
                 "type": "string"
+              }
+            ]
+          },
+          "SessionRef": {
+            "description": "An opaque handle a harness gives for resuming a conversation.",
+            "type": "string"
+          },
+          "StartRefusal": {
+            "description": "Why a run could not start. A run that is refused never reached its harness.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "The executor's harness is not installed (or is too old to use).",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "The executor's harness is not signed in.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "No executor can honour the run: an access mode or sandbox level nobody offers, or a task\nthat named no executor and has no default to go to.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_refused",
+                "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Anything else that stopped the start: an unknown executor, an unreadable bot definition,\na task with no working directory, a spec the executor rejected.",
+                "type": "string"
+              }
+            ]
+          },
+          "StopDetail": {
+            "description": "The typed reason behind a run's last stop, beside the human `diagnostic`. A client decides\nwhat to show from this and never from the diagnostic's text.",
+            "oneOf": [
+              {
+                "description": "A budget stopped the run.",
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/BudgetKind",
+                    "description": "Which limit."
+                  },
+                  "limit": {
+                    "description": "The limit: milliseconds for `wall_time`, tokens for `tokens`.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "budget_exceeded",
+                    "type": "string"
+                  },
+                  "used": {
+                    "description": "What had been used when it was noticed, in the same unit.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "limit",
+                  "used"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run never started: `failure` says why, `detail` is the daemon's words for a person.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal as a sentence.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartRefusal",
+                    "description": "The kind of refusal."
+                  },
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Someone cancelled the run.",
+                "properties": {
+                  "by": {
+                    "$ref": "#/$defs/CancelledBy",
+                    "description": "Who."
+                  },
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "by"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon was shutting down. The run is resumed at the next start when it may be.",
+                "properties": {
+                  "type": {
+                    "const": "shutdown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon died with the run live; recovery found it at the next start.",
+                "properties": {
+                  "type": {
+                    "const": "crashed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended the run itself, as interrupted, without being asked to.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -1474,6 +1897,17 @@ expression: protocol_schema()
               "null"
             ]
           },
+          "notResumed": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NotResumed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why an `interrupted` run was not resumed, once the daemon has looked. Absent while the\nrun may still be resumed, and for any run that is not interrupted. Needs feature\n`run.resume`."
+          },
           "prompt": {
             "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
             "type": [
@@ -1485,9 +1919,31 @@ expression: protocol_schema()
             "$ref": "#/$defs/RunId",
             "description": "The run."
           },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SessionRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The harness session of the run, once its executor has reported one: what a resume\ncontinues. Needs feature `run.resume`."
+          },
           "status": {
             "$ref": "#/$defs/RunStatus",
             "description": "Current lifecycle state."
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StopDetail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The typed reason behind the run's last stop, when the daemon knows one: a budget, a\nrefused start, a cancel, a shutdown, a crash. Needs feature `run.stop_detail`."
           },
           "stopReason": {
             "anyOf": [
@@ -2815,9 +3271,254 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "BudgetKind": {
+            "description": "What a budget limits.",
+            "oneOf": [
+              {
+                "const": "wall_time",
+                "description": "How long one run may take (`budget.max_wall_time`). Limits are in milliseconds.",
+                "type": "string"
+              },
+              {
+                "const": "tokens",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "type": "string"
+              }
+            ]
+          },
+          "CancelledBy": {
+            "description": "Who cancelled a run.",
+            "oneOf": [
+              {
+                "const": "user",
+                "description": "A person (`run.cancel`).",
+                "type": "string"
+              },
+              {
+                "const": "pause",
+                "description": "The kill switch (`budget.pause` with `stopLive`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
+          },
+          "NotResumed": {
+            "description": "Why a run was not resumed, or cannot be: set on an `interrupted` run that recovery looked at\nand left, and the reason `run.resume` gives when it refuses.",
+            "oneOf": [
+              {
+                "description": "A person cancelled it; their word stands.",
+                "properties": {
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The kill switch stopped it.",
+                "properties": {
+                  "type": {
+                    "const": "paused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A budget stopped it; resuming would spend the same budget again.",
+                "properties": {
+                  "type": {
+                    "const": "budget_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended it by itself; a loop of those is not retried unasked.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It never started on an executor.",
+                "properties": {
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness never reported a session, so there is nothing to resume.",
+                "properties": {
+                  "type": {
+                    "const": "no_session",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor does not declare resume support.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_cannot_resume",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor is not registered in this daemon.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_missing",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's bot has `resume = \"never\"`.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_forbids",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run has used its attempts.",
+                "properties": {
+                  "attempts": {
+                    "description": "Attempts made.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "max": {
+                    "description": "Attempts allowed.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "attempts_exhausted",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "attempts",
+                  "max"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run is past its wall-time budget.",
+                "properties": {
+                  "limitMs": {
+                    "description": "The limit, in milliseconds.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "wall_time_spent",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "limitMs"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor has not finished stopping; ask again in a moment.",
+                "properties": {
+                  "type": {
+                    "const": "still_stopping",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Only `interrupted` runs, and `failed` ones that have a session, can be resumed.",
+                "properties": {
+                  "status": {
+                    "$ref": "#/$defs/RunStatus",
+                    "description": "The run's status."
+                  },
+                  "type": {
+                    "const": "wrong_status",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "status"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
@@ -2915,6 +3616,17 @@ expression: protocol_schema()
                   "null"
                 ]
               },
+              "notResumed": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/NotResumed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Why an `interrupted` run was not resumed, once the daemon has looked. Absent while the\nrun may still be resumed, and for any run that is not interrupted. Needs feature\n`run.resume`."
+              },
               "prompt": {
                 "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
                 "type": [
@@ -2926,9 +3638,31 @@ expression: protocol_schema()
                 "$ref": "#/$defs/RunId",
                 "description": "The run."
               },
+              "session": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The harness session of the run, once its executor has reported one: what a resume\ncontinues. Needs feature `run.resume`."
+              },
               "status": {
                 "$ref": "#/$defs/RunStatus",
                 "description": "Current lifecycle state."
+              },
+              "stop": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StopDetail"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed reason behind the run's last stop, when the daemon knows one: a budget, a\nrefused start, a cancel, a shutdown, a crash. Needs feature `run.stop_detail`."
               },
               "stopReason": {
                 "anyOf": [
@@ -2967,6 +3701,162 @@ expression: protocol_schema()
               "updatedAtMs"
             ],
             "type": "object"
+          },
+          "SessionRef": {
+            "description": "An opaque handle a harness gives for resuming a conversation.",
+            "type": "string"
+          },
+          "StartRefusal": {
+            "description": "Why a run could not start. A run that is refused never reached its harness.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "The executor's harness is not installed (or is too old to use).",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "The executor's harness is not signed in.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "No executor can honour the run: an access mode or sandbox level nobody offers, or a task\nthat named no executor and has no default to go to.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_refused",
+                "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Anything else that stopped the start: an unknown executor, an unreadable bot definition,\na task with no working directory, a spec the executor rejected.",
+                "type": "string"
+              }
+            ]
+          },
+          "StopDetail": {
+            "description": "The typed reason behind a run's last stop, beside the human `diagnostic`. A client decides\nwhat to show from this and never from the diagnostic's text.",
+            "oneOf": [
+              {
+                "description": "A budget stopped the run.",
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/BudgetKind",
+                    "description": "Which limit."
+                  },
+                  "limit": {
+                    "description": "The limit: milliseconds for `wall_time`, tokens for `tokens`.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "budget_exceeded",
+                    "type": "string"
+                  },
+                  "used": {
+                    "description": "What had been used when it was noticed, in the same unit.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "limit",
+                  "used"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run never started: `failure` says why, `detail` is the daemon's words for a person.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal as a sentence.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartRefusal",
+                    "description": "The kind of refusal."
+                  },
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Someone cancelled the run.",
+                "properties": {
+                  "by": {
+                    "$ref": "#/$defs/CancelledBy",
+                    "description": "Who."
+                  },
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "by"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon was shutting down. The run is resumed at the next start when it may be.",
+                "properties": {
+                  "type": {
+                    "const": "shutdown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon died with the run live; recovery found it at the next start.",
+                "properties": {
+                  "type": {
+                    "const": "crashed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended the run itself, as interrupted, without being asked to.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "StopReason": {
             "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
@@ -3132,6 +4022,116 @@ expression: protocol_schema()
           "status"
         ],
         "title": "RunCancelResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "run.resume",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.resume`.",
+        "properties": {
+          "prompt": {
+            "description": "What to tell the harness when the session continues; the daemon's standard \"continue\"\nprompt when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run to resume: `interrupted`, or `failed` with a session."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunResumeParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunStatus": {
+            "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
+            "oneOf": [
+              {
+                "const": "queued",
+                "description": "Waiting for a dispatcher to claim it.",
+                "type": "string"
+              },
+              {
+                "const": "leased",
+                "description": "Claimed under a lease and fence; the executor is not yet running.",
+                "type": "string"
+              },
+              {
+                "const": "running",
+                "description": "The executor is working.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_input",
+                "description": "Paused on an `ExecEvent::NeedsInput`.",
+                "type": "string"
+              },
+              {
+                "const": "waiting_approval",
+                "description": "Paused on an `ExecEvent::NeedsApproval`.",
+                "type": "string"
+              },
+              {
+                "const": "evaluating",
+                "description": "The harness finished; checks and verdicts are being gathered.",
+                "type": "string"
+              },
+              {
+                "const": "succeeded",
+                "description": "Evaluation passed. Terminal.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "Evaluation failed or the harness errored. Terminal, except that a retry re-queues it.",
+                "type": "string"
+              },
+              {
+                "const": "interrupted",
+                "description": "The daemon or executor stopped mid-run; resume or human review decides what follows.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "Cancelled before or after interruption. Terminal.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.resume`.",
+        "properties": {
+          "attempt": {
+            "description": "The attempt it will be, from 2.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/$defs/RunStatus",
+            "description": "The run's status once it was queued again (`queued`)."
+          }
+        },
+        "required": [
+          "status",
+          "attempt"
+        ],
+        "title": "RunResumeResult",
         "type": "object"
       }
     },
@@ -6647,6 +7647,450 @@ expression: protocol_schema()
         "title": "ExecutorInstallResult",
         "type": "object"
       }
+    },
+    {
+      "name": "agent.auth",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.auth`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run the token was minted for."
+          },
+          "token": {
+            "description": "The run token (the contents of the file named by [`ENV_TOKEN_FILE`]). Never logged.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "token"
+        ],
+        "title": "AgentAuthParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.auth`.",
+        "properties": {
+          "bot": {
+            "description": "The bot the run is pinned to, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run the connection now speaks for."
+          },
+          "scope": {
+            "description": "The board scope this run reads and writes: `bot:<name>`, or `run:<id>` for a run with no\nbot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runId",
+          "scope"
+        ],
+        "title": "AgentAuthResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.report",
+      "params": {
+        "$defs": {
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.report`.",
+        "properties": {
+          "details": {
+            "description": "Anything longer, for the transcript.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/ReportStatus",
+            "description": "How the work stands."
+          },
+          "summary": {
+            "description": "One short paragraph.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "summary"
+        ],
+        "title": "AgentReportParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.report`.",
+        "title": "AgentReportResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.request_approval",
+      "params": {
+        "$defs": {
+          "ActionClass": {
+            "description": "What kind of action an approval is about.",
+            "oneOf": [
+              {
+                "const": "read",
+                "description": "Reading files.",
+                "type": "string"
+              },
+              {
+                "const": "edit",
+                "description": "Editing files.",
+                "type": "string"
+              },
+              {
+                "const": "command",
+                "description": "Running a command.",
+                "type": "string"
+              },
+              {
+                "const": "network",
+                "description": "Network access.",
+                "type": "string"
+              },
+              {
+                "const": "mcp_tool",
+                "description": "An MCP tool call.",
+                "type": "string"
+              },
+              {
+                "const": "other",
+                "description": "Anything else.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.request_approval`.",
+        "properties": {
+          "action": {
+            "$ref": "#/$defs/ActionClass",
+            "description": "The class of the action to be approved."
+          },
+          "command": {
+            "description": "The command line, for a command action.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paths": {
+            "default": [],
+            "description": "The paths the action touches.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "description": "Why the run wants to do it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "reason"
+        ],
+        "title": "AgentApprovalParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ApprovalOutcome": {
+            "description": "How an approval request ended: the executor was told yes or no.",
+            "oneOf": [
+              {
+                "const": "approved",
+                "description": "The action may proceed.",
+                "type": "string"
+              },
+              {
+                "const": "denied",
+                "description": "The action is refused.",
+                "type": "string"
+              }
+            ]
+          },
+          "ResolvedBy": {
+            "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",
+            "oneOf": [
+              {
+                "description": "A person decided it.",
+                "properties": {
+                  "type": {
+                    "const": "human",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A rule of the policy decided it, with no question asked. `name` is the rule's `note`, or\n`rules[N]` when it has none, or `default` when no rule matched and the policy's default\neffect applied.",
+                "properties": {
+                  "name": {
+                    "description": "The rule's name.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "rule",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "properties": {
+                  "type": {
+                    "const": "expired",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The same action was denied earlier in this run, so it was denied again unasked.",
+                "properties": {
+                  "type": {
+                    "const": "repeat_denial",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.request_approval`: how the request ended.",
+        "properties": {
+          "by": {
+            "$ref": "#/$defs/ResolvedBy",
+            "description": "Who or what decided."
+          },
+          "decision": {
+            "$ref": "#/$defs/ApprovalOutcome",
+            "description": "Whether the action may go ahead."
+          },
+          "message": {
+            "description": "For a denial, the reason, when one was given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "by"
+        ],
+        "title": "AgentApprovalResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.board_read",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.board_read`.",
+        "properties": {
+          "key": {
+            "description": "The key to read. Without one, every key of the scope is listed (without values).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "title": "AgentBoardReadParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "BoardEntry": {
+            "description": "One entry of a board scope.",
+            "properties": {
+              "key": {
+                "description": "The key.",
+                "type": "string"
+              },
+              "size": {
+                "description": "Size of the value in bytes.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "updatedAtMs": {
+                "description": "When it was last written, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "value": {
+                "description": "The value. Absent in a listing.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "description": "How many times the key has been written; the first write is version 1.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "key",
+              "version",
+              "size",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.board_read`.",
+        "properties": {
+          "entries": {
+            "description": "The entry asked for (empty when the key does not exist), or every entry of the scope.",
+            "items": {
+              "$ref": "#/$defs/BoardEntry"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "description": "The scope that was read.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "entries"
+        ],
+        "title": "AgentBoardReadResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "agent.board_write",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `agent.board_write`.",
+        "properties": {
+          "expectedVersion": {
+            "description": "The version the writer last saw (0 for a key that must not exist yet). When it is not the\ncurrent version the write is refused with the current entry. Without it the write always\nsucceeds.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "key": {
+            "description": "The key.",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value, at most [`BOARD_VALUE_MAX_BYTES`] bytes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "AgentBoardWriteParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `agent.board_write`.",
+        "properties": {
+          "scope": {
+            "description": "The scope written.",
+            "type": "string"
+          },
+          "version": {
+            "description": "The key's version after the write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "version"
+        ],
+        "title": "AgentBoardWriteResult",
+        "type": "object"
+      }
     }
   ],
   "notifications": [
@@ -6777,6 +8221,36 @@ expression: protocol_schema()
               "tool"
             ],
             "type": "object"
+          },
+          "BudgetKind": {
+            "description": "What a budget limits.",
+            "oneOf": [
+              {
+                "const": "wall_time",
+                "description": "How long one run may take (`budget.max_wall_time`). Limits are in milliseconds.",
+                "type": "string"
+              },
+              {
+                "const": "tokens",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "type": "string"
+              }
+            ]
+          },
+          "CancelledBy": {
+            "description": "Who cancelled a run.",
+            "oneOf": [
+              {
+                "const": "user",
+                "description": "A person (`run.cancel`).",
+                "type": "string"
+              },
+              {
+                "const": "pause",
+                "description": "The kill switch (`budget.pause` with `stopLive`).",
+                "type": "string"
+              }
+            ]
           },
           "ExecEvent": {
             "description": "One event from a running executor. A failing harness yields `Done { stop: Error }`; the\nstream itself never errors mid-run.",
@@ -7023,14 +8497,55 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "The run ended; always the last event.",
+                "description": "The run called Reno's `report` tool: a structured status, shown in the transcript. Only\ndaemons that negotiate the `agent` feature emit it.",
                 "properties": {
-                  "diagnostic": {
-                    "description": "Failure detail, when `stop` is `error`.",
+                  "details": {
+                    "description": "Anything longer.",
                     "type": [
                       "string",
                       "null"
                     ]
+                  },
+                  "status": {
+                    "$ref": "#/$defs/ReportStatus",
+                    "description": "How the work stands."
+                  },
+                  "summary": {
+                    "description": "A short summary.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "agent_report",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "status",
+                  "summary"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run ended; always the last event.",
+                "properties": {
+                  "diagnostic": {
+                    "description": "Failure detail, when `stop` is `error`. For people: read `reason` to decide.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/StopDetail"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The typed reason, when the daemon knows one (a budget, a refused start, a cancel, a\nshutdown). Absent from an executor's own `Done` and from daemons that predate it."
                   },
                   "result": {
                     "description": "Final result text.",
@@ -7051,6 +8566,31 @@ expression: protocol_schema()
                 "required": [
                   "type",
                   "stop"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run was resumed: a new attempt continues the harness session. Follows the\n`Done` of the attempt that ended, and precedes the new attempt's `Started`. Only daemons\nthat negotiate the `run.resume` feature emit it.",
+                "properties": {
+                  "fromAttempt": {
+                    "description": "The attempt that ended and is continued.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "session": {
+                    "$ref": "#/$defs/SessionRef",
+                    "description": "The session the new attempt resumes."
+                  },
+                  "type": {
+                    "const": "resumed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "fromAttempt",
+                  "session"
                 ],
                 "type": "object"
               }
@@ -7086,6 +8626,31 @@ expression: protocol_schema()
               "prompt"
             ],
             "type": "object"
+          },
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
           },
           "ResolvedBy": {
             "description": "Who or what resolved an approval request, and so why the transcript shows the outcome it\ndoes.",
@@ -7158,6 +8723,158 @@ expression: protocol_schema()
           "SessionRef": {
             "description": "An opaque handle a harness gives for resuming a conversation.",
             "type": "string"
+          },
+          "StartRefusal": {
+            "description": "Why a run could not start. A run that is refused never reached its harness.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "The executor's harness is not installed (or is too old to use).",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "The executor's harness is not signed in.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "No executor can honour the run: an access mode or sandbox level nobody offers, or a task\nthat named no executor and has no default to go to.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_refused",
+                "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Anything else that stopped the start: an unknown executor, an unreadable bot definition,\na task with no working directory, a spec the executor rejected.",
+                "type": "string"
+              }
+            ]
+          },
+          "StopDetail": {
+            "description": "The typed reason behind a run's last stop, beside the human `diagnostic`. A client decides\nwhat to show from this and never from the diagnostic's text.",
+            "oneOf": [
+              {
+                "description": "A budget stopped the run.",
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/BudgetKind",
+                    "description": "Which limit."
+                  },
+                  "limit": {
+                    "description": "The limit: milliseconds for `wall_time`, tokens for `tokens`.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "budget_exceeded",
+                    "type": "string"
+                  },
+                  "used": {
+                    "description": "What had been used when it was noticed, in the same unit.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "limit",
+                  "used"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run never started: `failure` says why, `detail` is the daemon's words for a person.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal as a sentence.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartRefusal",
+                    "description": "The kind of refusal."
+                  },
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Someone cancelled the run.",
+                "properties": {
+                  "by": {
+                    "$ref": "#/$defs/CancelledBy",
+                    "description": "Who."
+                  },
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "by"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon was shutting down. The run is resumed at the next start when it may be.",
+                "properties": {
+                  "type": {
+                    "const": "shutdown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon died with the run live; recovery found it at the next start.",
+                "properties": {
+                  "type": {
+                    "const": "crashed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended the run itself, as interrupted, without being asked to.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "StopReason": {
             "description": "Why an executor stopped, carried by `ExecEvent::Done`.",
@@ -7294,9 +9011,254 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "BudgetKind": {
+            "description": "What a budget limits.",
+            "oneOf": [
+              {
+                "const": "wall_time",
+                "description": "How long one run may take (`budget.max_wall_time`). Limits are in milliseconds.",
+                "type": "string"
+              },
+              {
+                "const": "tokens",
+                "description": "What a bot may spend per local day (`budget.daily_token_ceiling`). Limits are in tokens,\ninput and output together.",
+                "type": "string"
+              }
+            ]
+          },
+          "CancelledBy": {
+            "description": "Who cancelled a run.",
+            "oneOf": [
+              {
+                "const": "user",
+                "description": "A person (`run.cancel`).",
+                "type": "string"
+              },
+              {
+                "const": "pause",
+                "description": "The kill switch (`budget.pause` with `stopLive`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
+          },
+          "NotResumed": {
+            "description": "Why a run was not resumed, or cannot be: set on an `interrupted` run that recovery looked at\nand left, and the reason `run.resume` gives when it refuses.",
+            "oneOf": [
+              {
+                "description": "A person cancelled it; their word stands.",
+                "properties": {
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The kill switch stopped it.",
+                "properties": {
+                  "type": {
+                    "const": "paused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A budget stopped it; resuming would spend the same budget again.",
+                "properties": {
+                  "type": {
+                    "const": "budget_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended it by itself; a loop of those is not retried unasked.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It never started on an executor.",
+                "properties": {
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness never reported a session, so there is nothing to resume.",
+                "properties": {
+                  "type": {
+                    "const": "no_session",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor does not declare resume support.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_cannot_resume",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor is not registered in this daemon.",
+                "properties": {
+                  "executor": {
+                    "$ref": "#/$defs/ExecutorId",
+                    "description": "The executor."
+                  },
+                  "type": {
+                    "const": "executor_missing",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "executor"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's bot has `resume = \"never\"`.",
+                "properties": {
+                  "bot": {
+                    "description": "The bot.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "bot_forbids",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "bot"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run has used its attempts.",
+                "properties": {
+                  "attempts": {
+                    "description": "Attempts made.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "max": {
+                    "description": "Attempts allowed.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "attempts_exhausted",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "attempts",
+                  "max"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run is past its wall-time budget.",
+                "properties": {
+                  "limitMs": {
+                    "description": "The limit, in milliseconds.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "wall_time_spent",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "limitMs"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's executor has not finished stopping; ask again in a moment.",
+                "properties": {
+                  "type": {
+                    "const": "still_stopping",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Only `interrupted` runs, and `failed` ones that have a session, can be resumed.",
+                "properties": {
+                  "status": {
+                    "$ref": "#/$defs/RunStatus",
+                    "description": "The run's status."
+                  },
+                  "type": {
+                    "const": "wrong_status",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "status"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
@@ -7394,6 +9356,17 @@ expression: protocol_schema()
                   "null"
                 ]
               },
+              "notResumed": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/NotResumed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Why an `interrupted` run was not resumed, once the daemon has looked. Absent while the\nrun may still be resumed, and for any run that is not interrupted. Needs feature\n`run.resume`."
+              },
               "prompt": {
                 "description": "The prompt the task was submitted with. Absent from daemons that predate it. In\n`run.list` and `runs.watch` it is cut to [`PROMPT_SUMMARY_CHARS`] characters, ending in\n`…` when cut; `run.get` returns it whole.",
                 "type": [
@@ -7405,9 +9378,31 @@ expression: protocol_schema()
                 "$ref": "#/$defs/RunId",
                 "description": "The run."
               },
+              "session": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SessionRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The harness session of the run, once its executor has reported one: what a resume\ncontinues. Needs feature `run.resume`."
+              },
               "status": {
                 "$ref": "#/$defs/RunStatus",
                 "description": "Current lifecycle state."
+              },
+              "stop": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StopDetail"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The typed reason behind the run's last stop, when the daemon knows one: a budget, a\nrefused start, a cancel, a shutdown, a crash. Needs feature `run.stop_detail`."
               },
               "stopReason": {
                 "anyOf": [
@@ -7446,6 +9441,162 @@ expression: protocol_schema()
               "updatedAtMs"
             ],
             "type": "object"
+          },
+          "SessionRef": {
+            "description": "An opaque handle a harness gives for resuming a conversation.",
+            "type": "string"
+          },
+          "StartRefusal": {
+            "description": "Why a run could not start. A run that is refused never reached its harness.",
+            "oneOf": [
+              {
+                "const": "not_installed",
+                "description": "The executor's harness is not installed (or is too old to use).",
+                "type": "string"
+              },
+              {
+                "const": "not_signed_in",
+                "description": "The executor's harness is not signed in.",
+                "type": "string"
+              },
+              {
+                "const": "no_eligible_executor",
+                "description": "No executor can honour the run: an access mode or sandbox level nobody offers, or a task\nthat named no executor and has no default to go to.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_refused",
+                "description": "The run's workspace could not be prepared: a write run with no git repository to isolate\nit in, or git failing.",
+                "type": "string"
+              },
+              {
+                "const": "secret_missing",
+                "description": "A secret the run's bot lists is not set, or the secret store cannot be read (a locked\nKeychain). A person has to act: `reno secret set <NAME>`.",
+                "type": "string"
+              },
+              {
+                "const": "invalid",
+                "description": "Anything else that stopped the start: an unknown executor, an unreadable bot definition,\na task with no working directory, a spec the executor rejected.",
+                "type": "string"
+              }
+            ]
+          },
+          "StopDetail": {
+            "description": "The typed reason behind a run's last stop, beside the human `diagnostic`. A client decides\nwhat to show from this and never from the diagnostic's text.",
+            "oneOf": [
+              {
+                "description": "A budget stopped the run.",
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/BudgetKind",
+                    "description": "Which limit."
+                  },
+                  "limit": {
+                    "description": "The limit: milliseconds for `wall_time`, tokens for `tokens`.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "budget_exceeded",
+                    "type": "string"
+                  },
+                  "used": {
+                    "description": "What had been used when it was noticed, in the same unit.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "kind",
+                  "limit",
+                  "used"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run never started: `failure` says why, `detail` is the daemon's words for a person.",
+                "properties": {
+                  "detail": {
+                    "description": "The refusal as a sentence.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/StartRefusal",
+                    "description": "The kind of refusal."
+                  },
+                  "type": {
+                    "const": "start_refused",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Someone cancelled the run.",
+                "properties": {
+                  "by": {
+                    "$ref": "#/$defs/CancelledBy",
+                    "description": "Who."
+                  },
+                  "type": {
+                    "const": "cancelled",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "by"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon was shutting down. The run is resumed at the next start when it may be.",
+                "properties": {
+                  "type": {
+                    "const": "shutdown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The daemon died with the run live; recovery found it at the next start.",
+                "properties": {
+                  "type": {
+                    "const": "crashed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The executor ended the run itself, as interrupted, without being asked to.",
+                "properties": {
+                  "type": {
+                    "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
           },
           "StopReason": {
             "description": "Why an executor stopped, carried by `ExecEvent::Done`.",

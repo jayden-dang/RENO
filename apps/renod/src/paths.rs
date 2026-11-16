@@ -7,6 +7,7 @@
 //!   journals/              per-run journals (made by the store)
 //!   logs/                  JSON logs
 //!   workspace/             the working directory of a task that names none
+//!   run/                   one directory per live run, 0700, holding its 0600 token file
 //!   worktrees/             git worktrees of write runs: <repo key>/<run id>/, branch reno/<run id>
 //!   reno.sock              the socket (0600), unless `--socket` puts it elsewhere
 //! ```
@@ -40,6 +41,8 @@ pub const LOGS_DIR: &str = "logs";
 pub const WORKSPACE_DIR: &str = "workspace";
 /// The directory of the worktrees of write runs.
 pub const WORKTREES_DIR: &str = "worktrees";
+/// The directory of the run token files.
+pub const RUNS_DIR: &str = "run";
 /// Where [`Paths::new`] puts the definitions, inside the data directory.
 pub const DEFS_DIR: &str = "definitions";
 
@@ -117,6 +120,11 @@ impl Paths {
     /// `<name>-<12 hex of the SHA-256 of the repository's canonical git dir>`.
     pub fn worktrees(&self) -> PathBuf {
         self.data_dir.join(WORKTREES_DIR)
+    }
+
+    /// The run token files: `<run id>/token` below it (see [`crate::link`]).
+    pub fn runs(&self) -> PathBuf {
+        self.data_dir.join(RUNS_DIR)
     }
 
     /// The default working directory of a task.

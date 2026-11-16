@@ -304,6 +304,10 @@ impl Conn {
                 });
             }
             Inbound::Notification { method, params } => {
+                if let Err(err) = self.router.check(&self.ctx, &method) {
+                    tracing::debug!(method, error = %err.message, "a guarded notification is dropped");
+                    return true;
+                }
                 let Some(handler) = self.router.notification_handler(&method) else {
                     tracing::debug!(method, "ignoring unknown notification");
                     return true;
@@ -341,6 +345,9 @@ impl Conn {
         if method == SUB_CANCEL {
             let outcome = self.cancel_subscription(params);
             return self.reply(&id, outcome).await;
+        }
+        if let Err(err) = self.router.check(&self.ctx, &method) {
+            return self.reply(&id, Err(err)).await;
         }
         match self.router.handler(&method) {
             None => {

@@ -15,7 +15,9 @@ use std::time::Duration;
 use common::{id, is_done, within};
 use futures::StreamExt;
 use reno_client::{Client, ClientError};
-use reno_proto::{ExecEvent, RunId, RunStatus, StopReason, TaskRunParams};
+use reno_proto::{
+    CancelledBy, ExecEvent, NotResumed, RunId, RunStatus, StopDetail, StopReason, TaskRunParams,
+};
 
 /// A `renod` process that is killed if the test panics before it is stopped.
 struct Renod {
@@ -235,16 +237,122 @@ process_test! {
         assert!(!dir.join("reno.sock").exists(), "the socket is removed");
         drop(client);
 
-        // The lock was released and the live run ended `interrupted`, with its journal closed.
+        // The lock was released and the live run ended `interrupted`, with its journal closed and
+        // the shutdown named as the reason. Nobody asked it to stop, so the next daemon resumes it.
         let mut next = Renod::spawn(&dir);
         let client = next.client().await;
-        assert_eq!(
-            within(client.get_run(&run)).await.expect("run.get").status,
-            RunStatus::Interrupted
+        let events: Vec<_> =
+            within(client.run_events(run.clone(), None).take(5).collect::<Vec<_>>()).await;
+        let events: Vec<_> = events.into_iter().map(|e| e.expect("ok").event).collect();
+        assert!(
+            matches!(
+                &events[2],
+                ExecEvent::Done {
+                    stop: StopReason::Interrupted,
+                    reason: Some(StopDetail::Shutdown),
+                    ..
+                }
+            ),
+            "{events:?}"
         );
-        let events: Vec<_> = within(client.run_events(run, None).collect::<Vec<_>>()).await;
-        let last = events.last().expect("events").as_ref().expect("ok");
-        assert!(is_done(&last.event, StopReason::Interrupted));
+        assert!(
+            matches!(&events[3], ExecEvent::Resumed { from_attempt: 1, .. }),
+            "{events:?}"
+        );
+        next.signal("TERM");
+        assert!(next.exit().await.success());
+    }
+}
+
+/// Waits until `count` text events have been seen in the run's journal.
+async fn wait_for_texts(client: &Client, run: &RunId, count: usize) {
+    let mut events = Box::pin(client.run_events(run.clone(), None));
+    let mut seen = 0;
+    while seen < count {
+        let item = within(events.next()).await.expect("event").expect("ok");
+        if matches!(item.event, ExecEvent::Text { .. }) {
+            seen += 1;
+        }
+    }
+}
+
+process_test! {
+    async fn a_run_the_daemon_was_killed_with_is_resumed_by_the_next_start() {
+        let (_root, dir) = data_dir();
+        let mut daemon = Renod::spawn(&dir);
+        let client = daemon.client().await;
+        let run = start_live_run(&client).await;
+        // The session reached the database before the run was seen to be live.
+        let summary = within(client.get_run(&run)).await.expect("run.get");
+        assert_eq!(summary.session.map(|s| s.0), Some("mock-session".to_owned()));
+        drop(client);
+
+        let status = daemon.crash().await;
+        assert!(!status.success(), "SIGKILL: {status:?}");
+
+        let mut next = Renod::spawn(&dir);
+        let client = next.client().await;
+        // The next start found the run `running` with no daemon, interrupted it and, with a
+        // session and an executor that resumes, put it back: the held mock is live again.
+        wait_for_texts(&client, &run, 2).await;
+        let live = within(client.get_run(&run)).await.expect("run.get");
+        assert_eq!(live.status, RunStatus::Running);
+        assert_eq!(live.attempt, 2);
+        assert_eq!(live.stop, None);
+        let events: Vec<_> =
+            within(client.run_events(run.clone(), None).take(6).collect::<Vec<_>>()).await;
+        let events: Vec<_> = events.into_iter().map(|e| e.expect("ok").event).collect();
+        assert!(
+            matches!(
+                &events[2],
+                ExecEvent::Done { stop: StopReason::Interrupted, reason: Some(StopDetail::Crashed), .. }
+            ),
+            "recovery's Done names the crash: {events:?}"
+        );
+        assert!(
+            matches!(&events[3], ExecEvent::Resumed { from_attempt: 1, session } if session.0 == "mock-session"),
+            "{events:?}"
+        );
+
+        // Let the held run finish so the daemon stops with nothing live.
+        within(client.steer(&run, "finish".into())).await.expect("steer");
+        let events: Vec<_> = within(client.run_events(run.clone(), None).collect::<Vec<_>>()).await;
+        assert!(is_done(&events.last().expect("events").as_ref().expect("ok").event, StopReason::Completed));
+        assert_eq!(within(client.get_run(&run)).await.expect("run.get").status, RunStatus::Succeeded);
+        next.signal("TERM");
+        assert!(next.exit().await.success());
+    }
+}
+
+process_test! {
+    async fn a_run_a_person_cancelled_stays_interrupted_through_a_kill_until_they_resume_it() {
+        let (_root, dir) = data_dir();
+        let mut daemon = Renod::spawn(&dir);
+        let client = daemon.client().await;
+        let run = start_live_run(&client).await;
+        within(client.cancel_run(&run, None)).await.expect("run.cancel");
+        let events: Vec<_> = within(client.run_events(run.clone(), None).collect::<Vec<_>>()).await;
+        assert!(is_done(&events.last().expect("events").as_ref().expect("ok").event, StopReason::Interrupted));
+        drop(client);
+        daemon.crash().await;
+
+        let mut next = Renod::spawn(&dir);
+        let client = next.client().await;
+        // Another start did not take the run back: a person's cancel stands, and the run says so.
+        let summary = within(client.get_run(&run)).await.expect("run.get");
+        assert_eq!(summary.status, RunStatus::Interrupted);
+        assert_eq!(summary.not_resumed, Some(NotResumed::Cancelled));
+        assert_eq!(
+            summary.stop,
+            Some(StopDetail::Cancelled { by: CancelledBy::User })
+        );
+
+        // A person's own resume does take it back, as attempt 2 on the same session.
+        assert_eq!(within(client.resume_run(&run, None)).await.expect("run.resume"), 2);
+        wait_for_texts(&client, &run, 2).await;
+        within(client.steer(&run, "finish".into())).await.expect("steer");
+        let events: Vec<_> = within(client.run_events(run.clone(), None).collect::<Vec<_>>()).await;
+        assert!(is_done(&events.last().expect("events").as_ref().expect("ok").event, StopReason::Completed));
         next.signal("TERM");
         assert!(next.exit().await.success());
     }
@@ -354,15 +462,21 @@ process_test! {
         let mut next = Renod::spawn(&dir);
         let client = next.client().await;
 
-        // The run the crash cut short is interrupted, and its journal ends in a Done.
-        assert_eq!(
-            within(client.get_run(&run)).await.expect("run.get").status,
-            RunStatus::Interrupted
-        );
-        let events: Vec<_> = within(client.run_events(run.clone(), None).collect::<Vec<_>>()).await;
+        // The run the crash cut short was interrupted, and recovery closed its journal's first
+        // attempt with a Done that names the crash. (It is resumed afterwards: see
+        // `a_run_the_daemon_was_killed_with_is_resumed_by_the_next_start`.)
+        let events: Vec<_> =
+            within(client.run_events(run.clone(), None).take(3).collect::<Vec<_>>()).await;
         let events: Vec<_> = events.into_iter().map(|e| e.expect("event")).collect();
         assert!(matches!(events[0].event, ExecEvent::Started { .. }));
-        assert!(is_done(&events.last().unwrap().event, StopReason::Interrupted));
+        assert!(matches!(
+            events[2].event,
+            ExecEvent::Done {
+                stop: StopReason::Interrupted,
+                reason: Some(StopDetail::Crashed),
+                ..
+            }
+        ));
         for (index, item) in events.iter().enumerate() {
             assert_eq!(item.seq.0, index as u64 + 1, "no hole in the journal");
         }

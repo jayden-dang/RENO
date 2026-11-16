@@ -152,6 +152,7 @@ daemon_test! {
                 stop: StopReason::Completed,
                 result: Some(format!("used {TOKEN}")),
                 diagnostic: None,
+                reason: None,
             }),
         ]);
         let log = echo.clone();
@@ -172,7 +173,17 @@ daemon_test! {
         };
         assert_eq!(*stop, StopReason::Error);
         let why = diagnostic.clone().unwrap();
-        assert!(why.starts_with("SecretMissing:") && why.contains("GITHUB_TOKEN"), "{why}");
+        assert!(why.contains("GITHUB_TOKEN") && why.contains("not set"), "{why}");
+        assert!(matches!(
+            journal.last(),
+            Some(ExecEvent::Done {
+                reason: Some(reno_proto::StopDetail::StartRefused {
+                    failure: reno_proto::StartRefusal::SecretMissing,
+                    ..
+                }),
+                ..
+            })
+        ), "{journal:?}");
         assert_eq!(fx.status(&refused).await, RunStatus::Failed);
         assert!(log.log().specs.is_empty());
 

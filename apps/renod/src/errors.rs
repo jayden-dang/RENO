@@ -19,12 +19,17 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
         KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
         KernelError::NoExecutor(_) => ErrorCode::InvalidParams,
-        KernelError::NotCancellable { .. } | KernelError::RunEnded(_) => ErrorCode::Conflict,
+        KernelError::NotCancellable { .. }
+        | KernelError::NotResumable { .. }
+        | KernelError::RunEnded(_) => ErrorCode::Conflict,
         KernelError::SteerQueueFull(_) | KernelError::ShuttingDown | KernelError::Gap { .. } => {
             ErrorCode::Unavailable
         }
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
+        // One answer for every cause: a caller learns nothing about which tokens exist.
+        KernelError::AgentDenied => ErrorCode::Unauthorized,
+        KernelError::BoardStale { .. } | KernelError::BoardFull { .. } => ErrorCode::Conflict,
         KernelError::BudgetExhausted { .. } => ErrorCode::BudgetExceeded,
         KernelError::Definitions(_) => ErrorCode::Internal,
         KernelError::WorkspaceNotFound(_) => ErrorCode::NotFound,
@@ -69,11 +74,28 @@ pub fn kernel_error(error: &KernelError) -> ErrorObject {
     }
     let object = ErrorObject::new(code, error.to_string());
     match error {
+        // The entry as it stands, so a writer can merge and write again without another call.
+        KernelError::BoardStale { current } => ErrorObject {
+            data: serde_json::to_value(reno_proto::BoardConflict {
+                current: current.as_deref().cloned(),
+            })
+            .ok(),
+            ..object
+        },
         // The limit and the use, typed, so a client never parses the message.
         KernelError::BudgetExhausted { bot, stop } => ErrorObject {
             data: serde_json::to_value(reno_proto::BudgetRefusal {
                 bot: bot.clone(),
                 stop: *stop,
+            })
+            .ok(),
+            ..object
+        },
+        // Why the run cannot be resumed, typed, so a client never parses the message.
+        KernelError::NotResumable { run, why } => ErrorObject {
+            data: serde_json::to_value(reno_proto::NotResumable {
+                run_id: run.clone(),
+                why: why.clone(),
             })
             .ok(),
             ..object
@@ -151,6 +173,13 @@ mod tests {
                 ErrorCode::Conflict,
             ),
             (KernelError::RunEnded(run()), ErrorCode::Conflict),
+            (
+                KernelError::NotResumable {
+                    run: run(),
+                    why: reno_proto::NotResumed::NoSession,
+                },
+                ErrorCode::Conflict,
+            ),
             (KernelError::SteerQueueFull(run()), ErrorCode::Unavailable),
             (KernelError::ShuttingDown, ErrorCode::Unavailable),
             (
@@ -160,6 +189,17 @@ mod tests {
                 ErrorCode::Unavailable,
             ),
             (KernelError::Invalid("x".into()), ErrorCode::InvalidParams),
+            (KernelError::AgentDenied, ErrorCode::Unauthorized),
+            (
+                KernelError::BoardStale { current: None },
+                ErrorCode::Conflict,
+            ),
+            (
+                KernelError::BoardFull {
+                    scope: "bot:b".into(),
+                },
+                ErrorCode::Conflict,
+            ),
             (
                 KernelError::BudgetExhausted {
                     bot: "keeper".into(),
@@ -230,6 +270,36 @@ mod tests {
             assert_eq!(code_of(&error), code, "{error}");
             assert_eq!(kernel_error(&error).code, code, "{error}");
         }
+    }
+
+    #[test]
+    fn a_stale_board_write_carries_the_entry_as_it_stands() {
+        let entry = reno_proto::BoardEntry {
+            key: "plan".into(),
+            value: Some("v1".into()),
+            version: 3,
+            size: 2,
+            updated_at_ms: 9,
+        };
+        let object = kernel_error(&KernelError::BoardStale {
+            current: Some(Box::new(entry.clone())),
+        });
+        assert_eq!(object.code, ErrorCode::Conflict);
+        let data: reno_proto::BoardConflict =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!(data.current, Some(entry));
+        // A key that does not exist yet says so.
+        let object = kernel_error(&KernelError::BoardStale { current: None });
+        let data: reno_proto::BoardConflict =
+            serde_json::from_value(object.data.expect("data")).expect("typed");
+        assert_eq!(data.current, None);
+    }
+
+    #[test]
+    fn every_refused_token_reads_the_same() {
+        let object = kernel_error(&KernelError::AgentDenied);
+        assert_eq!(object.code, ErrorCode::Unauthorized);
+        assert!(object.data.is_none());
     }
 
     #[test]

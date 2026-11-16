@@ -11,13 +11,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, ResolvedBy,
-    RoutingDecision, RunId, RunStatus, TaskId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
+    RoutingDecision, RunId, RunStatus, SessionRef, TaskId, WorkspaceChanges, WorkspaceInfo,
+    WorkspaceStatus,
 };
 use reno_store::{
-    Applied, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired, FireResult, Journals,
-    NewApproval, NewDefinition, NewFiring, NewTask, Occupancy, RunRecord, Store, StoreError,
-    StoredApproval, Tokens, TriggerRow,
+    Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
+    FireResult, Journals, NewApproval, NewDefinition, NewFiring, NewRunToken, NewTask, Note,
+    Occupancy, Resumed, RunRecord, RunToken, Store, StoreError, StoredApproval, Tokens, TriggerRow,
 };
 
 use crate::clock::Clock;
@@ -244,6 +245,56 @@ impl Db {
         self.store.transition(run, fence, to, self.now_ms()).await
     }
 
+    /// A transition that also records why the run stopped (and will not be resumed).
+    pub(crate) async fn transition_noted(
+        &self,
+        run: &RunId,
+        fence: u64,
+        to: RunStatus,
+        note: Note,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .transition_noted(run, fence, to, note, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn record_session(
+        &self,
+        run: &RunId,
+        fence: u64,
+        session: &SessionRef,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .record_session(run, fence, session, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn resume_run(
+        &self,
+        run: &RunId,
+        fence: u64,
+        prompt: Option<String>,
+    ) -> Result<Resumed> {
+        self.wrote();
+        self.store
+            .resume_run(run, fence, prompt, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn set_not_resumed(
+        &self,
+        run: &RunId,
+        fence: u64,
+        why: &NotResumed,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .set_not_resumed(run, fence, why, self.now_ms())
+            .await
+    }
+
     pub(crate) async fn record_process(
         &self,
         run: &RunId,
@@ -430,5 +481,50 @@ impl Db {
 
     pub(crate) async fn was_denied(&self, run: &RunId, digest: &str) -> Result<bool> {
         self.store.was_denied(run, digest).await
+    }
+
+    pub(crate) async fn put_run_token(&self, token: NewRunToken) -> Result<()> {
+        self.wrote();
+        self.store.put_run_token(token, self.now_ms()).await
+    }
+
+    pub(crate) async fn run_token(
+        &self,
+        run: &RunId,
+        token_hash: &str,
+    ) -> Result<Option<RunToken>> {
+        self.store.run_token(run, token_hash).await
+    }
+
+    pub(crate) async fn revoke_run_tokens(&self, run: &RunId) -> Result<u64> {
+        self.wrote();
+        self.store.revoke_run_tokens(run, self.now_ms()).await
+    }
+
+    pub(crate) async fn revoke_open_run_tokens(&self) -> Result<Vec<RunId>> {
+        self.wrote();
+        self.store.revoke_open_run_tokens(self.now_ms()).await
+    }
+
+    pub(crate) async fn board_get(&self, scope: &str, key: &str) -> Result<Option<BoardRow>> {
+        self.store.board_get(scope, key).await
+    }
+
+    pub(crate) async fn board_list(&self, scope: &str) -> Result<Vec<BoardRow>> {
+        self.store.board_list(scope).await
+    }
+
+    pub(crate) async fn board_put(
+        &self,
+        scope: &str,
+        key: &str,
+        value: &str,
+        expected: Option<u64>,
+        run: &RunId,
+    ) -> Result<BoardWrite> {
+        self.wrote();
+        self.store
+            .board_put(scope, key, value, expected, run, self.now_ms())
+            .await
     }
 }

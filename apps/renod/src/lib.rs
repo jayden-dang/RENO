@@ -16,6 +16,7 @@
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
 //! - [`secrets`]: the `Secrets` port over the macOS Keychain, behind a `Keychain` trait with an
 //!   in-memory fake.
+//! - [`link`]: the `RunLink` port: each run's token file and the `reno mcp` server that reads it.
 //! - [`worktrees`]: the `Workspace` port over git worktrees in `<data-dir>/worktrees/`.
 //! - `handlers`: methods and subscriptions to kernel calls.
 //! - [`errors`]: kernel errors to stable wire codes (ARCH-14).
@@ -32,6 +33,7 @@ pub mod executors;
 pub mod fswatch;
 mod handlers;
 pub mod install;
+pub mod link;
 pub mod lock;
 pub mod logging;
 pub mod paths;

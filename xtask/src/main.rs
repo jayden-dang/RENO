@@ -71,6 +71,8 @@ const OWNERS: &[(&str, &[&str])] = &[
     ("gpui*", &["reno-app"]),
     ("notify", &["renod", "reno"]),
     ("security-framework", &["renod"]),
+    // Only the CLI speaks MCP (ARCH-4).
+    ("rmcp", &["reno"]),
 ];
 
 /// Packages that some members must never use.

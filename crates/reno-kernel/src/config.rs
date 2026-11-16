@@ -56,6 +56,9 @@ pub struct KernelConfig {
     /// `BudgetExceeded`). A run for a bot has its bot's `budget.max_wall_time` instead. A
     /// generous ceiling by default: it is there to catch a run that hangs, not to shape work.
     pub default_wall_time: Duration,
+    /// How many attempts (claims) a run may have made for the daemon to resume it on its own
+    /// after another interruption. A person can still resume it past this. At least 1.
+    pub max_attempts: u32,
 }
 
 impl Default for KernelConfig {
@@ -78,6 +81,7 @@ impl Default for KernelConfig {
             scratch_root: None,
             default_executors: Vec::new(),
             default_wall_time: Duration::from_secs(4 * 60 * 60),
+            max_attempts: 3,
         }
     }
 }
