@@ -1,6 +1,6 @@
 //! The sidebar: nav rows, the "ORCHESTRATION" group, recent runs from state, and a footer with
 //! the daemon status dot. It sits on `shell`. Only Home is functional; the shell turns the other
-//! rows into "coming in Phase 1" toasts.
+//! rows into "coming in a later phase" toasts.
 
 use std::rc::Rc;
 

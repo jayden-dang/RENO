@@ -149,7 +149,7 @@ pub(crate) fn build(state: &State, now_ms: u64) -> TriggersView {
         .count();
     TriggersView {
         banner: banner(state),
-        rows: Section::of(state.feed(Feed::Triggers), rows),
+        rows: Section::of_state(state, state.feed(Feed::Triggers), rows),
         backing_off,
     }
 }

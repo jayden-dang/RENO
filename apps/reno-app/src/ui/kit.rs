@@ -150,6 +150,19 @@ pub(crate) enum Tone {
     Quiet,
 }
 
+/// The hover fill of a pill button: none while it is disabled, so an inert button does not look
+/// pressable, and none for the filled primary.
+pub(crate) fn hover_fill(theme: &Theme, tone: Tone, enabled: bool) -> Option<Hsla> {
+    if !enabled {
+        return None;
+    }
+    match tone {
+        Tone::Primary => None,
+        Tone::Danger => Some(theme.danger.opacity(0.1)),
+        Tone::Quiet => Some(theme.raised),
+    }
+}
+
 /// A pill button. The id doubles as the accessible label and the test selector. The caller adds
 /// `on_click` (and dims it with [`Stateful::opacity`] when busy).
 pub(crate) fn pill_button(
@@ -157,6 +170,18 @@ pub(crate) fn pill_button(
     id: impl Into<SharedString>,
     label: &'static str,
     tone: Tone,
+) -> Stateful<Div> {
+    pill_button_enabled(theme, id, label, tone, true)
+}
+
+/// A [`pill_button`] that can be disabled: dimmed, with the default cursor and no hover fill. The
+/// caller still adds `on_click` only when enabled.
+pub(crate) fn pill_button_enabled(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: &'static str,
+    tone: Tone,
+    enabled: bool,
 ) -> Stateful<Div> {
     let id: SharedString = id.into();
     let selector = id.clone();
@@ -172,24 +197,24 @@ pub(crate) fn pill_button(
         .rounded(px(999.0))
         .text_size(px(13.5))
         .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer()
-        .child(label);
-    match tone {
+        .child(label)
+        .when(enabled, |b| b.cursor_pointer())
+        .when(!enabled, |b| b.cursor_default().opacity(0.4));
+    let hover = hover_fill(theme, tone, enabled);
+    let base = match tone {
         Tone::Primary => base.bg(theme.accent).text_color(gpui::white()),
-        Tone::Danger => {
-            let hover = theme.danger.opacity(0.1);
-            base.border_1()
-                .border_color(theme.danger.opacity(0.5))
-                .text_color(theme.danger)
-                .hover(move |s| s.bg(hover))
-        }
-        Tone::Quiet => {
-            let hover = theme.raised;
-            base.border_1()
-                .border_color(theme.hairline)
-                .text_color(theme.text)
-                .hover(move |s| s.bg(hover))
-        }
+        Tone::Danger => base
+            .border_1()
+            .border_color(theme.danger.opacity(0.5))
+            .text_color(theme.danger),
+        Tone::Quiet => base
+            .border_1()
+            .border_color(theme.hairline)
+            .text_color(theme.text),
+    };
+    match hover {
+        Some(fill) => base.hover(move |s| s.bg(fill)),
+        None => base,
     }
 }
 
@@ -241,4 +266,20 @@ pub(crate) fn status_pill(theme: &Theme, status: RunStatus) -> Div {
         .text_color(color)
         .child(dot(color, 7.0))
         .child(crate::summary::status_label(status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::{Appearance, Theme};
+
+    #[test]
+    fn a_disabled_button_has_no_hover_fill() {
+        let theme = Theme::for_appearance(Appearance::Dark);
+        for tone in [Tone::Primary, Tone::Danger, Tone::Quiet] {
+            assert_eq!(hover_fill(&theme, tone, false), None, "{tone:?}");
+        }
+        assert!(hover_fill(&theme, Tone::Quiet, true).is_some());
+        assert!(hover_fill(&theme, Tone::Danger, true).is_some());
+    }
 }

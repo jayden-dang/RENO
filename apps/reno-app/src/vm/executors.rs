@@ -295,7 +295,7 @@ pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
     };
     ExecutorsView {
         banner: banner(state),
-        rows: Section::of(state.feed(Feed::Executors), rows),
+        rows: Section::of_state(state, state.feed(Feed::Executors), rows),
         lede,
         detail,
         needing,

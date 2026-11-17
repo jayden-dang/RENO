@@ -1361,7 +1361,7 @@ impl Composer {
     }
 
     /// The "why?" list under the foot: the rule, the order, and each executor passed over.
-    fn why_panel(&self, theme: &Theme) -> gpui::Div {
+    fn why_panel(&self, theme: &Theme, connected: bool) -> gpui::Div {
         let panel = div()
             .debug_selector(|| "why-panel".to_owned())
             .px(px(22.0))
@@ -1372,10 +1372,12 @@ impl Composer {
             .text_size(px(12.5))
             .text_color(theme.muted);
         match &self.preview {
-            Preview::Idle | Preview::Loading => panel.child("Asking the daemon where this would go\u{2026}"),
-            Preview::Unavailable(reason) => panel.child(SharedString::from(format!(
-                "The route could not be previewed: {reason}. The daemon still routes the task when you send it."
-            ))),
+            Preview::Idle | Preview::Loading => {
+                panel.child("Asking the daemon where this would go\u{2026}")
+            }
+            Preview::Unavailable(reason) => panel.child(SharedString::from(
+                preview_unavailable_text(reason, connected),
+            )),
             Preview::Ready(decision) => {
                 let view = routing::view(decision);
                 let label = |text: &'static str| {
@@ -1488,6 +1490,7 @@ impl Render for Composer {
         let entity = cx.entity();
         let reason = self.mode == Mode::Reason;
         let enabled = self.input_enabled(cx);
+        let connected = self.connected(cx);
         let sending = self.store.read(cx).is_sending();
 
         let min_rows = if self.mode == Mode::Home {
@@ -1666,13 +1669,39 @@ impl Render for Composer {
             .child(text_area)
             .children(self.attachment_row(&theme, cx))
             .child(foot)
-            .when(home && self.why_open, |c| c.child(self.why_panel(&theme)))
+            .when(home && self.why_open, |c| {
+                c.child(self.why_panel(&theme, connected))
+            })
+    }
+}
+
+/// The "why?" panel's line when no route preview came back. Only a connected daemon routes the
+/// task on send; with none running, a send is refused.
+fn preview_unavailable_text(reason: &str, connected: bool) -> String {
+    if connected {
+        format!(
+            "The route could not be previewed: {reason}. The daemon still routes the task when you send it."
+        )
+    } else {
+        format!("The route could not be previewed: {reason}.")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unavailable_route_promises_a_send_only_while_connected() {
+        let offline = preview_unavailable_text("the daemon is not running", false);
+        assert!(
+            offline.starts_with("The route could not be previewed"),
+            "{offline}"
+        );
+        assert!(!offline.contains("still routes"), "{offline}");
+        let online = preview_unavailable_text("boom", true);
+        assert!(online.contains("The daemon still routes the task when you send it."));
+    }
 
     #[test]
     fn a_live_run_takes_a_steer_a_finished_one_says_why_it_does_not() {

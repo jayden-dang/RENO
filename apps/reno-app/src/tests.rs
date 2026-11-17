@@ -245,6 +245,25 @@ fn no_daemon_at_the_socket_says_how_to_start_one(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn home_offers_the_same_retry_as_every_other_screen_when_offline(cx: &mut TestAppContext) {
+    one_window_test_at_a_time();
+    cx.update(gpui_tokio::init);
+    let store = cx.new(|cx| {
+        let mut store = Store::connecting();
+        store.connect_socket("/nonexistent-reno-dir/reno.sock".into(), cx);
+        store
+    });
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.offline_reason().is_some())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    draw(vcx);
+    let headline = root.read_with(vcx, |r, cx| r.home().read(cx).headline(cx));
+    assert!(matches!(headline, Headline::Offline { .. }));
+    assert!(painted(vcx, "retry-now"), "Home offers Retry now");
+}
+
+#[gpui::test]
 fn a_still_connecting_store_says_so(cx: &mut TestAppContext) {
     let store = cx.new(|_| Store::connecting());
     let (root, vcx) = window(cx, &store, Appearance::Light);

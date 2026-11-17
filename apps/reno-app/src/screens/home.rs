@@ -16,7 +16,7 @@ use crate::summary::{self, Finding};
 use crate::ui::attention::AttentionDock;
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
-use crate::ui::kit;
+use crate::ui::kit::{self, Tone};
 use crate::ui::sidebar::daemon_label;
 use crate::ui::theme::{self, Theme};
 use crate::vm::routing::{self, Class};
@@ -119,7 +119,12 @@ impl HomeScreen {
         }
     }
 
-    fn finding_pill(&self, headline: &Headline, theme: &Theme) -> gpui::Div {
+    fn finding_pill(
+        &self,
+        headline: &Headline,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let pill = div()
             .flex()
             .items_center()
@@ -171,6 +176,13 @@ impl HomeScreen {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .child("Daemon not running"),
+                )
+                .child(
+                    kit::pill_button(theme, "retry-now", "Retry now", Tone::Quiet).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.store.update(cx, |store, _| store.retry_now());
+                        }),
+                    ),
                 ),
             Headline::Connecting => pill.child(
                 div()
@@ -278,7 +290,7 @@ impl Render for HomeScreen {
             .flex_col()
             .items_center()
             .gap(px(14.0))
-            .child(self.finding_pill(&headline, &theme))
+            .child(self.finding_pill(&headline, &theme, cx))
             .when_some(offline_reason, |col, reason| {
                 col.child(
                     div()

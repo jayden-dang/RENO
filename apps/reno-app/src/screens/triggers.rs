@@ -62,17 +62,15 @@ impl TriggersScreen {
         let firing = self.store.read(cx).is_firing(&row.name);
         let name = row.name.clone();
         let fire = cx.listener(move |this, _, _, cx| this.fire(&name, cx));
-        let button = kit::pill_button(
+        let live = row.can_fire && !firing;
+        let button = kit::pill_button_enabled(
             theme,
             format!("fire-{}", row.name),
             if firing { "Firing…" } else { "Fire now" },
             Tone::Quiet,
+            live,
         );
-        let button = if row.can_fire && !firing {
-            button.on_click(fire)
-        } else {
-            button.opacity(0.4).cursor_default()
-        };
+        let button = if live { button.on_click(fire) } else { button };
 
         let state_color = match row.status {
             TriggerStatus::BackedOff => theme.warning,

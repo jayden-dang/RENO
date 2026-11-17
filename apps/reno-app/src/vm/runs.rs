@@ -82,6 +82,8 @@ pub(crate) enum More {
     Available,
     /// A page is on its way.
     Loading,
+    /// The daemon is out of reach: no page can be read, and "every run" is not known.
+    Offline,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +94,8 @@ pub(crate) struct RunsView {
     pub(crate) counts: Vec<(RunFilter, usize)>,
     pub(crate) rows: Section<RunRow>,
     pub(crate) more: More,
+    /// The lede's second line: how many runs are known, or that none can be while offline.
+    pub(crate) detail: String,
 }
 
 fn row(run: &RunSummary, now_ms: u64) -> RunRow {
@@ -145,7 +149,15 @@ pub(crate) fn build(state: &State, filter: RunFilter, paging: bool, now_ms: u64)
         .into_iter()
         .map(|r| row(r, now_ms))
         .collect();
+    let offline = super::is_offline(state);
+    let detail = match everything.len() {
+        0 if offline => "Not connected: runs appear when the daemon answers.".to_owned(),
+        0 => "No runs yet.".to_owned(),
+        1 => "1 run known.".to_owned(),
+        n => format!("{n} runs known."),
+    };
     let more = match (state.run_page(filter.statuses()), paging) {
+        _ if offline => More::Offline,
         (_, true) => More::Loading,
         (RunPage::Done, false) => More::None,
         (RunPage::NotLoaded | RunPage::More(_), false) => More::Available,
@@ -154,8 +166,9 @@ pub(crate) fn build(state: &State, filter: RunFilter, paging: bool, now_ms: u64)
         banner: banner(state),
         filter,
         counts,
-        rows: Section::of(state.feed(Feed::Runs), rows),
+        rows: Section::of_state(state, state.feed(Feed::Runs), rows),
         more,
+        detail,
     }
 }
 
@@ -217,6 +230,44 @@ mod tests {
             not_resumed: None,
             session: None,
         }
+    }
+
+    #[test]
+    fn offline_claims_neither_no_runs_nor_older_runs() {
+        use reno_client::{Offline, OfflineKind};
+        let mut state = State::new();
+        state.apply(Update::Offline(Offline {
+            kind: OfflineKind::NotRunning,
+            detail: "x".into(),
+            attempt: 2,
+        }));
+        let view = build(&state, RunFilter::All, false, NOW);
+        assert!(view.banner.is_some_and(|b| !b.connecting));
+        assert_ne!(
+            view.rows,
+            Section::Empty,
+            "nothing is known, not nothing there"
+        );
+        assert_ne!(view.rows, Section::Loading, "nothing is on its way either");
+        assert_ne!(view.more, More::Available, "no daemon to page from");
+        assert_eq!(view.rows, Section::NotConnected);
+        assert_eq!(view.more, More::Offline);
+        assert_eq!(
+            view.detail,
+            "Not connected: runs appear when the daemon answers."
+        );
+        // Even after an empty list was once read, the connection is gone: it is unknown now.
+        let mut seen = State::new();
+        seen.apply(Update::Runs(vec![]));
+        seen.apply(Update::Offline(Offline {
+            kind: OfflineKind::NotRunning,
+            detail: "x".into(),
+            attempt: 1,
+        }));
+        assert_eq!(
+            build(&seen, RunFilter::All, false, NOW).rows,
+            Section::NotConnected
+        );
     }
 
     #[test]

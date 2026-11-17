@@ -21,7 +21,7 @@ mod tests {
     use gpui::prelude::*;
     use gpui::{Context, TestAppContext, Window, div, px};
 
-    use super::notice::{NoticeChipIcon, notice_chip};
+    use super::notice::{NoticeChipIcon, NoticeTone, notice_chip};
     use super::running_pill::running_pill;
     use super::theme::{Appearance, Theme};
 
@@ -37,14 +37,14 @@ mod tests {
                 .child(running_pill("capped", 120, theme.accent, "Menlo"))
                 .child(notice_chip(
                     &theme,
-                    false,
+                    NoticeTone::Danger,
                     "Failed",
                     "exit status 1",
                     NoticeChipIcon::Tile,
                 ))
                 .child(notice_chip(
                     &theme,
-                    true,
+                    NoticeTone::Warning,
                     "Held",
                     "needs approval",
                     NoticeChipIcon::Plain,

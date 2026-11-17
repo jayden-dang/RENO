@@ -184,8 +184,8 @@ pub(crate) fn defs(state: &State) -> DefsView {
         .collect();
     DefsView {
         banner: banner(state),
-        bots: Section::of(feed.clone(), of_kind(DefKind::Bot)),
-        triggers: Section::of(feed, of_kind(DefKind::Trigger)),
+        bots: Section::of_state(state, feed.clone(), of_kind(DefKind::Bot)),
+        triggers: Section::of_state(state, feed, of_kind(DefKind::Trigger)),
         policy: of_kind(DefKind::Policy),
         orphan_problems,
         problem_count: snapshot.errors.len(),

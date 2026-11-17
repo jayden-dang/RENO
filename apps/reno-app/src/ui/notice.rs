@@ -21,38 +21,63 @@ pub(crate) enum NoticeChipIcon {
     Tile,
 }
 
+/// What a chip reports, which picks its colour and header mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoticeTone {
+    /// A failure: the danger colour and a "!".
+    Danger,
+    /// Something to watch: the warning colour and a "!".
+    Warning,
+    /// Something that went fine: the success colour and a check.
+    Info,
+}
+
+impl NoticeTone {
+    fn color(self, theme: &Theme) -> gpui::Hsla {
+        match self {
+            Self::Danger => theme.danger,
+            Self::Warning => theme.warning,
+            Self::Info => theme.success,
+        }
+    }
+
+    fn mark(self) -> &'static str {
+        match self {
+            Self::Danger | Self::Warning => "!",
+            Self::Info => "\u{2713}",
+        }
+    }
+}
+
 /// The failure notice: a tinted rounded chip, a 16% border over a 5% wash of the accent (the
 /// tile variant: a borderless 10% wash), never a bare stroke. It has a header row (icon and
 /// medium label, with a tiny copy button pinned to its top-right corner, because failure
 /// payloads are meant to be pasted) and the message below. The message wraps instead of
-/// truncating: failure payloads carry exit statuses and stderr. `warning` picks the warning
-/// colour over the danger colour. Callers chain their own chrome (an id and dismiss click,
+/// truncating: failure payloads carry exit statuses and stderr. `tone` picks the colour and mark. Callers chain their own chrome (an id and dismiss click,
 /// `w_full().overflow_hidden()`).
 pub(crate) fn notice_chip(
     theme: &Theme,
-    warning: bool,
+    tone: NoticeTone,
     label: &'static str,
     message: impl Into<SharedString>,
     icon: NoticeChipIcon,
 ) -> Div {
-    notice_chip_with_action(theme, warning, label, message, icon, None)
+    notice_chip_with_action(theme, tone, label, message, icon, None)
 }
 
 /// [`notice_chip`] with an action under the message (the transcript's
 /// "Log in").
 pub(crate) fn notice_chip_with_action(
     theme: &Theme,
-    warning: bool,
+    tone: NoticeTone,
     label: &'static str,
     message: impl Into<SharedString>,
     icon: NoticeChipIcon,
     action: Option<AnyElement>,
 ) -> Div {
-    let (accent, muted) = if warning {
-        (theme.warning, theme.soften(theme.warning))
-    } else {
-        (theme.danger, theme.soften(theme.danger))
-    };
+    let accent = tone.color(theme);
+    let muted = theme.soften(accent);
+    let mark = tone.mark();
     let message = message.into();
     let copy_message = message.clone();
     let tile = matches!(icon, NoticeChipIcon::Tile);
@@ -90,10 +115,10 @@ pub(crate) fn notice_chip_with_action(
             .flex()
             .items_center()
             .justify_center()
-            .child(glyph("!", 12.0, muted.opacity(0.8)))
+            .child(glyph(mark, 12.0, muted.opacity(0.8)))
             .into_any_element()
     } else {
-        glyph("!", 14.0, muted.opacity(0.9)).into_any_element()
+        glyph(mark, 14.0, muted.opacity(0.9)).into_any_element()
     };
     // The tile pins its own label/message colors; the plain icon inherits the
     // chip-wide muted accent.

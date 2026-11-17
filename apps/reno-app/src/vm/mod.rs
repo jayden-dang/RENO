@@ -46,12 +46,24 @@ pub(crate) fn banner(state: &State) -> Option<Banner> {
     }
 }
 
+/// Whether the daemon is known to be out of reach: disconnected, or retrying after a failure.
+/// The first connection attempt is not this; a screen is still loading then.
+pub(crate) fn is_offline(state: &State) -> bool {
+    match state.connection() {
+        ConnectionStatus::Connected => false,
+        ConnectionStatus::Connecting => state.offline().is_some(),
+        ConnectionStatus::Disconnected => true,
+    }
+}
+
 /// What a list shows, once its feed and rows are known. Empty, loading and failed are different
 /// things, and a screen says which.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Section<T> {
     /// Nothing has arrived yet.
     Loading,
+    /// The daemon is out of reach, so what is in the list, if anything, is unknown.
+    NotConnected,
     /// The daemon does not offer this.
     Unavailable,
     /// The last request failed.
@@ -73,6 +85,15 @@ impl<T> Section<T> {
             FeedState::Unavailable => Self::Unavailable,
             FeedState::Failed(reason) => Self::Failed(reason),
         }
+    }
+
+    /// [`Section::of`] for a screen that knows the connection: with no rows to show and the
+    /// daemon out of reach, the list is unknown rather than empty, loading or failed.
+    pub(crate) fn of_state(state: &State, feed: FeedState, rows: Vec<T>) -> Self {
+        if rows.is_empty() && is_offline(state) {
+            return Self::NotConnected;
+        }
+        Self::of(feed, rows)
     }
 
     pub(crate) fn rows(&self) -> &[T] {

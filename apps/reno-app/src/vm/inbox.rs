@@ -153,6 +153,10 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
     let need = held.len();
     let live = summary::attention(state).running;
     let (lede, detail) = match need {
+        0 if super::is_offline(state) => (
+            "Not connected".to_owned(),
+            "Held actions and running runs appear when the daemon answers.".to_owned(),
+        ),
         0 => (
             "Nothing needs you".to_owned(),
             match live {
@@ -176,8 +180,8 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
         banner: banner(state),
         lede,
         detail,
-        held: Section::of(state.feed(Feed::Approvals), held),
-        history: Section::of(state.feed(Feed::ApprovalHistory), history),
+        held: Section::of_state(state, state.feed(Feed::Approvals), held),
+        history: Section::of_state(state, state.feed(Feed::ApprovalHistory), history),
         reasons: state.supports(reno_proto::FEATURE_APPROVAL_MESSAGE),
     }
 }
@@ -235,6 +239,28 @@ mod tests {
         assert_eq!(inbox.history, Section::Loading);
         assert!(inbox.banner.unwrap().connecting);
         assert_eq!(inbox.lede, "Nothing needs you");
+    }
+
+    #[test]
+    fn offline_does_not_say_nothing_needs_you() {
+        use reno_client::{Offline, OfflineKind};
+        let mut state = State::new();
+        state.apply(Update::Offline(Offline {
+            kind: OfflineKind::NotRunning,
+            detail: "x".into(),
+            attempt: 2,
+        }));
+        let inbox = build(&state, NOW);
+        assert_ne!(inbox.lede, "Nothing needs you");
+        assert_ne!(inbox.detail, "No runs are moving right now.");
+        for section in [inbox.held.rows().len(), inbox.history.rows().len()] {
+            assert_eq!(section, 0);
+        }
+        assert_eq!(inbox.lede, "Not connected");
+        assert_eq!(inbox.held, Section::NotConnected);
+        assert_eq!(inbox.history, Section::NotConnected);
+        assert_ne!(inbox.held, Section::Loading);
+        assert_ne!(inbox.history, Section::Failed("the request failed".into()));
     }
 
     #[test]

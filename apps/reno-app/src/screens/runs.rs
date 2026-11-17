@@ -172,12 +172,7 @@ impl Render for RunsScreen {
             let store = self.store.clone();
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
-        let total = view.counts.first().map_or(0, |(_, n)| *n);
-        let detail = match total {
-            0 => "No runs yet.".to_owned(),
-            1 => "1 run known.".to_owned(),
-            n => format!("{n} runs known."),
-        };
+        let detail = view.detail.clone();
 
         let rows = view.rows.rows();
         let table_rows: Vec<AnyElement> = rows
@@ -210,7 +205,7 @@ impl Render for RunsScreen {
                     .child("Loading older runs…")
                     .into_any_element(),
             ),
-            More::None => None,
+            More::None | More::Offline => None,
         };
 
         let body = page::content(page::WIDE)

@@ -159,6 +159,11 @@ pub(crate) fn note<T>(theme: &Theme, section: &Section<T>, empty: &str) -> Optio
     let (glyph, tone, text) = match section {
         Section::Rows(_) => return None,
         Section::Loading => (Icon::Clock, theme.faint, "Loading…".to_owned()),
+        Section::NotConnected => (
+            Icon::Clock,
+            theme.faint,
+            "Not connected: this appears when the daemon answers.".to_owned(),
+        ),
         Section::Empty => (Icon::Check, theme.faint, empty.to_owned()),
         Section::Unavailable => (
             Icon::Lock,
