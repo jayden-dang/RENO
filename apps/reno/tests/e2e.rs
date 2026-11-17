@@ -562,7 +562,7 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
     write_def(
         &dir,
         "bots/keeper.toml",
-        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"acp.grok\"]\n",
+        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"mystery\"]\n",
     );
     write_def(
         &dir,
@@ -572,15 +572,34 @@ fn defs_check_prints_every_error_and_exits_non_zero_without_a_daemon() {
     write_def(&dir, "policy.toml", "");
     let refused = world.reno(&["defs", "check"]);
     assert_eq!(refused.status.code(), Some(1));
-    let accepted = world.reno(&["defs", "check", "--executor", "acp.grok"]);
+    let accepted = world.reno(&["defs", "check", "--executor", "mystery"]);
     assert!(accepted.status.success(), "{}", text(&accepted.stdout));
     assert_eq!(
         text(&accepted.stdout),
         format!("ok: 3 definition(s) in {}\n", dir.display())
     );
-    let json = world.json(&["defs", "check", "--executor", "acp.grok"]);
+    let json = world.json(&["defs", "check", "--executor", "mystery"]);
     assert_eq!(json["ok"], true);
     assert_eq!(json["definitions"], 3);
+}
+
+/// The daemon registers the ACP agents (`acp.devin`, ...) and the ones added from the registry,
+/// installed or not, so a bot that lists one is valid there; the offline check says the same.
+#[test]
+fn defs_check_accepts_the_acp_executor_ids_the_daemon_accepts() {
+    let world = World::new();
+    let dir = world.defs_dir();
+    write_def(
+        &dir,
+        "bots/builder.toml",
+        "name = \"builder\"\ninstructions = \"x\"\nexecutors = [\"acp.devin\", \"acp.gemini\"]\n",
+    );
+    let out = world.reno(&["defs", "check"]);
+    assert!(out.status.success(), "{}", text(&out.stdout));
+    assert_eq!(
+        text(&out.stdout),
+        format!("ok: 1 definition(s) in {}\n", dir.display())
+    );
 }
 
 const POLICY: &str = r#"

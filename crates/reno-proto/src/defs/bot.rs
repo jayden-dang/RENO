@@ -255,7 +255,7 @@ impl BotDef {
             let path = format!("executors[{i}]");
             if !seen.insert(executor) {
                 sink.err(path, format!("duplicate executor {:?}", executor.as_str()));
-            } else if !cx.ctx.executors.contains(executor) {
+            } else if !cx.ctx.knows(executor) {
                 sink.err(path, format!("unknown executor {:?}", executor.as_str()));
             }
         }

@@ -108,7 +108,7 @@ fn check(env: &Env, args: DefsCheck) -> anyhow::Result<ExitCode> {
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
-    let context = ValidationContext::with_builtin(args.executors);
+    let context = ValidationContext::offline(args.executors);
     let (files, mut errors) = read_files(&dir)?;
     let definitions = match load_set(&files, &context) {
         Ok(set) => set.len(),

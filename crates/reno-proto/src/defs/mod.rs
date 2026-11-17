@@ -109,7 +109,18 @@ pub const MAX_FILES_PER_KIND: usize = 1024;
 pub const POLICY_NAME: &str = "policy";
 /// The executors Reno knows how to build, installed or not. A definition may name any of them:
 /// whether one is installed is the router's question, not the file's.
-pub const BUILTIN_EXECUTORS: &[&str] = &["mock", "claude-code", "codex"];
+pub const BUILTIN_EXECUTORS: &[&str] = &[
+    "mock",
+    "claude-code",
+    "codex",
+    "acp.grok",
+    "acp.devin",
+    "acp.hermes",
+    "acp.fx",
+    "acp.antigravity",
+];
+/// The namespace of the executors a daemon adds from the ACP registry (`acp.<registry id>`).
+pub const ACP_NAMESPACE: &str = "acp.";
 
 /// The kinds of definition this version loads. Teams and flows join with their tasks.
 #[derive(
@@ -248,6 +259,9 @@ impl fmt::Display for DefError {
 pub struct ValidationContext {
     /// The executor ids a bot may list.
     pub executors: BTreeSet<ExecutorId>,
+    /// Whether any `acp.<registry id>` also counts. A daemon knows which registry agents this
+    /// device has added; a check with no daemon cannot, so it takes the whole namespace.
+    pub any_acp: bool,
 }
 
 impl ValidationContext {
@@ -255,7 +269,22 @@ impl ValidationContext {
     pub fn new(executors: impl IntoIterator<Item = ExecutorId>) -> Self {
         Self {
             executors: executors.into_iter().collect(),
+            any_acp: false,
         }
+    }
+
+    /// [`Self::with_builtin`] for a check that has no daemon to ask: every `acp.<registry id>`
+    /// is accepted too, as the daemon accepts the registry agents it has added.
+    pub fn offline(extra: impl IntoIterator<Item = ExecutorId>) -> Self {
+        Self {
+            any_acp: true,
+            ..Self::with_builtin(extra)
+        }
+    }
+
+    /// Whether a bot may list `id`.
+    pub fn knows(&self, id: &ExecutorId) -> bool {
+        self.executors.contains(id) || (self.any_acp && id.as_str().starts_with(ACP_NAMESPACE))
     }
 
     /// A context that knows [`BUILTIN_EXECUTORS`] and `extra`.
