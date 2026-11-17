@@ -43,7 +43,7 @@ pub(crate) struct RowBadge {
 
 pub(crate) fn badge(nav: Nav, counts: &summary::Attention) -> Option<RowBadge> {
     let (text, hot) = match nav {
-        Nav::Inbox if counts.need > 0 => (counts.need.to_string(), true),
+        Nav::Inbox if counts.needs_you() > 0 => (counts.needs_you().to_string(), true),
         Nav::Runs if counts.running > 0 => (format!("{} live", counts.running), false),
         Nav::Bots if counts.bots > 0 => (counts.bots.to_string(), false),
         _ => return None,
@@ -264,13 +264,14 @@ mod tests {
     fn badges_follow_the_counts() {
         let counts = summary::Attention {
             need: 2,
+            questions: 1,
             running: 3,
             bots: 5,
         };
         assert_eq!(
             badge(Nav::Inbox, &counts),
             Some(RowBadge {
-                text: "2".into(),
+                text: "3".into(),
                 hot: true
             })
         );

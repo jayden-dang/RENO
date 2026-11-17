@@ -27,6 +27,20 @@ pub(crate) struct HeldRow {
     pub(crate) network: bool,
 }
 
+/// One run waiting on a harness question (`waiting_input`). The question's own text lives in the
+/// run's transcript, so the row names the run and sends the person there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QuestionRow {
+    pub(crate) run: RunId,
+    pub(crate) bot: Option<String>,
+    pub(crate) repo: Option<String>,
+    pub(crate) executor: String,
+    /// What the run is for: the title without the bot and repository.
+    pub(crate) what: String,
+    /// How long it has waited: "6h".
+    pub(crate) waited: String,
+}
+
 /// How a decided approval ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -57,6 +71,9 @@ pub(crate) struct Inbox {
     pub(crate) lede: String,
     pub(crate) detail: String,
     pub(crate) held: Section<HeldRow>,
+    /// Runs waiting on a question, longest-waiting first. The section is drawn only when there
+    /// is one; the app cannot answer yet, so each is a way to open the run.
+    pub(crate) questions: Vec<QuestionRow>,
     pub(crate) history: Section<HistoryRow>,
     /// Whether the daemon takes a reason with a denial (`approval.message`): Deny then asks for
     /// one, and without it Deny is a single click.
@@ -135,6 +152,26 @@ fn history_row(state: &State, record: &ApprovalRecord, now_ms: u64) -> Option<Hi
     })
 }
 
+/// The runs waiting on a question, longest-waiting first.
+fn question_rows(state: &State, now_ms: u64) -> Vec<QuestionRow> {
+    let mut waiting = summary::waiting_questions(state);
+    waiting.sort_by_key(|run| run.updated_at_ms);
+    waiting
+        .into_iter()
+        .map(|run| {
+            let (bot, repo, executor) = run_bot(state, &run.run_id);
+            QuestionRow {
+                run: run.run_id.clone(),
+                bot,
+                repo,
+                executor,
+                what: summary::parse_title(&run.title).what.to_owned(),
+                waited: summary::age_label(now_ms.saturating_sub(run.updated_at_ms)),
+            }
+        })
+        .collect()
+}
+
 /// What the Inbox shows.
 pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
     let held: Vec<HeldRow> = state
@@ -147,8 +184,12 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
         .iter()
         .filter_map(|r| history_row(state, r, now_ms))
         .collect();
-    let need = held.len();
+    let questions = question_rows(state, now_ms);
+    let need = held.len() + questions.len();
     let live = summary::attention(state).running;
+    // A waiting question keeps its run waiting like a held action does, but it cannot be
+    // answered from the app yet: say so, and that it is declined at expiry.
+    let question_note = "Answering a question from the app arrives in a later phase; an unanswered question is declined when it expires.";
     let (lede, detail) = match need {
         0 if super::is_offline(state) => (
             "Not connected".to_owned(),
@@ -161,6 +202,17 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
                 1 => "1 run is moving on its own.".to_owned(),
                 n => format!("{n} runs are moving on their own."),
             },
+        ),
+        _ if !questions.is_empty() && held.is_empty() => (
+            match need {
+                1 => "1 thing needs you".to_owned(),
+                n => format!("{n} things need you"),
+            },
+            format!("A question keeps its run waiting. {question_note}"),
+        ),
+        _ if !questions.is_empty() => (
+            format!("{need} things need you"),
+            format!("Held actions and questions keep their runs waiting. {question_note}"),
         ),
         1 => (
             "1 thing needs you".to_owned(),
@@ -178,6 +230,7 @@ pub(crate) fn build(state: &State, now_ms: u64) -> Inbox {
         lede,
         detail,
         held: Section::of_state(state, state.feed(Feed::Approvals), held),
+        questions,
         history: Section::of_state(state, state.feed(Feed::ApprovalHistory), history),
         reasons: state.supports(reno_proto::FEATURE_APPROVAL_MESSAGE),
     }
@@ -380,6 +433,59 @@ mod tests {
         );
         state.apply(Update::Daemon(hello(&["approvals", "approval.message"])));
         assert!(build(&state, NOW).reasons);
+    }
+
+    fn waiting_run(name: &str, title: &str, age: u64) -> reno_proto::RunSummary {
+        reno_proto::RunSummary {
+            run_id: RunId::from_suffix(name).unwrap(),
+            task_id: reno_proto::TaskId::from_suffix(name).unwrap(),
+            executor: "claude-code".parse().unwrap(),
+            status: reno_proto::RunStatus::WaitingInput,
+            attempt: 1,
+            title: title.into(),
+            prompt: None,
+            model: None,
+            stop_reason: None,
+            bot: None,
+            cwd: None,
+            created_at_ms: NOW - age,
+            updated_at_ms: NOW - age,
+            stop: None,
+            not_resumed: None,
+            session: None,
+        }
+    }
+
+    #[test]
+    fn a_waiting_question_needs_you_and_is_listed_longest_waiting_first() {
+        let mut state = State::new();
+        state.apply(Update::Approvals(vec![]));
+        state.apply(Update::Runs(vec![
+            waiting_run("new", "keeper \u{b7} atlas: ask", HOUR),
+            waiting_run("old", "builder \u{b7} reno: pick", 6 * HOUR),
+        ]));
+        let inbox = build(&state, NOW);
+        assert_eq!(inbox.lede, "2 things need you");
+        assert!(inbox.detail.contains("later phase"), "{}", inbox.detail);
+        assert!(inbox.detail.contains("declined"), "{}", inbox.detail);
+        let runs: Vec<_> = inbox.questions.iter().map(|q| q.run.to_string()).collect();
+        assert_eq!(runs, ["run_old", "run_new"]);
+        assert_eq!(inbox.questions[0].bot.as_deref(), Some("builder"));
+        assert_eq!(inbox.questions[0].waited, "6h");
+        assert_eq!(inbox.questions[0].what, "pick");
+    }
+
+    #[test]
+    fn a_question_adds_to_the_held_actions_in_the_count() {
+        let mut state = State::new();
+        state.apply(Update::Approvals(vec![pending("a", "r", HOUR)]));
+        state.apply(Update::Runs(vec![waiting_run("q", "t", HOUR)]));
+        let inbox = build(&state, NOW);
+        assert_eq!(inbox.lede, "2 things need you");
+        assert_eq!(inbox.held.rows().len(), 1);
+        assert_eq!(inbox.questions.len(), 1);
+        state.apply(Update::Runs(vec![]));
+        assert_eq!(build(&state, NOW).lede, "1 thing needs you");
     }
 
     #[test]

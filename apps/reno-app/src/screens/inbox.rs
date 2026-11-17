@@ -26,7 +26,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
-use crate::vm::inbox::{self, HeldRow, HistoryRow, Verdict};
+use crate::vm::inbox::{self, HeldRow, HistoryRow, QuestionRow, Verdict};
 use crate::vm::rules;
 
 /// The reason field open under one card.
@@ -406,6 +406,96 @@ impl InboxScreen {
             .into_any_element()
     }
 
+    /// A run waiting on a harness question. The app cannot answer yet, so the card says what
+    /// happens and opens the run, where the question is.
+    fn question_card(row: &QuestionRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let id = row.run.to_string();
+        let open = {
+            let run = row.run.clone();
+            cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone())))
+        };
+        let who = row.bot.clone().unwrap_or_else(|| "A run".to_owned());
+        div()
+            .id(SharedString::from(format!("question-{id}")))
+            .w_full()
+            .flex()
+            .gap(px(14.0))
+            .p(px(16.0))
+            .rounded(px(18.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(40.0))
+                    .rounded(px(20.0))
+                    .bg(theme.raised.opacity(0.5))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(Icon::Question, 17.0, theme.warning)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(14.0))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child(who))
+                            .child(div().text_color(theme.muted).child(format!(
+                                "\u{b7} {}",
+                                crate::summary::executor_name(&row.executor)
+                            )))
+                            .when_some(row.repo.clone(), |d, repo| {
+                                d.child(
+                                    div()
+                                        .text_color(theme.muted)
+                                        .child(format!("\u{b7} {repo}")),
+                                )
+                            })
+                            .child(kit::tag(theme.warning, format!("waited {}", row.waited)))
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("open-question-{id}")))
+                                    .debug_selector(move || format!("open-question-{id}"))
+                                    .text_size(px(12.5))
+                                    .text_color(theme.muted)
+                                    .cursor_pointer()
+                                    .hover({
+                                        let text = theme.text;
+                                        move |s| s.text_color(text)
+                                    })
+                                    .on_click(open)
+                                    .child("Open run"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .text_color(theme.text)
+                            .child(SharedString::from(row.what.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.faint)
+                            .child(
+                                "This run is waiting on a question. Answering from the app arrives in a later phase; it is declined when it expires.",
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn history_row(
         row: &HistoryRow,
         last: bool,
@@ -522,6 +612,11 @@ impl Render for InboxScreen {
             .iter()
             .map(|row| self.held_card(row, &theme, cx))
             .collect();
+        let questions: Vec<AnyElement> = view
+            .questions
+            .iter()
+            .map(|row| Self::question_card(row, &theme, cx))
+            .collect();
         let history_rows = view.history.rows();
         let history: Vec<AnyElement> = history_rows
             .iter()
@@ -550,6 +645,18 @@ impl Render for InboxScreen {
                     )
                     .children(held),
             )
+            .when(!questions.is_empty(), |c| {
+                c.child(
+                    div()
+                        .id("inbox-questions")
+                        .debug_selector(|| "inbox-questions".to_owned())
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(page::section_label(&theme, "QUESTIONS"))
+                        .children(questions),
+                )
+            })
             .child(
                 div()
                     .flex()

@@ -214,7 +214,7 @@ impl Render for AttentionDock {
         summary_row = if offline {
             summary_row.child(plain("daemon offline".to_owned(), theme.faint))
         } else {
-            let need = if counts.need > 0 {
+            let need = if counts.needs_you() > 0 {
                 div()
                     .flex()
                     .items_center()
@@ -222,7 +222,7 @@ impl Render for AttentionDock {
                     .text_color(theme.warning)
                     .child(running_pill(
                         "attention-need",
-                        counts.need,
+                        counts.needs_you(),
                         theme.warning,
                         MONO,
                     ))

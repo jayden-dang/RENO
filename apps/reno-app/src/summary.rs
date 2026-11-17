@@ -111,11 +111,21 @@ fn run_repo_in(run: &RunSummary, data_dir: Option<&Path>) -> Option<RunRepo> {
 pub(crate) struct Attention {
     /// Held actions waiting for a human.
     pub(crate) need: u32,
+    /// Runs waiting on a harness question. The app cannot answer yet, but the person is who the
+    /// run waits for, so they count toward [`Attention::needs_you`].
+    pub(crate) questions: u32,
     /// Runs that are moving on their own.
     pub(crate) running: u32,
     /// Distinct bots the daemon has defined; a run pinned to a deleted bot does not count. Only
     /// when no definitions are known (the fake daemon defines none) the bots the runs name.
     pub(crate) bots: u32,
+}
+
+impl Attention {
+    /// Everything a run waits on the person for: held actions and questions.
+    pub(crate) const fn needs_you(&self) -> u32 {
+        self.need.saturating_add(self.questions)
+    }
 }
 
 /// The bot a run belongs to: the daemon's `bot` pin; only for a run without one (the fake
@@ -135,6 +145,15 @@ pub(crate) fn is_live(status: RunStatus) -> bool {
     )
 }
 
+/// The runs waiting on a harness question.
+pub(crate) fn waiting_questions(state: &State) -> Vec<&RunSummary> {
+    state
+        .runs()
+        .into_iter()
+        .filter(|run| run.status == RunStatus::WaitingInput)
+        .collect()
+}
+
 pub(crate) fn attention(state: &State) -> Attention {
     let runs = state.runs();
     let mut bots: BTreeSet<&str> = state
@@ -151,6 +170,11 @@ pub(crate) fn attention(state: &State) -> Attention {
     }
     Attention {
         need: count(state.approvals().len()),
+        questions: count(
+            runs.iter()
+                .filter(|run| run.status == RunStatus::WaitingInput)
+                .count(),
+        ),
         running: count(runs.iter().filter(|run| is_live(run.status)).count()),
         bots: count(bots.len()),
     }
@@ -439,6 +463,16 @@ impl Finding {
 pub(crate) fn finding(state: &State, now_ms: u64) -> Finding {
     let counts = attention(state);
     let Some(oldest) = state.approvals().first() else {
+        if counts.questions > 0 {
+            let lead = match counts.questions {
+                1 => "1 question is waiting for you".to_owned(),
+                n => format!("{n} questions are waiting for you"),
+            };
+            return Finding::Held {
+                lead,
+                detail: "\u{2014} answering from the app arrives in a later phase.".to_owned(),
+            };
+        }
         let text = match counts.running {
             0 => "Nothing needs you — all quiet.".to_owned(),
             1 => "Nothing needs you — 1 run is moving on its own.".to_owned(),
@@ -852,6 +886,28 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_question_is_counted_and_not_called_running() {
+        let state = state_with(
+            vec![
+                run(
+                    "q1",
+                    RunStatus::WaitingInput,
+                    "keeper \u{b7} atlas-api: ask",
+                ),
+                run("b1", RunStatus::Running, "builder \u{b7} reno: b"),
+            ],
+            vec![],
+        );
+        let counts = attention(&state);
+        assert_eq!((counts.need, counts.questions, counts.running), (0, 1, 1));
+        assert_eq!(counts.needs_you(), 1);
+        assert_eq!(
+            finding(&state, NOW).sentence(),
+            "1 question is waiting for you \u{2014} answering from the app arrives in a later phase."
+        );
+    }
+
+    #[test]
     fn attention_counts() {
         let state = state_with(
             vec![
@@ -867,6 +923,7 @@ mod tests {
             attention(&state),
             Attention {
                 need: 1,
+                questions: 0,
                 running: 2,
                 bots: 3
             }

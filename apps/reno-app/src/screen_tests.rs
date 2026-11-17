@@ -116,6 +116,56 @@ fn inbox_is_empty_and_then_live(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn inbox_lists_a_run_waiting_on_a_question_and_opens_it(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            empty: true,
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Inbox);
+    wait_drawn(vcx, |vcx| {
+        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
+        v.held == Section::Empty && v.lede == "Nothing needs you"
+    });
+    assert!(!painted(vcx, "inbox-questions"), "no section without one");
+    let waiting = reno_proto::RunSummary {
+        run_id: reno_proto::RunId::from_suffix("ask1").unwrap(),
+        task_id: reno_proto::TaskId::from_suffix("ask1").unwrap(),
+        executor: "claude-code".parse().unwrap(),
+        status: RunStatus::WaitingInput,
+        attempt: 1,
+        title: "keeper \u{b7} atlas-api: pick a colour".into(),
+        prompt: None,
+        model: None,
+        stop_reason: None,
+        bot: None,
+        cwd: None,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        stop: None,
+        not_resumed: None,
+        session: None,
+    };
+    store.update(vcx, |s, cx| {
+        s.apply(reno_client::Update::Runs(vec![waiting]), cx);
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "inbox-questions"));
+    let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
+    assert_eq!(v.lede, "1 thing needs you");
+    click(vcx, "open-question-run_ask1");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, cx| {
+            r.run_screen()
+                .is_some_and(|s| s.read(cx).run_id().to_string() == "run_ask1")
+        })
+    });
+}
+
+#[gpui::test]
 fn inbox_says_when_history_fails(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);

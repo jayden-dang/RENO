@@ -135,6 +135,7 @@ fn home_renders_with_the_demo_state(cx: &mut TestAppContext) {
         counts,
         Attention {
             need: 2,
+            questions: 0,
             running: 1,
             bots: 5
         }
