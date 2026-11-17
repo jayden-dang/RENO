@@ -907,16 +907,10 @@ impl Store {
         .await
     }
 
-    /// Records the model the run is using. Fenced. With `pin`, the task's own model becomes
-    /// `model` too, so the run's next attempt starts on it (a `run.set_model` switch outlives
-    /// a crash or a resume); without, it only says what the harness reported.
-    pub async fn record_model(
-        &self,
-        run: &RunId,
-        fence: u64,
-        model: &str,
-        pin: bool,
-    ) -> Result<()> {
+    /// Records the model a `run.set_model` switch put the run on. Fenced. It is the run's
+    /// model, and the task's own model becomes it too, so the next attempt starts on it (a
+    /// switch outlives a crash or a resume).
+    pub async fn record_model(&self, run: &RunId, fence: u64, model: &str) -> Result<()> {
         let (run, model) = (run.clone(), model.to_owned());
         self.write(Durability::Normal, move |c| {
             let rec = load_fenced(c, &run, fence)?;
@@ -924,16 +918,14 @@ impl Store {
                 .db()?
                 .execute(params![run.as_str(), model])
                 .db()?;
-            if pin {
-                let mut spec = rec.spec;
-                if let Some(map) = spec.as_object_mut() {
-                    map.insert("model".into(), serde_json::Value::String(model));
-                }
-                c.prepare_cached("UPDATE tasks SET spec = ?2 WHERE id = ?1")
-                    .db()?
-                    .execute(params![rec.task_id.as_str(), spec.to_string()])
-                    .db()?;
+            let mut spec = rec.spec;
+            if let Some(map) = spec.as_object_mut() {
+                map.insert("model".into(), serde_json::Value::String(model));
             }
+            c.prepare_cached("UPDATE tasks SET spec = ?2 WHERE id = ?1")
+                .db()?
+                .execute(params![rec.task_id.as_str(), spec.to_string()])
+                .db()?;
             Ok(())
         })
         .await

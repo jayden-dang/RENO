@@ -645,11 +645,12 @@ async fn set_model_switches_a_live_run_and_shows_in_its_summary_and_journal() {
     ]);
     let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
     let run = fx.submit("go").await;
-    until(async || {
-        (fx.kernel.get_run(&run).await.unwrap().model.as_deref() == Some("mock-1")).then_some(())
-    })
-    .await;
-    // What the harness reported in `Started` is the run's model.
+    fx.wait_status(&run, RunStatus::Running).await;
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model,
+        None,
+        "none was asked for"
+    );
     assert_eq!(fx.kernel.set_model(&run, "mock-2").await.unwrap(), "mock-2");
     // The reply is after the change is stored.
     assert_eq!(

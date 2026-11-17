@@ -155,7 +155,7 @@ daemon_test! {
         // A model the executor does not list is refused, and nothing changes.
         let e = within(fx.client.set_run_model(&run, "no-such-model".into())).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::InvalidParams);
-        assert_eq!(fx.client.get_run(&run).await.unwrap().model.as_deref(), Some("mock-1"));
+        assert_eq!(fx.client.get_run(&run).await.unwrap().model, None);
 
         let switched = within(fx.client.set_run_model(&run, "mock-2".into())).await.unwrap();
         assert_eq!(switched.model, "mock-2");

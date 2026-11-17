@@ -385,10 +385,7 @@ impl Supervisor {
             if self.model_requests_open > 0 {
                 self.model_events_ahead += 1;
             }
-            self.record_model(model, true).await;
-        }
-        if let ExecEvent::Started { model, .. } = &event {
-            self.record_model(model, false).await;
+            self.record_model(model).await;
         }
         if let ExecEvent::Started { session, .. } = &event {
             // The session is what a resume continues: it is durable before anyone sees it.
@@ -420,17 +417,18 @@ impl Supervisor {
         }
     }
 
-    /// Stores the model the harness reports in use. `pin` also makes it the model of the run's
-    /// next attempt (a switch outlives a crash or a resume); a store failure is logged and the
-    /// run goes on.
-    async fn record_model(&mut self, model: &str, pin: bool) {
+    /// Stores the model a switch put the run on: the run's model, and the one its next attempt
+    /// starts with (a switch outlives a crash or a resume). A store failure is logged and the
+    /// run goes on. What the harness reported at `Started` is not stored here: the journal
+    /// keeps it (`startedModel`), beside the model that was asked for.
+    async fn record_model(&mut self, model: &str) {
         if self.lost {
             return;
         }
         match self
             .shared
             .db
-            .record_model(&self.run, self.fence, model, pin)
+            .record_model(&self.run, self.fence, model)
             .await
         {
             Ok(()) => self.shared.mark_runs_dirty(),
@@ -477,7 +475,7 @@ impl Supervisor {
                 self.model_events_ahead -= 1;
             } else {
                 self.model_answers_ahead += 1;
-                self.record_model(model, true).await;
+                self.record_model(model).await;
                 self.publish(&ExecEvent::ModelChanged {
                     model: model.clone(),
                 });
