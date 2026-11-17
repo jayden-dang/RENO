@@ -227,28 +227,37 @@ async fn active_rules_follow_scope_expiry_and_revocation() {
     };
     assert_eq!(
         ids(store
-            .active_rules(&run_id(0), Some("scout"), 500)
+            .active_rules(&run_id(0), Some("scout"), None, 500)
             .await
             .unwrap()),
         ["rule_u1", "rule_u2", "rule_u4", "rule_u6"]
     );
     assert_eq!(
-        ids(store.active_rules(&run_id(1), None, 999).await.unwrap()),
+        ids(store
+            .active_rules(&run_id(1), None, None, 999)
+            .await
+            .unwrap()),
         ["rule_u1", "rule_u5", "rule_u6"]
     );
     // Rule 6 expires at 1000, to the millisecond.
     assert_eq!(
-        ids(store.active_rules(&run_id(1), None, 1_000).await.unwrap()),
+        ids(store
+            .active_rules(&run_id(1), None, None, 1_000)
+            .await
+            .unwrap()),
         ["rule_u1", "rule_u5"]
     );
 
     store.revoke_rule(&rule_id(1), 2_000).await.unwrap();
     store.revoke_rule(&rule_id(1), 2_500).await.unwrap();
     assert_eq!(
-        ids(store.active_rules(&run_id(1), None, 500).await.unwrap()),
+        ids(store
+            .active_rules(&run_id(1), None, None, 500)
+            .await
+            .unwrap()),
         ["rule_u5", "rule_u6"]
     );
-    let all = store.list_rules(true, 1_500).await.unwrap();
+    let all = store.list_rules(true, None, 1_500).await.unwrap();
     assert_eq!(all.len(), 6);
     assert_eq!(all[0].id, rule_id(6), "newest first");
     let revoked = all.iter().find(|r| r.id == rule_id(1)).unwrap();
@@ -257,7 +266,7 @@ async fn active_rules_follow_scope_expiry_and_revocation() {
         Some(2_000),
         "the first revocation stands"
     );
-    assert_eq!(store.list_rules(false, 1_500).await.unwrap().len(), 4);
+    assert_eq!(store.list_rules(false, None, 1_500).await.unwrap().len(), 4);
     assert_eq!(
         store
             .events_since(Seq(0), 1000)
@@ -352,8 +361,65 @@ async fn a_rule_of_one_run_is_not_in_force_once_that_run_is_over() {
         rules.into_iter().map(|r| r.id.to_string()).collect()
     };
     assert_eq!(
-        ids(store.list_rules(false, 20).await.unwrap()),
+        ids(store.list_rules(false, None, 20).await.unwrap()),
         ["rule_u9", "rule_u1"]
     );
-    assert_eq!(store.list_rules(true, 20).await.unwrap().len(), 3);
+    assert_eq!(store.list_rules(true, None, 20).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn project_rules_apply_only_to_runs_of_that_project_and_list_by_project() {
+    let (_d, store) = store_with_runs(1).await;
+    let project = |root: &str| StandingScope::Project { root: root.into() };
+    let make = |n, scope| rule(n, scope, StandingEffect::Allow, None);
+    store
+        .create_rule(make(1, project("/work/a")), 10)
+        .await
+        .unwrap();
+    store
+        .create_rule(make(2, project("/work/b")), 11)
+        .await
+        .unwrap();
+    store
+        .create_rule(make(3, StandingScope::Always), 12)
+        .await
+        .unwrap();
+    let ids = |rules: Vec<reno_proto::StandingRule>| -> Vec<String> {
+        rules.into_iter().map(|r| r.id.to_string()).collect()
+    };
+    let at = |p: &str| Some(std::path::PathBuf::from(p));
+    assert_eq!(
+        ids(store
+            .active_rules(&run_id(0), None, at("/work/a").as_deref(), 20)
+            .await
+            .unwrap()),
+        ["rule_u1", "rule_u3"]
+    );
+    assert_eq!(
+        ids(store
+            .active_rules(&run_id(0), None, None, 20)
+            .await
+            .unwrap()),
+        ["rule_u3"],
+        "a run with no project meets no project rule"
+    );
+    assert_eq!(
+        ids(store
+            .list_rules(false, at("/work/b").as_deref(), 20)
+            .await
+            .unwrap()),
+        ["rule_u2"]
+    );
+    assert_eq!(store.list_rules(false, None, 20).await.unwrap().len(), 3);
+    let back = store.get_rule(&rule_id(1)).await.unwrap().unwrap();
+    assert_eq!(back.scope, project("/work/a"));
+    // The row stays as unchangeable as the others.
+    store.revoke_rule(&rule_id(1), 30).await.unwrap();
+    assert!(
+        store
+            .list_rules(false, at("/work/a").as_deref(), 31)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

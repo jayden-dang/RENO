@@ -8,23 +8,58 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reno_proto::{RuleListResult, StandingRule, StandingScope};
 use serde::Serialize;
 
-use crate::cli::{RuleCommand, RuleList, RuleRevoke};
+use crate::cli::{RuleAdd, RuleCommand, RuleList, RuleRevoke};
 use crate::env::{Env, print_json, print_line};
 use crate::render;
 
 pub(crate) async fn run(env: &Env, command: RuleCommand) -> anyhow::Result<ExitCode> {
     match command {
         RuleCommand::List(args) => list(env, args).await,
+        RuleCommand::Add(args) => add(env, args).await,
         RuleCommand::Revoke(args) => revoke(env, args).await,
     }
 }
 
-async fn list(env: &Env, args: RuleList) -> anyhow::Result<ExitCode> {
+/// `dir` as the daemon, which runs somewhere else, can read it.
+fn absolute(dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    Ok(std::path::absolute(dir)?)
+}
+
+async fn add(env: &Env, args: RuleAdd) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
-    let rules = client
-        .list_rules(args.all)
+    let rule = client
+        .add_rule(reno_proto::RuleAddParams {
+            project: absolute(&args.project)?,
+            effect: if args.deny {
+                reno_proto::StandingEffect::Deny
+            } else {
+                reno_proto::StandingEffect::Allow
+            },
+            command: args.command.join(" "),
+            tool: args.tool,
+            expires_in_secs: args.expires_in,
+        })
         .await
         .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&rule)?;
+    } else {
+        print_line(render::rule_line(&rule, now_ms()))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn list(env: &Env, args: RuleList) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let rules = match &args.project {
+        Some(project) => {
+            client
+                .list_project_rules(&absolute(project)?, args.all)
+                .await
+        }
+        None => client.list_rules(args.all).await,
+    }
+    .map_err(|e| env.explain(e))?;
     if env.json {
         print_json(&RuleListResult { rules })?;
     } else if rules.is_empty() {

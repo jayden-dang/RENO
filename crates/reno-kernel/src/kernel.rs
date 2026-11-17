@@ -16,7 +16,7 @@
 //! cannot deadlock in a cycle (ARCH-11). Every task is spawned on one `TaskTracker`; every
 //! run's cancel token is a child of the one root token.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -28,10 +28,15 @@ use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
     CleanTarget, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision, RuleId,
-    RunEventItem, RunId, RunStatus, RunSummary, Seq, StandingRule, StopDetail, TaskId,
-    TriggerFireResult, TriggerInfo, WorkspaceInfo, WorkspaceStatus,
+    RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, TriggerFireResult,
+    TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
-use reno_store::{NewTask, Note, StoreError};
+use reno_proto::{
+    ActionClass, CommandPattern, RULE_ADD_COMMAND_MAX_CHARS, RULE_ADD_DEFAULT_TOOL, RuleMatcher,
+    StandingEffect, StandingRule, StandingScope,
+};
+use reno_store::{NewRule, NewTask, Note, StoreError};
+
 use tokio::sync::{oneshot, watch};
 use tokio::time::timeout;
 
@@ -814,7 +819,98 @@ impl Kernel {
 
     /// The standing rules, newest first: only those in force now unless `include_inactive`.
     pub async fn list_rules(&self, include_inactive: bool) -> Result<Vec<StandingRule>> {
-        Ok(self.shared.db.list_rules(include_inactive).await?)
+        Ok(self.shared.db.list_rules(include_inactive, None).await?)
+    }
+
+    /// [`Self::list_rules`], only the rules whose scope is the project of `dir`: any directory of
+    /// it will do (see `crate::project`). A directory in no project lists nothing.
+    pub async fn list_project_rules(
+        &self,
+        dir: &Path,
+        include_inactive: bool,
+    ) -> Result<Vec<StandingRule>> {
+        let Some(root) = self.shared.project_of(dir).await else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .shared
+            .db
+            .list_rules(include_inactive, Some(&root))
+            .await?)
+    }
+
+    /// Make a standing rule for the project of `dir` from a command line, as if a person had
+    /// answered that command's approval there with "always in this project": action `command`,
+    /// `tool` (default [`RULE_ADD_DEFAULT_TOOL`]), the line exactly (trimmed), no paths. The
+    /// project is resolved here; `Invalid` for a directory in none, an empty or multi-line
+    /// command, one over [`RULE_ADD_COMMAND_MAX_CHARS`], an empty `tool`, and an expiry outside
+    /// 1 to [`RULE_MAX_EXPIRY_SECS`] seconds.
+    pub async fn add_project_rule(
+        &self,
+        dir: &Path,
+        effect: StandingEffect,
+        command: &str,
+        tool: Option<&str>,
+        expires_in_secs: Option<u64>,
+    ) -> Result<StandingRule> {
+        let command = command.trim();
+        if command.is_empty() || command.contains(['\n', '\r']) {
+            return Err(KernelError::Invalid(
+                "a rule's command is one non-empty line".to_owned(),
+            ));
+        }
+        if command.chars().count() > RULE_ADD_COMMAND_MAX_CHARS {
+            return Err(KernelError::Invalid(format!(
+                "a rule's command is at most {RULE_ADD_COMMAND_MAX_CHARS} characters"
+            )));
+        }
+        let tool = tool.map_or(RULE_ADD_DEFAULT_TOOL, str::trim);
+        if tool.is_empty() {
+            return Err(KernelError::Invalid(
+                "a rule's tool is not empty".to_owned(),
+            ));
+        }
+        if let Some(secs) = expires_in_secs
+            && !(1..=RULE_MAX_EXPIRY_SECS).contains(&secs)
+        {
+            return Err(KernelError::Invalid(format!(
+                "a rule's expiry is between 1 and {RULE_MAX_EXPIRY_SECS} seconds"
+            )));
+        }
+        let root = self.shared.project_of(dir).await.ok_or_else(|| {
+            KernelError::Invalid(format!(
+                "{} is not in a git repository, so it is in no project",
+                dir.display()
+            ))
+        })?;
+        let now = self.shared.db.now_ms();
+        let id = RuleId::from_suffix(&self.shared.mint.suffix(now))
+            .map_err(|error| KernelError::Invalid(format!("cannot mint a rule id: {error}")))?;
+        self.shared
+            .db
+            .create_rule(NewRule {
+                id: id.clone(),
+                scope: StandingScope::Project { root },
+                effect,
+                matcher: RuleMatcher {
+                    action: ActionClass::Command,
+                    tool: tool.to_owned(),
+                    command: Some(CommandPattern::Exact {
+                        command: command.to_owned(),
+                    }),
+                    paths: Vec::new(),
+                },
+                expires_at: expires_in_secs.map(|secs| {
+                    now.saturating_add(i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX))
+                }),
+                source_approval: None,
+            })
+            .await?;
+        self.shared
+            .db
+            .get_rule(&id)
+            .await?
+            .ok_or(KernelError::RuleNotFound(id))
     }
 
     /// Revoke a standing rule for good. `RuleNotFound` for an unknown id; revoking a revoked

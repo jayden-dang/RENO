@@ -514,3 +514,74 @@ async fn the_users_checkout_is_byte_identical_after_a_whole_lifecycle() {
     assert_eq!(git(&repo, &["stash", "list"]).lines().count(), 1);
     assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
 }
+
+// ---- project_root -------------------------------------------------------------------------
+//
+// Project-scoped standing rules match on this path, so every spelling of a directory of a
+// repository has to give the same one.
+
+mod project_root {
+    use std::path::{Path, PathBuf};
+
+    use reno_harness::proc::git_workspace::project_root;
+
+    /// A directory with a `.git` directory in it, canonical (macOS `/var` is `/private/var`).
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        (dir, root)
+    }
+
+    #[tokio::test]
+    async fn the_root_and_every_directory_below_it_are_the_same_project() {
+        let (_dir, root) = repo();
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(project_root(&root).await, Some(root.clone()));
+        assert_eq!(project_root(&deep).await, Some(root));
+    }
+
+    #[tokio::test]
+    async fn a_git_file_marks_a_root_too_and_the_nearest_one_wins() {
+        let (_dir, outer) = repo();
+        let inner = outer.join("vendor").join("lib");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+        assert_eq!(project_root(&inner).await, Some(inner.clone()));
+        assert_eq!(project_root(inner.parent().unwrap()).await, Some(outer));
+    }
+
+    #[tokio::test]
+    async fn every_spelling_of_a_directory_is_one_project() {
+        let (_dir, root) = repo();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("porch");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert_eq!(project_root(&link).await, Some(root.clone()));
+        assert_eq!(project_root(&link.join("src")).await, Some(root.clone()));
+        // `..` and a trailing slash too.
+        let dotted = root.join("src").join("..").join("src");
+        assert_eq!(project_root(&dotted).await, Some(root));
+    }
+
+    #[tokio::test]
+    async fn a_missing_directory_has_no_project() {
+        assert_eq!(
+            project_root(Path::new("/definitely/not/here/at/all")).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_walk_stops_at_the_nearest_root_and_never_reports_the_directory_without_a_dot_git()
+    {
+        // The temp dir has no `.git` of its own, so whatever is found (a repository the machine
+        // keeps above `$TMPDIR`, or nothing) is a strict ancestor of it, never it.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let found = project_root(&root).await;
+        assert!(found.is_none_or(|p| root.starts_with(&p) && p != root));
+    }
+}

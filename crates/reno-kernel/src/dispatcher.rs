@@ -710,6 +710,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         }
     }
     let resuming = spec.resume.is_some();
+    // The project is that of the directory the task named, before the run moves to a worktree.
+    let project = shared.project_of(&spec.cwd).await;
     // Where the run works: its own worktree for a write run in a git repository (T1.3).
     let opted_in = in_place_opt_in(&row, &settings);
     let placed = tokio::select! {
@@ -746,6 +748,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         executor: row.executor.clone(),
         cwd: spec.cwd.clone(),
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
+        project,
         wall_time: settings.wall_time,
         token_ceiling: settings.token_ceiling,
         redactor: redactor.clone(),

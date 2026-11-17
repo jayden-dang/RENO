@@ -79,6 +79,10 @@ impl Workspace for GitWorkspace {
         }))
     }
 
+    async fn project_of(&self, dir: &Path) -> Option<PathBuf> {
+        reno_harness::proc::git_workspace::project_root(dir).await
+    }
+
     async fn dir_exists(&self, dir: &Path) -> bool {
         tokio::fs::metadata(dir)
             .await

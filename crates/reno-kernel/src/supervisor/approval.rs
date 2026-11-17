@@ -12,8 +12,9 @@
 //!    never asked, so there is nothing for a standing rule to answer). A policy reload changes the
 //!    answer for requests that come after it and never for one already waiting.
 //! 2. **Standing deny.** A standing rule of effect `deny` that is in force and matches the
-//!    subject (`reno_proto::rules`; scope: this run, this run's bot, or everything). A standing
-//!    deny beats a standing allow whatever their scopes, and beats a policy `allow` or `ask`.
+//!    subject (`reno_proto::rules`; scope: this run, this run's bot, this run's project, or
+//!    everything). A standing deny beats a standing allow whatever their scopes, and beats a
+//!    policy `allow` or `ask`.
 //!    The decision is named `standing:<rule id>`.
 //! 3. **Repeat denial.** A subject whose digest was already refused in this run, by a person, by
 //!    a rule or by running out of time (no answer means deny), is denied again, unasked. This
@@ -31,6 +32,13 @@
 //! 7. **Ask.** A pending record is stored with a deadline, the run waits in `waiting_approval`,
 //!    and the pending list is published. A human's `decide` answers it; if none comes by the
 //!    deadline, it is denied as expired.
+//!
+//! In the owner's words the order is **never** (step 1, the policy file) → **this project** → **every
+//! project** → **ask**: a project rule is judged with the others of its effect (steps 2 and 5), so it
+//! can never loosen a policy deny (step 1 answers first), a project deny refuses what a global allow
+//! would have allowed, and a project allow answers what would otherwise be asked. A run's project is
+//! the git repository root of the directory it was submitted for (`Workspace::project_of`), resolved once
+//! when the run starts; a run with no project meets no project rule.
 //!
 //! A standing rule is in force when it is not revoked and `now < expires_at`; expiry is read
 //! against the clock at the time of judging, with no timer. A rule that is revoked while a
@@ -279,7 +287,11 @@ impl Supervisor {
         let standing = self
             .shared
             .db
-            .active_rules(&self.run, self.info.bot.as_deref())
+            .active_rules(
+                &self.run,
+                self.info.bot.as_deref(),
+                self.info.project.as_deref(),
+            )
             .await?;
         let of_effect = |effect: StandingEffect| {
             standing.iter().find(|rule| {
@@ -618,6 +630,14 @@ impl Supervisor {
                 bot: self.info.bot.clone().ok_or_else(|| {
                     KernelError::Invalid(
                         "this run has no bot, so a rule cannot be kept for its bot".to_owned(),
+                    )
+                })?,
+            },
+            RememberScope::Project => StandingScope::Project {
+                root: self.info.project.clone().ok_or_else(|| {
+                    KernelError::Invalid(
+                        "this run is not in a git repository, so it has no project to keep a rule for"
+                            .to_owned(),
                     )
                 })?,
             },

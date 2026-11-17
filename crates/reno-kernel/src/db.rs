@@ -6,6 +6,7 @@
 //! the writes that leave no event row (heartbeats, empty claims).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -450,8 +451,23 @@ impl Db {
         self.store.revoke_rule(id, self.now_ms()).await
     }
 
-    pub(crate) async fn list_rules(&self, include_inactive: bool) -> Result<Vec<StandingRule>> {
-        self.store.list_rules(include_inactive, self.now_ms()).await
+    pub(crate) async fn list_rules(
+        &self,
+        include_inactive: bool,
+        project: Option<&Path>,
+    ) -> Result<Vec<StandingRule>> {
+        self.store
+            .list_rules(include_inactive, project, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn create_rule(&self, rule: NewRule) -> Result<()> {
+        self.wrote();
+        self.store.create_rule(rule, self.now_ms()).await
+    }
+
+    pub(crate) async fn get_rule(&self, id: &RuleId) -> Result<Option<StandingRule>> {
+        self.store.get_rule(id).await
     }
 
     /// The standing rules in force now that apply to `run`, a run of `bot`.
@@ -459,8 +475,11 @@ impl Db {
         &self,
         run: &RunId,
         bot: Option<&str>,
+        project: Option<&Path>,
     ) -> Result<Vec<StandingRule>> {
-        self.store.active_rules(run, bot, self.now_ms()).await
+        self.store
+            .active_rules(run, bot, project, self.now_ms())
+            .await
     }
 
     pub(crate) async fn expire_pending(
