@@ -488,7 +488,13 @@ impl Cx<'_> {
             return Err("the mcp scenario injects no server".into());
         }
         let log = self.run_completed(scenario, Behaviour::Passive).await?;
-        require_expectations(&log, scenario)
+        // A miss on a live CLI is a model that called something else, or nothing: say which.
+        require_expectations(&log, scenario).map_err(|failure| match failure {
+            Failure::Broken(why) => {
+                Failure::Broken(format!("{why} (tools called: {:?})", log.tool_names()))
+            }
+            other => other,
+        })
     }
 
     async fn user_config(&mut self) -> CaseResultOf {

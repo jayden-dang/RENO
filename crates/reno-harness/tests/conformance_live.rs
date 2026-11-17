@@ -42,7 +42,8 @@
 //!
 //! What it does not prove, reported as `waived` (an unverified claim, never a pass): a deny
 //! message reaching the model (Claude), a harness crash (a real CLI is not made to crash), an
-//! unrecognised frame (a real CLI cannot be asked to send one) and, on Codex, a question
+//! unrecognised frame (a real CLI cannot be asked to send one), isolation from the owner's
+//! personal config (asserted against the fake CLIs) and, on Codex, a question
 //! (`request_user_input` is experimental). Claude Code declares no sandbox level but
 //! `Unrestricted`, so it has none to run. The unrecognised-frame counters are still printed, and
 //! the clean-path check of that case still runs.
@@ -359,13 +360,13 @@ fn live_target(name: &str, executor: Arc<dyn Executor>, cwd: &Path, plan: Plan) 
         "a real CLI cannot be asked to send a frame it does not know",
     );
     target.exhaustive = false;
-    if name == "claude-code" {
-        target = target.waive(
-            CaseId::UserConfig,
-            "a tiny live prompt cannot show what an owner's config would have added; the \
-             flags and variables are asserted against the fake CLI",
-        );
-    }
+    // Both CLIs: on Codex the launch flags are asserted against the fake CLI, and what they
+    // switch off was checked once on 0.169 with `mcpServerStatus/list` and `plugin/installed`.
+    target = target.waive(
+        CaseId::UserConfig,
+        "a tiny live prompt cannot show what an owner's config would have added; the \
+         flags and variables are asserted against the fake CLI",
+    );
     if name == "codex" {
         target = target.waive(
             CaseId::Input,
@@ -595,7 +596,12 @@ mod plans {
         );
         assert_eq!(
             waived("codex"),
-            [CaseId::Input, CaseId::Crash, CaseId::UnknownFrames]
+            [
+                CaseId::Input,
+                CaseId::Crash,
+                CaseId::UserConfig,
+                CaseId::UnknownFrames
+            ]
         );
     }
 }

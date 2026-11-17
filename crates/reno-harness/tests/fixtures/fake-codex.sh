@@ -29,6 +29,8 @@ say() {
 case "$1" in
   --version) echo "codex-cli ${FAKE_CODEX_VERSION:-0.169.0}"; exit 0 ;;
 esac
+# The launch flags, for scenario:user-config.
+argv="$*"
 
 # ---- handshake -------------------------------------------------------------
 read -r line || exit 1 # initialize
@@ -696,6 +698,24 @@ case "$turnline" in
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
   say "configured"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  ;;
+
+*scenario:user-config*)
+  # Isolated: every personal feature off and the owner's server (from the CODEX_HOME the
+  # scenario names, tests/fixtures/codex/owner-home) disabled by name. Inherited: none of it.
+  isolated=yes
+  inherited=yes
+  for want in 'features.apps=false' 'features.plugins=false' 'features.computer_use=false' \
+    'features.browser_use=false' 'mcp_servers.owner-tool.enabled=false'; do
+    if has "$argv" "$want"; then inherited=no; else isolated=no; fi
+  done
+  has "$argv" 'mcp_servers.reno.enabled' && { fail_turn "$tid" "Reno's own server was disabled"; exit 0; }
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  if [ "$isolated" = yes ]; then say "user-config:isolated"
+  elif [ "$inherited" = yes ]; then say "user-config:inherited"
+  else say "user-config:partial $argv"; fi
   emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
   ;;
 

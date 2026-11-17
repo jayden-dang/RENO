@@ -420,7 +420,24 @@ pub(crate) fn codex_target() -> Target {
                 .expect(Expect::ResultContains("unknown-done".into())),
             keys: vec!["method:zz/futureNotification".into()],
         }),
-        user_config: None,
+        user_config: Some(UserConfigPlan {
+            scenario: Scenario::new("scenario:user-config")
+                .env(
+                    "CODEX_HOME",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("tests/fixtures/codex/owner-home")
+                        .display()
+                        .to_string(),
+                )
+                .mcp(vec![McpServerSpec {
+                    name: "reno".into(),
+                    command: "/opt/reno/reno".into(),
+                    args: vec!["mcp".into()],
+                    env: Default::default(),
+                }]),
+            isolated: vec![Expect::ResultContains("user-config:isolated".into())],
+            inherited: vec![Expect::ResultContains("user-config:inherited".into())],
+        }),
     };
     Target::new(
         "codex",

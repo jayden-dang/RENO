@@ -25,6 +25,8 @@ tar.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["io-util", "codec"] }
+# Reads the names in the owner's Codex `mcp_servers` table, to switch them off for a run.
+toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 zip.workspace = true

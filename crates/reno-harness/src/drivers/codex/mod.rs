@@ -41,17 +41,15 @@
 //! - Cancel: cancelling `ExecControls::cancel` declines every open request (and any that arrives
 //!   later), sends `turn/interrupt`, then SIGTERM and SIGKILL after their graces. The stream
 //!   ends with `Done { stop: Interrupted }`.
-//! - NO ISOLATION FROM THE OWNER'S CONFIG (`ExecSpec::inherit_user_config` is not honoured, and
-//!   the descriptor says `isolates_user_config: false`; ARCH-15). `codex app-server` loads the
-//!   owner's `$CODEX_HOME/config.toml` (profiles, `mcp_servers`, hooks) and the global
-//!   `$CODEX_HOME/AGENTS.md`. The 0.169 schema snapshot's `thread/start` params have no switch
-//!   to leave them out: `config` entries are dotted overrides that only layer on top of the
-//!   user's table (they cannot remove a server they do not know the name of), the global
-//!   `AGENTS.md` has no toggle (`project_doc_max_bytes = 0` covers project files only), and
-//!   moving `CODEX_HOME` would drop the login. Codex's docs list `--ignore-user-config` (auth
-//!   still read from `CODEX_HOME`) for `codex exec`; nothing says `app-server` accepts it, and an
-//!   unknown flag would fail every run, so it is not passed. Reno's own MCP server is added on
-//!   top of the owner's, never in place of it.
+//! - Isolation from the owner's personal tools (ARCH-15): unless the bot sets
+//!   `inherit_user_config`, the app-server is launched with `-c` overrides that turn off
+//!   connected apps, plugins, computer use and the browser, and disable every server in the
+//!   owner's `mcp_servers` table by name ([`isolation_args`]). The owner's login, model,
+//!   providers and project trust still apply: `codex app-server` (0.169) has no
+//!   `--ignore-user-config`, and a separate `CODEX_HOME` would copy the login, whose refresh
+//!   could sign the owner's own Codex out. Not covered: the global `$CODEX_HOME/AGENTS.md`
+//!   (no toggle) and skills outside plugins (`~/.agents/skills`). Reno's own MCP server is added
+//!   per thread and is never disabled.
 //! - Process records: every app-server this module spawns for a run is reported through
 //!   `ExecControls::processes` as soon as it exists, so a crash of the daemon leaves a row for
 //!   the orphan sweep (ARCHITECTURE 17.3). The short-lived `model/list` probe is not a run and
@@ -569,14 +567,9 @@ impl Executor for CodexExecutor {
                 // declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models,
-                // Not enforced: see [`isolates_user_config`]. `codex app-server` reads
-                // `$CODEX_HOME/config.toml` (profiles, `mcp_servers`, hooks) and the global
-                // `$CODEX_HOME/AGENTS.md` for the owner and the 0.169 `thread/start` params have no
-                // switch to leave them out (`config` overrides only layer on top; `AGENTS.md` has no
-                // toggle; `--ignore-user-config` is documented for `codex exec`, not verified for
-                // `app-server`). Pointing `CODEX_HOME` elsewhere would drop the login. Never claimed
-                // (ARCH-15).
-                isolates_user_config: false,
+                // Enforced at launch: see [`isolation_args`]. What it leaves (the global
+                // `AGENTS.md`, skills outside plugins) is in the module docs.
+                isolates_user_config: true,
                 model_aliases: vec![],
             },
         }
@@ -772,6 +765,77 @@ impl AppServer {
     }
 }
 
+/// The Codex features that bring the owner's personal tools into a session: connected apps
+/// (`codex_apps`: Slack, Drive, ...), installed plugins (their MCP servers, skills and hooks:
+/// `cua_repl`, `linear`, ...), computer use and the browser. Checked live on 0.169 with
+/// `mcpServerStatus/list` and `plugin/installed`: with these off and the owner's own
+/// `mcp_servers` disabled by name, no personal server offers a tool.
+const PERSONAL_FEATURES: [&str; 4] = ["apps", "plugins", "computer_use", "browser_use"];
+
+/// The Codex home whose `config.toml` the app-server will read: the run's `CODEX_HOME` (a
+/// managed one), else the daemon's, else `~/.codex`.
+fn codex_home(run_env: &std::collections::BTreeMap<String, String>) -> Option<PathBuf> {
+    if let Some(home) = run_env.get("CODEX_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|h| !h.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".codex"))
+}
+
+/// `-c` overrides that keep the owner's personal tools out of a run (ARCH-15; the bot opts in
+/// with `inherit_user_config`): the [`PERSONAL_FEATURES`] off, and every server in the owner's
+/// `mcp_servers` table disabled by name. The login, model and providers stay: `codex app-server`
+/// has no `--ignore-user-config`, and a separate `CODEX_HOME` would copy the login, whose
+/// refresh could sign the owner's own Codex out. Servers Reno injects for the run (`injected`)
+/// are left alone, so a run's own server keeps working even if the owner's table names it too.
+/// A name that is not a bare TOML key cannot be addressed by a dotted override and is skipped
+/// with a warning.
+fn isolation_args(owner_config: &str, injected: &[&str]) -> Vec<String> {
+    let mut args = Vec::new();
+    for feature in PERSONAL_FEATURES {
+        args.push("-c".to_owned());
+        args.push(format!("features.{feature}=false"));
+    }
+    let servers = match owner_config.parse::<toml::Table>() {
+        Ok(table) => table
+            .get("mcp_servers")
+            .and_then(toml::Value::as_table)
+            .map(|servers| servers.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+        Err(error) => {
+            // Codex refuses such a file too, so no run would start with it anyway.
+            if !owner_config.is_empty() {
+                tracing::warn!(target: "reno_harness::codex", %error, "the owner's Codex config.toml does not parse");
+            }
+            Vec::new()
+        }
+    };
+    for name in servers {
+        if injected.contains(&name.as_str()) {
+            continue;
+        }
+        let bare = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !bare {
+            tracing::warn!(
+                target: "reno_harness::codex",
+                server = %name,
+                "the owner's MCP server has a name a -c override cannot address; it stays on"
+            );
+            continue;
+        }
+        args.push("-c".to_owned());
+        args.push(format!("mcp_servers.{name}.enabled=false"));
+    }
+    args
+}
+
 /// Start one app-server for a run, wire its stdio up and report it for the orphan sweep.
 async fn launch(
     tracker: &TaskTracker,
@@ -782,6 +846,16 @@ async fn launch(
     let mut cmd = Command::new(exe);
     crate::child_env::restrict(&mut cmd, crate::child_env::CODEX);
     cmd.arg("app-server");
+    if !spec.inherit_user_config {
+        let owner_config = match codex_home(&spec.env) {
+            Some(home) => tokio::fs::read_to_string(home.join("config.toml"))
+                .await
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+        let injected: Vec<&str> = spec.mcp.iter().map(|s| s.name.as_str()).collect();
+        cmd.args(isolation_args(&owner_config, &injected));
+    }
     crate::compose_child_path(&mut cmd, exe);
     // The allowlisted environment of the run (host-resolved credentials: a Cloud device's
     // managed CODEX_HOME, GH_TOKEN, ...). Absent on laptops: the CLI's own login is used.
@@ -2156,6 +2230,62 @@ mod tests {
         assert_eq!(params["developerInstructions"], "Be terse.");
         // The base instructions stay Codex's own.
         assert!(!params.contains_key("baseInstructions"));
+    }
+
+    #[test]
+    fn isolation_turns_the_personal_features_off_and_the_owners_servers_off_by_name() {
+        let config = r#"
+            model = "gpt-owner"
+            [mcp_servers.node_repl]
+            command = "/x/node_repl"
+            [mcp_servers.computer-use]
+            command = "/x/cua"
+            [mcp_servers.reno]
+            command = "/old/reno"
+            [mcp_servers."has.dot"]
+            command = "/x/dot"
+            [plugins."slack@openai-curated"]
+            enabled = true
+        "#;
+        let args = isolation_args(config, &["reno"]);
+        let overrides: Vec<&str> = args
+            .chunks(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "-c");
+                pair[1].as_str()
+            })
+            .collect();
+        assert_eq!(
+            overrides,
+            [
+                "features.apps=false",
+                "features.plugins=false",
+                "features.computer_use=false",
+                "features.browser_use=false",
+                "mcp_servers.computer-use.enabled=false",
+                "mcp_servers.node_repl.enabled=false",
+            ],
+            "Reno's own server and a name no dotted key can address stay on"
+        );
+    }
+
+    #[test]
+    fn isolation_without_a_readable_config_still_turns_the_features_off() {
+        for config in ["", "this is = = not toml"] {
+            let args = isolation_args(config, &[]);
+            assert_eq!(
+                args.len(),
+                2 * PERSONAL_FEATURES.len(),
+                "{config:?}: {args:?}"
+            );
+            assert!(args.iter().all(|a| a == "-c" || a.starts_with("features.")));
+        }
+    }
+
+    #[test]
+    fn the_runs_codex_home_wins_over_the_daemons() {
+        let env = [("CODEX_HOME".to_owned(), "/managed/codex".to_owned())].into();
+        assert_eq!(codex_home(&env), Some(PathBuf::from("/managed/codex")));
     }
 
     #[test]

@@ -69,6 +69,17 @@ impl RunLog {
             .count()
     }
 
+    /// The names of the tools the run called, in order.
+    pub(crate) fn tool_names(&self) -> Vec<&str> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                ExecEvent::Tool { call, .. } => Some(call.name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn text(&self) -> String {
         self.events
             .iter()

@@ -88,11 +88,7 @@ async fn the_mock_and_every_driver_pass_the_suite() {
     );
     assert_eq!(
         labels("codex"),
-        pinned(&[
-            ("deny-message", "skip"),
-            ("plan-mode", "skip"),
-            ("user-config", "skip"),
-        ]),
+        pinned(&[("deny-message", "skip"), ("plan-mode", "skip")]),
         "Codex's approval reply has no field for a reason"
     );
     let acp_full_access_only = [

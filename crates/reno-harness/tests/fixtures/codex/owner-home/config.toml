@@ -1,0 +1,9 @@
+# An owner's Codex config for the user-config scenario: one personal MCP server Reno must switch
+# off, one named like Reno's own server (left alone when Reno injects it).
+model = "gpt-owner-default"
+
+[mcp_servers.owner-tool]
+command = "/opt/owner/tool"
+
+[mcp_servers.reno]
+command = "/opt/owner/old-reno"
