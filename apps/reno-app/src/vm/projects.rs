@@ -214,6 +214,16 @@ pub(crate) fn folders(
         .collect()
 }
 
+/// The project a run belongs to (`None`: a run not known yet, which shows as "No project").
+pub(crate) fn key_of(
+    run: Option<&RunSummary>,
+    root_of: impl Fn(&Path) -> Option<PathBuf>,
+) -> FolderKey {
+    run.and_then(|r| r.cwd.as_deref())
+        .and_then(root_of)
+        .map_or(FolderKey::NoProject, FolderKey::Repo)
+}
+
 fn is_waiting(run: &RunSummary) -> bool {
     matches!(
         run.status,

@@ -10,7 +10,7 @@ use gpui::{
 };
 use reno_client::ConnectionStatus;
 
-use crate::actions::{GoInbox, OpenPalette};
+use crate::actions::OpenPalette;
 use crate::store::Store;
 use crate::summary::{self, Finding};
 use crate::ui::attention::AttentionDock;
@@ -137,7 +137,7 @@ impl HomeScreen {
             .border_color(theme.hairline)
             .text_size(px(14.5));
         match headline {
-            Headline::Finding(Finding::Held { lead, detail }) => pill
+            Headline::Finding(Finding::Held { lead, detail, run }) => pill
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -162,8 +162,14 @@ impl HomeScreen {
                             let hover = theme.raised;
                             move |s| s.bg(hover)
                         })
-                        .on_click(|_, window, cx| window.dispatch_action(Box::new(GoInbox), cx))
-                        .child("Review"),
+                        .on_click({
+                            let store = self.store.clone();
+                            let run = run.clone();
+                            move |_, _, cx| {
+                                store.update(cx, |store, cx| store.show_run(run.clone(), cx));
+                            }
+                        })
+                        .child("Open"),
                 ),
             Headline::Finding(Finding::Calm { text }) => pill
                 .child(icon(Icon::Check, 16.0, theme.success))

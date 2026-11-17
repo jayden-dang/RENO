@@ -33,6 +33,8 @@ pub(crate) struct SidebarHandlers {
     pub(crate) recent_run: RunHandler,
     /// Opens or closes a project folder.
     pub(crate) toggle_folder: FolderHandler,
+    /// The folder's shield: the project's Allowlist and History.
+    pub(crate) open_project: FolderHandler,
     /// "N more": the Runs screen, which lists every run.
     pub(crate) more: ActionHandler,
 }
@@ -185,6 +187,25 @@ fn folder_view(
                     .child(format!("{} waiting", folder.waiting)),
             )
         });
+    let shield = {
+        let open = Rc::clone(&handlers.open_project);
+        let key = folder.key.clone();
+        let group = SharedString::from(format!("folder-group-{slug}"));
+        kit::icon_button(theme, format!("project-{slug}"), Icon::Shield, 24.0)
+            .debug_selector({
+                let slug = slug.clone();
+                move || format!("project-{slug}")
+            })
+            .opacity(0.0)
+            .group_hover(group, |s| s.opacity(1.0))
+            .on_click(move |_, window, cx| open(key.clone(), window, cx))
+    };
+    let head = div()
+        .group(SharedString::from(format!("folder-group-{slug}")))
+        .flex()
+        .items_center()
+        .child(head.flex_1())
+        .child(shield);
     let more = (folder.more > 0).then(|| {
         let more = Rc::clone(&handlers.more);
         div()

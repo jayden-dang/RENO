@@ -1,4 +1,4 @@
-//! The Inbox, Runs, Triggers and Settings screens against the fake daemon: loading, empty,
+//! The Run, Project, Runs, Triggers and Settings screens against the fake daemon: loading, empty,
 //! failed and live states, and the actions on each.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -16,7 +16,7 @@ use crate::store::Store;
 use crate::tests::{click, draw, fake_store, painted, wait_drawn, wait_until, window};
 use crate::ui::theme::Appearance;
 use crate::vm::runs::RunFilter;
-use crate::vm::{Section, inbox, settings, triggers};
+use crate::vm::{Section, settings, triggers};
 
 fn store_with(cx: &mut TestAppContext, mut config: FakeConfig) -> Entity<Store> {
     crate::tests::one_window_test_at_a_time();
@@ -46,160 +46,6 @@ fn connected(cx: &mut TestAppContext, store: &Entity<Store>) {
                 && s.state().feed(Feed::Triggers) == FeedState::Live
                 && s.state().feed(Feed::Defs) == FeedState::Live
         })
-    });
-}
-
-#[gpui::test]
-fn inbox_loads_before_the_daemon_answers(cx: &mut TestAppContext) {
-    let store = cx.new(|_| Store::connecting());
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    let view = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-    assert_eq!(view.held, Section::Loading);
-    assert!(view.banner.is_some());
-}
-
-#[gpui::test]
-fn inbox_shows_held_actions_and_approving_moves_them_to_history(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "approve-appr_keeperpush"));
-    let view = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-    assert_eq!(view.lede, "2 things need you");
-    assert_eq!(
-        view.held.rows()[0].approval.id.to_string(),
-        "appr_keeperpush",
-        "the longest-waiting action is first"
-    );
-    // The history was read when the screen opened.
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        matches!(v.history, Section::Rows(_))
-    });
-
-    click(vcx, "approve-appr_keeperpush");
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        v.held.rows().len() == 1
-            && v.history
-                .rows()
-                .first()
-                .is_some_and(|h| h.verdict == inbox::Verdict::Approved && h.by == "you")
-    });
-}
-
-#[gpui::test]
-fn inbox_is_empty_and_then_live(cx: &mut TestAppContext) {
-    let store = store_with(
-        cx,
-        FakeConfig {
-            empty: true,
-            ..FakeConfig::default()
-        },
-    );
-    connected(cx, &store);
-    let (root, vcx) = window(cx, &store, Appearance::Light);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        v.held == Section::Empty && v.history == Section::Empty
-    });
-    // A run that needs a human appears without any refresh.
-    store.update(vcx, |s, cx| s.run_task("push it".into(), "claude-code", cx));
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        v.held.rows().len() == 1 && v.lede == "1 thing needs you"
-    });
-}
-
-#[gpui::test]
-fn inbox_lists_a_run_waiting_on_a_question_and_opens_it(cx: &mut TestAppContext) {
-    let store = store_with(
-        cx,
-        FakeConfig {
-            empty: true,
-            ..FakeConfig::default()
-        },
-    );
-    connected(cx, &store);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        v.held == Section::Empty && v.lede == "Nothing needs you"
-    });
-    assert!(!painted(vcx, "inbox-questions"), "no section without one");
-    let waiting = reno_proto::RunSummary {
-        run_id: reno_proto::RunId::from_suffix("ask1").unwrap(),
-        task_id: reno_proto::TaskId::from_suffix("ask1").unwrap(),
-        executor: "claude-code".parse().unwrap(),
-        status: RunStatus::WaitingInput,
-        attempt: 1,
-        title: "keeper \u{b7} atlas-api: pick a colour".into(),
-        prompt: None,
-        model: None,
-        stop_reason: None,
-        bot: None,
-        cwd: None,
-        created_at_ms: 1,
-        updated_at_ms: 1,
-        stop: None,
-        report: None,
-        not_resumed: None,
-        session: None,
-    };
-    store.update(vcx, |s, cx| {
-        s.apply(reno_client::Update::Runs(vec![waiting]), cx);
-    });
-    wait_drawn(vcx, |vcx| painted(vcx, "inbox-questions"));
-    let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-    assert_eq!(v.lede, "1 thing needs you");
-    // Until its transcript is loaded the card has only the run's title.
-    assert!(!painted(vcx, "asked-run_ask1-0"));
-    store.update(vcx, |s, cx| {
-        s.apply(
-            reno_client::Update::RunEvent {
-                run: reno_proto::RunId::from_suffix("ask1").unwrap(),
-                seq: reno_proto::Seq(1),
-                event: reno_proto::ExecEvent::NeedsInput {
-                    request_id: "r1".into(),
-                    questions: vec![reno_proto::Question {
-                        id: "q".into(),
-                        prompt: "Which colour do you prefer?".into(),
-                        options: vec!["Red".into(), "Blue".into()],
-                        multi_select: false,
-                    }],
-                },
-            },
-            cx,
-        );
-    });
-    wait_drawn(vcx, |vcx| painted(vcx, "asked-run_ask1-0"));
-    click(vcx, "open-question-run_ask1");
-    wait_drawn(vcx, |vcx| {
-        root.read_with(vcx, |r, cx| {
-            r.run_screen()
-                .is_some_and(|s| s.read(cx).run_id().to_string() == "run_ask1")
-        })
-    });
-}
-
-#[gpui::test]
-fn inbox_says_when_history_fails(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    connected(cx, &store);
-    daemon(cx, &store).fail(
-        "approval.history",
-        ErrorObject::new(ErrorCode::Unavailable, "busy"),
-    );
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        matches!(v.history, Section::Failed(_))
     });
 }
 
@@ -426,90 +272,6 @@ fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn a_held_action_offers_how_far_the_answer_reaches_and_the_rule_is_listed_and_revoked(
-    cx: &mut TestAppContext,
-) {
-    use reno_proto::{RememberScope, StandingEffect};
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "approve-appr_keeperpush"));
-
-    // The default is once: no hint, and the button says so.
-    let keeper = "appr_keeperpush".parse().unwrap();
-    assert_eq!(
-        root.read_with(vcx, |r, cx| r.inbox().read(cx).scope_of(&keeper)),
-        None
-    );
-    assert!(!painted(vcx, "scope-hint-appr_keeperpush"));
-    // keeper's run has a bot, so the bot scope is offered.
-    assert!(painted(vcx, "scope-This-bot-appr_keeperpush"));
-    click(vcx, "scope-This-bot-appr_keeperpush");
-    draw(vcx);
-    assert_eq!(
-        root.read_with(vcx, |r, cx| r.inbox().read(cx).scope_of(&keeper)),
-        Some(RememberScope::Bot)
-    );
-    assert!(painted(vcx, "scope-hint-appr_keeperpush"));
-
-    click(vcx, "approve-appr_keeperpush");
-    wait_until(vcx, |cx| {
-        store.read_with(cx, |s, _| matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.source_approval.as_ref() == Some(&keeper))))
-    });
-    let rule = store.read_with(vcx, |s, _| {
-        s.rules()
-            .and_then(|r| r.as_ref().ok())
-            .and_then(|rules| {
-                rules
-                    .iter()
-                    .find(|r| r.source_approval.as_ref() == Some(&keeper))
-            })
-            .cloned()
-            .unwrap()
-    });
-    assert_eq!(rule.effect, StandingEffect::Allow);
-    // The card is gone and its choice with it.
-    wait_drawn(vcx, |vcx| !painted(vcx, "approve-appr_keeperpush"));
-
-    // Settings, Policy: the rule is listed with a Revoke button, and revoking removes it.
-    go(vcx, &root, Nav::Settings);
-    click(vcx, "tab-Policy");
-    let revoke = format!("revoke-{}", rule.id);
-    wait_drawn(vcx, |vcx| painted(vcx, &revoke));
-    click(vcx, &revoke);
-    wait_drawn(vcx, |vcx| !painted(vcx, &revoke));
-    assert!(store.read_with(
-        vcx,
-        |s, _| !matches!(s.rules(), Some(Ok(rules)) if rules.iter().any(|r| r.id == rule.id))
-    ));
-}
-
-#[gpui::test]
-fn an_older_daemon_without_rules_offers_no_scope(cx: &mut TestAppContext) {
-    let store = store_with(
-        cx,
-        FakeConfig {
-            without_features: vec![reno_proto::FEATURE_RULES.to_owned()],
-            ..FakeConfig::default()
-        },
-    );
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "approve-appr_keeperpush"));
-    assert!(!painted(vcx, "scope-Always-appr_keeperpush"));
-    go(vcx, &root, Nav::Settings);
-    click(vcx, "tab-Policy");
-    wait_drawn(vcx, |vcx| {
-        store.read_with(vcx, |s, _| settings::policy(s.state()).is_some())
-    });
-    assert!(painted(vcx, "standing-rules"));
-}
-
-#[gpui::test]
 fn the_app_reconnects_after_the_daemon_drops(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
@@ -714,105 +476,6 @@ fn history_of(
     })
 }
 
-#[gpui::test]
-fn deny_asks_for_a_reason_and_enter_sends_it(cx: &mut TestAppContext) {
-    cx.update(crate::ui::composer::bind_keys);
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_scoutfetch"));
-    assert!(
-        root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx))
-            .reasons
-    );
-
-    // Deny opens the field and decides nothing yet.
-    click(vcx, "deny-appr_scoutfetch");
-    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_scoutfetch"));
-    assert_eq!(crate::tests::approvals(vcx, &store), 2);
-
-    let input = root
-        .read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().cloned())
-        .expect("the reason field is open");
-    input.update_in(vcx, |c, window, cx| {
-        c.fill("not from that host, use the mirror", window, cx);
-    });
-    vcx.simulate_keystrokes("enter");
-    wait_drawn(vcx, |vcx| {
-        history_of(&store, vcx, "appr_scoutfetch")
-            .is_some_and(|r| r.message.as_deref() == Some("not from that host, use the mirror"))
-    });
-    assert_eq!(crate::tests::approvals(vcx, &store), 1);
-    assert!(
-        root.read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().is_none()),
-        "the field closed"
-    );
-    // The Decided list shows the reason.
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
-        v.history
-            .rows()
-            .iter()
-            .any(|h| h.message.as_deref() == Some("not from that host, use the mirror"))
-    });
-}
-
-#[gpui::test]
-fn a_blank_reason_denies_without_one_and_escape_cancels(cx: &mut TestAppContext) {
-    cx.update(crate::ui::composer::bind_keys);
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Light);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_keeperpush"));
-
-    // Escape: the field closes and the action is still held.
-    click(vcx, "deny-appr_keeperpush");
-    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_keeperpush"));
-    vcx.simulate_keystrokes("escape");
-    draw(vcx);
-    assert!(root.read_with(vcx, |r, cx| r.inbox().read(cx).reason_input().is_none()));
-    assert_eq!(crate::tests::approvals(vcx, &store), 2);
-
-    // Enter with nothing typed: denied, with no message.
-    click(vcx, "deny-appr_keeperpush");
-    wait_drawn(vcx, |vcx| painted(vcx, "reason-appr_keeperpush"));
-    vcx.simulate_keystrokes("enter");
-    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
-    wait_drawn(vcx, |vcx| {
-        history_of(&store, vcx, "appr_keeperpush").is_some()
-    });
-    let record = history_of(&store, vcx, "appr_keeperpush").unwrap();
-    assert_eq!(record.status, reno_proto::ApprovalStatus::Denied);
-    assert_eq!(record.message, None);
-}
-
-#[gpui::test]
-fn on_an_older_daemon_deny_is_one_click(cx: &mut TestAppContext) {
-    let store = store_with(
-        cx,
-        FakeConfig {
-            without_features: vec![reno_proto::FEATURE_APPROVAL_MESSAGE.to_owned()],
-            ..FakeConfig::default()
-        },
-    );
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    go(vcx, &root, Nav::Inbox);
-    wait_drawn(vcx, |vcx| painted(vcx, "deny-appr_scoutfetch"));
-    assert!(
-        !root
-            .read_with(vcx, |r, cx| r.inbox().read(cx).view(cx))
-            .reasons
-    );
-    click(vcx, "deny-appr_scoutfetch");
-    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
-}
-
 // --- Answering inside the run (ui-brief 2026-11-17) ------------------------------------------
 
 fn open_run_screen(
@@ -907,4 +570,80 @@ fn the_approve_menu_keeps_the_answer_for_the_bot(cx: &mut TestAppContext) {
                 })
         })
     });
+
+    // Settings, Policy: the kept rule is listed with a Revoke button, and revoking removes it.
+    let rule = store.read_with(vcx, |s, _| {
+        s.rules()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|rules| rules.first())
+            .cloned()
+            .unwrap()
+    });
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "tab-Policy");
+    let revoke = format!("revoke-{}", rule.id);
+    wait_drawn(vcx, |vcx| painted(vcx, &revoke));
+    click(vcx, &revoke);
+    wait_drawn(vcx, |vcx| !painted(vcx, &revoke));
+}
+
+// --- The Project page (ui-brief 2026-11-17) ---------------------------------------------------
+
+fn project_of(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+) -> Option<crate::vm::projects::FolderKey> {
+    root.read_with(vcx, |r, cx| {
+        r.project_screen().map(|p| p.read(cx).key().clone())
+    })
+}
+
+#[gpui::test]
+fn a_runs_crumb_opens_its_project_whose_history_holds_only_its_decisions(cx: &mut TestAppContext) {
+    use crate::vm::projects::FolderKey;
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    // keeper's push is in atlas-api; approve it so atlas-api has a decision.
+    open_run_screen(vcx, &root, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve"));
+    click(vcx, "approve");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+
+    click(vcx, "crumb-project");
+    let atlas = FolderKey::Repo(std::path::PathBuf::from("/demo/atlas-api"));
+    assert_eq!(project_of(vcx, &root), Some(atlas));
+    let project = root
+        .read_with(vcx, |r, _| r.project_screen().cloned())
+        .unwrap();
+    project.update_in(vcx, |p, _, cx| {
+        p.set_tab(crate::screens::project::Tab::History, cx);
+    });
+    wait_drawn(vcx, |vcx| {
+        let view = project.read_with(vcx, |p, cx| p.view(cx));
+        view.history
+            .rows()
+            .iter()
+            .any(|h| h.line.contains("git push"))
+    });
+
+    // web-console's project page does not show atlas-api's decision.
+    click(vcx, "project-web-console");
+    let web = FolderKey::Repo(std::path::PathBuf::from("/demo/web-console"));
+    assert_eq!(project_of(vcx, &root), Some(web));
+    let project = root
+        .read_with(vcx, |r, _| r.project_screen().cloned())
+        .unwrap();
+    let view = project.read_with(vcx, |p, cx| p.view(cx));
+    assert!(
+        !view
+            .history
+            .rows()
+            .iter()
+            .any(|h| h.line.contains("reno/keeper")),
+        "{:?}",
+        view.history.rows()
+    );
 }

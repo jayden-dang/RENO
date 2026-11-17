@@ -53,6 +53,8 @@ pub(crate) const RUNS_PAGE: u32 = 50;
 #[derive(Clone, Debug)]
 pub(crate) enum StoreEvent {
     RunStarted(RunId),
+    /// Show this run: what needs you is answered inside it (ui-brief 2026-11-17).
+    ShowRun(RunId),
     /// A trigger was fired by hand: what became of it.
     TriggerFired {
         name: String,
@@ -165,6 +167,11 @@ impl Store {
             looking: None,
             bridge: None,
         }
+    }
+
+    /// Asks the shell to show `run`.
+    pub(crate) fn show_run(&mut self, run: RunId, cx: &mut Context<Self>) {
+        cx.emit(StoreEvent::ShowRun(run));
     }
 
     /// The canonical repository root `dir` is in, if any.
@@ -555,7 +562,7 @@ impl Store {
         cx.notify();
     }
 
-    /// Starts following the transcript of every run waiting on a question, so the Inbox can show
+    /// Starts following the transcript of every run waiting on a question, so Home and the run can show
     /// the question itself. Only waiting runs are loaded (not every run), each followed once
     /// from where its transcript stands; the follow ends when the run does.
     fn follow_waiting_questions(&mut self, cx: &mut Context<Self>) {
@@ -997,7 +1004,7 @@ impl Store {
         );
     }
 
-    /// `run.get` for a run the window does not hold (opened from a trigger or the inbox).
+    /// `run.get` for a run the window does not hold (opened from a trigger or Home).
     pub(crate) fn ensure_run(&mut self, run: &RunId, cx: &mut Context<Self>) {
         if self.state.run(run).is_some() || !self.fetching_runs.insert(run.clone()) {
             return;

@@ -19,7 +19,7 @@
 //! Run screen: while the run is live, an empty draft shows Stop and a draft shows Steer; a
 //! finished run disables the box and says why.
 //!
-//! [`Mode::Reason`] is the small variant the Inbox opens under a held action when the human
+//! [`Mode::Reason`] is the small field under a held action on the Run screen, where the human
 //! denies it: no chips, no send button, one row; Enter and Escape are reported as a
 //! [`ReasonEvent`] for the card to act on.
 
@@ -152,7 +152,7 @@ pub(crate) enum Mode {
     Home,
     /// The Run screen: steers this run while it is live.
     Steer(RunId),
-    /// An Inbox card's reason for a denial: Enter and Escape are emitted as [`ReasonEvent`]s.
+    /// A held action's reason for a denial: Enter and Escape are emitted as [`ReasonEvent`]s.
     Reason,
 }
 

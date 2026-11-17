@@ -35,7 +35,6 @@ pub(crate) fn entries() -> Vec<Entry> {
     };
     Nav::ROWS
         .into_iter()
-        .chain([Nav::Inbox])
         .map(go)
         .chain([
             Entry {
@@ -275,7 +274,7 @@ mod tests {
     #[test]
     fn entries_cover_every_destination_and_the_actions() {
         let all = entries();
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 7);
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleTheme));
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleSidebar));
         assert_eq!(all[0].action, PaletteAction::Go(Nav::Home));
@@ -285,7 +284,7 @@ mod tests {
     fn filter_matches_case_insensitively_by_word() {
         let all = entries();
         assert_eq!(filter("", &all).len(), all.len());
-        assert_eq!(labels(&filter("INB", &all)), ["Inbox"]);
+        assert_eq!(labels(&filter("TRIG", &all)), ["Triggers"]);
         assert_eq!(
             labels(&filter("sidebar hide", &all)),
             ["Hide or show sidebar"]

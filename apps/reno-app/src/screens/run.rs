@@ -19,7 +19,6 @@ use reno_proto::{
 
 use super::ScreenEvent;
 use super::executors::health_lines;
-use crate::actions::GoRuns;
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Outcome, Resolution, Row, ToolEntry};
@@ -270,6 +269,10 @@ impl RunScreen {
             None => (String::new(), format!("Run {}", self.run), None),
         };
         let run_id = self.run.clone();
+        let project = {
+            let store = self.store.read(cx);
+            crate::vm::projects::key_of(run.as_ref(), |dir| store.root_of(dir))
+        };
 
         div()
             .flex_none()
@@ -282,11 +285,15 @@ impl RunScreen {
             .border_color(theme.hairline)
             .child(
                 div()
-                    .id("crumb-runs")
+                    .id("crumb-project")
+                    .debug_selector(|| "crumb-project".to_owned())
                     .text_color(theme.muted)
                     .cursor_pointer()
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(GoRuns), cx))
-                    .child("Runs"),
+                    .hover(|s| s.text_color(theme.text))
+                    .child(project.name())
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(ScreenEvent::OpenProject(project.clone()));
+                    })),
             )
             .child(div().text_color(theme.faint).child("/"))
             .when(!executor.is_empty(), |h| {
@@ -661,6 +668,16 @@ impl RunScreen {
         let deny_button = kit::pill_button(theme, "deny", "Deny", Tone::Danger)
             .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| b.on_click(deny));
+        // What a kept answer holds, in words: exactly this action, for whom.
+        let keeps = rules::hint(
+            &approval.subject,
+            if bot.is_some() {
+                RememberScope::Bot
+            } else {
+                RememberScope::Run
+            },
+            bot,
+        );
         let menu =
             (menu_open && keeps_rules).then(|| {
                 div()
@@ -668,6 +685,13 @@ impl RunScreen {
                     .flex_wrap()
                     .justify_end()
                     .gap(px(6.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted)
+                            .child(keeps),
+                    )
                     .children(choices.into_iter().enumerate().skip(1).map(
                         |(ix, (scope, label))| {
                             let id = id.clone();

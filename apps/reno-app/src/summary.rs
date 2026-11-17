@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use reno_client::State;
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ActionClass, Approval, ApprovalSubject, CancelledBy, ReportStatus, RunStatus, RunSummary,
-    StopDetail,
+    ActionClass, Approval, ApprovalSubject, CancelledBy, ReportStatus, RunId, RunStatus,
+    RunSummary, StopDetail,
 };
 
 /// A run title is `"<bot> · <repo>: <what>"` (the protocol has no bot or repository field yet).
@@ -489,8 +489,12 @@ pub(crate) fn approval_bot<'a>(state: &'a State, approval: &Approval) -> Option<
 /// The finding pill's content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Finding {
-    /// Something is held: the bold lead and the muted detail.
-    Held { lead: String, detail: String },
+    /// Something is held: the bold lead, the muted detail, and the run "Open" goes to.
+    Held {
+        lead: String,
+        detail: String,
+        run: RunId,
+    },
     /// Nothing needs the human.
     Calm { text: String },
 }
@@ -500,7 +504,7 @@ impl Finding {
     /// The whole sentence, for tests and accessibility labels.
     pub(crate) fn sentence(&self) -> String {
         match self {
-            Self::Held { lead, detail } => format!("{lead} {detail}"),
+            Self::Held { lead, detail, .. } => format!("{lead} {detail}"),
             Self::Calm { text } => text.clone(),
         }
     }
@@ -509,14 +513,21 @@ impl Finding {
 pub(crate) fn finding(state: &State, now_ms: u64) -> Finding {
     let counts = attention(state);
     let Some(oldest) = state.approvals().first() else {
-        if counts.questions > 0 {
+        if let Some(asking) = state
+            .runs()
+            .into_iter()
+            .filter(|run| run.status == RunStatus::WaitingInput)
+            .min_by_key(|run| run.updated_at_ms)
+        {
             let lead = match counts.questions {
                 1 => "1 question is waiting for you".to_owned(),
                 n => format!("{n} questions are waiting for you"),
             };
+            let who = run_bot(asking).map_or_else(|| "a run".to_owned(), str::to_owned);
             return Finding::Held {
                 lead,
-                detail: "\u{2014} answering from the app arrives in a later phase.".to_owned(),
+                detail: format!("\u{2014} {who} asks{}.", in_project(asking)),
+                run: asking.run_id.clone(),
             };
         }
         let text = match counts.running {
@@ -535,12 +546,29 @@ pub(crate) fn finding(state: &State, now_ms: u64) -> Finding {
         .map_or_else(|| "the oldest".to_owned(), |bot| format!("{bot}'s"));
     let what = action_word(&oldest.subject);
     let waited = age_label(now_ms.saturating_sub(oldest.requested_at_ms));
+    let place = state
+        .run(&oldest.run_id)
+        .map_or_else(String::new, in_project);
     let detail = if waited == "just now" {
-        format!("— {who} {what} was just held.")
+        format!("— {who} {what}{place} was just held.")
     } else {
-        format!("— {who} {what} has waited {waited}.")
+        format!("— {who} {what}{place} has waited {waited}.")
     };
-    Finding::Held { lead, detail }
+    Finding::Held {
+        lead,
+        detail,
+        run: oldest.run_id.clone(),
+    }
+}
+
+/// " in porch": the folder the run was sent in, by name (no disk read); empty without one.
+fn in_project(run: &RunSummary) -> String {
+    run.cwd
+        .as_deref()
+        .and_then(|cwd| cwd.file_name())
+        .map_or_else(String::new, |name| {
+            format!(" in {}", name.to_string_lossy())
+        })
 }
 
 #[cfg(test)]
@@ -868,6 +896,30 @@ mod tests {
     }
 
     #[test]
+    fn finding_names_the_project_and_the_run_to_open() {
+        let mut keeper = run("k1", RunStatus::WaitingApproval, "keeper · porch: bump");
+        keeper.cwd = Some(std::path::PathBuf::from("/w/porch"));
+        let state = state_with(
+            vec![keeper],
+            vec![approval(
+                "a1",
+                "k1",
+                3 * 60_000,
+                Some("git push -u origin HEAD"),
+            )],
+        );
+        let f = finding(&state, NOW);
+        assert_eq!(
+            f.sentence(),
+            "1 action is held for you — keeper's push in porch has waited 3m."
+        );
+        let Finding::Held { run, .. } = f else {
+            panic!("held")
+        };
+        assert_eq!(run.to_string(), "run_k1");
+    }
+
+    #[test]
     fn finding_one_held_is_singular_and_names_the_kind() {
         let state = state_with(
             vec![run("s1", RunStatus::WaitingApproval, "scout · web: fetch")],
@@ -1008,7 +1060,7 @@ mod tests {
         assert_eq!(counts.needs_you(), 1);
         assert_eq!(
             finding(&state, NOW).sentence(),
-            "1 question is waiting for you \u{2014} answering from the app arrives in a later phase."
+            "1 question is waiting for you \u{2014} keeper asks."
         );
     }
 

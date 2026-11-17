@@ -17,12 +17,11 @@ use gpui::{
 use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
-use crate::actions::{self, GoInbox, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
+use crate::actions::{self, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
 use crate::nav::Nav;
 use crate::screens::ScreenEvent;
 use crate::screens::executors::ExecutorsScreen;
 use crate::screens::home::HomeScreen;
-use crate::screens::inbox::InboxScreen;
 use crate::screens::run::RunScreen;
 use crate::screens::runs::RunsScreen;
 use crate::screens::settings::SettingsScreen;
@@ -48,7 +47,7 @@ pub(crate) struct Options {
     pub(crate) quit_after: Option<Duration>,
     /// `RENO_REDUCE_MOTION=1`: force reduced motion (the OS setting is not read, see `motion`).
     pub(crate) reduce_motion: bool,
-    /// `RENO_OPEN=inbox|runs|triggers|executors|settings`: open on that screen (screenshots, reviews).
+    /// `RENO_OPEN=runs|triggers|executors|settings`: open on that screen (screenshots, reviews).
     pub(crate) open: Option<Nav>,
     /// `RENO_OPEN=run_<id>`: open on that run's screen (screenshots, reviews).
     pub(crate) open_run: Option<RunId>,
@@ -77,7 +76,6 @@ impl Options {
         options.reduce_motion = env("RENO_REDUCE_MOTION").is_some_and(|v| v == "1");
         options.open = match env("RENO_OPEN").as_deref() {
             None | Some("" | "home") => None,
-            Some("inbox") => Some(Nav::Inbox),
             Some("runs") => Some(Nav::Runs),
             Some("triggers") => Some(Nav::Triggers),
             Some("executors") => Some(Nav::Executors),
@@ -224,9 +222,9 @@ fn default_bounds(cx: &App) -> Bounds<gpui::Pixels> {
 #[derive(Clone)]
 enum Screen {
     Home,
-    Inbox,
     Runs,
     Run(Entity<RunScreen>),
+    Project(Entity<crate::screens::project::ProjectScreen>),
     Triggers,
     Executors,
     Settings,
@@ -235,7 +233,6 @@ enum Screen {
 pub(crate) struct RootView {
     store: Entity<Store>,
     home: Entity<HomeScreen>,
-    inbox: Entity<InboxScreen>,
     runs: Entity<RunsScreen>,
     triggers: Entity<TriggersScreen>,
     executors: Entity<ExecutorsScreen>,
@@ -265,13 +262,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Self {
         let home = cx.new(|cx| HomeScreen::new(store.clone(), cx));
-        let inbox = cx.new(|cx| InboxScreen::new(store.clone(), cx));
         let runs = cx.new(|cx| RunsScreen::new(store.clone(), cx));
         let triggers = cx.new(|cx| TriggersScreen::new(store.clone(), cx));
         let executors = cx.new(|cx| ExecutorsScreen::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
         let subscriptions = vec![
-            cx.subscribe_in(&inbox, window, Self::on_screen_event),
             cx.subscribe_in(&runs, window, Self::on_screen_event),
             cx.subscribe_in(&triggers, window, Self::on_screen_event),
             cx.subscribe_in(&executors, window, Self::on_screen_event),
@@ -288,7 +283,9 @@ impl RootView {
                             message.clone(),
                         );
                     }
-                    StoreEvent::RunStarted(run) => this.open_run(run.clone(), window, cx),
+                    StoreEvent::RunStarted(run) | StoreEvent::ShowRun(run) => {
+                        this.open_run(run.clone(), window, cx);
+                    }
                     // The composer that sent it takes its draft back.
                     StoreEvent::SendFailed(_) => {}
                     StoreEvent::ExecutorInstalled(id) => {
@@ -326,7 +323,6 @@ impl RootView {
         Self {
             store,
             home,
-            inbox,
             runs,
             triggers,
             executors,
@@ -354,6 +350,7 @@ impl RootView {
         match event {
             ScreenEvent::OpenRun(run) => self.open_run(run.clone(), window, cx),
             ScreenEvent::OpenExecutors => self.navigate(Nav::Executors, window, cx),
+            ScreenEvent::OpenProject(key) => self.open_project(key.clone(), window, cx),
         }
     }
 
@@ -361,8 +358,7 @@ impl RootView {
     pub(crate) fn nav(&self) -> Nav {
         match self.screen {
             Screen::Home => Nav::Home,
-            Screen::Inbox => Nav::Inbox,
-            Screen::Runs | Screen::Run(_) => Nav::Runs,
+            Screen::Runs | Screen::Run(_) | Screen::Project(_) => Nav::Runs,
             Screen::Triggers => Nav::Triggers,
             Screen::Executors => Nav::Executors,
             Screen::Settings => Nav::Settings,
@@ -375,11 +371,6 @@ impl RootView {
             Screen::Run(run) => Some(run),
             _ => None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inbox(&self) -> &Entity<InboxScreen> {
-        &self.inbox
     }
 
     #[cfg(test)]
@@ -437,10 +428,6 @@ impl RootView {
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
         self.screen = match nav {
-            Nav::Inbox => {
-                self.inbox.update(cx, |screen, cx| screen.shown(cx));
-                Screen::Inbox
-            }
             Nav::Runs => {
                 self.runs.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Runs
@@ -473,6 +460,29 @@ impl RootView {
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// Shows a project's Allowlist and History.
+    pub(crate) fn open_project(
+        &mut self,
+        key: crate::vm::projects::FolderKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.update(cx, |store, cx| store.look_at(None, cx));
+        let store = self.store.clone();
+        let screen = cx.new(|cx| crate::screens::project::ProjectScreen::new(store, key, cx));
+        self.screen = Screen::Project(screen);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_screen(&self) -> Option<&Entity<crate::screens::project::ProjectScreen>> {
+        match &self.screen {
+            Screen::Project(project) => Some(project),
+            _ => None,
+        }
     }
 
     /// Opens a closed project folder, or closes an open one.
@@ -570,6 +580,16 @@ impl RootView {
                     },
                 )
             },
+            open_project: {
+                let this = this.clone();
+                Rc::new(
+                    move |key: crate::vm::projects::FolderKey,
+                          window: &mut Window,
+                          cx: &mut App| {
+                        this.update(cx, |root, cx| root.open_project(key, window, cx));
+                    },
+                )
+            },
             more: {
                 let this = this.clone();
                 Rc::new(move |window: &mut Window, cx: &mut App| {
@@ -626,9 +646,9 @@ impl Render for RootView {
             .overflow_hidden()
             .child(match &self.screen {
                 Screen::Home => self.home.clone().into_any_element(),
-                Screen::Inbox => self.inbox.clone().into_any_element(),
                 Screen::Runs => self.runs.clone().into_any_element(),
                 Screen::Run(run) => run.clone().into_any_element(),
+                Screen::Project(project) => project.clone().into_any_element(),
                 Screen::Triggers => self.triggers.clone().into_any_element(),
                 Screen::Executors => self.executors.clone().into_any_element(),
                 Screen::Settings => self.settings.clone().into_any_element(),
@@ -653,9 +673,6 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(
-                cx.listener(|this, _: &GoInbox, window, cx| this.navigate(Nav::Inbox, window, cx)),
-            )
             .on_action(
                 cx.listener(|this, _: &GoRuns, window, cx| this.navigate(Nav::Runs, window, cx)),
             )

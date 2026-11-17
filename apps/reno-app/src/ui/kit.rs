@@ -109,13 +109,13 @@ pub(crate) fn exec_glyph(theme: &Theme, executor_id: &str, size: f32) -> Div {
 /// A square icon button with an accessible label (the element id).
 pub(crate) fn icon_button(
     theme: &Theme,
-    id: &'static str,
+    id: impl Into<SharedString>,
     glyph: Icon,
     size: f32,
 ) -> Stateful<Div> {
     let hover = theme.raised;
     div()
-        .id(id)
+        .id(id.into())
         .flex_none()
         .size(px(size))
         .flex()
@@ -226,43 +226,6 @@ pub(crate) fn pill_button_enabled(
         Some(fill) => base.hover(move |s| s.bg(fill)),
         None => base,
     }
-}
-
-/// One option of a small choice (a row of these is a segmented control): filled when it is the
-/// selected one. The id is the accessible label and the test selector. The caller adds `on_click`.
-pub(crate) fn choice_chip(
-    theme: &Theme,
-    id: impl Into<SharedString>,
-    label: &'static str,
-    selected: bool,
-) -> Stateful<Div> {
-    let id: SharedString = id.into();
-    let selector = id.clone();
-    let hover = theme.raised;
-    div()
-        .id(id)
-        .debug_selector(move || selector.to_string())
-        .flex_none()
-        .h(px(26.0))
-        .px(px(11.0))
-        .flex()
-        .items_center()
-        .rounded(px(999.0))
-        .text_size(px(12.5))
-        .cursor_pointer()
-        .border_1()
-        .when(selected, |c| {
-            c.border_color(theme.accent.opacity(0.7))
-                .bg(theme.accent.opacity(0.14))
-                .text_color(theme.text)
-                .font_weight(FontWeight::MEDIUM)
-        })
-        .when(!selected, |c| {
-            c.border_color(theme.hairline)
-                .text_color(theme.muted)
-                .hover(move |s| s.bg(hover))
-        })
-        .child(label)
 }
 
 /// The status mark of a run: a dot and the state's words, in the state's colour.

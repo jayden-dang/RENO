@@ -304,7 +304,7 @@ impl SettingsScreen {
         out
     }
 
-    /// The standing rules: answers kept from the Inbox (or `reno approve --remember`), each
+    /// The standing rules: answers kept on a run's card (or `reno approve --remember`), each
     /// holding exactly the action it came from. The policy file's own deny rules always win over
     /// them.
     fn standing_rules(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -398,7 +398,7 @@ impl SettingsScreen {
                     .line_height(px(19.0))
                     .text_color(theme.muted)
                     .child(
-                        "Answers you kept from the Inbox. Each holds exactly the action it came from, and a deny rule in the policy file always wins over it.",
+                        "Answers you kept on a run's card. Each holds exactly the action it came from, and a deny rule in the policy file always wins over it.",
                     ),
             )
             .when_some(

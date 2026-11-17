@@ -7,9 +7,6 @@ use crate::ui::icon::Icon;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Nav {
     Home,
-    /// Being retired: answers live in each run (ui-brief 2026-11-17). Reached only from the
-    /// palette and ⌘-shortcut until its history has moved to the project page.
-    Inbox,
     Runs,
     Triggers,
     Executors,
@@ -29,7 +26,6 @@ impl Nav {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
-            Self::Inbox => "Inbox",
             Self::Runs => "Runs",
             Self::Triggers => "Triggers",
             Self::Executors => "Executors",
@@ -41,7 +37,6 @@ impl Nav {
     pub(crate) const fn icon(self) -> Icon {
         match self {
             Self::Home => Icon::Home,
-            Self::Inbox => Icon::Inbox,
             Self::Runs => Icon::Terminal,
             Self::Triggers => Icon::Clock,
             Self::Executors => Icon::Cpu,
@@ -61,6 +56,5 @@ mod tests {
             labels,
             ["Home", "Runs", "Triggers", "Executors", "Settings"]
         );
-        assert!(!Nav::ROWS.contains(&Nav::Inbox));
     }
 }

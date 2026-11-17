@@ -1,4 +1,4 @@
-//! Standing rules: what the Inbox card says about keeping an answer, and the rows of Settings →
+//! Standing rules: what a held action's card says about keeping an answer, and the rows of Settings →
 //! Policy that list and revoke them. From `rule.list` and the held approval's own subject.
 
 use reno_proto::{
@@ -95,16 +95,6 @@ pub(crate) fn rows(
             }
         }
     }
-}
-
-/// How far an answer on a held card is kept, as the card's choice names it.
-pub(crate) fn choices(has_bot: bool) -> Vec<(Option<RememberScope>, &'static str)> {
-    let mut all = vec![(None, "Once"), (Some(RememberScope::Run), "This run")];
-    if has_bot {
-        all.push((Some(RememberScope::Bot), "This bot"));
-    }
-    all.push((Some(RememberScope::Always), "Always"));
-    all
 }
 
 /// The Approve ▾ menu of a held action in the run (ui-brief 2026-11-17): approve once, then how
@@ -240,15 +230,6 @@ mod tests {
             raw: serde_json::Value::Null,
         };
         assert!(hint(&fetch, RememberScope::Always, None).contains("every use of fetch"));
-    }
-
-    #[test]
-    fn a_run_with_no_bot_is_not_offered_the_bot_scope() {
-        let with: Vec<_> = choices(true).into_iter().map(|c| c.1).collect();
-        assert_eq!(with, ["Once", "This run", "This bot", "Always"]);
-        let without: Vec<_> = choices(false).into_iter().map(|c| c.1).collect();
-        assert_eq!(without, ["Once", "This run", "Always"]);
-        assert_eq!(choices(true)[0].0, None, "the default is once");
     }
 
     #[test]

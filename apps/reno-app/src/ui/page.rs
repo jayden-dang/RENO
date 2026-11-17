@@ -11,7 +11,7 @@ use super::kit;
 use super::theme::Theme;
 use crate::vm::{Banner, Section};
 
-/// Width of a narrow page's column (Inbox).
+/// Width of a narrow page's column (Project).
 pub(crate) const NARROW: f32 = 760.0;
 /// Width of a wide page's column (tables).
 pub(crate) const WIDE: f32 = 1_040.0;
