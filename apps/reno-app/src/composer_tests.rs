@@ -306,6 +306,12 @@ fn dropping_files_on_a_steer_says_a_steer_is_text(cx: &mut TestAppContext) {
         shown.contains(&(STEER_TOAST.0.to_owned(), STEER_TOAST.1.to_owned())),
         "{shown:?}"
     );
+    // A refusal is a caution, not the green tick of something that worked.
+    let tones = vcx.update(|_, cx| crate::ui::toast::shown_with_tone(cx));
+    assert_eq!(
+        tones,
+        [(crate::ui::toast::Tone::NotYet, STEER_TOAST.0.to_owned())]
+    );
 }
 
 #[gpui::test]

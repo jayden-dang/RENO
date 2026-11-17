@@ -544,7 +544,7 @@ impl Composer {
         if self.mode != Mode::Home {
             toast::push(
                 cx,
-                toast::Tone::Info,
+                toast::Tone::NotYet,
                 "Files",
                 "Only a new task takes files. A steer is text.",
             );
@@ -558,7 +558,7 @@ impl Composer {
         {
             toast::push(
                 cx,
-                toast::Tone::Info,
+                toast::Tone::NotYet,
                 "Files",
                 "This daemon is too old to take attachments. Update it to attach files.",
             );

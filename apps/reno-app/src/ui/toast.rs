@@ -20,7 +20,7 @@ const MAX_TOASTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tone {
-    /// A feature that is not built yet.
+    /// A feature that is not built yet, or a request declined with nothing done: a caution.
     NotYet,
     /// Something failed.
     Error,
@@ -77,6 +77,20 @@ pub(crate) fn push(
     };
     let message = message.into();
     hub.update(cx, |toasts, cx| toasts.push(tone, label, message, cx));
+}
+
+/// The tone and label of every toast now showing, oldest first.
+#[cfg(test)]
+pub(crate) fn shown_with_tone(cx: &App) -> Vec<(Tone, String)> {
+    cx.try_global::<ToastHub>()
+        .map(|h| {
+            h.0.read(cx)
+                .items
+                .iter()
+                .map(|t| (t.tone, t.label.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The label and message of every toast now showing, oldest first.
