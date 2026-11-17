@@ -677,7 +677,7 @@ impl Composer {
             Mode::Steer(run) => state.run(run).map_or((None, String::new()), |r| {
                 let pick = models::Pick {
                     executor: r.executor.clone(),
-                    model: r.model.clone(),
+                    model: models::in_use(state, run),
                 };
                 (Some(r.executor.clone()), models::label(state, Some(&pick)))
             }),
@@ -837,7 +837,9 @@ impl Composer {
             ),
             Some(h) => {
                 let current = match &live {
-                    Some(_) => self.live_run(cx).and_then(|r| r.model.clone()),
+                    Some(_) => self
+                        .live_run(cx)
+                        .and_then(|r| models::in_use(self.store.read(cx).state(), &r.run_id)),
                     None => self
                         .pick
                         .as_ref()

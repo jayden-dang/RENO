@@ -5,7 +5,9 @@
 //! `None` as a pick is "Auto": the router chooses the harness and the harness its default model.
 
 use reno_client::State;
-use reno_proto::{ExecutorId, ExecutorInfo, InstallStatus, ModelSource, SignedIn};
+use reno_proto::{
+    ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
+};
 
 use crate::summary;
 
@@ -94,6 +96,20 @@ pub(crate) fn model_name(state: &State, executor: &ExecutorId, model: &str) -> S
         .map_or_else(|| model.to_owned(), |m| m.name)
 }
 
+/// The model a run is using, as its harness said: the last `ModelChanged` in its journal, else
+/// the model `Started` reported, else (journal not loaded yet) the one it asked for.
+pub(crate) fn in_use(state: &State, run: &RunId) -> Option<String> {
+    let reported = state.transcript(run).and_then(|t| {
+        t.events.iter().rev().find_map(|(_, event)| match event {
+            ExecEvent::ModelChanged { model } | ExecEvent::Started { model, .. } => {
+                Some(model.clone())
+            }
+            _ => None,
+        })
+    });
+    reported.or_else(|| state.run(run).and_then(|r| r.model.clone()))
+}
+
 /// The chip's words: "Auto", "Codex", or "Claude Code · Sonnet 5.5".
 pub(crate) fn label(state: &State, pick: Option<&Pick>) -> String {
     match pick {
@@ -155,6 +171,53 @@ mod tests {
         );
         let first_unusable = all.iter().position(|h| !h.usable).unwrap_or(all.len());
         assert!(all[..first_unusable].iter().all(|h| h.usable));
+    }
+
+    #[test]
+    fn the_model_in_use_is_the_last_the_harness_reported() {
+        use reno_proto::{RunStatus, RunSummary, SessionRef, TaskId};
+        let run = RunId::from_suffix("a").unwrap();
+        let mut state = State::new();
+        state.apply(reno_client::Update::RunUpserted(RunSummary {
+            run_id: run.clone(),
+            task_id: TaskId::from_suffix("a").unwrap(),
+            executor: "claude-code".parse().unwrap(),
+            status: RunStatus::Running,
+            attempt: 1,
+            title: "t".into(),
+            prompt: None,
+            model: Some("sonnet".into()),
+            stop_reason: None,
+            stop: None,
+            not_resumed: None,
+            session: None,
+            bot: None,
+            cwd: None,
+            report: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }));
+        assert_eq!(in_use(&state, &run).as_deref(), Some("sonnet"), "asked for");
+        let event = |seq, event| reno_client::Update::RunEvent {
+            run: run.clone(),
+            seq,
+            event,
+        };
+        state.apply(event(
+            reno_proto::Seq(0),
+            ExecEvent::Started {
+                session: SessionRef("s".into()),
+                model: "claude-sonnet-5-5".into(),
+            },
+        ));
+        assert_eq!(in_use(&state, &run).as_deref(), Some("claude-sonnet-5-5"));
+        state.apply(event(
+            reno_proto::Seq(1),
+            ExecEvent::ModelChanged {
+                model: "claude-haiku-5-5".into(),
+            },
+        ));
+        assert_eq!(in_use(&state, &run).as_deref(), Some("claude-haiku-5-5"));
     }
 
     #[test]
