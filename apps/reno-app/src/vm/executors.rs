@@ -396,6 +396,7 @@ mod tests {
                     deterministic_turn_end: false,
                     plan_mode: false,
                     models,
+                    model_switch: false,
                     isolates_user_config: false,
                     model_aliases: vec![],
                 },
@@ -621,6 +622,7 @@ mod tests {
                 .map(|i| ModelInfo {
                     id: format!("m{i}"),
                     display_name: None,
+                    description: None,
                 })
                 .collect();
             let catalog = if source_live {

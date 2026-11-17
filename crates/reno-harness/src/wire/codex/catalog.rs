@@ -82,6 +82,7 @@ pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Optio
             ModelInfo {
                 id: id.to_owned(),
                 display_name: Some(display_name),
+                description: None,
             },
             item.get("isDefault").and_then(Value::as_bool) == Some(true),
         ));
@@ -114,6 +115,7 @@ pub(crate) fn static_model_infos() -> Vec<ModelInfo> {
         .map(|(id, label)| ModelInfo {
             id: (*id).into(),
             display_name: Some((*label).into()),
+            description: None,
         })
         .collect()
 }
@@ -207,14 +209,16 @@ mod tests {
                 (
                     ModelInfo {
                         id: "gpt-6-astra".into(),
-                        display_name: Some("GPT-6-Astra".into())
+                        display_name: Some("GPT-6-Astra".into()),
+                        description: None,
                     },
                     true
                 ),
                 (
                     ModelInfo {
                         id: "gpt-old".into(),
-                        display_name: Some("gpt-old".into())
+                        display_name: Some("gpt-old".into()),
+                        description: None,
                     },
                     false
                 ),

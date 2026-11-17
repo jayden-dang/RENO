@@ -476,6 +476,7 @@ impl AcpExecutor {
             .map(|(id, name)| ModelInfo {
                 id: (*id).to_owned(),
                 display_name: Some((*name).to_owned()),
+                description: None,
             })
             .collect()
     }
@@ -550,6 +551,7 @@ impl Executor for AcpExecutor {
                 // never declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models: self.known_models(),
+                model_switch: false,
                 // ACP agents are third-party programs whose personal config (their own settings,
                 // memory, instructions) Reno has no common switch for; a run loads whatever the
                 // agent loads for its owner. Never claimed (ARCH-15).

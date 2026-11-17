@@ -371,6 +371,8 @@ pub(crate) fn build_rows(
                 questions: questions.clone(),
                 resolution: Resolution::Pending,
             }),
+            // Drawn by the model-picker change (app side).
+            ExecEvent::ModelChanged { .. } => {}
             ExecEvent::InputExpired { request_id } => {
                 let card = built.rows.iter_mut().find_map(|row| match row {
                     Row::Question {

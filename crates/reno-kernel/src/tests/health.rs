@@ -370,6 +370,7 @@ async fn the_listed_models_are_the_ones_the_health_labels() {
     let live = ModelCatalog::live(vec![reno_proto::ModelInfo {
         id: "live-1".into(),
         display_name: None,
+        description: None,
     }]);
     let probed = Probed::new(HealthProbe {
         models: live.clone(),

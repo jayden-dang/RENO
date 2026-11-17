@@ -77,6 +77,7 @@ pub(super) fn supported_models(cli: Option<&str>) -> Vec<ModelInfo> {
         .map(|(id, label)| ModelInfo {
             id: (*id).into(),
             display_name: Some((*label).into()),
+            description: None,
         })
         .collect()
 }

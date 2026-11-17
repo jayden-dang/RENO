@@ -89,6 +89,9 @@ pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
 
 /// Feature: `run.steer` exists, and journals may carry `ExecEvent::UserMessage`.
 pub const FEATURE_RUN_STEER: &str = "run.steer";
+/// Feature: `run.set_model` exists, journals may carry `ExecEvent::ModelChanged`, and
+/// `ExecutorCaps::model_switch` says which executors take it.
+pub const FEATURE_RUN_MODEL: &str = "run.model";
 /// Feature: `executor.list`, `executor.refresh` and the `executors.watch` subscription exist.
 pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `executor.install` exists.
@@ -146,6 +149,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_EXECUTOR_FRAMES,
     crate::rules::FEATURE_RULES,
     crate::rules::FEATURE_PROJECT_RULES,
+    FEATURE_RUN_MODEL,
 ];
 
 /// A request with a single reply.
@@ -213,7 +217,8 @@ pub struct RunSummary {
     /// `…` when cut; `run.get` returns it whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// The model the run was asked for, or the one the executor reported once it started.
+    /// The model the run was asked for, or the one the executor reported once it started; after
+    /// `run.set_model`, the one it switched to. A resumed attempt keeps the last of these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Why it stopped, once it has.
@@ -487,6 +492,26 @@ pub struct RunSteerParams {
 /// Result of `run.steer`: empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RunSteerResult {}
+
+/// Params of `run.set_model`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSetModelParams {
+    /// The live run whose model changes.
+    pub run_id: RunId,
+    /// The model to use from the harness's next model call: an id or an alias the executor
+    /// lists (`ExecutorCaps::models`, `model_aliases`).
+    pub model: String,
+}
+
+/// Result of `run.set_model`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSetModelResult {
+    /// The model now in use, as the harness resolved it. The run's `RunSummary::model` and a
+    /// journalled `ExecEvent::ModelChanged` say the same.
+    pub model: String,
+}
 
 /// Params of the `run.events` subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -773,6 +798,13 @@ method!(
 method!(
     /// `run.steer`: sends a steering message to a live run. Needs feature `run.steer`.
     RunSteer, "run.steer", RunSteerParams => RunSteerResult
+);
+method!(
+    /// `run.set_model`: changes a live run's model, on an executor whose caps say
+    /// `model_switch`. Refused (`Conflict`) for a run that is not live, `InvalidParams` for a
+    /// model the executor does not list, `Unsupported`-style refusal for an executor without
+    /// the switch. Needs feature `run.model`.
+    RunSetModel, "run.set_model", RunSetModelParams => RunSetModelResult
 );
 method!(
     /// `def.list`: the current definitions and any load errors. Needs feature `defs`.

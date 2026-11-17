@@ -135,7 +135,9 @@ impl MockExecutor {
                 models: vec![ModelInfo {
                     id: "mock-1".into(),
                     display_name: Some("Mock 1".into()),
+                    description: None,
                 }],
+                model_switch: false,
                 isolates_user_config: false,
                 model_aliases: vec![],
             },

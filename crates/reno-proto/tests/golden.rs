@@ -309,7 +309,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model"],
                "pid": 4242}),
     );
 }
@@ -1107,6 +1107,7 @@ fn executor_health_on_the_wire() {
             models: ModelCatalog::live(vec![ModelInfo {
                 id: "gpt-6".into(),
                 display_name: Some("GPT-6".into()),
+                description: None,
             }]),
             checked_at_ms: 1_800_000_000_000,
         },

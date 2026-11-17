@@ -436,6 +436,13 @@ pub enum ExecEvent {
         /// The `request_id` of the `NeedsInput` this answers.
         request_id: String,
     },
+    /// The run's model was changed while it ran (`run.set_model`): `model` is the one the
+    /// harness now reports in use, which it applies from its next model call. Only daemons that
+    /// negotiate the `run.model` feature emit it; older clients skip it.
+    ModelChanged {
+        /// The model now in use, as the harness resolved it (`claude-sonnet-5-5` for `sonnet`).
+        model: String,
+    },
     /// A message from the human, added by `run.steer`. Only daemons that negotiate the
     /// `run.steer` feature emit it.
     UserMessage {
@@ -488,6 +495,9 @@ pub struct ModelInfo {
     /// Display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// What the harness says it is for ("Most efficient for simpler tasks"), when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Harness CLI versions an adapter supports.
@@ -524,6 +534,12 @@ pub struct ExecutorCaps {
     pub plan_mode: bool,
     /// Models on offer.
     pub models: Vec<ModelInfo>,
+    /// Whether a running run's model can be changed (`run.set_model`). The harness applies it
+    /// from its next model call, inside the same turn. Only claimed where a live run proved it
+    /// (Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the
+    /// model per turn and an ACP agent's `session/set_model` is unproven mid-prompt.
+    #[serde(default)]
+    pub model_switch: bool,
     /// Names the CLI accepts for a model besides the ids in `models`: short aliases that
     /// resolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.
     /// Empty when the harness has none.

@@ -882,6 +882,7 @@ mod tests {
                     deterministic_turn_end: false,
                     plan_mode: false,
                     models: vec![],
+                    model_switch: false,
                     isolates_user_config: false,
                     model_aliases: vec![],
                 },

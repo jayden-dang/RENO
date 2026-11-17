@@ -567,6 +567,7 @@ impl Executor for CodexExecutor {
                 // declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models,
+                model_switch: false,
                 // Enforced at launch: see [`isolation_args`]. What it leaves (the global
                 // `AGENTS.md`, skills outside plugins) is in the module docs.
                 isolates_user_config: true,

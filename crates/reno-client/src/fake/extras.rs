@@ -346,6 +346,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     deterministic_turn_end: true,
                     plan_mode: false,
                     models: health.models.models.clone(),
+                    model_switch: false,
                     isolates_user_config: false,
                     model_aliases: vec![],
                 },
@@ -358,6 +359,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             .map(|(id, name)| ModelInfo {
                 id: (*id).to_owned(),
                 display_name: Some((*name).to_owned()),
+                description: None,
             })
             .collect::<Vec<_>>()
     };

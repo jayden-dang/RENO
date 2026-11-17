@@ -1,5 +1,6 @@
 ---
 source: crates/reno-proto/tests/schema.rs
+assertion_line: 14
 expression: protocol_schema()
 ---
 {
@@ -666,7 +667,8 @@ expression: protocol_schema()
     "secrets",
     "executor.frames",
     "rules",
-    "rules.project"
+    "rules.project",
+    "run.model"
   ],
   "methods": [
     {
@@ -1983,7 +1985,7 @@ expression: protocol_schema()
             "description": "The executor running it."
           },
           "model": {
-            "description": "The model the run was asked for, or the one the executor reported once it started.",
+            "description": "The model the run was asked for, or the one the executor reported once it started; after\n`run.set_model`, the one it switched to. A resumed attempt keeps the last of these.",
             "type": [
               "string",
               "null"
@@ -3812,7 +3814,7 @@ expression: protocol_schema()
                 "description": "The executor running it."
               },
               "model": {
-                "description": "The model the run was asked for, or the one the executor reported once it started.",
+                "description": "The model the run was asked for, or the one the executor reported once it started; after\n`run.set_model`, the one it switched to. A resumed attempt keeps the last of these.",
                 "type": [
                   "string",
                   "null"
@@ -6949,6 +6951,11 @@ expression: protocol_schema()
                 },
                 "type": "array"
               },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -7163,6 +7170,13 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "displayName": {
                 "description": "Display name.",
                 "type": [
@@ -7551,6 +7565,11 @@ expression: protocol_schema()
                 },
                 "type": "array"
               },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -7765,6 +7784,13 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "displayName": {
                 "description": "Display name.",
                 "type": [
@@ -8149,6 +8175,11 @@ expression: protocol_schema()
                 },
                 "type": "array"
               },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -8363,6 +8394,13 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "displayName": {
                 "description": "Display name.",
                 "type": [
@@ -9637,6 +9675,24 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "The run's model was changed while it ran (`run.set_model`): `model` is the one the\nharness now reports in use, which it applies from its next model call. Only daemons that\nnegotiate the `run.model` feature emit it; older clients skip it.",
+                "properties": {
+                  "model": {
+                    "description": "The model now in use, as the harness resolved it (`claude-sonnet-5-5` for `sonnet`).",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "model_changed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "model"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "A message from the human, added by `run.steer`. Only daemons that negotiate the\n`run.steer` feature emit it.",
                 "properties": {
                   "text": {
@@ -10558,7 +10614,7 @@ expression: protocol_schema()
                 "description": "The executor running it."
               },
               "model": {
-                "description": "The model the run was asked for, or the one the executor reported once it started.",
+                "description": "The model the run was asked for, or the one the executor reported once it started; after\n`run.set_model`, the one it switched to. A resumed attempt keeps the last of these.",
                 "type": [
                   "string",
                   "null"
@@ -11421,6 +11477,11 @@ expression: protocol_schema()
                 },
                 "type": "array"
               },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
               "models": {
                 "description": "Models on offer.",
                 "items": {
@@ -11635,6 +11696,13 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "displayName": {
                 "description": "Display name.",
                 "type": [
