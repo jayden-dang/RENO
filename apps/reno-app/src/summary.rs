@@ -525,6 +525,7 @@ mod tests {
             created_at_ms: NOW - HOUR,
             updated_at_ms: NOW - 1000,
             stop: None,
+            report: None,
             not_resumed: None,
             session: None,
         }

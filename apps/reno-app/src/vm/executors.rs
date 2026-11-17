@@ -727,6 +727,7 @@ mod tests {
             bot: None,
             stop_reason: None,
             stop,
+            report: None,
             not_resumed: None,
             session: None,
         };

@@ -147,6 +147,7 @@ fn inbox_lists_a_run_waiting_on_a_question_and_opens_it(cx: &mut TestAppContext)
         created_at_ms: 1,
         updated_at_ms: 1,
         stop: None,
+        report: None,
         not_resumed: None,
         session: None,
     };

@@ -451,6 +451,7 @@ mod tests {
             created_at_ms: NOW - age,
             updated_at_ms: NOW - age,
             stop: None,
+            report: None,
             not_resumed: None,
             session: None,
         }

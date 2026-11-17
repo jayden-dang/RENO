@@ -1723,6 +1723,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
             stop,
+            report: None,
             not_resumed: None,
             session: None,
         }
