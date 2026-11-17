@@ -6,6 +6,7 @@
 //! appearance unless `RENO_APPEARANCE` or the palette's "Toggle theme" says otherwise.
 
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -51,6 +52,8 @@ pub(crate) struct Options {
     pub(crate) open: Option<Nav>,
     /// `RENO_OPEN=run_<id>`: open on that run's screen (screenshots, reviews).
     pub(crate) open_run: Option<RunId>,
+    /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
+    pub(crate) open_project: Option<PathBuf>,
 }
 
 impl Options {
@@ -80,6 +83,10 @@ impl Options {
             Some("triggers") => Some(Nav::Triggers),
             Some("executors") => Some(Nav::Executors),
             Some("settings") => Some(Nav::Settings),
+            Some(other) if other.starts_with("project:") => {
+                options.open_project = Some(PathBuf::from(&other["project:".len()..]));
+                None
+            }
             Some(other) if other.starts_with("run_") => {
                 options.open_run = Some(
                     other
@@ -141,6 +148,7 @@ pub(crate) fn run(options: Options) {
         let appearance = options.appearance;
         let open = options.open;
         let open_run = options.open_run;
+        let open_project = options.open_project;
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -159,6 +167,22 @@ pub(crate) fn run(options: Options) {
                     root.focus_composer(window, cx);
                     if let Some(nav) = open {
                         root.navigate(nav, window, cx);
+                    }
+                    if let Some(dir) = open_project {
+                        cx.spawn_in(window, async move |view, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1500))
+                                .await;
+                            view.update_in(cx, |view, window, cx| {
+                                view.open_project(
+                                    crate::vm::projects::FolderKey::Repo(dir),
+                                    window,
+                                    cx,
+                                );
+                            })
+                            .ok();
+                        })
+                        .detach();
                     }
                     if let Some(run) = open_run {
                         // After the store has connected, so the run's transcript is followed.
@@ -740,6 +764,7 @@ mod tests {
                 reduce_motion: true,
                 open: Some(Nav::Executors),
                 open_run: None,
+                open_project: None,
             })
         );
         let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();

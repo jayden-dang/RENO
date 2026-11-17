@@ -130,7 +130,7 @@ impl ProjectScreen {
                             .child(rule.matches.clone()),
                     )
                     .child(page::cell(
-                        div().child(kit::tag(tone, words)),
+                        div().flex().child(kit::tag(tone, words)),
                         Some(EFFECT_W),
                     ))
                     .child(page::cell(
@@ -212,7 +212,7 @@ impl ProjectScreen {
                             .child(rule.matches.clone()),
                     )
                     .child(page::cell(
-                        div().child(kit::tag(tone, words)),
+                        div().flex().child(kit::tag(tone, words)),
                         Some(EFFECT_W),
                     ))
                     .child(page::cell(
@@ -301,7 +301,7 @@ impl ProjectScreen {
                 .text_size(px(12.5))
                 .text_color(theme.faint)
                 .child(format!(
-                    "Order: never \u{2192} this project \u{2192} every project \u{2192} \u{201c}{}\u{201d}. A project rule cannot loosen a \u{201c}never\u{201d}.",
+                    "A \u{201c}never\u{201d} always wins over a rule that allows, so a project rule cannot loosen one. Anything no rule allows gets \u{201c}{}\u{201d}.",
                     view.default
                 ))
                 .into_any_element(),
@@ -357,7 +357,7 @@ impl ProjectScreen {
                     page::table_row(theme, i + 1 == count)
                         .id(SharedString::from(format!("project-history-{i}")))
                         .child(page::cell(
-                            div().child(kit::tag(tone, word)),
+                            div().flex().child(kit::tag(tone, word)),
                             Some(ANSWER_W),
                         ))
                         .child(
