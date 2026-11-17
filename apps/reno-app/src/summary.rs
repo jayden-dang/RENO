@@ -5,7 +5,8 @@
 use std::collections::BTreeSet;
 
 use reno_client::State;
-use reno_proto::{ActionClass, Approval, ApprovalSubject, RunStatus};
+use reno_proto::defs::DefKind;
+use reno_proto::{ActionClass, Approval, ApprovalSubject, RunStatus, RunSummary};
 
 /// A run title is `"<bot> · <repo>: <what>"` (the protocol has no bot or repository field yet).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,8 +42,18 @@ pub(crate) struct Attention {
     pub(crate) need: u32,
     /// Runs that are moving on their own.
     pub(crate) running: u32,
-    /// Distinct bots named in run titles.
+    /// Distinct bots: those the daemon has defined, plus any a known run is pinned to (a run can
+    /// outlive its bot's file). The fake daemon defines none and names bots in run titles.
     pub(crate) bots: u32,
+}
+
+/// The bot a run belongs to: the daemon's `bot` pin; only for a run without one (the fake
+/// daemon) the bot its title names.
+pub(crate) fn run_bot(run: &RunSummary) -> Option<&str> {
+    run.bot
+        .as_ref()
+        .map(|pin| pin.name.as_str())
+        .or_else(|| parse_title(&run.title).bot)
 }
 
 /// Whether a run counts as "running": the executor is working or about to be.
@@ -55,9 +66,13 @@ pub(crate) fn is_live(status: RunStatus) -> bool {
 
 pub(crate) fn attention(state: &State) -> Attention {
     let runs = state.runs();
-    let bots: BTreeSet<&str> = runs
+    let bots: BTreeSet<&str> = state
+        .defs()
+        .defs
         .iter()
-        .filter_map(|run| parse_title(&run.title).bot)
+        .filter(|def| def.kind == DefKind::Bot)
+        .map(|def| def.name.as_str())
+        .chain(runs.iter().filter_map(|run| run_bot(run)))
         .collect();
     Attention {
         need: count(state.approvals().len()),
@@ -217,9 +232,7 @@ pub(crate) fn subject_line(subject: &ApprovalSubject) -> String {
 
 /// The bot that owns an approval's run, when its title names one.
 pub(crate) fn approval_bot<'a>(state: &'a State, approval: &Approval) -> Option<&'a str> {
-    state
-        .run(&approval.run_id)
-        .and_then(|run| parse_title(&run.title).bot)
+    state.run(&approval.run_id).and_then(run_bot)
 }
 
 /// The finding pill's content.
@@ -439,6 +452,72 @@ mod tests {
             "Nothing needs you — 2 runs are moving on their own."
         );
         assert!(matches!(f, Finding::Calm { .. }));
+    }
+
+    fn pinned(name: &str, status: RunStatus, title: &str, bot: &str) -> RunSummary {
+        let mut r = run(name, status, title);
+        r.bot = Some(reno_proto::defs::BotPin {
+            name: bot.to_owned(),
+            version: 1,
+        });
+        r
+    }
+
+    #[test]
+    fn a_real_run_names_its_bot_from_the_field_not_the_title() {
+        let r = pinned(
+            "s1",
+            RunStatus::Running,
+            "dogfood: hello from the app",
+            "scout",
+        );
+        assert_eq!(run_bot(&r), Some("scout"));
+        // The pin wins over a title that happens to carry the fake shape.
+        let r = pinned("s2", RunStatus::Running, "keeper \u{b7} atlas: x", "scout");
+        assert_eq!(run_bot(&r), Some("scout"));
+        // No pin: the fake daemon's title shape still names one.
+        let r = run("f1", RunStatus::Running, "keeper \u{b7} atlas: x");
+        assert_eq!(run_bot(&r), Some("keeper"));
+        assert_eq!(
+            run_bot(&run("n1", RunStatus::Running, "plain: title")),
+            None
+        );
+    }
+
+    #[test]
+    fn attention_bots_come_from_pins_and_definitions() {
+        let mut state = state_with(
+            vec![pinned("s1", RunStatus::Running, "dogfood: hi", "scout")],
+            vec![],
+        );
+        assert_eq!(attention(&state).bots, 1);
+        let def = |name: &str| reno_proto::defs::DefSummary {
+            kind: reno_proto::defs::DefKind::Bot,
+            name: name.to_owned(),
+            version: 1,
+            hash: "0".repeat(64),
+            created_at_ms: 0,
+        };
+        state.apply(Update::Defs(reno_proto::defs::DefsSnapshot {
+            defs: vec![def("scout"), def("reviewer"), def("keeper")],
+            errors: vec![],
+        }));
+        // Three defined, one of them already running: three, not four.
+        assert_eq!(attention(&state).bots, 3);
+    }
+
+    #[test]
+    fn approval_bot_uses_the_pin() {
+        let state = state_with(
+            vec![pinned(
+                "s1",
+                RunStatus::WaitingApproval,
+                "dogfood: hi",
+                "scout",
+            )],
+            vec![approval("a1", "s1", HOUR, Some("ls"))],
+        );
+        assert_eq!(approval_bot(&state, &state.approvals()[0]), Some("scout"));
     }
 
     #[test]

@@ -1179,7 +1179,7 @@ impl Composer {
                 let bot = store
                     .state()
                     .run(run)
-                    .and_then(|r| summary::parse_title(&r.title).bot.map(str::to_owned))
+                    .and_then(|r| summary::run_bot(r).map(str::to_owned))
                     .unwrap_or_else(|| "the run".to_owned());
                 match self.steer_state(cx) {
                     Some(SteerState::Ended(_)) => format!("{bot} has finished").into(),
@@ -1554,9 +1554,13 @@ impl Render for Composer {
                 let store = self.store.read(cx);
                 let summary = store.state().run(run);
                 let executor = summary.map_or("", |r| r.executor.as_str());
-                let model = summary
-                    .and_then(|r| r.model.clone())
-                    .unwrap_or_else(|| "model".to_owned());
+                let chip = {
+                    let name = summary::executor_name(executor);
+                    match summary.and_then(|r| r.model.as_deref()) {
+                        Some(model) => format!("{name} \u{b7} {model}"),
+                        None => name,
+                    }
+                };
                 let state = self.steer_state(cx);
                 let note: Option<(SharedString, gpui::Hsla)> = match &state {
                     Some(SteerState::Ended(why) | SteerState::Waiting(why)) => {
@@ -1578,10 +1582,7 @@ impl Render for Composer {
                     .child(
                         kit::chip(&theme, "")
                             .child(kit::exec_glyph(&theme, executor, 13.0))
-                            .child(SharedString::from(format!(
-                                "{} \u{b7} {model}",
-                                summary::executor_name(executor)
-                            ))),
+                            .child(SharedString::from(chip)),
                     )
                     .when_some(note, |d, (text, tone)| {
                         d.child(

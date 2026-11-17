@@ -519,9 +519,7 @@ impl RunScreen {
         let state = store.state();
         let busy = store.is_deciding(&approval.id);
         let summary = state.run(&approval.run_id);
-        let bot = summary
-            .and_then(|r| summary::parse_title(&r.title).bot)
-            .unwrap_or("run");
+        let bot = summary.and_then(|r| summary::run_bot(r)).unwrap_or("run");
         let executor = summary.map_or("", |r| r.executor.as_str());
         let age = summary::age_label(store.now_ms().saturating_sub(approval.requested_at_ms));
         let command = summary::subject_line(&approval.subject);
@@ -712,7 +710,9 @@ impl RunScreen {
                     )
                     .into_any_element(),
             ))
-            .when_some(parts.bot, |p, bot| p.child(kv("Bot", text(bot.to_owned()))))
+            .when_some(summary::run_bot(run), |p, bot| {
+                p.child(kv("Bot", text(bot.to_owned())))
+            })
             .child(kv(
                 "Executor",
                 div()
