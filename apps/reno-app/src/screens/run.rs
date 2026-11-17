@@ -19,7 +19,7 @@ use super::executors::health_lines;
 use crate::actions::GoRuns;
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self, Built, Facts, Key, Outcome, Row, ToolEntry};
+use crate::transcript::{self, Built, Facts, Key, Outcome, Resolution, Row, ToolEntry};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
@@ -258,7 +258,11 @@ impl RunScreen {
             },
             Row::Reasoning { key, text } => self.reasoning(&theme, *key, text, cx),
             Row::Tools { key, calls } => self.tools(&theme, *key, calls, cx),
-            Row::Question { questions, .. } => question_card(&theme, questions),
+            Row::Question {
+                questions,
+                resolution,
+                ..
+            } => question_card(&theme, questions, resolution),
             Row::Approval { key, approval } => self.approval_card(&theme, *key, approval, cx),
             Row::Asked { line, .. } => event_line(&theme, Icon::Shield, theme.muted, line),
             Row::Routing { key, view } => self.routing_card(&theme, *key, view, cx),
@@ -950,8 +954,24 @@ fn tool_line(theme: &Theme, call: &ToolEntry) -> impl IntoElement {
         )
 }
 
-fn question_card(theme: &Theme, questions: &[reno_proto::Question]) -> AnyElement {
-    div()
+/// The question card. Pending, it is the live ask; resolved, it is the record of how it ended:
+/// a status tag, the options dimmed (the chosen one lit) and no promise of a later phase.
+fn question_card(
+    theme: &Theme,
+    questions: &[reno_proto::Question],
+    resolution: &Resolution,
+) -> AnyElement {
+    let tag = match resolution {
+        Resolution::Pending => None,
+        Resolution::Declined => Some((theme.faint, "Declined", "question-tag-declined")),
+        Resolution::Unanswered => Some((theme.faint, "Not answered", "question-tag-unanswered")),
+        Resolution::Answered(_) => Some((theme.success, "Answered", "question-tag-answered")),
+    };
+    let answer_of = |i: usize| match resolution {
+        Resolution::Answered(answers) => answers.get(i).cloned().flatten(),
+        _ => None,
+    };
+    let card = div()
         .w_full()
         .p(px(16.0))
         .rounded(px(18.0))
@@ -961,7 +981,22 @@ fn question_card(theme: &Theme, questions: &[reno_proto::Question]) -> AnyElemen
         .flex()
         .flex_col()
         .gap(px(12.0))
-        .children(questions.iter().map(|q| {
+        .children(questions.iter().enumerate().map(|(i, q)| {
+            let answer = answer_of(i);
+            let chosen = |o: &str| {
+                answer
+                    .as_deref()
+                    .is_some_and(|a| a.split(", ").any(|part| part == o))
+            };
+            let free_text = answer
+                .as_ref()
+                .filter(|_| !q.options.iter().any(|o| chosen(o)));
+            let header_tag = tag.filter(|_| i == 0).map(|(tone, label, selector)| {
+                div()
+                    .ml_auto()
+                    .debug_selector(move || selector.to_owned())
+                    .child(kit::tag(tone, label))
+            });
             div()
                 .flex()
                 .flex_col()
@@ -976,23 +1011,61 @@ fn question_card(theme: &Theme, questions: &[reno_proto::Question]) -> AnyElemen
                             div()
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(q.prompt.clone()),
-                        ),
+                        )
+                        .children(header_tag),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_wrap()
                         .gap(px(8.0))
-                        .children(q.options.iter().map(|o| kit::chip(theme, o.clone()))),
+                        .children(q.options.iter().map(|o| {
+                            let chip = kit::chip(theme, o.clone());
+                            match resolution {
+                                Resolution::Pending => chip,
+                                _ if chosen(o) => chip
+                                    .border_color(theme.success.opacity(0.7))
+                                    .bg(theme.success.opacity(0.14))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .debug_selector(|| "question-chosen-chip".to_owned()),
+                                _ => chip
+                                    .opacity(0.5)
+                                    .text_color(theme.faint)
+                                    .debug_selector(|| "question-dimmed-chip".to_owned()),
+                            }
+                        })),
                 )
-        }))
-        .child(
+                .children(free_text.map(|text| {
+                    div()
+                        .text_size(px(13.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(format!("\u{201c}{text}\u{201d}")))
+                }))
+        }));
+    match resolution {
+        Resolution::Pending => card.child(
             div()
+                .debug_selector(|| "question-pending-note".to_owned())
                 .text_size(px(12.5))
                 .text_color(theme.faint)
                 .child("Answering from the app arrives in a later phase."),
-        )
-        .into_any_element()
+        ),
+        Resolution::Declined => card.child(
+            div()
+                .debug_selector(|| "question-declined-line".to_owned())
+                .text_size(px(12.5))
+                .text_color(theme.faint)
+                .child("Nobody answered in time."),
+        ),
+        Resolution::Unanswered => card.child(
+            div()
+                .text_size(px(12.5))
+                .text_color(theme.faint)
+                .child("The run went on without an answer."),
+        ),
+        Resolution::Answered(_) => card,
+    }
+    .into_any_element()
 }
 
 /// A one-line event: a muted icon and a sentence.
@@ -1100,3 +1173,6 @@ impl Render for RunScreen {
             )
     }
 }
+
+#[cfg(test)]
+mod question_card_tests;

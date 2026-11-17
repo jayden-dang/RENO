@@ -82,11 +82,12 @@ pub(crate) enum Row {
     Reasoning { key: Key, text: String },
     /// "Ran N commands", expandable.
     Tools { key: Key, calls: Vec<ToolEntry> },
-    /// The harness asks questions.
+    /// The harness asks questions; once resolved, the same card shows how it ended.
     Question {
         key: Key,
         request_id: String,
         questions: Vec<Question>,
+        resolution: Resolution,
     },
     /// An inline approval card: the approval is pending.
     Approval { key: Key, approval: Approval },
@@ -103,6 +104,49 @@ pub(crate) enum Row {
         /// The typed reason the daemon gave, which the line shows in words.
         reason: Option<reno_proto::StopDetail>,
     },
+}
+
+/// How a question ended. The journal has an event for a declined question
+/// (`InputExpired`) but none for an answered one, so an answer is read from the result of the
+/// harness's input tool (`AskUserQuestion`, `request_user_input`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// Nobody has answered yet.
+    Pending,
+    /// The time limit passed and the harness was told there is no answer.
+    Declined,
+    /// The run moved on or ended with the question open and no answer recorded.
+    Unanswered,
+    /// Answered; one entry per question, `None` where the answer is not known.
+    Answered(Vec<Option<String>>),
+}
+
+/// Whether a tool is the harness asking a person (its result carries the answer).
+fn is_input_tool(name: &str) -> bool {
+    name.eq_ignore_ascii_case("AskUserQuestion") || name.eq_ignore_ascii_case("request_user_input")
+}
+
+/// What each question was answered, read from the input tool's result text: the options it
+/// names, else (one free-text question) the text itself.
+fn read_answers(questions: &[Question], summary: &str) -> Vec<Option<String>> {
+    questions
+        .iter()
+        .map(|q| {
+            let chosen: Vec<&str> = q
+                .options
+                .iter()
+                .filter(|o| !o.is_empty() && summary.contains(&format!("\"{o}\"")))
+                .map(String::as_str)
+                .collect();
+            if !chosen.is_empty() {
+                Some(chosen.join(", "))
+            } else if q.options.is_empty() && questions.len() == 1 {
+                Some(summary.trim().to_owned()).filter(|t| !t.is_empty())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 impl Row {
@@ -172,6 +216,25 @@ pub(crate) struct Built {
     pub(crate) facts: Facts,
 }
 
+/// The input tool finished: the latest open question is answered (its result names the
+/// choice) or, when the tool failed, closed without an answer.
+fn resolve_open_question(rows: &mut [Row], ok: bool, summary: Option<&str>) {
+    let open = rows.iter_mut().rev().find_map(|row| match row {
+        Row::Question {
+            questions,
+            resolution,
+            ..
+        } if *resolution == Resolution::Pending => Some((questions, resolution)),
+        _ => None,
+    });
+    if let Some((questions, resolution)) = open {
+        *resolution = match (ok, summary) {
+            (true, Some(text)) => Resolution::Answered(read_answers(questions, text)),
+            _ => Resolution::Unanswered,
+        };
+    }
+}
+
 /// Builds the rows. `prompt` is the run's prompt, `pending` the approvals the state
 /// holds for this run.
 pub(crate) fn build_rows(
@@ -190,6 +253,7 @@ pub(crate) fn build_rows(
     let mut used = vec![false; pending.len()];
     // A `Done` ends the list, unless the run is resumed: then its next attempt goes on below.
     let mut ended = false;
+    let mut input_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (seq, event) in events {
         if ended {
             if !matches!(event, ExecEvent::Resumed { .. }) {
@@ -228,6 +292,9 @@ pub(crate) fn build_rows(
                 }),
             },
             ExecEvent::Tool { id, call } => {
+                if is_input_tool(&call.name) {
+                    input_calls.insert(id.clone());
+                }
                 let entry = ToolEntry {
                     id: id.clone(),
                     kind: tool_kind(&call.name),
@@ -243,6 +310,9 @@ pub(crate) fn build_rows(
                 }
             }
             ExecEvent::ToolResult { id, ok, summary } => {
+                if input_calls.contains(id) {
+                    resolve_open_question(&mut built.rows, *ok, summary.as_deref());
+                }
                 let outcome = if *ok {
                     Outcome::Ok(summary.clone())
                 } else {
@@ -299,11 +369,26 @@ pub(crate) fn build_rows(
                 key,
                 request_id: request_id.clone(),
                 questions: questions.clone(),
+                resolution: Resolution::Pending,
             }),
-            ExecEvent::InputExpired { .. } => built.rows.push(Row::Asked {
-                key,
-                line: "Nobody answered in time; the question was declined.".to_owned(),
-            }),
+            ExecEvent::InputExpired { request_id } => {
+                let card = built.rows.iter_mut().find_map(|row| match row {
+                    Row::Question {
+                        request_id: id,
+                        resolution,
+                        ..
+                    } if id == request_id && *resolution == Resolution::Pending => Some(resolution),
+                    _ => None,
+                });
+                if let Some(resolution) = card {
+                    *resolution = Resolution::Declined;
+                } else {
+                    built.rows.push(Row::Asked {
+                        key,
+                        line: "Nobody answered in time; the question was declined.".to_owned(),
+                    });
+                }
+            }
             ExecEvent::NeedsApproval { subject, .. } => {
                 let held = pending
                     .iter()
@@ -339,6 +424,13 @@ pub(crate) fn build_rows(
             } => {
                 built.facts.reason.clone_from(reason);
                 built.facts.diagnostic.clone_from(diagnostic);
+                for row in &mut built.rows {
+                    if let Row::Question { resolution, .. } = row
+                        && *resolution == Resolution::Pending
+                    {
+                        *resolution = Resolution::Unanswered;
+                    }
+                }
                 // A result that is the last answer, already drawn above, is not said twice.
                 let repeats = |result: &String| {
                     built.rows.iter().rev().find_map(|row| match row {
@@ -706,11 +798,64 @@ mod tests {
         ));
     }
 
+    fn pick() -> Question {
+        Question {
+            id: "a".into(),
+            prompt: "Which colour?".into(),
+            options: vec!["Red".into(), "Blue".into()],
+            multi_select: false,
+        }
+    }
+
+    fn asks(request_id: &str, questions: Vec<Question>) -> ExecEvent {
+        ExecEvent::NeedsInput {
+            request_id: request_id.into(),
+            questions,
+        }
+    }
+
+    fn ask_tool(id: &str) -> ExecEvent {
+        ExecEvent::Tool {
+            id: id.into(),
+            call: ToolCall::new("AskUserQuestion", json!({}), ActionClass::Other),
+        }
+    }
+
+    fn question_rows(built: &Built) -> Vec<(&str, &Resolution)> {
+        built
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Question {
+                    request_id,
+                    resolution,
+                    ..
+                } => Some((request_id.as_str(), resolution)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn an_expired_question_is_one_status_line() {
+    fn an_expired_question_resolves_its_own_card_with_no_status_row() {
+        let built = build(
+            vec![
+                asks("q1", vec![pick()]),
+                ExecEvent::InputExpired {
+                    request_id: "q1".into(),
+                },
+            ],
+            &[],
+        );
+        assert_eq!(built.rows.len(), 1, "{:?}", built.rows);
+        assert_eq!(question_rows(&built), [("q1", &Resolution::Declined)]);
+    }
+
+    #[test]
+    fn an_expiry_for_a_question_not_in_the_list_stays_a_status_line() {
         let built = build(
             vec![ExecEvent::InputExpired {
-                request_id: "q1".into(),
+                request_id: "gone".into(),
             }],
             &[],
         );
@@ -724,28 +869,109 @@ mod tests {
     }
 
     #[test]
-    fn questions_are_rows() {
-        let q = Question {
-            id: "a".into(),
-            prompt: "Which?".into(),
-            options: vec!["x".into()],
+    fn a_question_open_when_the_run_ends_is_not_answered() {
+        let done = ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        };
+        let built = build(vec![asks("q1", vec![pick()]), done], &[]);
+        assert_eq!(question_rows(&built), [("q1", &Resolution::Unanswered)]);
+    }
+
+    #[test]
+    fn a_chosen_option_in_the_tool_result_answers_the_question() {
+        let built = build(
+            vec![
+                ask_tool("t1"),
+                asks("q1", vec![pick()]),
+                result("t1", true, "User has answered: \"Which colour?\"=\"Blue\""),
+            ],
+            &[],
+        );
+        assert_eq!(
+            question_rows(&built),
+            [("q1", &Resolution::Answered(vec![Some("Blue".into())]))]
+        );
+    }
+
+    #[test]
+    fn a_free_text_answer_is_the_result_text() {
+        let free = Question {
+            id: "n".into(),
+            prompt: "Name it".into(),
+            options: vec![],
             multi_select: false,
         };
         let built = build(
-            vec![ExecEvent::NeedsInput {
-                request_id: "q1".into(),
-                questions: vec![q.clone()],
-            }],
+            vec![
+                ask_tool("t1"),
+                asks("q1", vec![free]),
+                result("t1", true, "Ferris"),
+            ],
             &[],
         );
+        assert_eq!(
+            question_rows(&built),
+            [("q1", &Resolution::Answered(vec![Some("Ferris".into())]))]
+        );
+    }
+
+    #[test]
+    fn each_of_several_questions_gets_its_own_answer() {
+        let size = Question {
+            id: "s".into(),
+            prompt: "Size?".into(),
+            options: vec!["S".into(), "L".into()],
+            multi_select: false,
+        };
+        let built = build(
+            vec![
+                ask_tool("t1"),
+                asks("q1", vec![pick(), size]),
+                result("t1", true, "\"Which colour?\"=\"Red\", \"Size?\"=\"L\""),
+            ],
+            &[],
+        );
+        let Resolution::Answered(answers) = question_rows(&built)[0].1 else {
+            panic!("expected answered");
+        };
+        assert_eq!(answers, &[Some("Red".to_owned()), Some("L".to_owned())]);
+    }
+
+    #[test]
+    fn a_failed_input_tool_leaves_the_question_not_answered() {
+        let built = build(
+            vec![
+                ask_tool("t1"),
+                asks("q1", vec![pick()]),
+                result("t1", false, "closed"),
+            ],
+            &[],
+        );
+        assert_eq!(question_rows(&built), [("q1", &Resolution::Unanswered)]);
+    }
+
+    #[test]
+    fn questions_are_rows() {
+        let q = pick();
+        let built = build(vec![asks("q1", vec![q.clone()])], &[]);
         assert_eq!(
             built.rows,
             vec![Row::Question {
                 key: Key(1),
                 request_id: "q1".into(),
-                questions: vec![q]
+                questions: vec![q],
+                resolution: Resolution::Pending,
             }]
         );
+    }
+
+    #[test]
+    fn a_question_nobody_resolved_yet_is_pending() {
+        let built = build(vec![asks("q1", vec![pick()])], &[]);
+        assert_eq!(question_rows(&built), [("q1", &Resolution::Pending)]);
     }
 
     #[test]
