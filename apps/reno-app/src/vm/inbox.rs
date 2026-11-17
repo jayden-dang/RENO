@@ -43,7 +43,7 @@ pub(crate) struct HistoryRow {
     pub(crate) action: &'static str,
     pub(crate) line: String,
     pub(crate) verdict: Verdict,
-    /// "you", "rule: never reset hard", "nobody in time", "repeat of a denial".
+    /// "you", "policy rule 8", "your rule", "nobody in time", "repeat of a denial".
     pub(crate) by: String,
     pub(crate) when: String,
     /// The reason given with a denial.
@@ -105,10 +105,7 @@ fn held_row(state: &State, approval: &Approval, now_ms: u64) -> HeldRow {
 fn who(by: Option<&ResolvedBy>, status: ApprovalStatus) -> String {
     match by {
         Some(ResolvedBy::Human) => "you".to_owned(),
-        Some(ResolvedBy::Rule { name }) => match name.strip_prefix("standing:") {
-            Some(id) => format!("your rule {id}"),
-            None => format!("rule: {name}"),
-        },
+        Some(ResolvedBy::Rule { name }) => summary::rule_words(name),
         Some(ResolvedBy::Expired) => "nobody in time".to_owned(),
         Some(ResolvedBy::RepeatDenial) => "repeat of an earlier denial".to_owned(),
         None if status == ApprovalStatus::Expired => "nobody in time".to_owned(),
@@ -315,6 +312,20 @@ mod tests {
             ),
             record("c", ApprovalStatus::Expired, Some(ResolvedBy::Expired)),
             record("d", ApprovalStatus::Denied, Some(ResolvedBy::RepeatDenial)),
+            record(
+                "e",
+                ApprovalStatus::Approved,
+                Some(ResolvedBy::Rule {
+                    name: "rules[7]".into(),
+                }),
+            ),
+            record(
+                "f",
+                ApprovalStatus::Approved,
+                Some(ResolvedBy::Rule {
+                    name: "standing:rule_001abc".into(),
+                }),
+            ),
         ]));
         let inbox = build(&state, NOW);
         let rows = inbox.history.rows();
@@ -323,9 +334,11 @@ mod tests {
             summary,
             [
                 (Verdict::Approved, "you"),
-                (Verdict::Denied, "rule: never reset hard"),
+                (Verdict::Denied, "rule never reset hard"),
                 (Verdict::Expired, "nobody in time"),
                 (Verdict::Denied, "repeat of an earlier denial"),
+                (Verdict::Approved, "policy rule 8"),
+                (Verdict::Approved, "your rule"),
             ]
         );
         assert_eq!(rows[0].when, "2h ago");

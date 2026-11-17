@@ -472,10 +472,13 @@ fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&st
     };
     match by {
         ResolvedBy::Human => format!("{outcome} by you"),
-        ResolvedBy::Rule { name } => match message {
-            Some(message) => format!("{outcome} by rule {name}: {message}"),
-            None => format!("{outcome} by rule {name}"),
-        },
+        ResolvedBy::Rule { name } => {
+            let rule = crate::summary::rule_words(name);
+            match message {
+                Some(message) => format!("{outcome} by {rule}: {message}"),
+                None => format!("{outcome} by {rule}"),
+            }
+        }
         ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
     }
@@ -999,6 +1002,18 @@ mod tests {
                     Some("denied by policy: force push"),
                 ),
                 "Denied by rule force push: denied by policy: force push",
+            ),
+            (
+                resolved(ApprovalOutcome::Approved, rule("rules[7]"), None),
+                "Approved by policy rule 8",
+            ),
+            (
+                resolved(
+                    ApprovalOutcome::Approved,
+                    rule("standing:rule_001abc"),
+                    None,
+                ),
+                "Approved by your rule",
             ),
             (
                 resolved(ApprovalOutcome::Approved, ResolvedBy::Human, None),

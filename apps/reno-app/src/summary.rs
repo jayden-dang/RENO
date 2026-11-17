@@ -203,6 +203,24 @@ pub(crate) fn run_status_label(run: &RunSummary) -> &'static str {
     }
 }
 
+/// A rule that decided an approval, named the way a person would: an unnamed policy rule
+/// (`rules[7]`, the daemon's index) is "policy rule 8", a standing rule the person made
+/// (`standing:rule_<id>`) is "your rule", and a rule with a name of its own is "rule <name>".
+/// Anything unrecognised is shown as sent, so a daemon that later sends nicer text still reads.
+pub(crate) fn rule_words(name: &str) -> String {
+    if name.starts_with("standing:") {
+        return "your rule".to_owned();
+    }
+    let index = name
+        .strip_prefix("rules[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|digits| digits.parse::<usize>().ok());
+    match index.and_then(|i| i.checked_add(1)) {
+        Some(number) => format!("policy rule {number}"),
+        None => format!("rule {name}"),
+    }
+}
+
 /// An executor's display name, for every place the UI names one.
 ///
 /// The wire carries only the id, so the name is made here: the known ones by table, an ACP
@@ -370,6 +388,20 @@ mod tests {
             not_resumed: None,
             session: None,
         }
+    }
+
+    #[test]
+    fn a_rule_is_named_in_words_a_person_uses() {
+        assert_eq!(rule_words("rules[7]"), "policy rule 8");
+        assert_eq!(rule_words("rules[0]"), "policy rule 1");
+        assert_eq!(rule_words("standing:rule_001a2b"), "your rule");
+        assert_eq!(rule_words("standing:"), "your rule");
+        // A name someone gave the rule, or a form this code does not know, is shown as it came.
+        assert_eq!(rule_words("never reset hard"), "rule never reset hard");
+        assert_eq!(rule_words("rules[x]"), "rule rules[x]");
+        assert_eq!(rule_words("rules[7]x"), "rule rules[7]x");
+        let huge = "rules[99999999999999999999]";
+        assert_eq!(rule_words(huge), format!("rule {huge}"));
     }
 
     #[test]
