@@ -517,7 +517,7 @@ fn tool_label(name: &str, input: &serde_json::Value) -> String {
             .find_map(|k| input.get(*k).and_then(serde_json::Value::as_str))
     };
     if let Some(command) = field(&["command", "cmd"]) {
-        command.to_owned()
+        crate::summary::unwrap_shell(command)
     } else if let Some(url) = field(&["url"]) {
         format!("GET {url}")
     } else if let Some(path) = field(&["file_path", "path"]) {
@@ -772,6 +772,10 @@ mod tests {
             "edit a.rs"
         );
         assert_eq!(tool_label("mystery", &json!(null)), "mystery");
+        assert_eq!(
+            tool_label("shell", &json!({ "command": "/bin/zsh -lc 'touch x'" })),
+            "touch x"
+        );
     }
 
     #[test]

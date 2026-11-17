@@ -272,11 +272,76 @@ pub(crate) fn duration_label(ms: u64) -> String {
     }
 }
 
+/// Reads one shell word from all of `text`: quotes (`'..'`, `".."`) and backslashes are removed
+/// and adjacent pieces join, as in `'it'\''s'`. `None` when `text` is not exactly one word or a
+/// quote is left open.
+fn single_shell_word(text: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut chars = text.trim().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    inner => word.push(inner),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => match chars.next()? {
+                        escaped @ ('"' | '\\' | '$' | '`') => word.push(escaped),
+                        other => {
+                            word.push('\\');
+                            word.push(other);
+                        }
+                    },
+                    inner => word.push(inner),
+                }
+            },
+            '\\' => word.push(chars.next()?),
+            c if c.is_whitespace() => return None,
+            c => word.push(c),
+        }
+    }
+    Some(word)
+}
+
+/// The command inside a shell wrapper: `/bin/zsh -lc 'touch x'` is `touch x`. Codex runs every
+/// command as `<shell> -lc '<command>'`, which would otherwise fill the screen and hide the
+/// command. Only zsh, bash and sh with a lone `-c` command are unwrapped; anything else (extra
+/// arguments, an unclosed quote, an empty command) comes back as it was.
+pub(crate) fn unwrap_shell(command: &str) -> String {
+    let unwrapped = (|| {
+        let rest = command.trim_start();
+        let (shell, mut rest) = rest.split_once(char::is_whitespace)?;
+        if !matches!(shell.rsplit('/').next()?, "zsh" | "bash" | "sh") {
+            return None;
+        }
+        // Flags such as `-l`, `-i`, `-lc`; the one holding `c` is followed by the command.
+        loop {
+            rest = rest.trim_start();
+            let (flag, after) = rest.split_once(char::is_whitespace)?;
+            let letters = flag.strip_prefix('-')?;
+            if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+                return None;
+            }
+            rest = after;
+            if letters.contains('c') {
+                break;
+            }
+        }
+        single_shell_word(rest).filter(|inner| !inner.trim().is_empty())
+    })();
+    unwrapped.unwrap_or_else(|| command.to_owned())
+}
+
 /// What kind of action an approval asks for, as one phrase.
 pub(crate) fn action_word(subject: &ApprovalSubject) -> &'static str {
     let is_push = subject
         .command
         .as_deref()
+        .map(unwrap_shell)
         .is_some_and(|c| c.trim_start().starts_with("git push"));
     match subject.action {
         ActionClass::Command if is_push => "push",
@@ -293,7 +358,7 @@ pub(crate) fn action_word(subject: &ApprovalSubject) -> &'static str {
 /// tool name and its raw input.
 pub(crate) fn subject_line(subject: &ApprovalSubject) -> String {
     if let Some(command) = &subject.command {
-        return command.clone();
+        return unwrap_shell(command);
     }
     if let Some(url) = subject.raw.get("url").and_then(|v| v.as_str()) {
         return format!("GET {url}");
@@ -388,6 +453,55 @@ mod tests {
             not_resumed: None,
             session: None,
         }
+    }
+
+    #[test]
+    fn a_shell_wrapper_is_unwrapped_for_display_and_only_when_it_is_exactly_one() {
+        let cases = [
+            ("/bin/zsh -lc 'touch dogfood-x.txt'", "touch dogfood-x.txt"),
+            ("zsh -c \"git status\"", "git status"),
+            ("/usr/bin/bash -lc 'ls -la'", "ls -la"),
+            ("sh -c 'echo hi'", "echo hi"),
+            ("/bin/zsh -l -c 'pwd'", "pwd"),
+            ("  /bin/zsh   -lc   'pwd'  ", "pwd"),
+            // Quotes inside: the shell-escaped quote, double quotes within singles, and back.
+            (r"/bin/zsh -lc 'echo '\''hi'\'''", "echo 'hi'"),
+            (r#"/bin/zsh -lc 'echo "a b"'"#, r#"echo "a b""#),
+            (r#"bash -c "echo \"a b\" \$HOME""#, r#"echo "a b" $HOME"#),
+            ("/bin/zsh -lc 'a; b | c'", "a; b | c"),
+            ("/bin/zsh -lc unquoted", "unquoted"),
+        ];
+        for (raw, shown) in cases {
+            assert_eq!(unwrap_shell(raw), shown, "{raw}");
+        }
+        // Not a wrapper, or not one this reads with certainty: shown as it came.
+        for raw in [
+            "git push -u origin x",
+            "zsh script.sh",
+            "/bin/zsh -lc",
+            "/bin/zsh -lc ''",
+            "/bin/zsh -lc 'unclosed",
+            "/bin/zsh -lc 'a' extra",
+            "/bin/fish -c 'x'",
+            "/bin/zsh --login -c 'x'",
+            "xzsh -c 'x'",
+            "",
+        ] {
+            assert_eq!(unwrap_shell(raw), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_wrapped_command_shows_inside_but_a_rule_still_names_it_exactly() {
+        let wrapped = "/bin/zsh -lc 'git push origin x'";
+        let card = approval("w1", "k1", HOUR, Some(wrapped));
+        assert_eq!(subject_line(&card.subject), "git push origin x");
+        assert_eq!(action_word(&card.subject), "push");
+        assert!(
+            crate::vm::rules::hint(&card.subject, reno_proto::RememberScope::Run, None)
+                .contains(&format!("`{wrapped}`")),
+            "the standing rule matches the raw subject"
+        );
     }
 
     #[test]
