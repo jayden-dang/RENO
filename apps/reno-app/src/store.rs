@@ -1212,6 +1212,8 @@ impl D<()> {
 fn flatten<T>(result: Result<Result<T, ClientError>, gpui_tokio::JoinError>) -> Result<T, String> {
     match result {
         Ok(Ok(value)) => Ok(value),
+        // The daemon's own words; its JSON-RPC code means nothing to a person.
+        Ok(Err(ClientError::Remote(error))) => Err(error.message.clone()),
         Ok(Err(e)) => Err(e.to_string()),
         Err(e) => Err(e.to_string()),
     }
@@ -1272,6 +1274,17 @@ pub(crate) fn retry_line(state: &State) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_daemon_refusal_reads_as_its_message_without_the_code() {
+        let refused: Result<Result<(), ClientError>, gpui_tokio::JoinError> = Ok(Err(
+            ClientError::Remote(Box::new(reno_proto::ErrorObject::new(
+                reno_proto::ErrorCode::Conflict,
+                "run run_a has ended",
+            ))),
+        ));
+        assert_eq!(flatten(refused), Err("run run_a has ended".to_owned()));
+    }
+
     use super::*;
 
     fn offline(kind: OfflineKind, detail: &str, attempt: u32) -> Offline {

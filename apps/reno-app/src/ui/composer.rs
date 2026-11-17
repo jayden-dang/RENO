@@ -272,6 +272,9 @@ pub(crate) struct Composer {
     /// Whether the harness · model picker is open, and which harness it is showing.
     picker_open: bool,
     picker_harness: Option<ExecutorId>,
+    /// Whether the open picker was for a live run (switch it) or a next task. When the run
+    /// ends or starts under it, the picker closes rather than change meaning under the cursor.
+    picker_for_live: bool,
     _store: Subscription,
     _events: Subscription,
 }
@@ -284,6 +287,9 @@ impl Composer {
     fn with_mode(store: Entity<Store>, mode: Mode, cx: &mut Context<Self>) -> Self {
         let mut composer = Self {
             _store: cx.observe(&store, |this, _, cx| {
+                if this.picker_open && this.live_run(cx).is_some() != this.picker_for_live {
+                    this.picker_open = false;
+                }
                 this.refresh_preview(cx);
                 cx.notify();
             }),
@@ -316,6 +322,7 @@ impl Composer {
             pick: None,
             picker_open: false,
             picker_harness: None,
+            picker_for_live: false,
         };
         composer.refresh_preview(cx);
         composer
@@ -713,6 +720,7 @@ impl Composer {
             ))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.picker_open = !this.picker_open;
+                this.picker_for_live = this.live_run(cx).is_some();
                 if this.picker_open {
                     this.picker_harness = this
                         .pick
@@ -1715,17 +1723,24 @@ impl Composer {
                             reno_proto::RuleMatched::ExplicitExecutor => "named".to_owned(),
                             reno_proto::RuleMatched::Default => "default".to_owned(),
                         };
+                        // A picked harness is already named on the chip: only "why?" stays.
+                        if self.pick.is_some() {
+                            return line.child(why("why?", tone, cx));
+                        }
                         line.child(kit::exec_glyph(theme, &chosen.id, 14.0))
                             .child(
                                 div()
                                     .id("route-name")
                                     .debug_selector(|| "route-name".to_owned())
+                                    .min_w_0()
+                                    .truncate()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
                                     .child(SharedString::from(chosen.name.clone())),
                             )
                             .child(
                                 div()
+                                    .min_w_0()
                                     .truncate()
                                     .text_color(theme.muted)
                                     .child(SharedString::from(format!("\u{b7} {how}"))),
@@ -1927,8 +1942,16 @@ impl Render for Composer {
                 )
                 .children(self.class_chips(&theme, cx))
                 .child(self.model_chip(&theme, cx))
-                .child(div().flex_1())
-                .child(self.route_line(&theme, cx))
+                // The route line takes what is left and shrinks; it never runs under Send.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .flex()
+                        .justify_end()
+                        .child(self.route_line(&theme, cx)),
+                )
                 .child(self.action_button(&theme, cx)),
             Mode::Reason => div()
                 .px(px(14.0))

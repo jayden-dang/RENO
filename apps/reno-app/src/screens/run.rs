@@ -863,7 +863,20 @@ impl RunScreen {
         let Some(run) = run else {
             return pane.child(kv("State", text("starting".to_owned())));
         };
-        let model = self.facts.model.clone().or_else(|| run.model.clone());
+        // The model in use as the harness reported it (a mid-run switch included), by name.
+        let model = {
+            let state = self.store.read(cx).state();
+            crate::vm::models::in_use(state, &run.run_id)
+                .or_else(|| self.facts.model.clone())
+                .map(|id| {
+                    let name = crate::vm::models::model_name(state, &run.executor, &id);
+                    if name == id {
+                        id
+                    } else {
+                        format!("{name} \u{b7} {id}")
+                    }
+                })
+        };
         let end = if run.status.is_terminal() {
             run.updated_at_ms
         } else {

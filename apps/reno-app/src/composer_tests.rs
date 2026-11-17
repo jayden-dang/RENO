@@ -631,3 +631,31 @@ fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext
         "Codex fixes its model per turn: no picker on a live run"
     );
 }
+
+#[gpui::test]
+fn a_live_runs_picker_closes_when_the_run_ends(cx: &mut TestAppContext) {
+    // Dogfood 2026-11-17: the run ended under an open picker, which turned into the next
+    // task's picker with its pills shifted, and the click picked another model.
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-picker"));
+    let keeper = crate::tests::run_id("keeper1");
+    store.update(vcx, |s, cx| s.cancel_run(keeper.clone(), cx));
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .is_some_and(|r| r.status == RunStatus::Cancelled)
+        })
+    });
+    wait_drawn(vcx, |vcx| !painted(vcx, "model-picker"));
+    let _ = root;
+}
