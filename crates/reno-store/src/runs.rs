@@ -829,6 +829,26 @@ impl Store {
         .await
     }
 
+    /// Several transitions in one transaction, each checked against the state machine: a
+    /// reader never sees the state between them. Used where a run passes through a state it
+    /// must not be seen in (`interrupted`, on the way to a person's `cancelled`).
+    pub async fn transition_through(
+        &self,
+        run: &RunId,
+        fence: u64,
+        steps: Vec<(RunStatus, Note)>,
+        now: i64,
+    ) -> Result<()> {
+        let run = run.clone();
+        self.write(Durability::Normal, move |c| {
+            for (to, note) in &steps {
+                tx_transition(c, &run, fence, *to, note, now)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Records the harness session of a run, as soon as its executor reports one: what a resume
     /// continues. Fenced, and a no-op when the run already holds this session.
     pub async fn record_session(

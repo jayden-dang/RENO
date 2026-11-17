@@ -135,7 +135,7 @@ daemon_test! {
 }
 
 daemon_test! {
-    async fn cancel_ends_a_live_run_interrupted_and_steer_reaches_it() {
+    async fn cancel_ends_a_live_run_cancelled_and_steer_reaches_it() {
         let fx = Fixture::start().await;
 
         // A live run, held after its first text.

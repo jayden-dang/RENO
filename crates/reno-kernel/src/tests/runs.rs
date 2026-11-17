@@ -222,7 +222,7 @@ async fn max_concurrent_is_honoured_and_the_next_run_starts_when_a_slot_frees() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn cancel_ends_a_live_run_interrupted_and_a_queued_one_cancelled() {
+async fn cancel_ends_a_live_run_and_a_queued_one_cancelled() {
     let m = mock([
         MockStep::text("working"),
         MockStep::Sleep(Duration::from_secs(3600)),
@@ -239,7 +239,7 @@ async fn cancel_ends_a_live_run_interrupted_and_a_queued_one_cancelled() {
     assert_eq!(fx.status(&queued).await, RunStatus::Cancelled);
 
     fx.kernel.cancel(&live).await.unwrap();
-    fx.wait_status(&live, RunStatus::Interrupted).await;
+    fx.wait_status(&live, RunStatus::Cancelled).await;
     let journal = fx.journal_with_done(&live).await;
     assert!(matches!(
         last_done(&journal),
@@ -257,12 +257,54 @@ async fn cancel_ends_a_live_run_interrupted_and_a_queued_one_cancelled() {
             ..
         })
     ));
-    // An interrupted run can still be cancelled: it waits for a human.
-    assert_eq!(fx.kernel.cancel(&live).await.unwrap(), RunStatus::Cancelled);
+    // A person's cancel of a live run is final, like the queued one's.
+    assert!(matches!(
+        fx.kernel.cancel(&live).await,
+        Err(KernelError::NotCancellable {
+            status: RunStatus::Cancelled,
+            ..
+        })
+    ));
     let unknown = RunId::from_suffix("nope").unwrap();
     assert!(matches!(
         fx.kernel.cancel(&unknown).await,
         Err(KernelError::RunNotFound(_))
+    ));
+}
+
+/// A person's cancel is final: the run is never `interrupted` on the way, so no client reads
+/// "interrupted, it can take a message once it resumes" while the executor winds down. The
+/// stop is recorded, and it is not offered for resuming. A pause (the kill switch) is another
+/// matter: that run stays `interrupted`.
+#[tokio::test(start_paused = true)]
+async fn a_persons_cancel_of_a_live_run_never_shows_as_interrupted() {
+    let m = mock([
+        MockStep::text("working"),
+        MockStep::Sleep(Duration::from_secs(3600)),
+    ]);
+    let fx = Fx::new(config(1), registry(&[m])).await;
+    let run = fx.submit("long").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+
+    fx.kernel.cancel(&run).await.unwrap();
+    fx.wait_status(&run, RunStatus::Cancelled).await;
+    let summary = fx.kernel.get_run(&run).await.unwrap();
+    assert_eq!(
+        summary.stop,
+        Some(reno_proto::StopDetail::Cancelled {
+            by: reno_proto::CancelledBy::User
+        })
+    );
+    assert_eq!(summary.not_resumed, None);
+    // The run row went from live to cancelled in one write, so no reader saw `interrupted`.
+    // The journal still ends as the executor did, for the transcript.
+    let journal = fx.journal_with_done(&run).await;
+    assert!(matches!(
+        last_done(&journal),
+        ExecEvent::Done {
+            stop: StopReason::Interrupted,
+            ..
+        }
     ));
 }
 
@@ -358,10 +400,10 @@ async fn needs_input_waits_for_input_and_cancel_still_ends_it() {
     let run = fx.submit("ask").await;
     fx.wait_status(&run, RunStatus::WaitingInput).await;
     fx.kernel.cancel(&run).await.unwrap();
-    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.wait_status(&run, RunStatus::Cancelled).await;
     assert_eq!(
         fx.transitions(&run).await.last().unwrap(),
-        &("waiting_input".to_owned(), "interrupted".to_owned())
+        &("interrupted".to_owned(), "cancelled".to_owned())
     );
 }
 
@@ -711,7 +753,7 @@ async fn an_executor_that_ignores_cancel_is_cut_off_after_the_grace() {
         fx.journal(&run)
     );
     advance(Duration::from_secs(10)).await;
-    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.wait_status(&run, RunStatus::Cancelled).await;
     let journal = fx.journal_with_done(&run).await;
     assert!(diagnostic(last_done(&journal)).contains("did not stop"));
 }

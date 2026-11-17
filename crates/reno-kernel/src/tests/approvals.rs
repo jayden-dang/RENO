@@ -1070,7 +1070,7 @@ async fn a_run_that_ends_while_waiting_closes_its_approval_before_its_done() {
     let run = rig.run_as("keeper").await;
     let pending = rig.pending().await;
     rig.fx.kernel.cancel(&run).await.unwrap();
-    rig.fx.wait_status(&run, RunStatus::Interrupted).await;
+    rig.fx.wait_status(&run, RunStatus::Cancelled).await;
 
     let journal = rig.fx.journal_with_done(&run).await;
     let kinds: Vec<_> = journal

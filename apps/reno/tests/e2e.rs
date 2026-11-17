@@ -394,11 +394,11 @@ fn a_cancelled_run_ends_the_task_command_non_zero() {
     assert_eq!(
         rest.status.code(),
         Some(1),
-        "an interrupted run is not success"
+        "a cancelled run is not success"
     );
     let all = format!("{seen}{}", text(&rest.stdout));
     assert!(all.contains("done (interrupted)"), "{all}");
-    assert_eq!(world.runs()[0]["status"], "interrupted");
+    assert_eq!(world.runs()[0]["status"], "cancelled");
     assert_eq!(world.runs()[0]["stopReason"], "interrupted");
 
     let stop = world.reno(&["daemon", "stop"]);
@@ -432,19 +432,26 @@ fn an_interrupted_run_is_resumed_from_the_command_line() {
         Some(1)
     );
 
-    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    // The kill switch interrupts it. A person's cancel would end it for good instead.
+    assert!(world.reno(&["pause", "--stop-live"]).status.success());
     task.wait_with_output().expect("task run ends");
+    assert!(world.reno(&["resume"]).status.success());
 
     // The run says who stopped it and that the daemon will not take it back.
     let shown = text(&world.reno(&["run", "show", &id]).stdout);
-    assert!(shown.contains("stopped: the run was cancelled"), "{shown}");
+    assert!(shown.contains("interrupted"), "{shown}");
     assert!(
-        shown.contains("not resumed: it was cancelled on request"),
+        shown.contains("stopped: the run was stopped by the kill switch"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("not resumed: the kill switch stopped it"),
         "{shown}"
     );
     let json = world.json(&["run", "show", &id]);
     assert_eq!(json["run"]["stop"]["type"], "cancelled");
-    assert_eq!(json["run"]["notResumed"]["type"], "cancelled");
+    assert_eq!(json["run"]["stop"]["by"], "pause");
+    assert_eq!(json["run"]["notResumed"]["type"], "paused");
     assert_eq!(json["run"]["session"], "mock-session");
 
     let resumed = world.reno(&["run", "resume", &id, "--prompt", "carry on"]);
@@ -483,8 +490,9 @@ fn run_tail_of_a_resumed_run_continues_past_the_first_done() {
         .expect("spawn task run");
     read_until(&mut task, "Hello from the mock executor.");
     let id = world.runs()[0]["runId"].as_str().unwrap().to_owned();
-    assert!(world.reno(&["run", "cancel", &id]).status.success());
+    assert!(world.reno(&["pause", "--stop-live"]).status.success());
     task.wait_with_output().expect("task run ends");
+    assert!(world.reno(&["resume"]).status.success());
     assert!(world.reno(&["run", "resume", &id]).status.success());
 
     // From the start: the first attempt's Done is followed by the resume, which is followed.

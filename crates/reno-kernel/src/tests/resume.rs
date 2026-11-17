@@ -334,12 +334,12 @@ async fn stays_interrupted(fx: &Fx, run: &RunId, why: NotResumed) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_run_a_person_cancelled_is_not_resumed() {
+async fn a_run_a_person_cancelled_is_final_and_is_not_resumed() {
     let fx = Fx::new(config(1), registry(&[long_run()])).await;
     let run = fx.submit("work").await;
     until(async || session_of(&fx, &run).await).await;
     fx.kernel.cancel(&run).await.unwrap();
-    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.wait_status(&run, RunStatus::Cancelled).await;
     let journal = fx.journal_with_done(&run).await;
     assert_eq!(
         done_reason(&journal),
@@ -355,13 +355,23 @@ async fn a_run_a_person_cancelled_is_not_resumed() {
             by: CancelledBy::User
         })
     );
-    assert_eq!(summary.not_resumed, Some(NotResumed::Cancelled));
+    // Nothing is left to resume: neither a person nor a restart takes it back.
+    assert_eq!(summary.not_resumed, None);
+    assert_eq!(
+        not_resumable(fx.kernel.resume_run(&run, None).await.unwrap_err()),
+        NotResumed::WrongStatus {
+            status: RunStatus::Cancelled
+        }
+    );
 
     drain(&fx).await;
     let (dir, store) = fx.into_store();
     let after = finishing();
     let fx = restart(dir, store, after.clone()).await;
-    stays_interrupted(&fx, &run, NotResumed::Cancelled).await;
+    for _ in 0..500 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fx.status(&run).await, RunStatus::Cancelled);
     assert!(after.log().specs.is_empty(), "nothing was started");
 }
 
@@ -561,13 +571,22 @@ async fn a_run_judged_once_is_not_judged_again_at_every_start() {
 // ---- a person's resume ---------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn a_person_resumes_a_cancelled_run_with_a_prompt_of_their_own() {
-    let first = long_run();
+async fn a_person_resumes_an_interrupted_run_with_a_prompt_of_their_own() {
+    // The executor ends the run by itself, which the daemon does not take back on its own.
+    let first = mock([
+        MockStep::started("sess-1", "mock-1"),
+        MockStep::text("working"),
+        MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Interrupted,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }),
+    ]);
     let fx = Fx::new(config(1), registry(std::slice::from_ref(&first))).await;
     // The same executor serves the second attempt: swap its script by using a second mock id.
     let run = fx.submit("work").await;
     until(async || session_of(&fx, &run).await).await;
-    fx.kernel.cancel(&run).await.unwrap();
     fx.wait_status(&run, RunStatus::Interrupted).await;
     fx.journal_with_done(&run).await;
 
@@ -582,8 +601,6 @@ async fn a_person_resumes_a_cancelled_run_with_a_prompt_of_their_own() {
     assert_eq!(specs[1].resume, Some(SessionRef("sess-1".into())));
     assert_eq!(specs[1].prompt, "carry on with the tests");
     assert_eq!(specs[0].prompt, "work");
-    let summary = fx.kernel.get_run(&run).await.unwrap();
-    assert_eq!((summary.stop, summary.not_resumed), (None, None));
     until(async || {
         fx.journal(&run)
             .iter()
@@ -647,10 +664,17 @@ async fn a_run_that_cannot_be_resumed_is_refused_with_the_reason() {
     );
 
     // Interrupted before its harness said anything: no session.
-    let quiet = Fx::new(config(1), registry(&[mock([MockStep::Sleep(hour())])])).await;
+    let quiet = Fx::new(
+        config(1),
+        registry(&[mock([MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Interrupted,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        })])]),
+    )
+    .await;
     let run = quiet.submit("work").await;
-    quiet.wait_status(&run, RunStatus::Running).await;
-    quiet.kernel.cancel(&run).await.unwrap();
     quiet.wait_status(&run, RunStatus::Interrupted).await;
     quiet.journal_with_done(&run).await;
     assert_eq!(

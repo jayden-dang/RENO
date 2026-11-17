@@ -295,6 +295,19 @@ impl Db {
             .await
     }
 
+    /// Transitions that commit together; see `Store::transition_through`.
+    pub(crate) async fn transition_through(
+        &self,
+        run: &RunId,
+        fence: u64,
+        steps: Vec<(RunStatus, Note)>,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .transition_through(run, fence, steps, self.now_ms())
+            .await
+    }
+
     pub(crate) async fn record_session(
         &self,
         run: &RunId,
