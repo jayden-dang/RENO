@@ -349,7 +349,7 @@ impl World {
             .collect();
         self.runs.push(RunRecord {
             summary: RunSummary {
-                effort: None,
+                effort: params.effort,
                 run_id: run_id.clone(),
                 task_id: TaskId::from_suffix(&format!("fake{n}"))?,
                 executor,

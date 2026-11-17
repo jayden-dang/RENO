@@ -945,6 +945,9 @@ impl RunScreen {
             ))
             .when_some(access, |p, access| p.child(kv("Access", text(access))))
             .when_some(model, |p, model| p.child(kv("Model", text(model))))
+            .when_some(run.effort, |p, effort| {
+                p.child(kv("Effort", text(effort.as_str().to_owned())))
+            })
             .when_some(summary::run_repo(run), |p, repo| {
                 // The folder's name, with the whole path under it when the daemon gave one.
                 p.child(kv(

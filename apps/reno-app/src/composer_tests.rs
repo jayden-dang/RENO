@@ -550,11 +550,12 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
         Some(crate::vm::models::Pick {
             executor: "claude-code".parse().unwrap(),
             model: Some("claude-sonnet-5-5".into()),
+            effort: None,
         })
     );
     assert!(
-        !painted(vcx, "pick-model-claude-sonnet-5-5"),
-        "choosing closes it"
+        painted(vcx, "pick-effort-default"),
+        "a model with effort levels keeps the picker open for its effort"
     );
 
     composer.update_in(vcx, |c, window, cx| c.fill("pick test", window, cx));
@@ -658,4 +659,61 @@ fn a_live_runs_picker_closes_when_the_run_ends(cx: &mut TestAppContext) {
     });
     wait_drawn(vcx, |vcx| !painted(vcx, "model-picker"));
     let _ = root;
+}
+
+#[gpui::test]
+fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-claude-code"));
+    click(vcx, "pick-harness-claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(
+        !painted(vcx, "pick-effort-high"),
+        "no effort before a model"
+    );
+    // Haiku takes low to high: no xhigh.
+    click(vcx, "pick-model-claude-haiku-5-5");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-effort-high"));
+    assert!(!painted(vcx, "pick-effort-xhigh"));
+    // Sonnet goes to max.
+    click(vcx, "pick-model-claude-sonnet-5-5");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-effort-xhigh"));
+    click(vcx, "pick-effort-xhigh");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "model-picker"),
+        "choosing an effort closes the picker"
+    );
+    let composer = home_composer(vcx, &root);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().cloned()),
+        Some(crate::vm::models::Pick {
+            executor: "claude-code".parse().unwrap(),
+            model: Some("claude-sonnet-5-5".into()),
+            effort: Some(reno_proto::Effort::XHigh),
+        })
+    );
+    composer.update_in(vcx, |c, window, cx| c.fill("effort test", window, cx));
+    draw(vcx);
+    click(vcx, "send");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+    let run = root
+        .read_with(vcx, |r, cx| {
+            r.run_screen().map(|s| s.read(cx).run_id().clone())
+        })
+        .unwrap();
+    store.read_with(vcx, |s, _| {
+        let summary = s.state().run(&run).unwrap();
+        assert_eq!(summary.effort, Some(reno_proto::Effort::XHigh));
+        assert_eq!(summary.model.as_deref(), Some("claude-sonnet-5-5"));
+    });
 }

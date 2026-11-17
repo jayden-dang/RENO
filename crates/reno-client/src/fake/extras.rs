@@ -355,11 +355,24 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             health: Some(health),
         })
     };
+    // The efforts each demo model takes, as its CLI would report them: Claude's big models go to
+    // `max`, Haiku to `high`; Codex models from `minimal` to `xhigh`.
+    let efforts = |id: &str| -> (Vec<reno_proto::Effort>, Option<reno_proto::Effort>) {
+        use reno_proto::Effort::{High, Low, Max, Medium, Minimal, XHigh};
+        match id {
+            "claude-opus-5-5" | "claude-sonnet-5-5" => {
+                (vec![Low, Medium, High, XHigh, Max], Some(High))
+            }
+            "claude-haiku-5-5" => (vec![Low, Medium, High], Some(Medium)),
+            id if id.starts_with("gpt-") => (vec![Minimal, Low, Medium, High, XHigh], Some(Medium)),
+            _ => (vec![], None),
+        }
+    };
     let models = |ids: &[(&str, &str)]| {
         ids.iter()
             .map(|(id, name)| ModelInfo {
-                default_effort: None,
-                efforts: vec![],
+                default_effort: efforts(id).1,
+                efforts: efforts(id).0,
                 id: (*id).to_owned(),
                 display_name: Some((*name).to_owned()),
                 description: None,

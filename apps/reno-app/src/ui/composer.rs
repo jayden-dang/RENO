@@ -212,7 +212,7 @@ fn ended(how: &str) -> SteerState {
 pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunParams {
     let bot = run.bot.as_ref().map(|pin| pin.name.clone());
     TaskRunParams {
-        effort: None,
+        effort: run.effort,
         prompt: prompt.to_owned(),
         // The harness and model the run ended on (a model switched mid-run included), unless the
         // box picks others.
@@ -379,6 +379,7 @@ impl Composer {
         if let Some(pick) = &self.pick {
             params.executor = Some(pick.executor.clone());
             params.model.clone_from(&pick.model);
+            params.effort = pick.effort;
         }
         params
     }
@@ -686,6 +687,7 @@ impl Composer {
                 let pick = models::Pick {
                     executor: r.executor.clone(),
                     model: models::in_use(state, run),
+                    effort: r.effort,
                 };
                 (Some(r.executor.clone()), models::label(state, Some(&pick)))
             }),
@@ -749,7 +751,37 @@ impl Composer {
             cx.notify();
             return;
         }
-        self.pick = Some(models::Pick { executor, model });
+        // A model that lists effort levels keeps the picker open for one; the effort chosen
+        // before stays when this model takes it too.
+        let levels = {
+            let state = self.store.read(cx).state();
+            model
+                .as_deref()
+                .and_then(|m| models::model(state, &executor, m))
+                .map(|m| m.efforts)
+                .unwrap_or_default()
+        };
+        let effort = self
+            .pick
+            .as_ref()
+            .and_then(|p| p.effort)
+            .filter(|e| levels.contains(e));
+        self.picker_open = !levels.is_empty();
+        self.pick = Some(models::Pick {
+            executor,
+            model,
+            effort,
+        });
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    /// Choose the picked model's effort (`None`: its default); the picker closes.
+    fn choose_effort(&mut self, effort: Option<reno_proto::Effort>, cx: &mut Context<Self>) {
+        if let Some(pick) = &mut self.pick {
+            pick.effort = effort;
+        }
+        self.picker_open = false;
         self.refresh_preview(cx);
         cx.notify();
     }
@@ -891,6 +923,57 @@ impl Composer {
                             this.choose_model(id.clone(), Some(model.clone()), cx);
                         }))
                     }));
+                // The picked model's effort levels, as its CLI listed them (not on a live run:
+                // no harness changes effort mid-run).
+                let effort_model = if live.is_none() {
+                    self.pick
+                        .as_ref()
+                        .filter(|p| p.executor == h.id)
+                        .and_then(|p| p.model.as_deref())
+                        .and_then(|m| h.models.iter().find(|x| x.id == m))
+                        .filter(|m| !m.efforts.is_empty())
+                        .cloned()
+                } else {
+                    None
+                };
+                let effort_row = effort_model.map(|m| {
+                    let chosen = self.pick.as_ref().and_then(|p| p.effort);
+                    let default_word = m.default_effort.map_or_else(
+                        || "Default".to_owned(),
+                        |e| format!("Default ({})", e.as_str()),
+                    );
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.faint)
+                                .mr(px(4.0))
+                                .child("Effort"),
+                        )
+                        .child(
+                            pill("pick-effort-default".into(), default_word, chosen.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.choose_effort(None, cx);
+                                })),
+                        )
+                        .children(m.efforts.iter().map(|e| {
+                            let e = *e;
+                            pill(
+                                format!("pick-effort-{}", e.as_str()),
+                                e.as_str().to_owned(),
+                                chosen == Some(e),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.choose_effort(Some(e), cx);
+                                },
+                            ))
+                        }))
+                });
                 panel
                     .child(div().text_size(px(12.0)).text_color(theme.faint).child(
                         if live.is_some() {
@@ -900,6 +983,7 @@ impl Composer {
                         },
                     ))
                     .child(row)
+                    .children(effort_row)
             }
         }
     }

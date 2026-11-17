@@ -6,16 +6,18 @@
 
 use reno_client::State;
 use reno_proto::{
-    ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
+    Effort, ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
 };
 
 use crate::summary;
 
-/// What the person chose: a harness, and one of its models (`None`: the harness's default).
+/// What the person chose: a harness, one of its models (`None`: the harness's default), and one
+/// of that model's effort levels (`None`: the model's default).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Pick {
     pub(crate) executor: ExecutorId,
     pub(crate) model: Option<String>,
+    pub(crate) effort: Option<Effort>,
 }
 
 /// One model on offer.
@@ -24,6 +26,10 @@ pub(crate) struct ModelChoice {
     pub(crate) id: String,
     /// "Sonnet 5.5", or the id when the CLI gave no name.
     pub(crate) name: String,
+    /// The effort levels the CLI says it takes, least to most; empty when it did not say.
+    pub(crate) efforts: Vec<Effort>,
+    /// Its own level when none is asked for.
+    pub(crate) default_effort: Option<Effort>,
 }
 
 /// One harness on offer.
@@ -63,6 +69,8 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
             .into_iter()
             .map(|m| ModelChoice {
                 name: m.display_name.clone().unwrap_or_else(|| m.id.clone()),
+                efforts: m.efforts,
+                default_effort: m.default_effort,
                 id: m.id,
             })
             .collect(),
@@ -110,23 +118,28 @@ pub(crate) fn in_use(state: &State, run: &RunId) -> Option<String> {
     reported.or_else(|| state.run(run).and_then(|r| r.model.clone()))
 }
 
-/// The chip's words: "Auto", "Codex", or "Claude Code · Sonnet 5.5".
+/// One model of a harness, when the harness lists it.
+pub(crate) fn model(state: &State, executor: &ExecutorId, model: &str) -> Option<ModelChoice> {
+    harness(state, executor).and_then(|h| h.models.into_iter().find(|m| m.id == model))
+}
+
+/// The chip's words: "Auto", "Codex", "Claude Code · Sonnet 5.5", or with an effort
+/// "Claude Code · Sonnet 5.5 · high".
 pub(crate) fn label(state: &State, pick: Option<&Pick>) -> String {
-    match pick {
-        None => "Auto".to_owned(),
-        Some(Pick {
-            executor,
-            model: None,
-        }) => summary::executor_name(executor.as_str()),
-        Some(Pick {
-            executor,
-            model: Some(model),
-        }) => format!(
-            "{} \u{b7} {}",
-            summary::executor_name(executor.as_str()),
-            model_name(state, executor, model)
-        ),
+    let Some(pick) = pick else {
+        return "Auto".to_owned();
+    };
+    let mut words = summary::executor_name(pick.executor.as_str());
+    if let Some(model) = &pick.model {
+        words.push_str(&format!(
+            " \u{b7} {}",
+            model_name(state, &pick.executor, model)
+        ));
     }
+    if let Some(effort) = pick.effort {
+        words.push_str(&format!(" \u{b7} {}", effort.as_str()));
+    }
+    words
 }
 
 #[cfg(test)]
@@ -231,7 +244,8 @@ mod tests {
                 &state,
                 Some(&Pick {
                     executor: claude.clone(),
-                    model: None
+                    model: None,
+                    effort: None,
                 })
             ),
             "Claude Code"
@@ -241,11 +255,26 @@ mod tests {
                 &state,
                 Some(&Pick {
                     executor: claude.clone(),
-                    model: Some("claude-sonnet-5-5".into())
+                    model: Some("claude-sonnet-5-5".into()),
+                    effort: None,
                 })
             ),
             "Claude Code \u{b7} Sonnet 5.5"
         );
+        assert_eq!(
+            label(
+                &state,
+                Some(&Pick {
+                    executor: claude.clone(),
+                    model: Some("claude-sonnet-5-5".into()),
+                    effort: Some(Effort::XHigh),
+                })
+            ),
+            "Claude Code \u{b7} Sonnet 5.5 \u{b7} xhigh"
+        );
+        let haiku = model(&state, &claude, "claude-haiku-5-5").unwrap();
+        assert_eq!(haiku.efforts, [Effort::Low, Effort::Medium, Effort::High]);
+        assert_eq!(haiku.default_effort, Some(Effort::Medium));
         assert_eq!(model_name(&state, &claude, "sonnet"), "sonnet");
     }
 }
