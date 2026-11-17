@@ -32,6 +32,7 @@ fn run_id(s: &str) -> RunId {
 
 fn summary(n: u64) -> RunSummary {
     RunSummary {
+        effort: None,
         run_id: run_id("a"),
         task_id: "task_a".parse().expect("valid id"),
         executor: "codex".parse().expect("valid id"),

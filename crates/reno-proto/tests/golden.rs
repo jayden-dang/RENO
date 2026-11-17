@@ -309,7 +309,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort"],
                "pid": 4242}),
     );
 }
@@ -586,6 +586,7 @@ fn daemon_shutdown() {
 
 fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
     RunSummary {
+        effort: None,
         run_id: run_id(),
         task_id: "task_01HZX8".parse().unwrap(),
         executor: "mock".parse().unwrap(),
@@ -696,6 +697,7 @@ fn task_run_params_old_and_new_shapes() {
     // A client that predates `bot` sends exactly this, and it still parses.
     golden(
         &TaskRunParams {
+            effort: None,
             prompt: "go".into(),
             executor: Some("mock".parse().unwrap()),
             bot: None,
@@ -708,6 +710,7 @@ fn task_run_params_old_and_new_shapes() {
     );
     golden(
         &TaskRunParams {
+            effort: None,
             prompt: "go".into(),
             executor: None,
             bot: Some("keeper".into()),
@@ -1105,6 +1108,8 @@ fn executor_health_on_the_wire() {
                 account: Some("me@example.com".into()),
             },
             models: ModelCatalog::live(vec![ModelInfo {
+                default_effort: None,
+                efforts: vec![],
                 id: "gpt-6".into(),
                 display_name: Some("GPT-6".into()),
                 description: None,

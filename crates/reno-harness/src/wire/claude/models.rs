@@ -60,6 +60,8 @@ pub(crate) fn parse_initialize(payload: &Value) -> Option<LiveModels> {
             .all(|known| known.id != row.resolved_model)
         {
             live.models.push(ModelInfo {
+                default_effort: None,
+                efforts: vec![],
                 id: row.resolved_model,
                 display_name: row.display_name.filter(|name| !name.is_empty()),
                 description: row.description.filter(|text| !text.is_empty()),

@@ -35,6 +35,7 @@ fn keychain() -> (Arc<MemoryKeychain>, Arc<KeychainSecrets>) {
 
 fn bot_task(bot: &str) -> TaskRunParams {
     TaskRunParams {
+        effort: None,
         prompt: "go".into(),
         executor: None,
         bot: Some(bot.to_owned()),

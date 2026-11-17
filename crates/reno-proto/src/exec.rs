@@ -71,16 +71,56 @@ impl std::fmt::Display for SandboxLevel {
     }
 }
 
-/// Requested reasoning effort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+/// Requested reasoning effort, least to most. Which levels a model takes is what its harness
+/// reports (`ModelInfo::efforts`); a level a model does not list is refused before the run
+/// starts. Ordered, so `Low < High`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
+    /// Barely any reasoning (Codex `minimal`).
+    Minimal,
     /// Fastest, least reasoning.
     Low,
     /// Balanced default.
     Medium,
-    /// Most reasoning.
+    /// More reasoning.
     High,
+    /// Extra high (Claude Code and Codex `xhigh`).
+    #[serde(rename = "xhigh")]
+    XHigh,
+    /// The most the model offers (Claude Code `max`).
+    Max,
+}
+
+impl Effort {
+    /// Every level, least to most.
+    pub const ALL: [Self; 6] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    /// The word harnesses use for it: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// The level a harness word names, if Reno knows it.
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|e| e.as_str() == word)
+    }
 }
 
 /// When a running harness can accept a steering message.
@@ -498,6 +538,13 @@ pub struct ModelInfo {
     /// What the harness says it is for ("Most efficient for simpler tasks"), when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The effort levels the harness says this model takes, least to most. Empty: the harness
+    /// did not say, and no effort may be asked of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<Effort>,
+    /// The level the model uses when none is asked for, when the harness says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<Effort>,
 }
 
 /// Harness CLI versions an adapter supports.

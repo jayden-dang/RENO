@@ -239,6 +239,7 @@ mod tests {
         t.last_run_id = Some(RunId::from_suffix("r1").unwrap());
         state.apply(Update::Triggers(vec![t]));
         state.apply(Update::RunUpserted(RunSummary {
+            effort: None,
             run_id: RunId::from_suffix("r1").unwrap(),
             task_id: TaskId::from_suffix("r1").unwrap(),
             executor: "claude-code".parse().unwrap(),
@@ -347,6 +348,7 @@ mod tests {
         t.last_run_id = Some(RunId::from_suffix("r1").unwrap());
         state.apply(Update::Triggers(vec![t]));
         state.apply(Update::RunUpserted(RunSummary {
+            effort: None,
             run_id: RunId::from_suffix("r1").unwrap(),
             task_id: TaskId::from_suffix("r1").unwrap(),
             executor: "claude-code".parse().unwrap(),

@@ -55,6 +55,41 @@ expression: protocol_schema()
           },
           "type": "object"
         },
+        "Effort": {
+          "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+          "oneOf": [
+            {
+              "const": "minimal",
+              "description": "Barely any reasoning (Codex `minimal`).",
+              "type": "string"
+            },
+            {
+              "const": "low",
+              "description": "Fastest, least reasoning.",
+              "type": "string"
+            },
+            {
+              "const": "medium",
+              "description": "Balanced default.",
+              "type": "string"
+            },
+            {
+              "const": "high",
+              "description": "More reasoning.",
+              "type": "string"
+            },
+            {
+              "const": "xhigh",
+              "description": "Extra high (Claude Code and Codex `xhigh`).",
+              "type": "string"
+            },
+            {
+              "const": "max",
+              "description": "The most the model offers (Claude Code `max`).",
+              "type": "string"
+            }
+          ]
+        },
         "ExecutorId": {
           "pattern": "^[A-Za-z0-9._-]{1,64}$",
           "type": "string"
@@ -111,6 +146,17 @@ expression: protocol_schema()
             "max_wall_time": "45m"
           },
           "description": "The limits on this bot's runs."
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Reasoning effort for the bot's runs: `minimal`, `low`, `medium`, `high`, `xhigh` or `max`,\none the run's model takes. Absent: the model's own default."
         },
         "executors": {
           "description": "Executors in order of preference. At least one.",
@@ -668,7 +714,8 @@ expression: protocol_schema()
     "executor.frames",
     "rules",
     "rules.project",
-    "run.model"
+    "run.model",
+    "run.effort"
   ],
   "methods": [
     {
@@ -858,6 +905,41 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -886,6 +968,17 @@ expression: protocol_schema()
               "string",
               "null"
             ]
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reasoning effort, one the run's model lists (`ModelInfo::efforts`); refused otherwise.\nAbsent: the bot's, else the model's own default. Needs feature `run.effort`."
           },
           "executor": {
             "anyOf": [
@@ -1435,6 +1528,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -1979,6 +2107,17 @@ expression: protocol_schema()
               "string",
               "null"
             ]
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reasoning effort the run was started with (the task's, else the bot's); absent when\nnone was asked for and the model uses its own default."
           },
           "executor": {
             "$ref": "#/$defs/ExecutorId",
@@ -2582,6 +2721,41 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -2609,6 +2783,17 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Reasoning effort, one the run's model lists (`ModelInfo::efforts`); refused otherwise.\nAbsent: the bot's, else the model's own default. Needs feature `run.effort`."
               },
               "executor": {
                 "anyOf": [
@@ -3455,6 +3640,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -3808,6 +4028,17 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The reasoning effort the run was started with (the task's, else the bot's); absent when\nnone was asked for and the model uses its own default."
               },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
@@ -6921,6 +7152,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorCaps": {
             "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
             "properties": {
@@ -7170,6 +7436,17 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
               "description": {
                 "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
                 "type": [
@@ -7183,6 +7460,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
               },
               "id": {
                 "description": "Model id as passed to the harness.",
@@ -7535,6 +7819,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorCaps": {
             "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
             "properties": {
@@ -7784,6 +8103,17 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
               "description": {
                 "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
                 "type": [
@@ -7797,6 +8127,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
               },
               "id": {
                 "description": "Model id as passed to the harness.",
@@ -8145,6 +8482,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorCaps": {
             "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
             "properties": {
@@ -8394,6 +8766,17 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
               "description": {
                 "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
                 "type": [
@@ -8407,6 +8790,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
               },
               "id": {
                 "description": "Model id as passed to the harness.",
@@ -10255,6 +10645,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
@@ -10608,6 +11033,17 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The reasoning effort the run was started with (the task's, else the bot's); absent when\nnone was asked for and the model uses its own default."
               },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
@@ -11447,6 +11883,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecutorCaps": {
             "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
             "properties": {
@@ -11696,6 +12167,17 @@ expression: protocol_schema()
           "ModelInfo": {
             "description": "A model an executor offers.",
             "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
               "description": {
                 "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
                 "type": [
@@ -11709,6 +12191,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
               },
               "id": {
                 "description": "Model id as passed to the harness.",

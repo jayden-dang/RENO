@@ -16,6 +16,7 @@ use reno_proto::{
 
 fn task(prompt: &str) -> TaskRunParams {
     TaskRunParams {
+        effort: None,
         prompt: prompt.to_owned(),
         executor: Some("claude-code".parse().unwrap()),
         bot: None,

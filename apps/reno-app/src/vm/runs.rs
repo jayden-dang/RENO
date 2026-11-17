@@ -220,6 +220,7 @@ mod tests {
 
     fn run(name: &str, status: RunStatus, age_min: u64) -> RunSummary {
         RunSummary {
+            effort: None,
             run_id: RunId::from_suffix(name).unwrap(),
             task_id: TaskId::from_suffix(name).unwrap(),
             executor: "claude-code".parse().unwrap(),

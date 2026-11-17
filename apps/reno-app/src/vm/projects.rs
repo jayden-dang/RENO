@@ -245,6 +245,7 @@ mod tests {
 
     fn run(id: &str, status: RunStatus, cwd: Option<&str>, created: u64) -> RunSummary {
         RunSummary {
+            effort: None,
             run_id: RunId::from_suffix(id).unwrap(),
             task_id: TaskId::from_suffix(id).unwrap(),
             executor: "claude-code".parse().unwrap(),

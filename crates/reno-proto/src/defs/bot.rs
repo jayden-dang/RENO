@@ -108,6 +108,10 @@ pub struct BotDef {
     /// different vendors should leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reasoning effort for the bot's runs: `minimal`, `low`, `medium`, `high`, `xhigh` or `max`,
+    /// one the run's model takes. Absent: the model's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::Effort>,
 }
 
 /// The longest `model`, in bytes.

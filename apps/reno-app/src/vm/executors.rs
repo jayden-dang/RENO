@@ -620,6 +620,8 @@ mod tests {
         let models = |source_live: bool, n: usize| {
             let list: Vec<ModelInfo> = (0..n)
                 .map(|i| ModelInfo {
+                    default_effort: None,
+                    efforts: vec![],
                     id: format!("m{i}"),
                     display_name: None,
                     description: None,
@@ -715,6 +717,7 @@ mod tests {
             detail: "words for a person, never read".into(),
         };
         let run = |status: RunStatus, stop: Option<StopDetail>| RunSummary {
+            effort: None,
             run_id: RunId::from_suffix("r1").unwrap(),
             task_id: "task_t1".parse().unwrap(),
             title: "x".into(),

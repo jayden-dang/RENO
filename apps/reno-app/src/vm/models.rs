@@ -179,6 +179,7 @@ mod tests {
         let run = RunId::from_suffix("a").unwrap();
         let mut state = State::new();
         state.apply(reno_client::Update::RunUpserted(RunSummary {
+            effort: None,
             run_id: run.clone(),
             task_id: TaskId::from_suffix("a").unwrap(),
             executor: "claude-code".parse().unwrap(),

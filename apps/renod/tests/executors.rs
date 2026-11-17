@@ -190,6 +190,7 @@ daemon_test! {
         within(fx.client.refresh_executors(None)).await.unwrap();
 
         let run = within(fx.client.run_task(TaskRunParams {
+            effort: None,
             prompt: "go".into(),
             executor: Some(id("mock")),
             bot: None,
@@ -264,6 +265,7 @@ daemon_test! {
         let fx = Fixture::start().await;
         for _ in 0..3 {
             let run = within(fx.client.run_task(TaskRunParams {
+                effort: None,
                 prompt: "go".into(),
                 executor: Some(id("mock")),
                 bot: None,

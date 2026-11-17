@@ -265,6 +265,7 @@ async fn run_for_bot(
     executor: Option<&str>,
 ) -> Result<reno_proto::RunId, ClientError> {
     within(client.run_task(TaskRunParams {
+        effort: None,
         prompt: "go".into(),
         executor: executor.map(id),
         bot: Some(bot.into()),
@@ -325,6 +326,7 @@ daemon_test! {
         assert_eq!(code(&e), ErrorCode::NotFound);
         // Neither a bot nor an executor: the router chooses (T1.5), so this is no longer refused.
         let run = within(fx.client.run_task(TaskRunParams {
+            effort: None,
             prompt: "go".into(),
             executor: None,
             bot: None,

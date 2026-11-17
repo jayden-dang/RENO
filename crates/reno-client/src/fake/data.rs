@@ -74,6 +74,7 @@ fn summary(
     last_change_age: u64,
 ) -> Ids<RunSummary> {
     Ok(RunSummary {
+        effort: None,
         run_id: RunId::from_suffix(name)?,
         task_id: TaskId::from_suffix(name)?,
         executor: exec.parse()?,

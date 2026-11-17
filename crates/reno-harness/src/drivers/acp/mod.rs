@@ -474,6 +474,8 @@ impl AcpExecutor {
             .models
             .iter()
             .map(|(id, name)| ModelInfo {
+                default_effort: None,
+                efforts: vec![],
                 id: (*id).to_owned(),
                 display_name: Some((*name).to_owned()),
                 description: None,

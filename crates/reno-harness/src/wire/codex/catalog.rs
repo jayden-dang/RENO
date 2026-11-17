@@ -11,11 +11,7 @@ use serde_json::Value;
 
 /// `turn/start`'s `effort`.
 pub(crate) fn effort(effort: Effort) -> &'static str {
-    match effort {
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-    }
+    effort.as_str()
 }
 
 /// `thread/start`'s `sandbox` param (kebab-case wire words).
@@ -80,6 +76,8 @@ pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Optio
             .to_owned();
         models.push((
             ModelInfo {
+                default_effort: None,
+                efforts: vec![],
                 id: id.to_owned(),
                 display_name: Some(display_name),
                 description: None,
@@ -113,6 +111,8 @@ pub(crate) fn static_model_infos() -> Vec<ModelInfo> {
     CURATED
         .iter()
         .map(|(id, label)| ModelInfo {
+            default_effort: None,
+            efforts: vec![],
             id: (*id).into(),
             display_name: Some((*label).into()),
             description: None,
@@ -208,6 +208,8 @@ mod tests {
             vec![
                 (
                     ModelInfo {
+                        default_effort: None,
+                        efforts: vec![],
                         id: "gpt-6-astra".into(),
                         display_name: Some("GPT-6-Astra".into()),
                         description: None,
@@ -216,6 +218,8 @@ mod tests {
                 ),
                 (
                     ModelInfo {
+                        default_effort: None,
+                        efforts: vec![],
                         id: "gpt-old".into(),
                         display_name: Some("gpt-old".into()),
                         description: None,

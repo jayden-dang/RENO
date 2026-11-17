@@ -80,6 +80,8 @@ impl Executors {
         ]);
         let mut descriptor = reno_harness::exec::Executor::descriptor(&model);
         descriptor.caps.models.push(reno_proto::ModelInfo {
+            default_effort: None,
+            efforts: vec![],
             id: "mock-2".into(),
             display_name: Some("Mock 2".into()),
             description: None,
@@ -268,6 +270,7 @@ impl Fixture {
 
     pub(crate) async fn run(&self, executor: &str, prompt: &str) -> RunId {
         within(self.client.run_task(TaskRunParams {
+            effort: None,
             prompt: prompt.into(),
             executor: Some(id(executor)),
             bot: None,

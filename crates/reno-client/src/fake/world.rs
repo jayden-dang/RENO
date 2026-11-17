@@ -349,6 +349,7 @@ impl World {
             .collect();
         self.runs.push(RunRecord {
             summary: RunSummary {
+                effort: None,
                 run_id: run_id.clone(),
                 task_id: TaskId::from_suffix(&format!("fake{n}"))?,
                 executor,
@@ -739,6 +740,7 @@ impl World {
         }
         let (bot, prompt) = super::extras::trigger_target(name).unwrap_or(("keeper", name));
         let params = reno_proto::TaskRunParams {
+            effort: None,
             prompt: prompt.to_owned(),
             executor: "claude-code".parse().ok(),
             bot: None,

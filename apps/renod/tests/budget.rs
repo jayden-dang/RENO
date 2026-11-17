@@ -29,6 +29,7 @@ macro_rules! daemon_test {
 
 fn bot_task(bot: &str) -> TaskRunParams {
     TaskRunParams {
+        effort: None,
         prompt: "go".into(),
         executor: None,
         bot: Some(bot.to_owned()),

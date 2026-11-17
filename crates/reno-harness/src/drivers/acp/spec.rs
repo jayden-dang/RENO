@@ -88,9 +88,12 @@ const EVERY_MODE: &[AccessMode] = &[
 fn default_effort_values(effort: Option<Effort>) -> Vec<&'static str> {
     match effort {
         None => Vec::new(),
+        Some(Effort::Minimal) => vec!["minimal", "low"],
         Some(Effort::Low) => vec!["low", "minimal"],
         Some(Effort::Medium) => vec!["medium"],
         Some(Effort::High) => vec!["high"],
+        Some(Effort::XHigh) => vec!["xhigh", "high"],
+        Some(Effort::Max) => vec!["max", "xhigh", "high"],
     }
 }
 

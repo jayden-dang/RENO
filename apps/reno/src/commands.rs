@@ -104,6 +104,7 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
     let submitted = client
         .submit_task(TaskRunParams {
+            effort: None,
             prompt: args.prompt,
             executor,
             bot: args.bot,

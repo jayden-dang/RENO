@@ -268,9 +268,12 @@ const EFFORT_SUFFIXES: [(&str, &str, Effort); 3] = [
 
 fn effort_rank(effort: Effort) -> u8 {
     match effort {
-        Effort::Low => 0,
-        Effort::Medium => 1,
-        Effort::High => 2,
+        Effort::Minimal => 0,
+        Effort::Low => 1,
+        Effort::Medium => 2,
+        Effort::High => 3,
+        Effort::XHigh => 4,
+        Effort::Max => 5,
     }
 }
 

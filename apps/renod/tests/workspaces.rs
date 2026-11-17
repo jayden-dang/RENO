@@ -84,6 +84,7 @@ fn snapshot(repo: &Path) -> BTreeMap<String, Vec<u8>> {
 
 async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
     within(fx.client.run_task(TaskRunParams {
+        effort: None,
         prompt: "work".into(),
         executor: Some(id(executor)),
         bot: None,
@@ -270,6 +271,7 @@ async fn a_bot_less_task_opts_in_to_in_place_writes_and_a_repository_is_still_ne
     let plain = fx.dir.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let in_place = |cwd: &Path| TaskRunParams {
+        effort: None,
         prompt: "work".into(),
         executor: Some(id("mock")),
         bot: None,

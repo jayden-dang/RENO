@@ -598,6 +598,7 @@ mod tests {
 
     fn summary(name: &str, status: RunStatus, created: u64) -> RunSummary {
         RunSummary {
+            effort: None,
             run_id: run_id(name),
             task_id: TaskId::from_suffix(name).unwrap(),
             executor: "claude-code".parse::<ExecutorId>().unwrap(),

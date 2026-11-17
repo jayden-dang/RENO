@@ -358,6 +358,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
     let models = |ids: &[(&str, &str)]| {
         ids.iter()
             .map(|(id, name)| ModelInfo {
+                default_effort: None,
+                efforts: vec![],
                 id: (*id).to_owned(),
                 display_name: Some((*name).to_owned()),
                 description: None,

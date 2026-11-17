@@ -626,6 +626,8 @@ fn switching(steps: impl IntoIterator<Item = MockStep>) -> reno_harness::exec::M
     let m = mock(steps);
     let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
     descriptor.caps.models.push(reno_proto::ModelInfo {
+        default_effort: None,
+        efforts: vec![],
         id: "mock-2".into(),
         display_name: Some("Mock 2".into()),
         description: None,

@@ -140,6 +140,8 @@ impl MockExecutor {
                 deterministic_turn_end: true,
                 plan_mode: false,
                 models: vec![ModelInfo {
+                    default_effort: None,
+                    efforts: vec![],
                     id: "mock-1".into(),
                     display_name: Some("Mock 1".into()),
                     description: None,

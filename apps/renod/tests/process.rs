@@ -122,6 +122,7 @@ fn data_dir() -> (tempfile::TempDir, PathBuf) {
 /// Submits a run on the held mock and waits until it is live.
 async fn start_live_run(client: &Client) -> RunId {
     let run = within(client.run_task(TaskRunParams {
+        effort: None,
         prompt: "stay alive".into(),
         executor: Some(id("mock")),
         bot: None,
@@ -399,6 +400,7 @@ process_test! {
         );
         let client = daemon.client().await;
         let run = within(client.run_task(TaskRunParams {
+            effort: None,
             prompt: "hold".into(),
             executor: Some(id("claude-code")),
             bot: None,

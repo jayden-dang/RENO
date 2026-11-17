@@ -68,9 +68,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
-    AccessMode, Effort, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId,
-    HealthProbe, McpServerSpec, ModelCatalog, SandboxLevel, SignedIn, Steering, StopReason,
-    VersionGate, VersionRange,
+    AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, HealthProbe,
+    McpServerSpec, ModelCatalog, SandboxLevel, SignedIn, Steering, StopReason, VersionGate,
+    VersionRange,
 };
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -373,12 +373,7 @@ impl ClaudeExecutor {
             args.extend(["--append-system-prompt".into(), instructions.clone()]);
         }
         if let Some(effort) = spec.effort {
-            let effort = match effort {
-                Effort::Low => "low",
-                Effort::Medium => "medium",
-                Effort::High => "high",
-            };
-            args.extend(["--effort".into(), effort.into()]);
+            args.extend(["--effort".into(), effort.as_str().into()]);
         }
         args.extend([
             "--permission-mode".into(),

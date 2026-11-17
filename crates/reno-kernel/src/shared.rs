@@ -507,6 +507,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         _ => None,
     };
     RunSummary {
+        effort: None,
         run_id: row.id.clone(),
         task_id: row.task_id.clone(),
         executor: row.executor.clone(),
