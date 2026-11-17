@@ -954,6 +954,16 @@ fn tool_line(theme: &Theme, call: &ToolEntry) -> impl IntoElement {
         )
 }
 
+/// The tone of the card's leading "?": warning while the question waits, then the tone of how
+/// it ended.
+fn question_icon_tone(theme: &Theme, resolution: &Resolution) -> gpui::Hsla {
+    match resolution {
+        Resolution::Pending => theme.warning,
+        Resolution::Declined | Resolution::Unanswered => theme.faint,
+        Resolution::Answered(_) => theme.success,
+    }
+}
+
 /// The question card. Pending, it is the live ask; resolved, it is the record of how it ended:
 /// a status tag, the options dimmed (the chosen one lit) and no promise of a later phase.
 fn question_card(
@@ -1006,7 +1016,7 @@ fn question_card(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(icon(Icon::Question, 15.0, theme.warning))
+                        .child(icon(Icon::Question, 15.0, question_icon_tone(theme, resolution)))
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)

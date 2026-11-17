@@ -82,3 +82,15 @@ fn an_unanswered_card_is_tagged_not_answered(cx: &mut TestAppContext) {
         ["question-tag-unanswered", "question-dimmed-chip"]
     );
 }
+
+#[test]
+fn the_question_mark_is_warning_only_while_the_question_waits() {
+    let theme = Theme::for_appearance(Appearance::Dark);
+    assert_eq!(question_icon_tone(&theme, &Resolution::Pending), theme.warning);
+    assert_eq!(question_icon_tone(&theme, &Resolution::Declined), theme.faint);
+    assert_eq!(question_icon_tone(&theme, &Resolution::Unanswered), theme.faint);
+    assert_eq!(
+        question_icon_tone(&theme, &Resolution::Answered(vec![])),
+        theme.success
+    );
+}
