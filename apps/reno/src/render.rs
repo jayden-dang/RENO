@@ -664,7 +664,9 @@ pub(crate) fn fired_line(name: &str, fired: &TriggerFireResult) -> String {
 
 /// One standing rule on one line: id, effect, scope, what it matches, and its end.
 /// `now_ms` is the time to read the expiry against.
-pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String {
+///
+/// `run_over` is true for a rule of one run whose run has ended: it holds no more, and says so.
+pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64, run_over: bool) -> String {
     use reno_proto::{CommandPattern, StandingScope};
     let scope = match &rule.scope {
         StandingScope::Run { run } => format!("run {run}"),
@@ -685,6 +687,7 @@ pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String 
         (Some(_), _) => "  revoked".to_owned(),
         (None, Some(at)) if at <= now_ms => "  expired".to_owned(),
         (None, Some(at)) => format!("  expires in {}", duration((at - now_ms) / 1000)),
+        (None, None) if run_over => "  ended with its run".to_owned(),
         (None, None) => String::new(),
     };
     format!(
@@ -1337,15 +1340,29 @@ mod tests {
             source_approval: None,
         };
         assert_eq!(
-            rule_line(&rule, 10),
+            rule_line(&rule, 10, false),
             "rule_a1  allow  bot keeper  command bash `git push`"
         );
         let timed = StandingRule {
             expires_at_ms: Some(3_700_000),
             ..rule.clone()
         };
-        assert!(rule_line(&timed, 100_000).ends_with("  expires in 1h 00m"));
-        assert!(rule_line(&timed, 3_700_000).ends_with("  expired"));
+        assert!(rule_line(&timed, 100_000, false).ends_with("  expires in 1h 00m"));
+        assert!(rule_line(&timed, 3_700_000, false).ends_with("  expired"));
+        // A rule of a run that has ended says so, unless it was revoked first.
+        let scoped = StandingRule {
+            scope: StandingScope::Run {
+                run: "run_r1".parse().unwrap(),
+            },
+            ..rule.clone()
+        };
+        assert!(rule_line(&scoped, 10, true).ends_with("  ended with its run"));
+        assert!(!rule_line(&scoped, 10, false).contains("ended"));
+        let revoked = StandingRule {
+            revoked_at_ms: Some(5),
+            ..scoped
+        };
+        assert!(rule_line(&revoked, 10, true).ends_with("  revoked"));
         let edit = StandingRule {
             effect: StandingEffect::Deny,
             scope: StandingScope::Always,
@@ -1359,7 +1376,7 @@ mod tests {
             ..rule
         };
         assert_eq!(
-            rule_line(&edit, 10),
+            rule_line(&edit, 10, false),
             "rule_a1  deny   always  edit write on src/lib.rs, /etc/hosts  revoked"
         );
     }

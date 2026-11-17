@@ -5,7 +5,7 @@
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use reno_proto::RuleListResult;
+use reno_proto::{RuleListResult, StandingRule, StandingScope};
 use serde::Serialize;
 
 use crate::cli::{RuleCommand, RuleList, RuleRevoke};
@@ -32,10 +32,27 @@ async fn list(env: &Env, args: RuleList) -> anyhow::Result<ExitCode> {
     } else {
         let now = now_ms();
         for rule in &rules {
-            print_line(render::rule_line(rule, now))?;
+            let over = args.all && run_is_over(&client, rule, now).await;
+            print_line(render::rule_line(rule, now, over))?;
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether `rule` belongs to one run and that run has ended: the rule holds no more, though
+/// nobody revoked it. Only a rule still otherwise in force needs the look; a run the daemon
+/// cannot find (or cannot be asked about) is not reported as over.
+async fn run_is_over(client: &reno_client::Client, rule: &StandingRule, now: u64) -> bool {
+    let StandingScope::Run { run } = &rule.scope else {
+        return false;
+    };
+    if !rule.is_active(now) {
+        return false;
+    }
+    client
+        .get_run(run)
+        .await
+        .is_ok_and(|run| run.status.is_terminal())
 }
 
 #[derive(Debug, Serialize)]
