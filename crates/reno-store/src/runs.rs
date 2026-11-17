@@ -20,7 +20,8 @@
 
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
-    ExecutorId, NotResumed, RoutingDecision, RunId, RunStatus, SessionRef, StopDetail, TaskId,
+    ExecutorId, NotResumed, RoutingDecision, RunId, RunReport, RunStatus, SessionRef, StopDetail,
+    TaskId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -99,6 +100,8 @@ pub struct RunRecord {
     pub not_resumed: Option<NotResumed>,
     /// The prompt a person gave when they resumed the run, for the attempt that follows.
     pub resume_prompt: Option<String>,
+    /// The last report the run's agent made, until the run is queued or resumed again.
+    pub report: Option<RunReport>,
     /// When it was enqueued.
     pub created_at: i64,
     /// When it first ran.
@@ -169,7 +172,7 @@ const RUN_COLS: &str = "id, task_id, executor, model, status, lease_owner, lease
      (SELECT spec FROM tasks WHERE tasks.id = runs.task_id), \
      COALESCE((SELECT MAX(ts) FROM events \
                WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at), \
-     bot_name, bot_version, stop, not_resumed, resume_prompt";
+     bot_name, bot_version, stop, not_resumed, resume_prompt, report";
 
 fn json_col<T: serde::de::DeserializeOwned>(text: Option<String>, what: &str) -> Result<Option<T>> {
     text.map(|text| {
@@ -203,6 +206,7 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let stop: Option<String> = row.get(21)?;
     let not_resumed: Option<String> = row.get(22)?;
     let resume_prompt = row.get(23)?;
+    let report: Option<String> = row.get(24)?;
     Ok((|| {
         let id_u32 = |v: Option<i64>| {
             v.map(|v| u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("bad pid {v}"))))
@@ -241,6 +245,7 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
             stop: json_col(stop, "stop")?,
             not_resumed: json_col(not_resumed, "not_resumed")?,
             resume_prompt,
+            report: json_col(report, "report")?,
             created_at,
             started_at,
             ended_at,
@@ -567,6 +572,7 @@ fn set_reasons(
     let clear = stop.is_none() && not_resumed.is_none();
     conn.prepare_cached(
         "UPDATE runs SET
+             report = CASE WHEN ?4 THEN NULL ELSE report END,
              stop = CASE WHEN ?4 THEN NULL WHEN ?2 IS NOT NULL THEN ?2 ELSE stop END,
              not_resumed = CASE WHEN ?4 THEN NULL WHEN ?3 IS NOT NULL THEN ?3 ELSE not_resumed END
          WHERE id = ?1",
@@ -877,6 +883,20 @@ impl Store {
                 None,
                 &json!({ "fence": fence, "why": why }),
             )
+        })
+        .await
+    }
+
+    /// Records the agent's last report on its run. Fenced.
+    pub async fn set_report(&self, run: &RunId, fence: u64, report: &RunReport) -> Result<()> {
+        let (run, report) = (run.clone(), serde_json::to_string(report)?);
+        self.write(Durability::Normal, move |c| {
+            load_fenced(c, &run, fence)?;
+            c.prepare_cached("UPDATE runs SET report = ?2 WHERE id = ?1")
+                .db()?
+                .execute(params![run.as_str(), report])
+                .db()?;
+            Ok(())
         })
         .await
     }

@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RuleId, RunId, RunStatus, SessionRef, StandingRule, TaskId, WorkspaceChanges,
-    WorkspaceInfo, WorkspaceStatus,
+    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule, TaskId,
+    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
@@ -329,6 +329,16 @@ impl Db {
         self.store
             .set_not_resumed(run, fence, why, self.now_ms())
             .await
+    }
+
+    pub(crate) async fn set_report(
+        &self,
+        run: &RunId,
+        fence: u64,
+        report: &RunReport,
+    ) -> Result<()> {
+        self.wrote();
+        self.store.set_report(run, fence, report).await
     }
 
     pub(crate) async fn record_process(

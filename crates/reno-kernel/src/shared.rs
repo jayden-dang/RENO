@@ -502,6 +502,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         session: row.session_ref.clone().map(SessionRef),
         bot: row.bot.clone(),
         cwd: requested_cwd(&row.spec),
+        report: row.report.clone(),
         created_at_ms: u64::try_from(row.created_at).unwrap_or(0),
         updated_at_ms: u64::try_from(row.updated_at).unwrap_or(0),
     }

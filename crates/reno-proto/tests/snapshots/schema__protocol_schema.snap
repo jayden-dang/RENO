@@ -1651,9 +1651,52 @@ expression: protocol_schema()
               }
             ]
           },
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
+          },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
             "type": "string"
+          },
+          "RunReport": {
+            "description": "What the run's agent last said about its own work, through Reno's `report` tool. The run's\n`status` is how the harness ended; this is how the agent says the work went, and the two can\ndiffer: a run can `succeed` whose agent reported `failed`.",
+            "properties": {
+              "status": {
+                "$ref": "#/$defs/ReportStatus",
+                "description": "How the agent said the work stands."
+              },
+              "summary": {
+                "description": "Its one-line summary (never the longer details, which stay in the journal).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "summary"
+            ],
+            "type": "object"
           },
           "RunStatus": {
             "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
@@ -1962,6 +2005,17 @@ expression: protocol_schema()
               "string",
               "null"
             ]
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last report the run's agent made, when it made one. Absent from daemons that predate\nit and from a run whose agent never reported; cleared when the run is queued or resumed\nagain, because the new attempt has not reported yet."
           },
           "runId": {
             "$ref": "#/$defs/RunId",
@@ -3617,9 +3671,52 @@ expression: protocol_schema()
               }
             ]
           },
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
+          },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
             "type": "string"
+          },
+          "RunReport": {
+            "description": "What the run's agent last said about its own work, through Reno's `report` tool. The run's\n`status` is how the harness ended; this is how the agent says the work went, and the two can\ndiffer: a run can `succeed` whose agent reported `failed`.",
+            "properties": {
+              "status": {
+                "$ref": "#/$defs/ReportStatus",
+                "description": "How the agent said the work stands."
+              },
+              "summary": {
+                "description": "Its one-line summary (never the longer details, which stay in the journal).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "summary"
+            ],
+            "type": "object"
           },
           "RunStatus": {
             "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
@@ -3737,6 +3834,17 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "report": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunReport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The last report the run's agent made, when it made one. Absent from daemons that predate\nit and from a run whose agent never reported; cleared when the run is queued or resumed\nagain, because the new attempt has not reported yet."
               },
               "runId": {
                 "$ref": "#/$defs/RunId",
@@ -9933,9 +10041,52 @@ expression: protocol_schema()
               }
             ]
           },
+          "ReportStatus": {
+            "description": "How a run says its work stands.",
+            "oneOf": [
+              {
+                "const": "progress",
+                "description": "Work is going on; this is a checkpoint.",
+                "type": "string"
+              },
+              {
+                "const": "done",
+                "description": "The work is finished.",
+                "type": "string"
+              },
+              {
+                "const": "blocked",
+                "description": "The run cannot go on without something it does not have.",
+                "type": "string"
+              },
+              {
+                "const": "failed",
+                "description": "The work failed.",
+                "type": "string"
+              }
+            ]
+          },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
             "type": "string"
+          },
+          "RunReport": {
+            "description": "What the run's agent last said about its own work, through Reno's `report` tool. The run's\n`status` is how the harness ended; this is how the agent says the work went, and the two can\ndiffer: a run can `succeed` whose agent reported `failed`.",
+            "properties": {
+              "status": {
+                "$ref": "#/$defs/ReportStatus",
+                "description": "How the agent said the work stands."
+              },
+              "summary": {
+                "description": "Its one-line summary (never the longer details, which stay in the journal).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "summary"
+            ],
+            "type": "object"
           },
           "RunStatus": {
             "description": "Where a run is in its lifecycle. Serialised as a snake_case string.",
@@ -10053,6 +10204,17 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "report": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunReport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The last report the run's agent made, when it made one. Absent from daemons that predate\nit and from a run whose agent never reported; cleared when the run is queued or resumed\nagain, because the new attempt has not reported yet."
               },
               "runId": {
                 "$ref": "#/$defs/RunId",

@@ -365,6 +365,7 @@ impl World {
                 stop: None,
                 not_resumed: None,
                 session: None,
+                report: None,
             },
             journal: vec![],
             journal_tx: watch::channel(0).0,

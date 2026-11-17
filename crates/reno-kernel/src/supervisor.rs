@@ -47,7 +47,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_harness::exec::{ExecHandle, SteerRejected};
 use reno_proto::{
-    BudgetKind, BudgetStop, CancelledBy, ExecEvent, RunId, RunStatus, Seq, StopDetail, StopReason,
+    BudgetKind, BudgetStop, CancelledBy, ExecEvent, RunId, RunReport, RunStatus, Seq, StopDetail,
+    StopReason,
 };
 use reno_store::{JournalWriter, StoreError, Tokens};
 use tokio::sync::mpsc::{self, error::TrySendError};
@@ -489,6 +490,24 @@ impl Supervisor {
             }
             SupCmd::Report { event, reply } => {
                 self.publish(&event);
+                // Beside the run's status, clients see what the agent said about its work.
+                if let ExecEvent::AgentReport {
+                    status, summary, ..
+                } = &event
+                {
+                    let report = RunReport {
+                        status: *status,
+                        summary: summary.clone(),
+                    };
+                    if let Err(error) = self
+                        .shared
+                        .db
+                        .set_report(&self.run, self.fence, &report)
+                        .await
+                    {
+                        tracing::warn!(run = %self.run, %error, "could not record the run's report");
+                    }
+                }
                 let _ = reply.send(Ok(()));
             }
             SupCmd::AgentApproval { subject, reply } => self.agent_approval(subject, reply).await,

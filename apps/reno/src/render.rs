@@ -11,9 +11,9 @@ use reno_proto::defs::format_instant;
 use reno_proto::{
     Approval, ApprovalId, ApprovalOutcome, ApprovalRecord, ApprovalStatus, ApprovalSubject,
     CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
-    InstallStatus, ModelSource, NotInstalledReason, ResolvedBy, RoutingDecision, RunEventItem,
-    RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo, TriggerStatus,
-    VersionGate, WorkspaceInfo, WorkspaceStatus,
+    InstallStatus, ModelSource, NotInstalledReason, ReportStatus, ResolvedBy, RoutingDecision,
+    RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo,
+    TriggerStatus, VersionGate, WorkspaceInfo, WorkspaceStatus,
 };
 use serde::Serialize;
 
@@ -322,19 +322,41 @@ pub(crate) fn model_line(run: &RunSummary, started: Option<&str>) -> Option<Stri
 
 /// One run on one line: `id  status  executor  title`.
 pub(crate) fn run_line(run: &RunSummary) -> String {
+    let mut status = status_name(run.status);
+    if let Some(flag) = reported_flag(run) {
+        status = format!("{status} (reported {flag})");
+    }
     format!(
         "{}  {:<16}  {:<12}  {}",
         run.run_id,
-        status_name(run.status),
+        status,
         run.executor.as_str(),
         run.title
     )
 }
 
-/// What a run's stop and resume state add to its one line, as extra lines: why it stopped, and
-/// why it was not resumed.
+/// The word a list adds beside a status when the agent's own report disagrees with it: the agent
+/// reported `failed` or `blocked` while the run did not fail. `None` when they agree or the
+/// report is only progress or done.
+fn reported_flag(run: &RunSummary) -> Option<&'static str> {
+    match run.report.as_ref()?.status {
+        ReportStatus::Failed if run.status != RunStatus::Failed => Some("failed"),
+        ReportStatus::Blocked => Some("blocked"),
+        _ => None,
+    }
+}
+
+/// What a run's stop and resume state add to its one line, as extra lines: the agent's last
+/// report, why it stopped, and why it was not resumed.
 pub(crate) fn stop_lines(run: &RunSummary) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(report) = &run.report {
+        lines.push(format!(
+            "report: {} \u{2014} {}",
+            wire_name(&report.status),
+            report.summary
+        ));
+    }
     if let Some(stop) = &run.stop {
         lines.push(format!("stopped: {stop}"));
     }
@@ -1067,6 +1089,38 @@ mod tests {
             "{}",
             trigger_line(&trigger)
         );
+    }
+
+    #[test]
+    fn a_run_whose_agent_reported_failure_says_so_beside_its_status() {
+        let mut run: RunSummary = serde_json::from_value(serde_json::json!({
+            "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
+            "status": "succeeded", "attempt": 1, "title": "nightly update",
+            "createdAtMs": 1, "updatedAtMs": 1
+        }))
+        .unwrap();
+        assert!(!run_line(&run).contains("reported"));
+        assert!(stop_lines(&run).is_empty());
+        run.report = Some(reno_proto::RunReport {
+            status: reno_proto::ReportStatus::Failed,
+            summary: "tests failed, Cargo.lock reverted".into(),
+        });
+        assert!(
+            run_line(&run).contains("succeeded (reported failed)"),
+            "{}",
+            run_line(&run)
+        );
+        assert_eq!(
+            stop_lines(&run),
+            ["report: failed \u{2014} tests failed, Cargo.lock reverted"]
+        );
+        // A report that agrees with the run, or is only a checkpoint, adds no flag to the line.
+        run.report.as_mut().unwrap().status = reno_proto::ReportStatus::Done;
+        assert!(!run_line(&run).contains("reported"));
+        // A failed run whose agent said it failed is not told twice.
+        run.status = RunStatus::Failed;
+        run.report.as_mut().unwrap().status = reno_proto::ReportStatus::Failed;
+        assert!(!run_line(&run).contains("reported"));
     }
 
     #[test]

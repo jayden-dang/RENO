@@ -602,6 +602,7 @@ fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
         stop: None,
         not_resumed: None,
         session: None,
+        report: None,
     }
 }
 
@@ -644,6 +645,23 @@ fn run_list_paging() {
     );
     assert_eq!((RUN_LIST_DEFAULT_LIMIT, RUN_LIST_MAX_LIMIT), (100, 500));
     assert_eq!(PROMPT_SUMMARY_CHARS, 280);
+}
+
+#[test]
+fn run_summary_carries_the_agents_report_beside_the_status() {
+    let mut summary = run_summary(None, None);
+    summary.status = RunStatus::Succeeded;
+    summary.report = Some(RunReport {
+        status: ReportStatus::Failed,
+        summary: "tests failed, Cargo.lock reverted".into(),
+    });
+    golden(
+        &summary,
+        json!({"runId": "run_01HZX9", "taskId": "task_01HZX8", "executor": "mock",
+               "status": "succeeded", "attempt": 1, "title": "first line",
+               "report": {"status": "failed", "summary": "tests failed, Cargo.lock reverted"},
+               "createdAtMs": 10, "updatedAtMs": 20}),
+    );
 }
 
 #[test]

@@ -177,6 +177,18 @@ pub trait Subscription {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NoParams {}
 
+/// What the run's agent last said about its own work, through Reno's `report` tool. The run's
+/// `status` is how the harness ended; this is how the agent says the work went, and the two can
+/// differ: a run can `succeed` whose agent reported `failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReport {
+    /// How the agent said the work stands.
+    pub status: crate::agent::ReportStatus,
+    /// Its one-line summary (never the longer details, which stay in the journal).
+    pub summary: String,
+}
+
 /// One run, as shown in lists and watches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -226,6 +238,11 @@ pub struct RunSummary {
     /// it, and from a run whose task recorded none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// The last report the run's agent made, when it made one. Absent from daemons that predate
+    /// it and from a run whose agent never reported; cleared when the run is queued or resumed
+    /// again, because the new attempt has not reported yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<RunReport>,
     /// Creation time, in milliseconds since the Unix epoch.
     pub created_at_ms: u64,
     /// Last state change, in milliseconds since the Unix epoch.
