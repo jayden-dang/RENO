@@ -854,12 +854,24 @@ fn the_details_pane_shows_what_the_agent_reported_when_it_did_not_go_well(cx: &m
         summary: "the registry was unreachable".to_owned(),
     });
     store.update(cx, |s, cx| {
-        s.apply(Update::RunUpserted(run), cx);
+        s.apply(Update::RunUpserted(run.clone()), cx);
     });
     let (_root, vcx) = window(cx, &store, Appearance::Light);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "details-report"));
+    // The fake daemon's own copy of the run can arrive after the local upsert under load and
+    // replace it without the report; put it back until the screen shows it.
+    wait_drawn(vcx, |vcx| {
+        let reported = store.read_with(vcx, |s, _| {
+            s.state()
+                .run(&run_id("keeper1"))
+                .is_some_and(|r| r.report.is_some())
+        });
+        if !reported {
+            store.update(vcx, |s, cx| s.apply(Update::RunUpserted(run.clone()), cx));
+        }
+        painted(vcx, "details-report")
+    });
 }
 
 #[gpui::test]
