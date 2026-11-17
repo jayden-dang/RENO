@@ -43,8 +43,8 @@ pub enum KernelError {
     /// The harness did not answer a model change in time.
     #[error("run {0}'s harness did not answer the model change in time")]
     ModelSwitchTimedOut(RunId),
-    /// The run ended before it took the decision.
-    #[error("run {0} no longer accepts decisions")]
+    /// The run has ended (or ended first): it takes no decision, steer or model change.
+    #[error("run {0} has ended")]
     RunEnded(RunId),
     /// The kernel is shutting down.
     #[error("the kernel is shutting down")]
