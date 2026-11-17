@@ -262,6 +262,8 @@ pub(crate) struct Composer {
     sent: Option<Sent>,
     /// "Sent" shows until this task ends.
     sent_note: Option<Task<()>>,
+    /// A [`Mode::Reason`] field's own placeholder and hint, when it is not a denial's reason.
+    labels: Option<(SharedString, SharedString)>,
     _store: Subscription,
     _events: Subscription,
 }
@@ -302,6 +304,7 @@ impl Composer {
             next_ticket: 0,
             sent: None,
             sent_note: None,
+            labels: None,
         };
         composer.refresh_preview(cx);
         composer
@@ -310,6 +313,25 @@ impl Composer {
     /// The small reason input of a denial.
     pub(crate) fn reason(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         Self::with_mode(store, Mode::Reason, cx)
+    }
+
+    /// A one-line field like the reason field, with its own placeholder and hint: Enter emits
+    /// [`ReasonEvent::Submitted`], Escape clears it.
+    pub(crate) fn field(
+        store: Entity<Store>,
+        placeholder: impl Into<SharedString>,
+        hint: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut field = Self::with_mode(store, Mode::Reason, cx);
+        field.labels = Some((placeholder.into(), hint.into()));
+        field
+    }
+
+    /// Empties the field.
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
+        self.model.set_text("");
+        cx.notify();
     }
 
     /// A composer that steers `run`.
@@ -1231,7 +1253,10 @@ impl Composer {
     fn placeholder(&self, cx: &App) -> SharedString {
         match &self.mode {
             Mode::Home => "What should Reno orchestrate?".into(),
-            Mode::Reason => "Or tell it what to do instead \u{2014} Deny sends your words".into(),
+            Mode::Reason => self.labels.as_ref().map_or_else(
+                || "Or tell it what to do instead \u{2014} Deny sends your words".into(),
+                |(placeholder, _)| placeholder.clone(),
+            ),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
                 let bot = store
@@ -1612,7 +1637,10 @@ impl Render for Composer {
                 .pb(px(8.0))
                 .text_size(px(12.0))
                 .text_color(theme.faint)
-                .child("Enter to deny \u{b7} Esc to clear"),
+                .child(self.labels.as_ref().map_or_else(
+                    || "Enter to deny \u{b7} Esc to clear".into(),
+                    |(_, hint)| hint.clone(),
+                )),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
                 let summary = store.state().run(run);

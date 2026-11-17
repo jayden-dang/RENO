@@ -978,6 +978,42 @@ impl Store {
         );
     }
 
+    /// `rule.add`: `command` runs without asking in the project at `root`; then the list is read
+    /// again.
+    pub(crate) fn add_project_rule(
+        &mut self,
+        root: PathBuf,
+        command: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.supports(reno_proto::FEATURE_PROJECT_RULES) {
+            return;
+        }
+        self.call(
+            "Could not add the command",
+            move |client| async move {
+                client
+                    .add_rule(reno_proto::RuleAddParams {
+                        project: root,
+                        effect: reno_proto::StandingEffect::Allow,
+                        command,
+                        tool: None,
+                        expires_in_secs: None,
+                    })
+                    .await
+            },
+            cx,
+            D {
+                ok: Box::new(|store, _rule, cx| {
+                    store.load_rules(cx);
+                    cx.notify();
+                }),
+                err: Box::new(|_, cx| cx.notify()),
+                quiet: false,
+            },
+        );
+    }
+
     /// `rule.revoke`, then the list is read again.
     pub(crate) fn revoke_rule(&mut self, id: reno_proto::RuleId, cx: &mut Context<Self>) {
         if self.client().is_none() || !self.revoking.insert(id.clone()) {

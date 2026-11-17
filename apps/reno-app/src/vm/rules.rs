@@ -100,12 +100,19 @@ pub(crate) fn rows(
 
 /// The Approve ▾ menu of a held action in the run (ui-brief 2026-11-17): approve once, then how
 /// far a kept answer reaches. A run with a bot keeps it for the bot; one without, for the run.
-pub(crate) fn approve_choices(bot: Option<&str>) -> Vec<(Option<RememberScope>, String)> {
+/// `project` is offered when the daemon keeps project rules and the run is in a repository.
+pub(crate) fn approve_choices(
+    bot: Option<&str>,
+    project: Option<&str>,
+) -> Vec<(Option<RememberScope>, String)> {
     let mut all = vec![(None, "Approve once".to_owned())];
     all.push(match bot {
         Some(bot) => (Some(RememberScope::Bot), format!("Always for {bot}")),
         None => (Some(RememberScope::Run), "Always in this run".to_owned()),
     });
+    if let Some(project) = project {
+        all.push((Some(RememberScope::Project), format!("Always in {project}")));
+    }
     all.push((
         Some(RememberScope::Always),
         "Always, every project".to_owned(),
@@ -147,7 +154,7 @@ mod tests {
     #[test]
     fn the_approve_menu_keeps_for_the_bot_or_else_the_run() {
         let labels = |bot| -> Vec<String> {
-            super::approve_choices(bot)
+            super::approve_choices(bot, None)
                 .into_iter()
                 .map(|(_, l)| l)
                 .collect()
@@ -164,7 +171,7 @@ mod tests {
                 "Always, every project"
             ]
         );
-        let scopes: Vec<_> = super::approve_choices(Some("keeper"))
+        let scopes: Vec<_> = super::approve_choices(Some("keeper"), None)
             .into_iter()
             .map(|(s, _)| s)
             .collect();

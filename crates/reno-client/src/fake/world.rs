@@ -492,10 +492,13 @@ impl World {
                             .and_then(|r| r.summary.bot.as_ref().map(|b| b.name.clone()))
                             .ok_or_else(|| Some("this run has no bot".to_owned()))?,
                     },
-                    // The fake runs have no working directory, so no project.
-                    RememberScope::Project => {
-                        return Err(Some("this run has no project".to_owned()));
-                    }
+                    // A fake run's folder is its own project (they do not exist on disk).
+                    RememberScope::Project => StandingScope::Project {
+                        root: self
+                            .run(&self.approvals[at].run_id)
+                            .and_then(|r| r.summary.cwd.clone())
+                            .ok_or_else(|| Some("this run has no project".to_owned()))?,
+                    },
                     RememberScope::Always => StandingScope::Always,
                 })
             }

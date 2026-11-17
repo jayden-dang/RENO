@@ -7,12 +7,13 @@ use gpui::{
 };
 
 use crate::store::Store;
+use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::kit::{self, MONO};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
 use crate::vm::Section;
 use crate::vm::history::Verdict;
-use crate::vm::project::{self, AllowRow, ProjectView};
+use crate::vm::project::{self, AllowRow, HereRow, ProjectView};
 use crate::vm::projects::FolderKey;
 
 const EFFECT_W: f32 = 150.0;
@@ -20,6 +21,7 @@ const FROM_W: f32 = 170.0;
 const ANSWER_W: f32 = 110.0;
 const BOT_W: f32 = 110.0;
 const WHEN_W: f32 = 90.0;
+const REMOVE_W: f32 = 90.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -42,6 +44,8 @@ pub(crate) struct ProjectScreen {
     store: Entity<Store>,
     key: FolderKey,
     tab: Tab,
+    /// "Add a command": Enter keeps it for this project. Only for a repository.
+    add: Option<(Entity<Composer>, Subscription)>,
     _store: Subscription,
 }
 
@@ -51,12 +55,91 @@ impl ProjectScreen {
             store.load_history(cx);
             store.load_rules(cx);
         });
+        let add = key.root().map(|root| {
+            let root = root.to_path_buf();
+            let name = key.name();
+            let field = cx.new(|cx| {
+                Composer::field(
+                    store.clone(),
+                    "Add a command, e.g. cargo clippy --workspace",
+                    format!("Enter to allow it in {name} \u{b7} Esc to clear"),
+                    cx,
+                )
+            });
+            let events = cx.subscribe(&field, move |this, field, event: &ReasonEvent, cx| {
+                if let ReasonEvent::Submitted(Some(command)) = event {
+                    let (root, command) = (root.clone(), command.clone());
+                    this.store
+                        .update(cx, |store, cx| store.add_project_rule(root, command, cx));
+                    field.update(cx, |field, cx| field.clear(cx));
+                }
+            });
+            (field, events)
+        });
         Self {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             key,
             tab: Tab::Allowlist,
+            add,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_field(&self) -> Option<&Entity<Composer>> {
+        self.add.as_ref().map(|(field, _)| field)
+    }
+
+    fn here_table(&self, theme: &Theme, rows: &[HereRow], cx: &mut Context<Self>) -> AnyElement {
+        let count = rows.len();
+        page::table_frame(theme, page::table())
+            .child(page::table_head(
+                theme,
+                &[
+                    ("Command", None),
+                    ("Effect", Some(EFFECT_W)),
+                    ("From", Some(FROM_W)),
+                    ("", Some(REMOVE_W)),
+                ],
+            ))
+            .children(rows.iter().enumerate().map(|(i, rule)| {
+                let (tone, words) = match rule.effect.as_str() {
+                    "allow" => (theme.success, "runs without asking"),
+                    _ => (theme.danger, "never"),
+                };
+                let busy = self.store.read(cx).is_revoking(&rule.id);
+                let id = rule.id.clone();
+                let remove = kit::pill_button(
+                    theme,
+                    format!("remove-{}", rule.id),
+                    "Remove",
+                    kit::Tone::Quiet,
+                )
+                .when(busy, |b| b.opacity(0.4))
+                .when(!busy, |b| {
+                    b.on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.store.update(cx, |store, cx| store.revoke_rule(id, cx));
+                    }))
+                });
+                page::table_row(theme, i + 1 == count)
+                    .child(
+                        page::cell(div(), None)
+                            .font_family(MONO)
+                            .text_size(px(12.5))
+                            .child(rule.matches.clone()),
+                    )
+                    .child(page::cell(
+                        div().child(kit::tag(tone, words)),
+                        Some(EFFECT_W),
+                    ))
+                    .child(page::cell(
+                        div().text_color(theme.muted).child(rule.from.clone()),
+                        Some(FROM_W),
+                    ))
+                    .child(page::cell(div().child(remove), Some(REMOVE_W)))
+            }))
+            .into_any_element()
     }
 
     #[cfg(test)]
@@ -140,7 +223,12 @@ impl ProjectScreen {
             .into_any_element()
     }
 
-    fn allowlist(&self, view: &ProjectView, theme: &Theme) -> Vec<AnyElement> {
+    fn allowlist(
+        &self,
+        view: &ProjectView,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut out = vec![
             div()
                 .text_size(px(13.5))
@@ -151,19 +239,49 @@ impl ProjectScreen {
                 ))
                 .into_any_element(),
             page::section_label(theme, "This project").into_any_element(),
+        ];
+        let note = |text: String| {
             div()
                 .id("project-rules-here")
                 .text_size(px(13.0))
                 .text_color(theme.muted)
-                .child(if view.path.is_some() {
-                    "Nothing yet. \u{201c}Always in this project\u{201d} on an approval adds here."
-                } else {
-                    "Runs outside a repository share the rules every project has."
-                })
-                .into_any_element(),
+                .child(text)
+                .into_any_element()
+        };
+        if view.path.is_none() {
+            out.push(note(
+                "Runs outside a repository share the rules every project has.".to_owned(),
+            ));
+        } else if !view.project_rules {
+            out.push(note(
+                "This renod keeps no rules for one project; update it to set them here.".to_owned(),
+            ));
+        } else {
+            if view.here.is_empty() {
+                out.push(note(format!(
+                    "Nothing yet. \u{201c}Always in {}\u{201d} on an approval, or a command added below, lands here.",
+                    view.name
+                )));
+            } else {
+                out.push(self.here_table(theme, &view.here, cx));
+            }
+            if let Some((field, _)) = &self.add {
+                out.push(
+                    div()
+                        .id("project-add")
+                        .w_full()
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .child(field.clone())
+                        .into_any_element(),
+                );
+            }
+        }
+        out.push(
             page::section_label(theme, "Every project \u{b7} ~/.reno/policy.toml")
                 .into_any_element(),
-        ];
+        );
         if view.everywhere.is_empty() {
             out.push(
                 div()
@@ -271,7 +389,7 @@ impl Render for ProjectScreen {
         let theme = theme::current(cx);
         let view = self.view(cx);
         let body = match self.tab {
-            Tab::Allowlist => self.allowlist(&view, &theme),
+            Tab::Allowlist => self.allowlist(&view, &theme, cx),
             Tab::History => Self::history(&view, &theme),
         };
         div()

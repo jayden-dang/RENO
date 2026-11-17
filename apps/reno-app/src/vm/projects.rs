@@ -103,6 +103,14 @@ impl FolderKey {
         matches!(self, Self::Repo(_))
     }
 
+    /// The repository root, when there is one.
+    pub(crate) fn root(&self) -> Option<&Path> {
+        match self {
+            Self::Repo(root) => Some(root),
+            Self::NoProject => None,
+        }
+    }
+
     /// The folder's name: the repository's directory name.
     pub(crate) fn name(&self) -> String {
         match self {

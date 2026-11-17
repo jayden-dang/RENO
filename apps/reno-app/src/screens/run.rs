@@ -618,7 +618,14 @@ impl RunScreen {
         let age = summary::age_label(store.now_ms().saturating_sub(approval.requested_at_ms));
         let command = summary::subject_line(&approval.subject);
         let word = summary::action_word(&approval.subject);
-        let choices = rules::approve_choices(bot);
+        // "Always in porch": only when the daemon keeps project rules and the run is in one.
+        let project = state
+            .supports(reno_proto::FEATURE_PROJECT_RULES)
+            .then(|| summary.and_then(|r| r.cwd.as_deref()))
+            .flatten()
+            .and_then(|cwd| store.root_of(cwd))
+            .and_then(|root| root.file_name().map(|n| n.to_string_lossy().into_owned()));
+        let choices = rules::approve_choices(bot, project.as_deref());
         let menu_open = self.menu_open.as_ref() == Some(&approval.id);
 
         let id = approval.id.clone();

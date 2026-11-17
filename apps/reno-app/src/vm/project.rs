@@ -25,12 +25,27 @@ pub(crate) struct AllowRow {
     pub(crate) from: String,
 }
 
+/// One rule kept for this project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HereRow {
+    pub(crate) id: reno_proto::RuleId,
+    /// "allow" or "deny".
+    pub(crate) effect: String,
+    pub(crate) matches: String,
+    /// "kept from a run" or "added by you".
+    pub(crate) from: String,
+}
+
 /// What the Project page shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectView {
     pub(crate) name: String,
     /// The repository root, in full; `None` for "No project".
     pub(crate) path: Option<String>,
+    /// Whether the daemon keeps rules for one project (`rules.project`).
+    pub(crate) project_rules: bool,
+    /// The rules kept for this project, newest first.
+    pub(crate) here: Vec<HereRow>,
     /// Rules every project shares, policy file first.
     pub(crate) everywhere: Vec<AllowRow>,
     /// The policy's answer when no rule matches: "ask".
@@ -94,6 +109,29 @@ pub(crate) fn build(
                 }),
         );
     }
+    let here: Vec<HereRow> = match (standing, key) {
+        (Some(Ok(rules)), FolderKey::Repo(root)) => rules
+            .iter()
+            .filter(|r| r.is_active(now_ms))
+            .filter(|r| matches!(&r.scope, StandingScope::Project { root: at } if at == root))
+            .map(|r| HereRow {
+                id: r.id.clone(),
+                effect: match r.effect {
+                    reno_proto::StandingEffect::Allow => "allow",
+                    reno_proto::StandingEffect::Deny => "deny",
+                }
+                .to_owned(),
+                matches: rules::matcher_text(&r.matcher),
+                from: if r.source_approval.is_some() {
+                    "kept from a run"
+                } else {
+                    "added by you"
+                }
+                .to_owned(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let history: Vec<HistoryRow> = state
         .approval_history()
         .iter()
@@ -106,6 +144,8 @@ pub(crate) fn build(
             FolderKey::Repo(root) => Some(root.display().to_string()),
             FolderKey::NoProject => None,
         },
+        project_rules: state.supports(reno_proto::FEATURE_PROJECT_RULES),
+        here,
         everywhere,
         default: policy.map_or_else(|| "ask".to_owned(), |p| p.default),
         history: Section::of_state(state, state.feed(Feed::ApprovalHistory), history),

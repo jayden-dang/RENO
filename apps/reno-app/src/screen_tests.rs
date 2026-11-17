@@ -647,3 +647,77 @@ fn a_runs_crumb_opens_its_project_whose_history_holds_only_its_decisions(cx: &mu
         view.history.rows()
     );
 }
+
+#[gpui::test]
+fn always_in_the_project_keeps_the_answer_there_and_the_allowlist_lists_and_removes_it(
+    cx: &mut TestAppContext,
+) {
+    use crate::vm::projects::FolderKey;
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    open_run_screen(vcx, &root, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
+    click(vcx, "approve-more");
+    // Once, for keeper, in atlas-api, every project: the project choice is the third.
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-scope-2"));
+    click(vcx, "approve-scope-2");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+
+    let atlas = std::path::PathBuf::from("/demo/atlas-api");
+    root.update_in(vcx, |r, window, cx| {
+        r.open_project(FolderKey::Repo(atlas.clone()), window, cx);
+    });
+    let project = root
+        .read_with(vcx, |r, _| r.project_screen().cloned())
+        .unwrap();
+    wait_drawn(vcx, |vcx| {
+        project.read_with(vcx, |p, cx| p.view(cx)).here.len() == 1
+    });
+    let rule = project.read_with(vcx, |p, cx| p.view(cx)).here[0].clone();
+    assert!(rule.matches.contains("git push"), "{rule:?}");
+
+    // Remove takes it off the list.
+    let remove = format!("remove-{}", rule.id);
+    wait_drawn(vcx, |vcx| painted(vcx, &remove));
+    click(vcx, &remove);
+    wait_drawn(vcx, |vcx| {
+        project.read_with(vcx, |p, cx| p.view(cx)).here.is_empty()
+    });
+}
+
+#[gpui::test]
+fn a_command_added_on_the_allowlist_is_kept_for_that_project(cx: &mut TestAppContext) {
+    use crate::vm::projects::FolderKey;
+    cx.update(crate::ui::composer::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_project(
+            FolderKey::Repo(std::path::PathBuf::from("/demo/reno")),
+            window,
+            cx,
+        );
+    });
+    let project = root
+        .read_with(vcx, |r, _| r.project_screen().cloned())
+        .unwrap();
+    let field = project
+        .read_with(vcx, |p, _| p.add_field().cloned())
+        .expect("an add field for a repository");
+    field.update_in(vcx, |c, window, cx| {
+        c.fill("cargo clippy --workspace", window, cx);
+        c.submit(window, cx);
+    });
+    wait_drawn(vcx, |vcx| {
+        project
+            .read_with(vcx, |p, cx| p.view(cx))
+            .here
+            .iter()
+            .any(|r| r.matches.contains("cargo clippy --workspace"))
+    });
+}
