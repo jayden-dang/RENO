@@ -16,6 +16,12 @@
 //! A rescan notice (the platform dropped events and named a directory) and a watcher error both
 //! count whatever their path: the files that changed are unknown, and a read looks at them all.
 //!
+//! # Starting the watch
+//!
+//! `watch` returns at once; the platform stream is started on a blocking thread, because with
+//! `fseventsd` busy a start has taken half a second and the daemon should not boot that slowly.
+//! When the stream is up a reload is signalled, so an edit made while it was starting is read.
+//!
 //! # When the watch cannot start
 //!
 //! The platform has a finite pool of watch streams shared by every process on the machine (see
@@ -308,11 +314,6 @@ impl FsDefinitions {
         self.tasks.close();
         self.tasks.wait().await;
     }
-
-    /// Starts the platform watcher for `root`, feeding `raw`.
-    fn start_watcher(&self, raw: mpsc::Sender<()>) -> Result<WatcherGuard, String> {
-        start_watcher(&*self.watchers, &self.root, raw)
-    }
 }
 
 fn start_watcher(
@@ -337,6 +338,47 @@ fn start_watcher(
             }
         }),
     )
+}
+
+/// The first start of the watch, on a blocking thread (the platform call waits for its stream).
+/// When it works a reload is signalled: the kernel read the files when `watch` returned, and an
+/// edit made before the stream was up would otherwise be missed. When it fails, [`retry_start`]
+/// takes over.
+async fn first_start(
+    watchers: Arc<dyn WatcherFactory>,
+    root: PathBuf,
+    backoff: WatchBackoff,
+    state: Arc<WatchState>,
+    raw: mpsc::Sender<()>,
+    stop: CancellationToken,
+) {
+    let started = {
+        let (watchers, root, raw) = (Arc::clone(&watchers), root.clone(), raw.clone());
+        tokio::task::spawn_blocking(move || start_watcher(&*watchers, &root, raw))
+            .await
+            .unwrap_or_else(|error| Err(format!("the watch start did not finish: {error}")))
+    };
+    match started {
+        Ok(guard) => {
+            {
+                let mut slot = lock(&state.watcher);
+                // As in `retry_start`: a guard that arrives after `shutdown` is dropped.
+                if stop.is_cancelled() {
+                    return;
+                }
+                *slot = Some(guard);
+            }
+            let _ = raw.try_send(());
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "cannot watch the definitions; keeping what is loaded and trying again"
+            );
+            *lock(&state.problem) = Some(error);
+            retry_start(watchers, root, backoff, state, raw, stop).await;
+        }
+    }
 }
 
 /// Starts the watch again until it works or `stop` is cancelled. Each wait is a deadline that
@@ -405,25 +447,16 @@ impl Definitions for FsDefinitions {
         self.tasks
             .spawn(debounce(raw_rx, out_tx, self.debounce, self.stop.clone()));
 
-        // The first start is made now, so that the kernel's read after it misses no edit.
-        match self.start_watcher(raw_tx.clone()) {
-            Ok(guard) => *lock(&self.state.watcher) = Some(guard),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "cannot watch the definitions; keeping what is loaded and trying again"
-                );
-                *lock(&self.state.problem) = Some(error);
-                self.tasks.spawn(retry_start(
-                    Arc::clone(&self.watchers),
-                    self.root.clone(),
-                    self.retry,
-                    Arc::clone(&self.state),
-                    raw_tx,
-                    self.stop.clone(),
-                ));
-            }
-        }
+        // The first start runs off the boot path: with `fseventsd` busy it has taken half a
+        // second, and the daemon serves the definitions it just read meanwhile.
+        self.tasks.spawn(first_start(
+            Arc::clone(&self.watchers),
+            self.root.clone(),
+            self.retry,
+            Arc::clone(&self.state),
+            raw_tx,
+            self.stop.clone(),
+        ));
         Ok(out_rx)
     }
 }

@@ -637,6 +637,72 @@ use std::sync::Arc;
 
 use crate::watcher::{Captured, Counting, FailingFirst};
 
+/// What `probe` returns once it returns something, polled every millisecond up to [`FAILSAFE`].
+/// For what a background task sets with no signal to wait on.
+async fn eventually<T>(mut probe: impl FnMut() -> Option<T>) -> T {
+    let started = std::time::Instant::now();
+    while started.elapsed() < FAILSAFE {
+        if let Some(found) = probe() {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!("the condition never held");
+}
+
+/// A platform start that waits until the test lets it go, as a busy `fseventsd` makes it wait.
+#[derive(Debug)]
+struct Held {
+    inner: Captured,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl WatcherFactory for Held {
+    fn start(
+        &self,
+        roots: &[PathBuf],
+        handler: crate::watcher::Handler,
+    ) -> Result<crate::watcher::WatcherGuard, String> {
+        let _ = self
+            .release
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .recv_timeout(FAILSAFE);
+        self.inner.start(roots, handler)
+    }
+}
+
+#[tokio::test]
+async fn a_slow_watch_start_does_not_hold_up_watch_and_is_followed_by_a_reload() {
+    let (_dir, root) = temp_root();
+    bootstrap(&root, fixed(GitOutcome::Unavailable))
+        .await
+        .unwrap();
+    let (release, held) = std::sync::mpsc::channel();
+    let fs_defs = FsDefinitions::open(&root, Duration::from_millis(5))
+        .unwrap()
+        .with_watchers(Arc::new(Held {
+            inner: Captured::default(),
+            release: std::sync::Mutex::new(held),
+        }));
+
+    // `watch` answers while the platform start is still waiting, and nothing is wrong.
+    let mut changes = fs_defs.watch().unwrap();
+    assert_eq!(fs_defs.watch_problem(), None);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), changes.recv())
+            .await
+            .is_err(),
+        "no reload before the stream is up"
+    );
+
+    // Once it is up, a reload is signalled with no event from the platform (this fake raises
+    // none): it covers an edit made while the stream was starting, which nothing else reports.
+    release.send(()).unwrap();
+    next_signal(&mut changes).await;
+    fs_defs.shutdown().await;
+}
+
 fn quick() -> WatchBackoff {
     WatchBackoff {
         initial: Duration::from_millis(5),
@@ -657,10 +723,10 @@ async fn a_watch_that_cannot_start_is_reported_retried_and_then_reloads_edits() 
         .with_watchers(flaky.clone())
         .with_retry(quick());
 
-    // The first start fails at once: `watch` still answers, the condition is shown, and the last
-    // good files keep being readable.
+    // The first start fails: `watch` still answers, the condition is shown, and the last good
+    // files keep being readable.
     let mut changes = fs_defs.watch().unwrap();
-    let problem = fs_defs.watch_problem().expect("the failure is shown");
+    let problem = eventually(|| fs_defs.watch_problem()).await;
     assert!(
         problem.contains("unable to start FSEvent stream"),
         "{problem}"
@@ -714,7 +780,7 @@ async fn shutdown_ends_the_retries_and_a_dropped_port_lets_go_of_its_stream() {
         .unwrap()
         .with_watchers(counting.clone());
     let _changes = held.watch().unwrap();
-    assert_eq!(counting.live(), 1);
+    eventually(|| (counting.live() == 1).then_some(())).await;
     drop(held);
     assert_eq!(counting.live(), 0, "dropping the port stopped its watcher");
 }

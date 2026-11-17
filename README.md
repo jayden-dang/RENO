@@ -72,7 +72,7 @@ gets its own token, scoped to its bot, team and flow.
 ## Status
 
 Reno is **pre-alpha**. The architecture and the UI are locked; the code is being written now.
-There is nothing to install yet.
+There is no release yet; to run it from a checkout, see [docs/INSTALL.md](docs/INSTALL.md).
 
 | Phase | What ships |
 |---|---|
