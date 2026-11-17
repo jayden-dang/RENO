@@ -167,7 +167,7 @@ async fn a_run_in_a_repository_works_in_a_worktree_and_the_checkout_is_untouched
     git(&info.path, &["add", "agent.txt"]);
     git(&info.path, &["commit", "-qm", "agent"]);
     within(fx.client.cancel_run(&run, None)).await.unwrap();
-    until_status(&fx, &run, RunStatus::Interrupted).await;
+    until_status(&fx, &run, RunStatus::Cancelled).await;
     ended(&fx, &run).await;
 
     let kept = fx.client.get_workspace(run.clone()).await.unwrap();

@@ -150,12 +150,12 @@ daemon_test! {
 
         let cancelled = within(fx.client.cancel_run(&held, Some("test".into()))).await.unwrap();
         // The reply carries the status at answer time; a fast executor may already have stopped.
-        assert!(matches!(cancelled, RunStatus::Running | RunStatus::Interrupted), "{cancelled:?}");
+        assert!(matches!(cancelled, RunStatus::Running | RunStatus::Cancelled), "{cancelled:?}");
         while let Some(item) = within(events.next()).await {
             seen.push(item.unwrap().event);
         }
         assert!(is_done(seen.last().unwrap(), StopReason::Interrupted));
-        assert_eq!(fx.status(&held).await, RunStatus::Interrupted);
+        assert_eq!(fx.status(&held).await, RunStatus::Cancelled);
 
         // Steering lets a held run finish, and the message is in its journal.
         let steered = fx.run("mock-hold", "steer me").await;
