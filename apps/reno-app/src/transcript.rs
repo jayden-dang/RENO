@@ -335,10 +335,18 @@ pub(crate) fn build_rows(
             } => {
                 built.facts.reason.clone_from(reason);
                 built.facts.diagnostic.clone_from(diagnostic);
+                // A result that is the last answer, already drawn above, is not said twice.
+                let repeats = |result: &String| {
+                    built.rows.iter().rev().find_map(|row| match row {
+                        Row::Prose { text, .. } => Some(text.trim() == result.trim()),
+                        _ => None,
+                    }) == Some(true)
+                };
+                let result = result.clone().filter(|result| !repeats(result));
                 built.rows.push(Row::Done {
                     key,
                     stop: *stop,
-                    result: result.clone(),
+                    result,
                     diagnostic: diagnostic.clone(),
                     reason: reason.clone(),
                 });
@@ -836,6 +844,37 @@ mod tests {
         );
         assert!(matches!(twice.rows[0], Row::Approval { .. }));
         assert!(matches!(twice.rows[1], Row::Asked { .. }));
+    }
+
+    #[test]
+    fn a_result_that_is_the_final_answer_is_not_repeated_on_the_finished_line() {
+        let done = |result: &str| ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: Some(result.into()),
+            diagnostic: None,
+            reason: None,
+        };
+        let result_of = |built: &Built| match built.rows.last() {
+            Some(Row::Done { result, .. }) => result.clone(),
+            other => panic!("not done: {other:?}"),
+        };
+        let answer = "Here is **the answer**.\n\n- one\n- two";
+        // The harness's result is the last message, said again.
+        let same = build(
+            vec![
+                text("Here is **the answer**."),
+                text("\n\n- one\n- two"),
+                done(answer),
+            ],
+            &[],
+        );
+        assert_eq!(result_of(&same), None);
+        // Trailing whitespace is not a difference.
+        let spaced = build(vec![text(answer), done(&format!("{answer}\n"))], &[]);
+        assert_eq!(result_of(&spaced), None);
+        // A short summary that is not the message stays.
+        let summary = build(vec![text(answer), done("mock run complete")], &[]);
+        assert_eq!(result_of(&summary).as_deref(), Some("mock run complete"));
     }
 
     #[test]
