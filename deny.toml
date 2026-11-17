@@ -75,6 +75,7 @@ ignore = [
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; via gpui -> usvg" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; via gpui font stack" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; via gpui_linux (Linux only)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (published 2026-11-17); via gpui and rmcp, no direct use; revisit on the next gpui/rmcp bump" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; via gpui_linux (Linux only)" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; via gpui_linux (Linux only)" },
     #"RUSTSEC-0000-0000",
