@@ -44,7 +44,7 @@ async fn add(env: &Env, args: RuleAdd) -> anyhow::Result<ExitCode> {
     if env.json {
         print_json(&rule)?;
     } else {
-        print_line(render::rule_line(&rule, now_ms()))?;
+        print_line(render::rule_line(&rule, now_ms(), false))?;
     }
     Ok(ExitCode::SUCCESS)
 }

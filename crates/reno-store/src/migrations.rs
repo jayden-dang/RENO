@@ -394,13 +394,13 @@ ALTER TABLE run_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0 CH
 ALTER TABLE run_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0);
 ";
 
-/// Migration 15 (project-scoped standing rules): a rule may be scoped to one project, the git
+/// Migration 16 (project-scoped standing rules): a rule may be scoped to one project, the git
 /// repository root named in `scope_project` (the daemon's canonical path).
 ///
 /// SQLite cannot change a `CHECK`, so the table is rebuilt with its rows, indexes and triggers
 /// (the triggers also guard the new column). Nothing refers to `standing_rules`.
-const V15: &str = "
-ALTER TABLE standing_rules RENAME TO standing_rules_v14;
+const V16: &str = "
+ALTER TABLE standing_rules RENAME TO standing_rules_v15;
 DROP TRIGGER standing_rules_only_revoke;
 DROP TRIGGER standing_rules_are_kept;
 DROP INDEX standing_rules_in_force;
@@ -429,8 +429,8 @@ INSERT INTO standing_rules
      expires_at, revoked_at, source_approval)
 SELECT rowid, id, scope, scope_run, scope_bot, effect, matcher, created_by, created_at,
        expires_at, revoked_at, source_approval
-FROM standing_rules_v14;
-DROP TABLE standing_rules_v14;
+FROM standing_rules_v15;
+DROP TABLE standing_rules_v15;
 CREATE INDEX standing_rules_in_force ON standing_rules (scope, created_at) WHERE revoked_at IS NULL;
 CREATE INDEX standing_rules_run ON standing_rules (scope_run) WHERE scope_run IS NOT NULL;
 CREATE INDEX standing_rules_project ON standing_rules (scope_project) WHERE scope_project IS NOT NULL;
@@ -468,6 +468,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V13),
         M::up(V14),
         M::up(V15),
+        M::up(V16),
     ])
 }
 
@@ -516,7 +517,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -743,12 +744,12 @@ mod tests {
         .unwrap();
     }
 
-    /// Upgrading a database that holds standing rules (schema 14): they survive the table being
+    /// Upgrading a database that holds standing rules (schema 15): they survive the table being
     /// rebuilt for the `project` scope, stay unchangeable, and a project rule can then be stored.
     #[test]
-    fn upgrade_from_a_version_fourteen_database_keeps_its_rules_and_adds_project_scope() {
+    fn upgrade_from_a_version_fifteen_database_keeps_its_rules_and_adds_project_scope() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrations().to_version(&mut conn, 14).unwrap();
+        migrations().to_version(&mut conn, 15).unwrap();
         conn.execute_batch(
             "INSERT INTO standing_rules (id, scope, scope_bot, effect, matcher, created_by, created_at)
              VALUES ('rule_a', 'bot', 'scout', 'allow', '{}', 'human', 5);",
