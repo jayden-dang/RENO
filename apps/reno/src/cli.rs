@@ -321,6 +321,10 @@ pub(crate) enum WorkspaceCommand {
     ///
     /// Give one run, or --merged (workspaces whose branch is merged into their repository's
     /// current HEAD), or --all-clean (workspaces with no commits and no uncommitted changes).
+    ///
+    /// Exit status: naming one run that is kept (refused) exits 1. --merged and --all-clean
+    /// sweep best-effort: workspaces they skip as kept do not fail the command (exit 0).
+    /// Successful removals and --force exit 0.
     Clean(WorkspaceClean),
 }
 

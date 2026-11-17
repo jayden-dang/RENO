@@ -1108,9 +1108,12 @@ fn workspace_list_show_and_clean_through_the_cli() {
     let only = world.json(&["workspace", "list", "--status", "removed"]);
     assert!(only["workspaces"].as_array().unwrap().is_empty());
 
-    // Unmerged commits are kept by every clean, and removed only by --force.
+    // Unmerged commits are kept by every clean, and removed only by --force. A refused clean of
+    // one named run exits 1; a sweep (--merged, --all-clean) that only skips exits 0.
+    let refused = world.reno(&["workspace", "clean", &run]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(path.exists());
     for args in [
-        vec!["workspace", "clean", &run],
         vec!["workspace", "clean", "--merged"],
         vec!["workspace", "clean", "--all-clean"],
     ] {
@@ -1118,12 +1121,20 @@ fn workspace_list_show_and_clean_through_the_cli() {
         assert!(out.status.success(), "{}", text(&out.stderr));
         assert!(path.exists(), "{args:?}");
     }
-    let kept = text(&world.reno(&["workspace", "clean", &run]).stdout);
+    let kept = text(&refused.stdout);
     assert!(kept.contains("kept") && kept.contains("--force"), "{kept}");
 
     let forced = world.json(&["workspace", "clean", &run, "--force"]);
     assert_eq!(forced["items"][0]["outcome"], "removed");
     assert!(!path.exists());
+    // A removed workspace no longer holds what it held.
+    let after = text(&world.reno(&["workspace", "list"]).stdout);
+    assert!(
+        after.contains("removed") && !after.contains("commit(s)") && !after.contains("uncommitted"),
+        "{after}"
+    );
+    let detail = text(&world.reno(&["workspace", "show", &run]).stdout);
+    assert!(!detail.contains("holds"), "{detail}");
     assert_eq!(git(&repo, &["branch", "--list", "reno/*"]), "");
     assert_eq!(
         std::fs::read(repo.join(".git/index")).unwrap(),

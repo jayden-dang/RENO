@@ -10,10 +10,10 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use reno_client::Client;
 use reno_proto::{
-    ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanTarget, ExecEvent,
-    ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision, RunCancelResult,
-    RunId, RunListParams, RunListResult, RunSummary, Seq, StopReason, TaskRunParams,
-    TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
+    ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanOutcome, CleanTarget,
+    ExecEvent, ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision,
+    RunCancelResult, RunId, RunListParams, RunListResult, RunSummary, Seq, StopReason,
+    TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
 };
 use serde::Serialize;
 
@@ -530,11 +530,13 @@ async fn workspace_clean(env: &Env, args: WorkspaceClean) -> anyhow::Result<Exit
         (None, false, true) => CleanTarget::AllClean,
         _ => bail!("give one of: a run, --merged or --all-clean"),
     };
+    let named_run = matches!(target, CleanTarget::Run { .. });
     let client = env.connect().await?;
     let items = client
         .clean_workspaces(target, args.force)
         .await
         .map_err(|e| env.explain(e))?;
+    let refused = named_run && items.iter().any(|i| i.outcome == CleanOutcome::Kept);
     if env.json {
         print_json(&WorkspaceCleanResult { items })?;
     } else if items.is_empty() {
@@ -544,7 +546,13 @@ async fn workspace_clean(env: &Env, args: WorkspaceClean) -> anyhow::Result<Exit
             print_line(render::clean_line(item))?;
         }
     }
-    Ok(ExitCode::SUCCESS)
+    // Asking for one run and being refused is a failure a script must see; a sweep that skips
+    // some workspaces is best-effort and succeeds.
+    Ok(if refused {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 async fn approval_list(env: &Env) -> anyhow::Result<ExitCode> {

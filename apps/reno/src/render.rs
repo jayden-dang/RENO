@@ -13,7 +13,7 @@ use reno_proto::{
     CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
     InstallStatus, ModelSource, NotInstalledReason, ResolvedBy, RoutingDecision, RunEventItem,
     RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo, TriggerStatus,
-    VersionGate, WorkspaceInfo,
+    VersionGate, WorkspaceInfo, WorkspaceStatus,
 };
 use serde::Serialize;
 
@@ -422,7 +422,11 @@ pub(crate) fn workspace_line(workspace: &WorkspaceInfo) -> String {
         wire_name(&workspace.status),
         workspace.branch
     );
-    if let Some(changes) = workspace.changes {
+    // A removed worktree holds nothing now; its last-known changes are stale.
+    let held = workspace
+        .changes
+        .filter(|_| workspace.status != WorkspaceStatus::Removed);
+    if let Some(changes) = held {
         line.push_str(&format!("  {} commit(s)", changes.commits));
         if changes.dirty {
             line.push_str(", uncommitted changes");
@@ -446,7 +450,10 @@ pub(crate) fn workspace_detail(workspace: &WorkspaceInfo) -> Vec<String> {
     if !workspace.subdir.is_empty() {
         lines.push(format!("subdir     {}", workspace.subdir));
     }
-    if let Some(changes) = workspace.changes {
+    if let Some(changes) = workspace
+        .changes
+        .filter(|_| workspace.status != WorkspaceStatus::Removed)
+    {
         lines.push(format!(
             "holds      {} commit(s){}",
             changes.commits,
