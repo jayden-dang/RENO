@@ -243,6 +243,7 @@ impl ProjectScreen {
         let note = |text: String| {
             div()
                 .id("project-rules-here")
+                .debug_selector(|| "project-rules-here".to_owned())
                 .text_size(px(13.0))
                 .text_color(theme.muted)
                 .child(text)

@@ -196,7 +196,7 @@ fn folder_view(
                 let slug = slug.clone();
                 move || format!("project-{slug}")
             })
-            .opacity(0.0)
+            .opacity(0.45)
             .group_hover(group, |s| s.opacity(1.0))
             .on_click(move |_, window, cx| open(key.clone(), window, cx))
     };

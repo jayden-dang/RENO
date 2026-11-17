@@ -926,8 +926,14 @@ impl Store {
             move |client| async move { client.approval_history(None, Some(50)).await },
             cx,
             D {
-                ok: Box::new(|store, records, cx| {
+                ok: Box::new(|store, records: Vec<reno_proto::ApprovalRecord>, cx| {
+                    // A decision's run may be older than the runs the window holds: fetch it, so
+                    // the Project page can place the decision in its project.
+                    let runs: Vec<RunId> = records.iter().map(|r| r.run_id.clone()).collect();
                     store.apply(Update::ApprovalHistory(records), cx);
+                    for run in &runs {
+                        store.ensure_run(run, cx);
+                    }
                 }),
                 err: Box::new(|store, cx| {
                     store.apply(

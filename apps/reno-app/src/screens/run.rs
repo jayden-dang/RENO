@@ -103,6 +103,16 @@ impl RunScreen {
         self.steer.read(cx).focus_handle(cx)
     }
 
+    /// Whether the card offers a reason field: the daemon takes one with a denial.
+    pub(crate) fn shows_reason(&self, approval: &ApprovalId, cx: &gpui::App) -> bool {
+        self.reasons.contains_key(approval)
+            && self
+                .store
+                .read(cx)
+                .state()
+                .supports(reno_proto::FEATURE_APPROVAL_MESSAGE)
+    }
+
     #[cfg(test)]
     pub(crate) fn reason_input(&self, approval: &ApprovalId) -> Option<&Entity<Composer>> {
         self.reasons.get(approval).map(|(input, _)| input)
@@ -717,9 +727,11 @@ impl RunScreen {
                         },
                     ))
             });
+        // A daemon without `approval.message` would drop the words: then there is no field.
         let reason = self
             .reasons
             .get(&approval.id)
+            .filter(|_| self.shows_reason(&approval.id, cx))
             .map(|(input, _)| input.clone());
 
         div()

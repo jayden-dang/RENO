@@ -721,3 +721,72 @@ fn a_command_added_on_the_allowlist_is_kept_for_that_project(cx: &mut TestAppCon
             .any(|r| r.matches.contains("cargo clippy --workspace"))
     });
 }
+
+#[gpui::test]
+fn an_older_daemon_offers_only_what_it_keeps(cx: &mut TestAppContext) {
+    use crate::vm::projects::FolderKey;
+    // No project rules: the menu has no "Always in", the Allowlist says to update renod.
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_PROJECT_RULES.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    open_run_screen(vcx, &root, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
+    click(vcx, "approve-more");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-scope-2"));
+    assert!(
+        !painted(vcx, "approve-scope-3"),
+        "once, keeper, every project: no project choice"
+    );
+    root.update_in(vcx, |r, window, cx| {
+        r.open_project(
+            FolderKey::Repo(std::path::PathBuf::from("/demo/atlas-api")),
+            window,
+            cx,
+        );
+    });
+    let project = root
+        .read_with(vcx, |r, _| r.project_screen().cloned())
+        .unwrap();
+    assert!(!project.read_with(vcx, |p, cx| p.view(cx)).project_rules);
+    draw(vcx);
+    assert!(painted(vcx, "project-rules-here"));
+}
+
+#[gpui::test]
+fn without_rules_or_reasons_the_card_is_approve_and_deny(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![
+                reno_proto::FEATURE_RULES.to_owned(),
+                reno_proto::FEATURE_APPROVAL_MESSAGE.to_owned(),
+            ],
+            ..FakeConfig::default()
+        },
+    );
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open_run_screen(vcx, &root, "scout1");
+    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
+    assert!(
+        !painted(vcx, "approve-more"),
+        "no menu without standing rules"
+    );
+    let approval = reno_proto::ApprovalId::from_suffix("scoutfetch").unwrap();
+    assert!(
+        !screen.read_with(vcx, |s, cx| s.shows_reason(&approval, cx)),
+        "no reason field the daemon would drop"
+    );
+    click(vcx, "deny");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+}
