@@ -75,6 +75,8 @@ fn choosing_a_class_previews_its_bots_route_and_why_lists_who_was_passed_over(
     wait_drawn(vcx, |vcx| ready(vcx, &composer));
 
     // Review goes to the reviewer bot, which prefers Codex, which is signed out in the demo.
+    click(vcx, "class-menu");
+    wait_drawn(vcx, |vcx| painted(vcx, "class-review"));
     click(vcx, "class-review");
     settle_debounce(vcx);
     wait_drawn(vcx, |vcx| {
@@ -86,10 +88,17 @@ fn choosing_a_class_previews_its_bots_route_and_why_lists_who_was_passed_over(
             _ => false,
         })
     });
-    assert!(painted(vcx, "route-name"));
+    assert!(
+        painted(vcx, "route-name"),
+        "Auto's chip names where it routes"
+    );
     assert!(!painted(vcx, "why-panel"));
+    // "why?" lives on Auto's row in the picker; it opens the panel and closes the picker.
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "why"));
     click(vcx, "why");
     wait_drawn(vcx, |vcx| painted(vcx, "why-panel"));
+    assert!(!painted(vcx, "model-picker"));
     assert!(composer.read_with(vcx, |c, _| c.why_is_open()));
     assert!(painted(vcx, "rejected-0"));
     let Preview::Ready(d) = composer.read_with(vcx, |c, _| c.preview().clone()) else {
@@ -98,6 +107,8 @@ fn choosing_a_class_previews_its_bots_route_and_why_lists_who_was_passed_over(
     let view = crate::vm::routing::view(&d);
     assert_eq!(view.rejected[0].who.name, "Codex");
     assert_eq!(view.rejected[0].reason, "Signed out. Run `codex login`.");
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "why"));
     click(vcx, "why");
     draw(vcx);
     assert!(!painted(vcx, "why-panel"));
@@ -534,14 +545,18 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     assert!(painted(vcx, "model-chip"));
+    assert!(!painted(vcx, "model-picker"), "the picker starts closed");
     assert!(
-        !painted(vcx, "pick-harness-claude-code"),
-        "the picker starts closed"
+        !painted(vcx, "effort-dots"),
+        "Auto has no model, so no effort"
     );
     click(vcx, "model-chip");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-claude-code"));
-    click(vcx, "pick-harness-claude-code");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
+    assert!(painted(vcx, "pick-harness-auto"), "Auto is first on Home");
+    assert!(
+        painted(vcx, "harness-head-codex"),
+        "every installed harness is offered"
+    );
     click(vcx, "pick-model-claude-sonnet-5-5");
     draw(vcx);
     let composer = home_composer(vcx, &root);
@@ -553,9 +568,10 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
             effort: None,
         })
     );
+    assert!(!painted(vcx, "model-picker"), "a choice closes the picker");
     assert!(
-        painted(vcx, "pick-effort-default"),
-        "a model with effort levels keeps the picker open for its effort"
+        painted(vcx, "effort-dot-low") && painted(vcx, "effort-dot-max"),
+        "the dots are the model's own levels"
     );
 
     composer.update_in(vcx, |c, window, cx| c.fill("pick test", window, cx));
@@ -590,7 +606,7 @@ fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     assert!(
-        !painted(vcx, "pick-harness-codex"),
+        !painted(vcx, "harness-head-codex") && !painted(vcx, "pick-harness-auto"),
         "a live run keeps its harness: only its models are offered"
     );
     click(vcx, "pick-model-claude-haiku-5-5");
@@ -670,28 +686,38 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
     });
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
+    assert!(!painted(vcx, "effort-dot-high"), "no effort before a model");
     click(vcx, "model-chip");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-claude-code"));
-    click(vcx, "pick-harness-claude-code");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
-    assert!(
-        !painted(vcx, "pick-effort-high"),
-        "no effort before a model"
-    );
     // Haiku takes low to high: no xhigh.
     click(vcx, "pick-model-claude-haiku-5-5");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-effort-high"));
-    assert!(!painted(vcx, "pick-effort-xhigh"));
-    // Sonnet goes to max.
-    click(vcx, "pick-model-claude-sonnet-5-5");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-effort-xhigh"));
-    click(vcx, "pick-effort-xhigh");
-    draw(vcx);
-    assert!(
-        !painted(vcx, "model-picker"),
-        "choosing an effort closes the picker"
-    );
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-dot-high"));
+    assert!(!painted(vcx, "effort-dot-xhigh"));
     let composer = home_composer(vcx, &root);
+    click(vcx, "effort-dot-high");
+    draw(vcx);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        Some(reno_proto::Effort::High)
+    );
+    // Sonnet goes to max; high carries over, since Sonnet takes it too.
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
+    click(vcx, "pick-model-claude-sonnet-5-5");
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-dot-xhigh"));
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        Some(reno_proto::Effort::High)
+    );
+    // The chosen dot again goes back to the model's default; then xhigh.
+    click(vcx, "effort-dot-high");
+    draw(vcx);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        None
+    );
+    click(vcx, "effort-dot-xhigh");
+    draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().cloned()),
         Some(crate::vm::models::Pick {
@@ -716,4 +742,50 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
         assert_eq!(summary.effort, Some(reno_proto::Effort::XHigh));
         assert_eq!(summary.model.as_deref(), Some("claude-sonnet-5-5"));
     });
+}
+
+#[gpui::test]
+fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_next(
+    cx: &mut TestAppContext,
+) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    let keeper = crate::tests::run_id("keeper1");
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    // The demo run reports an alias the harness does not list, so it shows no dots until it
+    // is switched to a listed model.
+    assert!(!painted(vcx, "effort-dots"));
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
+    click(vcx, "pick-model-claude-haiku-5-5");
+    // A live run: the dots show its model's levels, and a click changes nothing.
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-dots"));
+    let before = composer.read_with(vcx, |c, _| c.pick().cloned());
+    click(vcx, "effort-dot-high");
+    draw(vcx);
+    assert_eq!(composer.read_with(vcx, |c, _| c.pick().cloned()), before);
+    // Ended: a dot picks the effort the next run starts with.
+    store.update(vcx, |s, cx| s.cancel_run(keeper.clone(), cx));
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .is_some_and(|r| r.status == RunStatus::Cancelled)
+        })
+    });
+    draw(vcx);
+    click(vcx, "effort-dot-high");
+    draw(vcx);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        Some(reno_proto::Effort::High)
+    );
 }

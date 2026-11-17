@@ -30,6 +30,8 @@ pub(crate) struct ModelChoice {
     pub(crate) efforts: Vec<Effort>,
     /// Its own level when none is asked for.
     pub(crate) default_effort: Option<Effort>,
+    /// What the CLI says it is for ("Fastest for quick answers"), when it says.
+    pub(crate) description: Option<String>,
 }
 
 /// One harness on offer.
@@ -71,6 +73,7 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
                 name: m.display_name.clone().unwrap_or_else(|| m.id.clone()),
                 efforts: m.efforts,
                 default_effort: m.default_effort,
+                description: m.description,
                 id: m.id,
             })
             .collect(),
@@ -123,23 +126,66 @@ pub(crate) fn model(state: &State, executor: &ExecutorId, model: &str) -> Option
     harness(state, executor).and_then(|h| h.models.into_iter().find(|m| m.id == model))
 }
 
-/// The chip's words: "Auto", "Codex", "Claude Code · Sonnet 5.5", or with an effort
-/// "Claude Code · Sonnet 5.5 · high".
-pub(crate) fn label(state: &State, pick: Option<&Pick>) -> String {
-    let Some(pick) = pick else {
-        return "Auto".to_owned();
-    };
-    let mut words = summary::executor_name(pick.executor.as_str());
-    if let Some(model) = &pick.model {
-        words.push_str(&format!(
-            " \u{b7} {}",
-            model_name(state, &pick.executor, model)
-        ));
+/// The chip's words for a pick: the model's name ("Opus 5.5"), or for a harness's default the
+/// harness name and a faint "default". The glyph beside them names the vendor.
+pub(crate) fn chip_words(state: &State, pick: &Pick) -> (String, Option<&'static str>) {
+    match &pick.model {
+        Some(model) => (model_name(state, &pick.executor, model), None),
+        None => (
+            summary::executor_name(pick.executor.as_str()),
+            Some("default"),
+        ),
     }
-    if let Some(effort) = pick.effort {
-        words.push_str(&format!(" \u{b7} {}", effort.as_str()));
-    }
-    words
+}
+
+/// How many of a harness's models the picker lists before "More …" (in the CLI's order).
+pub(crate) const FOLD: usize = 4;
+
+/// The models listed before "More …": the first [`FOLD`], plus the chosen one when it is further
+/// down, so a choice is never hidden. Also how many stay behind "More".
+pub(crate) fn folded<'a>(
+    models: &'a [ModelChoice],
+    chosen: Option<&str>,
+) -> (Vec<&'a ModelChoice>, usize) {
+    let shown: Vec<_> = models
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| *i < FOLD || chosen == Some(m.id.as_str()))
+        .map(|(_, m)| m)
+        .collect();
+    let hidden = models.len() - shown.len();
+    (shown, hidden)
+}
+
+/// One effort dot beside the chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EffortDot {
+    pub(crate) effort: Effort,
+    /// At or below the chosen level.
+    pub(crate) filled: bool,
+    /// The model's own level, shown when none is chosen.
+    pub(crate) default: bool,
+}
+
+/// The dots for a model's levels (least to most) and the chosen one (`None`: its default).
+pub(crate) fn effort_dots(
+    levels: &[Effort],
+    chosen: Option<Effort>,
+    default: Option<Effort>,
+) -> Vec<EffortDot> {
+    levels
+        .iter()
+        .map(|&effort| EffortDot {
+            effort,
+            filled: chosen.is_some_and(|c| effort <= c),
+            default: chosen.is_none() && default == Some(effort),
+        })
+        .collect()
+}
+
+/// The effort after clicking a dot: that level, or back to the default when it was chosen.
+pub(crate) fn next_effort(chosen: Option<Effort>, clicked: Effort) -> Option<Effort> {
+    (chosen != Some(clicked)).then_some(clicked)
 }
 
 #[cfg(test)]
@@ -235,46 +281,93 @@ mod tests {
     }
 
     #[test]
-    fn the_chip_names_the_pick() {
+    fn the_chip_names_the_model_and_the_vendor_glyph_does_the_rest() {
         let state = state();
         let claude: ExecutorId = "claude-code".parse().unwrap();
-        assert_eq!(label(&state, None), "Auto");
+        let pick = |model: Option<&str>| Pick {
+            executor: claude.clone(),
+            model: model.map(str::to_owned),
+            effort: Some(Effort::High),
+        };
         assert_eq!(
-            label(
-                &state,
-                Some(&Pick {
-                    executor: claude.clone(),
-                    model: None,
-                    effort: None,
-                })
-            ),
-            "Claude Code"
+            chip_words(&state, &pick(None)),
+            ("Claude Code".to_owned(), Some("default"))
         );
         assert_eq!(
-            label(
-                &state,
-                Some(&Pick {
-                    executor: claude.clone(),
-                    model: Some("claude-sonnet-5-5".into()),
-                    effort: None,
-                })
-            ),
-            "Claude Code \u{b7} Sonnet 5.5"
-        );
-        assert_eq!(
-            label(
-                &state,
-                Some(&Pick {
-                    executor: claude.clone(),
-                    model: Some("claude-sonnet-5-5".into()),
-                    effort: Some(Effort::XHigh),
-                })
-            ),
-            "Claude Code \u{b7} Sonnet 5.5 \u{b7} xhigh"
+            chip_words(&state, &pick(Some("claude-sonnet-5-5"))),
+            ("Sonnet 5.5".to_owned(), None)
         );
         let haiku = model(&state, &claude, "claude-haiku-5-5").unwrap();
         assert_eq!(haiku.efforts, [Effort::Low, Effort::Medium, Effort::High]);
         assert_eq!(haiku.default_effort, Some(Effort::Medium));
         assert_eq!(model_name(&state, &claude, "sonnet"), "sonnet");
+    }
+
+    fn choice(id: &str) -> ModelChoice {
+        ModelChoice {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            efforts: Vec::new(),
+            default_effort: None,
+            description: None,
+        }
+    }
+
+    #[test]
+    fn the_picker_folds_after_four_but_never_hides_the_choice() {
+        let all: Vec<_> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|id| choice(id))
+            .collect();
+        let ids = |(shown, hidden): (Vec<&ModelChoice>, usize)| {
+            (
+                shown.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                hidden,
+            )
+        };
+        assert_eq!(
+            ids(folded(&all, None)),
+            (vec!["a".into(), "b".into(), "c".into(), "d".into()], 3)
+        );
+        assert_eq!(
+            ids(folded(&all, Some("f"))),
+            (
+                vec!["a".into(), "b".into(), "c".into(), "d".into(), "f".into()],
+                2
+            )
+        );
+        assert_eq!(
+            ids(folded(&all[..2], None)),
+            (vec!["a".into(), "b".into()], 0)
+        );
+    }
+
+    #[test]
+    fn effort_dots_fill_to_the_choice_and_ring_the_default_when_none_is_chosen() {
+        use Effort::{High, Low, Max, Medium};
+        let levels = [Low, Medium, High, Max];
+        let filled = |dots: Vec<EffortDot>| dots.iter().map(|d| d.filled).collect::<Vec<_>>();
+        assert_eq!(
+            filled(effort_dots(&levels, Some(High), Some(Medium))),
+            [true, true, true, false]
+        );
+        let none = effort_dots(&levels, None, Some(Medium));
+        assert_eq!(filled(none.clone()), [false; 4]);
+        assert_eq!(
+            none.iter().map(|d| d.default).collect::<Vec<_>>(),
+            [false, true, false, false]
+        );
+        assert!(
+            effort_dots(&levels, Some(Low), Some(Medium))
+                .iter()
+                .all(|d| !d.default)
+        );
+        assert_eq!(next_effort(None, High), Some(High));
+        assert_eq!(next_effort(Some(Low), High), Some(High));
+        assert_eq!(
+            next_effort(Some(High), High),
+            None,
+            "the chosen dot again: back to default"
+        );
     }
 }

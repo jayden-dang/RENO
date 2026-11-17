@@ -458,7 +458,10 @@ fn clicking_the_class_chips_selects_a_class(cx: &mut TestAppContext) {
         ("class-triage", Class::Triage),
         ("class-implement", Class::Implement),
     ] {
+        click(vcx, "class-menu");
+        draw(vcx);
         click(vcx, selector);
+        assert!(!painted(vcx, "class-list"), "a choice closes the menu");
         assert_eq!(
             composer.read_with(vcx, |c, _| c.class()),
             class,
