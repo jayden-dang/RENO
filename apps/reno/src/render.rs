@@ -377,6 +377,7 @@ pub(crate) fn status_name(status: RunStatus) -> String {
 pub(crate) fn by_text(by: &ResolvedBy) -> String {
     match by {
         ResolvedBy::Human => "you".to_owned(),
+        ResolvedBy::Rule { name } if name == "builtin:reno-mcp" => "Reno's own tools".to_owned(),
         ResolvedBy::Rule { name } => match name.strip_prefix("standing:") {
             Some(id) => format!("your rule {id}"),
             // The daemon's own label for an unnamed policy rule already says what it is.
@@ -803,6 +804,14 @@ pub(crate) fn status_text(info: &DaemonStatusInfo, socket: &std::path::Path) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn renos_own_tools_rule_reads_as_renos_own_tools() {
+        let by = ResolvedBy::Rule {
+            name: "builtin:reno-mcp".into(),
+        };
+        assert_eq!(by_text(&by), "Reno's own tools");
+    }
+
     #[test]
     fn budget_lines_show_what_the_ceiling_counted_and_the_cache_behind_it() {
         let status: reno_proto::BudgetStatusResult = serde_json::from_value(serde_json::json!({

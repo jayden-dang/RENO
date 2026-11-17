@@ -188,7 +188,11 @@ pub(crate) fn steer_state(run: Option<&reno_proto::RunSummary>) -> SteerState {
         return ended("was stopped");
     }
     match run.status {
-        RunStatus::Succeeded => ended("passed"),
+        RunStatus::Succeeded => match summary::reported_problem(run) {
+            Some(summary::Problem::Failed) => ended("reported a failure"),
+            Some(summary::Problem::Blocked) => ended("reported it is blocked"),
+            None => ended("passed"),
+        },
         RunStatus::Failed => ended("failed"),
         RunStatus::Cancelled => ended("was stopped"),
         RunStatus::Interrupted => SteerState::Waiting(
@@ -1705,6 +1709,31 @@ mod tests {
         assert!(!offline.contains("still routes"), "{offline}");
         let online = preview_unavailable_text("boom", true);
         assert!(online.contains("The daemon still routes the task when you send it."));
+    }
+
+    #[test]
+    fn a_passed_run_that_reported_a_problem_is_not_called_passed() {
+        use reno_proto::{ReportStatus, RunReport};
+        let reported = |status| {
+            let mut r = run_in(RunStatus::Succeeded, None);
+            r.report = Some(RunReport {
+                status,
+                summary: "x".into(),
+            });
+            steer_state(Some(&r))
+        };
+        assert_eq!(
+            reported(ReportStatus::Failed),
+            SteerState::Ended("This run reported a failure. It can't be steered any more.".into())
+        );
+        assert_eq!(
+            reported(ReportStatus::Blocked),
+            SteerState::Ended("This run reported it is blocked. It can't be steered any more.".into())
+        );
+        assert_eq!(
+            reported(ReportStatus::Done),
+            SteerState::Ended("This run passed. It can't be steered any more.".into())
+        );
     }
 
     fn run_in(status: RunStatus, stop: Option<reno_proto::StopDetail>) -> reno_proto::RunSummary {

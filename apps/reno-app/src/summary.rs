@@ -316,6 +316,9 @@ pub(crate) fn rule_words(name: &str) -> String {
     if name.starts_with("standing:") {
         return "your rule".to_owned();
     }
+    if name == "builtin:reno-mcp" {
+        return "Reno's own tools".to_owned();
+    }
     if name.starts_with("policy rule ") {
         return name.to_owned();
     }
@@ -635,6 +638,11 @@ mod tests {
         assert_eq!(rule_words("rules[7]x"), "rule rules[7]x");
         let huge = "rules[99999999999999999999]";
         assert_eq!(rule_words(huge), format!("rule {huge}"));
+    }
+
+    #[test]
+    fn renos_own_tools_rule_reads_as_renos_own_tools() {
+        assert_eq!(rule_words("builtin:reno-mcp"), "Reno's own tools");
     }
 
     #[test]
