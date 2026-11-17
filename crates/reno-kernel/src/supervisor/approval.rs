@@ -68,6 +68,12 @@
 //! reads the clock and expires, at once and through the same path as the timer (record, answer,
 //! journal), every approval whose `expires_at` has passed.
 //!
+//! A question for a person (`NeedsInput`) gets the same limit and the same two clocks: the
+//! policy's `approval_ttl`, or the default. When it passes with nobody having answered, the
+//! harness is declined (an empty answer list, which every driver reads as "no answer"), the
+//! journal gets `ExecEvent::InputExpired`, and the run returns to `running`. This holds whether
+//! or not a client is connected: no client answers questions yet.
+//!
 //! # Where an approval ends
 //!
 //! Besides a decision and a deadline, an open approval is closed `expired` when its run ends, and
@@ -103,6 +109,17 @@ pub(super) struct Open {
     deadline: Instant,
     /// When it expires on the wall clock, as stored. The timer stops while the machine sleeps,
     /// so a wake-up closes the approval by this one.
+    expires_at: i64,
+}
+
+/// A question for a person (`NeedsInput`) that nobody has answered yet. It expires after the
+/// same limit as an approval, with the same two clocks.
+#[derive(Debug)]
+pub(super) struct OpenInput {
+    request_id: String,
+    /// When it expires, in `tokio::time`.
+    deadline: Instant,
+    /// When it expires on the wall clock; a wake-up closes it by this one.
     expires_at: i64,
 }
 
@@ -337,6 +354,29 @@ impl Supervisor {
             subject: subject.clone(),
             expires_at,
         }
+    }
+
+    /// The time limit of an approval or a question: the policy's `approval_ttl`, or the default.
+    fn approval_ttl(&self) -> Duration {
+        let current = self.shared.current_defs();
+        current
+            .set()
+            .policy()
+            .and_then(|p| p.def().approval_ttl())
+            .unwrap_or(self.shared.config.approval_ttl)
+    }
+
+    /// A question for a person was asked: the run waits in `waiting_input` and the question gets
+    /// the deadline an approval would.
+    pub(super) async fn input_requested(&mut self, request_id: &str) {
+        let ttl = self.approval_ttl();
+        self.open_inputs.push(OpenInput {
+            request_id: request_id.to_owned(),
+            deadline: sleep(ttl).deadline(),
+            expires_at: self.shared.db.now_ms().saturating_add(millis(ttl)),
+        });
+        self.rearm();
+        self.enter_wait(RunStatus::WaitingInput).await;
     }
 
     /// Store a pending request, move the run to `waiting_approval`, arm the deadline and publish
@@ -610,26 +650,43 @@ impl Supervisor {
         let Some(fired) = self.expiry.as_ref().map(|timer| timer.deadline()) else {
             return;
         };
-        self.expire_where(|open| open.deadline <= fired).await;
+        self.expire_where(
+            |open| open.deadline <= fired,
+            |input| input.deadline <= fired,
+        )
+        .await;
     }
 
     /// The system woke, and the timer did not run while it slept: deny every open approval whose
     /// wall-clock `expires_at` has passed on the clock now, exactly as the timer would have.
     pub(super) async fn expire_past_wall_clock(&mut self) {
         let now = self.shared.db.now_ms();
-        self.expire_where(|open| open.expires_at <= now).await;
+        self.expire_where(
+            |open| open.expires_at <= now,
+            |input| input.expires_at <= now,
+        )
+        .await;
     }
 
-    /// Deny, as expired, every open approval `is_due` picks, and re-arm the timer for the rest.
-    async fn expire_where(&mut self, is_due: impl Fn(&Open) -> bool) {
+    /// Deny, as expired, every open approval `is_due` picks, decline every open question
+    /// `input_due` picks, and re-arm the timer for the rest.
+    async fn expire_where(
+        &mut self,
+        is_due: impl Fn(&Open) -> bool,
+        input_due: impl Fn(&OpenInput) -> bool,
+    ) {
         let (due, rest): (Vec<Open>, Vec<Open>) = std::mem::take(&mut self.open_approvals)
             .into_iter()
             .partition(is_due);
-        if due.is_empty() {
-            self.open_approvals = rest;
+        self.open_approvals = rest;
+        let (due_inputs, rest): (Vec<OpenInput>, Vec<OpenInput>) =
+            std::mem::take(&mut self.open_inputs)
+                .into_iter()
+                .partition(input_due);
+        self.open_inputs = rest;
+        if due.is_empty() && due_inputs.is_empty() {
             return;
         }
-        self.open_approvals = rest;
         self.rearm();
         for open in due {
             if let Err(error) = self
@@ -659,6 +716,19 @@ impl Supervisor {
                 decision: ApprovalOutcome::Denied,
                 by: ResolvedBy::Expired,
                 message: None,
+            });
+        }
+        for input in due_inputs {
+            // "No answers" is how every driver declines a question.
+            let sent = tokio::select! {
+                sent = self.handle.answer_input(input.request_id.clone(), Vec::new()) => sent,
+                () = self.cancel.cancelled() => Err(reno_harness::exec::ControlsClosed),
+            };
+            if sent.is_err() {
+                tracing::debug!(run = %self.run, "the harness was gone when its question expired");
+            }
+            self.publish(&ExecEvent::InputExpired {
+                request_id: input.request_id,
             });
         }
         self.resolve_wait().await;
@@ -703,7 +773,9 @@ impl Supervisor {
 
     /// Point the one timer at the earliest open deadline, or drop it when nothing waits.
     fn rearm(&mut self) {
-        let next = self.open_approvals.iter().map(|open| open.deadline).min();
+        let next = (self.open_approvals.iter().map(|open| open.deadline))
+            .chain(self.open_inputs.iter().map(|input| input.deadline))
+            .min();
         match (next, self.expiry.as_mut()) {
             (Some(deadline), Some(timer)) => timer.as_mut().reset(deadline),
             (Some(deadline), None) => self.expiry = Some(Box::pin(sleep_until(deadline))),

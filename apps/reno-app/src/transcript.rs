@@ -300,6 +300,10 @@ pub(crate) fn build_rows(
                 request_id: request_id.clone(),
                 questions: questions.clone(),
             }),
+            ExecEvent::InputExpired { .. } => built.rows.push(Row::Asked {
+                key,
+                line: "Nobody answered in time; the question was declined.".to_owned(),
+            }),
             ExecEvent::NeedsApproval { subject, .. } => {
                 let held = pending
                     .iter()
@@ -700,6 +704,23 @@ mod tests {
             &built.rows[0],
             Row::Asked { line, .. } if line == "Reported blocked: need the staging key"
         ));
+    }
+
+    #[test]
+    fn an_expired_question_is_one_status_line() {
+        let built = build(
+            vec![ExecEvent::InputExpired {
+                request_id: "q1".into(),
+            }],
+            &[],
+        );
+        assert_eq!(
+            built.rows,
+            vec![Row::Asked {
+                key: Key(1),
+                line: "Nobody answered in time; the question was declined.".into()
+            }]
+        );
     }
 
     #[test]

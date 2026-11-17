@@ -426,6 +426,13 @@ pub enum ExecEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// A question (`NeedsInput`) went unanswered for the policy's approval time limit and was
+    /// declined: the harness was told there is no answer, and the run goes on. Follows the
+    /// `NeedsInput` it answers. Older clients that do not know it skip it.
+    InputExpired {
+        /// The `request_id` of the `NeedsInput` this answers.
+        request_id: String,
+    },
     /// A message from the human, added by `run.steer`. Only daemons that negotiate the
     /// `run.steer` feature emit it.
     UserMessage {

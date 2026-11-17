@@ -9134,6 +9134,24 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "A question (`NeedsInput`) went unanswered for the policy's approval time limit and was\ndeclined: the harness was told there is no answer, and the run goes on. Follows the\n`NeedsInput` it answers. Older clients that do not know it skip it.",
+                "properties": {
+                  "requestId": {
+                    "description": "The `request_id` of the `NeedsInput` this answers.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "input_expired",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "requestId"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "A message from the human, added by `run.steer`. Only daemons that negotiate the\n`run.steer` feature emit it.",
                 "properties": {
                   "text": {

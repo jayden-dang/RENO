@@ -1556,3 +1556,83 @@ async fn a_wake_expires_only_the_approvals_that_are_due() {
     rig.fx.wait_status(&run, RunStatus::Succeeded).await;
     assert_eq!(rig.decisions(), [Decision::Deny]);
 }
+
+fn asks_input(request: &str) -> MockStep {
+    MockStep::Emit(ExecEvent::NeedsInput {
+        request_id: request.into(),
+        questions: vec![reno_proto::Question {
+            id: "q1".into(),
+            prompt: "which?".into(),
+            options: vec!["a".into(), "b".into()],
+            multi_select: false,
+        }],
+    })
+}
+
+fn input_script() -> Vec<MockStep> {
+    vec![
+        MockStep::started("s", "mock-1"),
+        asks_input("q1"),
+        awaits("q1"),
+        MockStep::text("after"),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_question_nobody_answers_is_declined_at_the_approval_deadline() {
+    let rig = Rig::new("default = \"ask\"\n", input_script()).await;
+    let run = rig.run_as("keeper").await;
+    rig.fx.wait_status(&run, RunStatus::WaitingInput).await;
+
+    // Short of the 30 minute default: still waiting, nothing sent.
+    advance(Duration::from_secs(30 * 60 - 10)).await;
+    settle().await;
+    assert_eq!(rig.fx.status(&run).await, RunStatus::WaitingInput);
+    assert!(rig.mock.log().answers.is_empty());
+
+    // Past it: the harness is told "no answers", and the run goes on.
+    rig.fx.clock.advance(30 * 60 * 1000);
+    advance(Duration::from_secs(10)).await;
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    let answers = rig.mock.log().answers;
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].request_id, "q1");
+    assert!(matches!(&answers[0].answer, Answer::Input(a) if a.is_empty()));
+
+    // The journal says why, between the question and the end.
+    let journal = rig.fx.journal_with_done(&run).await;
+    let kinds: Vec<_> = journal
+        .iter()
+        .filter_map(|(_, event)| match event {
+            ExecEvent::NeedsInput { request_id, .. } => Some(format!("asked {request_id}")),
+            ExecEvent::InputExpired { request_id } => Some(format!("expired {request_id}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["asked q1", "expired q1"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_question_that_came_due_while_the_machine_slept_is_declined_on_the_wake_signal() {
+    let wake = WakeSignal::new();
+    let rig = Rig::waking(
+        "default = \"ask\"\napproval_ttl = \"5m\"\n",
+        input_script(),
+        &wake,
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    rig.fx.wait_status(&run, RunStatus::WaitingInput).await;
+
+    // Three minutes of wall clock: not yet due.
+    rig.fx.clock.advance(3 * 60 * 1000);
+    wake.notify();
+    settle().await;
+    assert_eq!(rig.fx.status(&run).await, RunStatus::WaitingInput);
+
+    // The machine slept past the limit: the wake declines it at once.
+    rig.fx.clock.advance(2 * 60 * 1000);
+    wake.notify();
+    rig.fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(rig.mock.log().answers.len(), 1);
+}

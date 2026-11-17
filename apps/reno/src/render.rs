@@ -124,6 +124,12 @@ impl<W: Write> Transcript<W> {
                 }
                 writeln!(self.out, "  (the CLI cannot answer questions yet)")
             }
+            ExecEvent::InputExpired { .. } => {
+                writeln!(
+                    self.out,
+                    "  Nobody answered in time; the question was declined."
+                )
+            }
             ExecEvent::UserMessage { text } => writeln!(self.out, "you: {text}"),
             ExecEvent::AgentReport {
                 status,
@@ -981,6 +987,20 @@ mod tests {
                 "type": "approval_resolved", "requestId": "r",
                 "decision": "denied", "by": {"type": "expired"}
             }})
+        );
+    }
+
+    #[test]
+    fn an_expired_question_says_nobody_answered() {
+        let (out, _) = render(
+            false,
+            vec![ExecEvent::InputExpired {
+                request_id: "q".into(),
+            }],
+        );
+        assert_eq!(
+            out.trim_end(),
+            "  Nobody answered in time; the question was declined."
         );
     }
 

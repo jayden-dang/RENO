@@ -28,13 +28,15 @@
 //! the exact order): a rule or a repeated denial answers it at once and the run never leaves
 //! `running` (a call to Reno's own tools is not journaled at all); otherwise the run moves to
 //! `waiting_approval` with a stored pending approval, which `decide` or the approval's deadline
-//! answers, and the run returns to `running`. `NeedsInput` moves it to `waiting_input`. Phase 0
-//! has no client path that answers input, so such a run waits until it is cancelled, the
-//! executor gives up, or the kernel shuts down.
+//! answers, and the run returns to `running`. `NeedsInput` moves it to `waiting_input`. No client
+//! path answers input yet, so a question has the deadline an approval has (the policy's
+//! `approval_ttl`, or the default, on the wall clock and re-checked on wake): when it passes
+//! unanswered the harness is declined, the journal records `InputExpired` ("nobody answered in
+//! time"), and the run returns to `running`. This applies whether or not a client is connected.
 
 mod approval;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -126,7 +128,7 @@ pub(crate) struct Supervisor {
     subs: Vec<Sub>,
     /// Approvals waiting for a human, each with its deadline.
     open_approvals: Vec<approval::Open>,
-    /// Fires at the earliest deadline in `open_approvals`; `None` while nothing waits.
+    /// Fires at the earliest deadline in `open_approvals` and `open_inputs`; `None` while nothing waits.
     expiry: Option<Pin<Box<Sleep>>>,
     /// An expiry could not be recorded, so a row may still be pending that `open_approvals` no
     /// longer lists; the end of the run closes it.
@@ -136,7 +138,9 @@ pub(crate) struct Supervisor {
     agent_waiters: HashMap<String, oneshot::Sender<AgentDecision>>,
     /// Counts the request ids minted for `agent_waiters`.
     agent_seq: u64,
-    open_inputs: HashSet<String>,
+    /// Questions for a person that nobody has answered, each with its deadline (the same timer
+    /// as `open_approvals`).
+    open_inputs: Vec<approval::OpenInput>,
     /// Something went wrong that makes the run's record untrustworthy; the run ends `error`.
     fatal: Option<String>,
     /// The lease was taken over: this supervisor no longer owns the run and writes nothing.
@@ -216,7 +220,7 @@ impl Supervisor {
             approvals_unrecorded: false,
             agent_waiters: HashMap::new(),
             agent_seq: 0,
-            open_inputs: HashSet::new(),
+            open_inputs: Vec::new(),
             fatal: None,
             lost: false,
             wall: None,
@@ -340,8 +344,7 @@ impl Supervisor {
             return;
         }
         if let ExecEvent::NeedsInput { request_id, .. } = &event {
-            self.open_inputs.insert(request_id.clone());
-            self.enter_wait(RunStatus::WaitingInput).await;
+            self.input_requested(request_id).await;
         }
         if let ExecEvent::Started { session, .. } = &event {
             // The session is what a resume continues: it is durable before anyone sees it.
