@@ -35,8 +35,6 @@ pub(crate) struct SidebarHandlers {
     pub(crate) toggle_folder: FolderHandler,
     /// The folder's shield: the project's Allowlist and History.
     pub(crate) open_project: FolderHandler,
-    /// "N more": the Runs screen, which lists every run.
-    pub(crate) more: ActionHandler,
 }
 
 /// The counts shown beside rows, so the view and the tests agree.
@@ -206,21 +204,6 @@ fn folder_view(
         .items_center()
         .child(head.flex_1())
         .child(shield);
-    let more = (folder.more > 0).then(|| {
-        let more = Rc::clone(&handlers.more);
-        div()
-            .id(SharedString::from(format!("folder-more-{slug}")))
-            .h(px(24.0))
-            .pl(px(30.0))
-            .flex()
-            .items_center()
-            .text_size(px(12.0))
-            .text_color(theme.faint)
-            .cursor_pointer()
-            .hover(|s| s.underline())
-            .on_click(move |_, window, cx| more(window, cx))
-            .child(format!("{} more", folder.more))
-    });
     div()
         .flex()
         .flex_col()
@@ -260,7 +243,6 @@ fn folder_view(
                         .child(row.age.clone()),
                 )
         }))
-        .children(more)
 }
 
 /// The sidebar column. `active` marks the current destination.

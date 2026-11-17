@@ -904,3 +904,19 @@ fn a_daemon_that_will_not_start_is_explained_in_the_banner(cx: &mut TestAppConte
         assert!(reason.contains("cannot open the store"), "{reason}");
     });
 }
+
+#[gpui::test]
+fn a_closed_folder_lists_its_waiting_runs_and_no_more_line(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    // atlas-api holds keeper's waiting push and builder's failed run.
+    click(vcx, "folder-atlas-api");
+    draw(vcx);
+    assert!(
+        painted(vcx, "recent-run_keeper1"),
+        "what waits stays listed"
+    );
+    assert!(!painted(vcx, "recent-run_builder0"));
+}

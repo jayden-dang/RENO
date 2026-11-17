@@ -614,12 +614,6 @@ impl RootView {
                     },
                 )
             },
-            more: {
-                let this = this.clone();
-                Rc::new(move |window: &mut Window, cx: &mut App| {
-                    this.update(cx, |root, cx| root.navigate(Nav::Runs, window, cx));
-                })
-            },
         }
     }
 

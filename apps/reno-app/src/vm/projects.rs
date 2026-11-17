@@ -143,8 +143,6 @@ pub(crate) struct Folder {
     /// Runs waiting for you inside, listed even while the folder is closed.
     pub(crate) waiting: usize,
     pub(crate) rows: Vec<RunRow>,
-    /// Runs inside that are not listed: "N more".
-    pub(crate) more: usize,
 }
 
 /// What the sidebar needs besides the runs.
@@ -215,7 +213,6 @@ pub(crate) fn folders(
                 open,
                 waiting,
                 rows,
-                more: list.len() - shown,
                 key,
             }
         })
@@ -299,7 +296,6 @@ mod tests {
         // reno was active last; "No project" is last whatever its activity.
         assert_eq!(names, ["reno", "porch", "No project"]);
         assert_eq!(folders[2].rows.len(), 0, "No project starts closed");
-        assert_eq!(folders[2].more, 2);
         assert!(folders[0].open && folders[1].open);
     }
 
@@ -325,7 +321,6 @@ mod tests {
             ["run_w", "run_q"],
             "a closed folder still lists what waits"
         );
-        assert_eq!(closed[0].more, 1);
     }
 
     #[test]
@@ -345,7 +340,6 @@ mod tests {
         let toggled = HashSet::new();
         let f = &folders(&runs, roots, &inputs(&seen, &toggled))[0];
         assert_eq!(f.rows.len(), 9, "all 9 waiting runs, more than a page");
-        assert_eq!(f.more, 3);
     }
 
     #[test]
