@@ -377,7 +377,12 @@ pub(crate) fn status_name(status: RunStatus) -> String {
 pub(crate) fn by_text(by: &ResolvedBy) -> String {
     match by {
         ResolvedBy::Human => "you".to_owned(),
-        ResolvedBy::Rule { name } => format!("rule {name}"),
+        ResolvedBy::Rule { name } => match name.strip_prefix("standing:") {
+            Some(id) => format!("your rule {id}"),
+            // The daemon's own label for an unnamed policy rule already says what it is.
+            None if name.starts_with("policy rule ") => name.clone(),
+            None => format!("rule {name}"),
+        },
         ResolvedBy::Expired => "the time limit".to_owned(),
         ResolvedBy::RepeatDenial => "the repeat-denial rule".to_owned(),
     }
@@ -1415,6 +1420,29 @@ mod tests {
                 Some(ResolvedBy::RepeatDenial)
             )),
             "appr_a1  run run_r1  denied    by the repeat-denial rule  bash cargo test"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_named_in_words_a_person_uses() {
+        let by = |name: &str| by_text(&ResolvedBy::Rule { name: name.into() });
+        // A policy rule with a note, or without one (the daemon's own label for it).
+        assert_eq!(by("cargo is fine"), "rule cargo is fine");
+        assert_eq!(
+            by("policy rule 8 (command `git checkout -- Cargo.lock`)"),
+            "policy rule 8 (command `git checkout -- Cargo.lock`)"
+        );
+        // A standing rule a person made: theirs, with its id kept.
+        assert_eq!(by("standing:rule_01HZX9"), "your rule rule_01HZX9");
+        assert_eq!(
+            resolved_text(
+                ApprovalOutcome::Approved,
+                &ResolvedBy::Rule {
+                    name: "standing:rule_01HZX9".into()
+                },
+                None
+            ),
+            "approved by your rule rule_01HZX9"
         );
     }
 

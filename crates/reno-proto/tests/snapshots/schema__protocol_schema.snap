@@ -4868,7 +4868,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -4886,7 +4886,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`. When the run's end is what closed it, the\ndecision's `message` says so (\"withdrawn: the run was cancelled\"); with no message it was\nthe time limit.",
                 "properties": {
                   "type": {
                     "const": "expired",
@@ -8632,7 +8632,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -8650,7 +8650,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`. When the run's end is what closed it, the\ndecision's `message` says so (\"withdrawn: the run was cancelled\"); with no message it was\nthe time limit.",
                 "properties": {
                   "type": {
                     "const": "expired",
@@ -9450,7 +9450,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`\nwhen it has none, or `default` when no rule matched and the policy's default effect\napplied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -9468,7 +9468,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`.",
+                "description": "Nobody decided before the approval's time limit, or the run ended or the daemon\nrestarted first. Always an outcome of `denied`. When the run's end is what closed it, the\ndecision's `message` says so (\"withdrawn: the run was cancelled\"); with no message it was\nthe time limit.",
                 "properties": {
                   "type": {
                     "const": "expired",

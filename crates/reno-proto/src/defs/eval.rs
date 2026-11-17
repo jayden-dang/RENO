@@ -130,7 +130,8 @@ pub struct EvalContext<'a> {
 pub struct RuleRef {
     /// The rule's position in the policy, from 0.
     pub index: usize,
-    /// Its `note`, or `rules[N]` when it has none.
+    /// Its `note`, or when it has none a label a person can read: `policy rule 8 (command
+    /// `git checkout -- Cargo.lock`)`, its number from 1 and what it matches.
     pub name: String,
 }
 
@@ -183,10 +184,10 @@ pub fn evaluate(
             let name = rule
                 .note
                 .clone()
-                .unwrap_or_else(|| format!("rules[{index}]"));
+                .unwrap_or_else(|| unnamed_rule_label(index, rule));
             let message = match &rule.note {
                 Some(note) => format!("denied by policy: {note}"),
-                None => format!("denied by policy rule {name}"),
+                None => format!("denied by {name}"),
             };
             return decision(rule.effect, Some(RuleRef { index, name }), message);
         }
@@ -196,6 +197,47 @@ pub fn evaluate(
         None,
         "denied by the policy's default".to_owned(),
     )
+}
+
+/// What an unnamed rule is called for a person: `policy rule 8 (command `git push*`)`. The
+/// number counts from 1, as a person counts the rules in the file; the parentheses hold what the
+/// rule matches, in the order command, path, tool, action, and nothing for a rule that matches
+/// everything.
+fn unnamed_rule_label(index: usize, rule: &PolicyRule) -> String {
+    let m = &rule.matches;
+    let mut what = Vec::new();
+    if let Some(command) = &m.command {
+        what.push(format!("command `{command}`"));
+    }
+    if let Some(tool) = &m.tool {
+        what.push(format!("tool `{tool}`"));
+    }
+    if let Some(path) = &m.path {
+        what.push(format!("path `{path}`"));
+    }
+    if what.is_empty()
+        && let Some(action) = m.action
+    {
+        what.push(format!("{} actions", action_word(action)));
+    }
+    let number = index + 1;
+    if what.is_empty() {
+        format!("policy rule {number}")
+    } else {
+        format!("policy rule {number} ({})", what.join(", "))
+    }
+}
+
+fn action_word(action: crate::exec::ActionClass) -> &'static str {
+    use crate::exec::ActionClass;
+    match action {
+        ActionClass::Read => "read",
+        ActionClass::Edit => "edit",
+        ActionClass::Command => "command",
+        ActionClass::Network => "network",
+        ActionClass::McpTool => "MCP tool",
+        ActionClass::Other => "other",
+    }
 }
 
 fn decision(effect: PolicyEffect, rule: Option<RuleRef>, message: String) -> PolicyDecision {
@@ -517,17 +559,42 @@ mod tests {
     }
 
     #[test]
-    fn a_rule_without_a_note_is_named_by_its_position() {
+    fn a_rule_without_a_note_is_named_for_a_person_by_its_number_and_what_it_matches() {
         let p = policy(
             "[[rules]]\neffect = \"ask\"\nmatch = { action = \"read\" }\n[[rules]]\neffect = \"deny\"\nmatch = { action = \"network\" }",
         );
         let decision = eval(&p, None, &subject(ActionClass::Network, "fetch", None, &[]));
-        assert_eq!(named(&decision), ("deny", "rules[1]"));
+        assert_eq!(
+            named(&decision),
+            ("deny", "policy rule 2 (network actions)")
+        );
         let PolicyDecision::Deny { message, rule } = decision else {
             panic!("a deny");
         };
         assert_eq!(rule.unwrap().index, 1);
-        assert_eq!(message, "denied by policy rule rules[1]");
+        assert_eq!(message, "denied by policy rule 2 (network actions)");
+
+        // The match text is what a person recognises: the command, the path, the tool.
+        let p = policy(
+            "[[rules]]\neffect = \"deny\"\nmatch = { command = \"git checkout -- Cargo.lock\" }\n[[rules]]\neffect = \"deny\"\nmatch = { tool = \"Write\", path = \"/etc/**\" }",
+        );
+        let decision = eval(&p, None, &command("git checkout -- Cargo.lock"));
+        assert_eq!(
+            named(&decision).1,
+            "policy rule 1 (command `git checkout -- Cargo.lock`)"
+        );
+        let decision = eval(
+            &p,
+            None,
+            &subject(ActionClass::Edit, "Write", None, &["/etc/hosts"]),
+        );
+        assert_eq!(
+            named(&decision).1,
+            "policy rule 2 (tool `Write`, path `/etc/**`)"
+        );
+        // A rule that matches everything has nothing to show but its number.
+        let p = policy("[[rules]]\neffect = \"deny\"\nmatch = {}");
+        assert_eq!(named(&eval(&p, None, &command("ls"))).1, "policy rule 1");
     }
 
     #[test]

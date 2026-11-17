@@ -318,16 +318,19 @@ pub enum ApprovalOutcome {
 pub enum ResolvedBy {
     /// A person decided it.
     Human,
-    /// A rule decided it, with no question asked. `name` is a policy rule's `note`, or `rules[N]`
-    /// when it has none, or `default` when no rule matched and the policy's default effect
-    /// applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or
+    /// A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it
+    /// has none a label for a person, such as "policy rule 8 (command `git push*`)" (its number
+    /// from 1, then what it matches); `default` when no rule matched and the policy's default
+    /// effect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or
     /// `builtin:reno-mcp` for a call to one of Reno's own MCP tools.
     Rule {
         /// The rule's name.
         name: String,
     },
     /// Nobody decided before the approval's time limit, or the run ended or the daemon
-    /// restarted first. Always an outcome of `denied`.
+    /// restarted first. Always an outcome of `denied`. When the run's end is what closed it, the
+    /// decision's `message` says so ("withdrawn: the run was cancelled"); with no message it was
+    /// the time limit.
     Expired,
     /// The same action was denied earlier in this run, so it was denied again unasked.
     RepeatDenial,
