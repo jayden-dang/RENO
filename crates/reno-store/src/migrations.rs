@@ -390,6 +390,62 @@ ALTER TABLE run_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0 CH
 ALTER TABLE run_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0);
 ";
 
+/// Migration 15 (project-scoped standing rules): a rule may be scoped to one project, the git
+/// repository root named in `scope_project` (the daemon's canonical path).
+///
+/// SQLite cannot change a `CHECK`, so the table is rebuilt with its rows, indexes and triggers
+/// (the triggers also guard the new column). Nothing refers to `standing_rules`.
+const V15: &str = "
+ALTER TABLE standing_rules RENAME TO standing_rules_v14;
+DROP TRIGGER standing_rules_only_revoke;
+DROP TRIGGER standing_rules_are_kept;
+DROP INDEX standing_rules_in_force;
+DROP INDEX standing_rules_run;
+
+CREATE TABLE standing_rules (
+    id              TEXT PRIMARY KEY,
+    scope           TEXT NOT NULL CHECK (scope IN ('run', 'bot', 'project', 'global')),
+    scope_run       TEXT REFERENCES runs (id),
+    scope_bot       TEXT,
+    scope_project   TEXT,
+    effect          TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+    matcher         TEXT NOT NULL CHECK (json_valid(matcher)),
+    created_by      TEXT NOT NULL CHECK (created_by = 'human'),
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER,
+    revoked_at      INTEGER,
+    source_approval TEXT REFERENCES approvals (id),
+    CHECK ((scope = 'run') = (scope_run IS NOT NULL)),
+    CHECK ((scope = 'bot') = (scope_bot IS NOT NULL)),
+    CHECK ((scope = 'project') = (scope_project IS NOT NULL)),
+    CHECK (expires_at IS NULL OR expires_at > created_at)
+);
+INSERT INTO standing_rules
+    (rowid, id, scope, scope_run, scope_bot, effect, matcher, created_by, created_at,
+     expires_at, revoked_at, source_approval)
+SELECT rowid, id, scope, scope_run, scope_bot, effect, matcher, created_by, created_at,
+       expires_at, revoked_at, source_approval
+FROM standing_rules_v14;
+DROP TABLE standing_rules_v14;
+CREATE INDEX standing_rules_in_force ON standing_rules (scope, created_at) WHERE revoked_at IS NULL;
+CREATE INDEX standing_rules_run ON standing_rules (scope_run) WHERE scope_run IS NOT NULL;
+CREATE INDEX standing_rules_project ON standing_rules (scope_project) WHERE scope_project IS NOT NULL;
+
+CREATE TRIGGER standing_rules_only_revoke BEFORE UPDATE ON standing_rules
+WHEN OLD.revoked_at IS NOT NULL
+  OR NEW.revoked_at IS NULL
+  OR NEW.id IS NOT OLD.id OR NEW.scope IS NOT OLD.scope OR NEW.scope_run IS NOT OLD.scope_run
+  OR NEW.scope_bot IS NOT OLD.scope_bot OR NEW.scope_project IS NOT OLD.scope_project
+  OR NEW.effect IS NOT OLD.effect
+  OR NEW.matcher IS NOT OLD.matcher OR NEW.created_by IS NOT OLD.created_by
+  OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
+  OR NEW.source_approval IS NOT OLD.source_approval
+BEGIN SELECT RAISE(ABORT, 'a standing rule changes only by being revoked, once'); END;
+
+CREATE TRIGGER standing_rules_are_kept BEFORE DELETE ON standing_rules
+BEGIN SELECT RAISE(ABORT, 'a standing rule is never deleted'); END;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -407,6 +463,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V12),
         M::up(V13),
         M::up(V14),
+        M::up(V15),
     ])
 }
 
@@ -455,7 +512,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -680,6 +737,47 @@ mod tests {
              VALUES ('rule_a', 'global', 'allow', '{}', 'human', 5, 'appr_a');",
         )
         .unwrap();
+    }
+
+    /// Upgrading a database that holds standing rules (schema 14): they survive the table being
+    /// rebuilt for the `project` scope, stay unchangeable, and a project rule can then be stored.
+    #[test]
+    fn upgrade_from_a_version_fourteen_database_keeps_its_rules_and_adds_project_scope() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 14).unwrap();
+        conn.execute_batch(
+            "INSERT INTO standing_rules (id, scope, scope_bot, effect, matcher, created_by, created_at)
+             VALUES ('rule_a', 'bot', 'scout', 'allow', '{}', 'human', 5);",
+        )
+        .unwrap();
+        run(&mut conn).unwrap();
+        let bot: String = conn
+            .query_row(
+                "SELECT scope_bot FROM standing_rules WHERE id = 'rule_a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bot, "scout");
+        conn.execute_batch(
+            "INSERT INTO standing_rules (id, scope, scope_project, effect, matcher, created_by, created_at)
+             VALUES ('rule_b', 'project', '/work/a', 'deny', '{}', 'human', 6);",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO standing_rules (id, scope, effect, matcher, created_by, created_at)
+                 VALUES ('rule_c', 'project', 'deny', '{}', 'human', 7)",
+                [],
+            )
+            .is_err(),
+            "a project rule names its project"
+        );
+        assert!(conn.execute("DELETE FROM standing_rules", []).is_err());
+        assert!(
+            conn.execute("UPDATE standing_rules SET effect = 'allow'", [])
+                .is_err()
+        );
     }
 
     /// Upgrading a database written before `reno mcp` (schema 10): its runs keep their rows and

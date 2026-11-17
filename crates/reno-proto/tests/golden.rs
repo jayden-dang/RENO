@@ -309,7 +309,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project"],
                "pid": 4242}),
     );
 }
@@ -1515,6 +1515,13 @@ fn standing_rules() {
     );
     golden(&RuleRevokeResult {}, json!({}));
     golden(
+        &RuleListParams {
+            include_inactive: false,
+            project: Some("/Users/x/porch".into()),
+        },
+        json!({"includeInactive": false, "project": "/Users/x/porch"}),
+    );
+    golden(
         &RuleRevokeParams {
             id: "rule_01K1".parse().unwrap(),
         },
@@ -1560,4 +1567,49 @@ fn standing_rules() {
         json!({"rules": [wire]}),
     );
     golden(&StandingScope::Always, json!({"type": "always"}));
+}
+
+#[test]
+fn project_rules() {
+    assert_eq!(<RuleAdd as Method>::NAME, "rule.add");
+    assert_eq!(FEATURE_PROJECT_RULES, "rules.project");
+    assert!(FEATURES.contains(&FEATURE_PROJECT_RULES));
+    assert_eq!(
+        serde_json::to_value(RememberScope::Project).unwrap(),
+        json!("project")
+    );
+    golden(
+        &Remember {
+            scope: RememberScope::Project,
+            expires_in_secs: None,
+        },
+        json!({"scope": "project"}),
+    );
+    golden(
+        &StandingScope::Project {
+            root: "/Users/x/porch".into(),
+        },
+        json!({"type": "project", "root": "/Users/x/porch"}),
+    );
+    golden(
+        &RuleAddParams {
+            project: "/Users/x/porch/src".into(),
+            effect: StandingEffect::Allow,
+            command: "cargo test".into(),
+            tool: None,
+            expires_in_secs: None,
+        },
+        json!({"project": "/Users/x/porch/src", "effect": "allow", "command": "cargo test"}),
+    );
+    golden(
+        &RuleAddParams {
+            project: "/Users/x/porch".into(),
+            effect: StandingEffect::Deny,
+            command: "git push --force".into(),
+            tool: Some("exec".into()),
+            expires_in_secs: Some(60),
+        },
+        json!({"project": "/Users/x/porch", "effect": "deny", "command": "git push --force",
+               "tool": "exec", "expiresInSecs": 60}),
+    );
 }

@@ -89,6 +89,10 @@ pub(crate) struct RunInfo {
     pub(crate) cwd: PathBuf,
     /// The bot the run is pinned to, which policy rules are scoped by.
     pub(crate) bot: Option<String>,
+    /// The run's project (`Workspace::project_of`): resolved once, when the run starts, from the
+    /// directory it was submitted for (not its worktree, which is inside Reno's data directory).
+    /// Standing rules scoped to a project apply to a run only when this equals their root.
+    pub(crate) project: Option<PathBuf>,
     /// The longest the run may take; the supervisor stops it when this has passed.
     pub(crate) wall_time: Duration,
     /// The daily token ceiling of the run's bot; the supervisor stops the run when its bot's

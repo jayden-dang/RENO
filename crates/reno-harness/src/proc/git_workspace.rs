@@ -687,6 +687,25 @@ pub struct Probe {
     pub subdir: String,
 }
 
+/// The project of `dir` (project-scoped standing rules): the **canonical** path of the nearest
+/// ancestor of `dir`, itself included, that has a `.git` entry, a directory or a file (a linked
+/// worktree or a submodule has a file). Symlinks are resolved, so `/tmp/x` and `/private/tmp/x`
+/// are one project. `None` for a directory that does not exist, is in no repository, or whose
+/// root path is not UTF-8. Walks up the file system; runs no `git`.
+pub async fn project_root(dir: &Path) -> Option<PathBuf> {
+    let canonical = tokio::fs::canonicalize(dir).await.ok()?;
+    for candidate in canonical.ancestors() {
+        if tokio::fs::symlink_metadata(candidate.join(".git"))
+            .await
+            .is_ok()
+        {
+            candidate.to_str()?;
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
 /// The branch of a run.
 pub fn branch_of(run: &str) -> String {
     format!("reno/{run}")

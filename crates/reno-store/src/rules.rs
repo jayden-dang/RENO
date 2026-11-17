@@ -18,6 +18,8 @@
 //! A rule's `expires_at` is compared with the `now` the caller passes. Nothing closes an expired
 //! rule; it simply stops being returned by [`Store::active_rules`].
 
+use std::path::{Path, PathBuf};
+
 use reno_proto::defs::content_hash;
 use reno_proto::{ApprovalId, RuleId, RuleMatcher, StandingEffect, StandingRule, StandingScope};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -46,13 +48,19 @@ pub struct NewRule {
 }
 
 const COLUMNS: &str = "id, scope, scope_run, scope_bot, effect, matcher, created_by, created_at, \
-     expires_at, revoked_at, source_approval";
+     expires_at, revoked_at, source_approval, scope_project";
 
 fn effect_str(effect: StandingEffect) -> &'static str {
     match effect {
         StandingEffect::Allow => "allow",
         StandingEffect::Deny => "deny",
     }
+}
+
+/// A project root as stored: text. A root that is not UTF-8 cannot be matched by `=`.
+fn path_text(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| StoreError::Corrupt(format!("project root {path:?} is not UTF-8")))
 }
 
 fn corrupt(what: &str, value: &str) -> StoreError {
@@ -75,13 +83,17 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<Result<StandingRule>> {
     let expires_at: Option<i64> = row.get(8)?;
     let revoked_at: Option<i64> = row.get(9)?;
     let source: Option<String> = row.get(10)?;
+    let scope_project: Option<String> = row.get(11)?;
     Ok((|| {
-        let scope = match (scope.as_str(), scope_run, scope_bot) {
-            ("run", Some(run), _) => StandingScope::Run {
+        let scope = match (scope.as_str(), scope_run, scope_bot, scope_project) {
+            ("run", Some(run), _, _) => StandingScope::Run {
                 run: run.parse().map_err(|_| corrupt("run", &run))?,
             },
-            ("bot", _, Some(bot)) => StandingScope::Bot { bot },
-            ("global", _, _) => StandingScope::Always,
+            ("bot", _, Some(bot), _) => StandingScope::Bot { bot },
+            ("project", _, _, Some(root)) => StandingScope::Project {
+                root: PathBuf::from(root),
+            },
+            ("global", ..) => StandingScope::Always,
             _ => return Err(corrupt("scope", &scope)),
         };
         Ok(StandingRule {
@@ -117,16 +129,17 @@ fn query(conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<
 
 /// Inserts a rule and its `rule.created` event. Called inside the caller's transaction.
 pub(crate) fn tx_create(conn: &Connection, new: &NewRule, now: i64) -> Result<()> {
-    let (scope, run, bot) = match &new.scope {
-        StandingScope::Run { run } => ("run", Some(run.as_str()), None),
-        StandingScope::Bot { bot } => ("bot", None, Some(bot.as_str())),
-        StandingScope::Always => ("global", None, None),
+    let (scope, run, bot, project) = match &new.scope {
+        StandingScope::Run { run } => ("run", Some(run.as_str()), None, None),
+        StandingScope::Bot { bot } => ("bot", None, Some(bot.as_str()), None),
+        StandingScope::Project { root } => ("project", None, None, Some(path_text(root)?)),
+        StandingScope::Always => ("global", None, None, None),
     };
     conn.prepare_cached(
         "INSERT INTO standing_rules
              (id, scope, scope_run, scope_bot, effect, matcher, created_by, created_at,
-              expires_at, source_approval)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'human', ?7, ?8, ?9)",
+              expires_at, source_approval, scope_project)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'human', ?7, ?8, ?9, ?10)",
     )
     .db()?
     .execute(params![
@@ -139,6 +152,7 @@ pub(crate) fn tx_create(conn: &Connection, new: &NewRule, now: i64) -> Result<()
         now,
         new.expires_at,
         new.source_approval.as_ref().map(ApprovalId::as_str),
+        project,
     ])
     .map_err(|e| {
         if is_unique_violation(&e) {
@@ -230,44 +244,62 @@ impl Store {
 
     /// The rules, newest first. Only those in force at `now` (not revoked, not expired, and for a
     /// rule of one run, that run not over) unless `include_inactive`.
-    pub async fn list_rules(&self, include_inactive: bool, now: i64) -> Result<Vec<StandingRule>> {
+    ///
+    /// With `project`, only the rules whose scope is that project (the path as stored, so the
+    /// caller passes the canonical root).
+    pub async fn list_rules(
+        &self,
+        include_inactive: bool,
+        project: Option<&Path>,
+        now: i64,
+    ) -> Result<Vec<StandingRule>> {
+        let project = project
+            .map(|p| path_text(p).map(str::to_owned))
+            .transpose()?;
         self.read(move |conn| {
             query(
                 conn,
                 &format!(
                     "SELECT {COLUMNS} FROM standing_rules
-                     WHERE ?1 OR (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?2)
+                     WHERE (?3 IS NULL OR scope_project = ?3)
+                       AND (?1 OR (revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?2)
                         AND (scope_run IS NULL OR scope_run IN
                              (SELECT id FROM runs
-                              WHERE status NOT IN ('succeeded', 'failed', 'cancelled'))))
+                              WHERE status NOT IN ('succeeded', 'failed', 'cancelled')))))
                      ORDER BY created_at DESC, rowid DESC"
                 ),
-                &[&include_inactive, &now],
+                &[&include_inactive, &now, &project],
             )
         })
         .await
     }
 
     /// The rules in force at `now` that apply to `run`, a run of `bot` (`None` for a run with no
-    /// bot): global ones, ones for that bot, and ones for that run. Oldest first.
+    /// bot) in the project `project` (`None` for a run with no project): global ones, ones for
+    /// that bot, that project and that run. Oldest first.
     pub async fn active_rules(
         &self,
         run: &reno_proto::RunId,
         bot: Option<&str>,
+        project: Option<&Path>,
         now: i64,
     ) -> Result<Vec<StandingRule>> {
         let run = run.clone();
         let bot = bot.map(str::to_owned);
+        let project = project
+            .map(|p| path_text(p).map(str::to_owned))
+            .transpose()?;
         self.read(move |conn| {
             query(
                 conn,
                 &format!(
                     "SELECT {COLUMNS} FROM standing_rules
                      WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?3)
-                       AND (scope = 'global' OR scope_run = ?1 OR (scope = 'bot' AND scope_bot = ?2))
+                       AND (scope = 'global' OR scope_run = ?1 OR (scope = 'bot' AND scope_bot = ?2)
+                       OR (scope = 'project' AND scope_project = ?4))
                      ORDER BY created_at, rowid"
                 ),
-                &[&run.as_str(), &bot, &now],
+                &[&run.as_str(), &bot, &now, &project],
             )
         })
         .await

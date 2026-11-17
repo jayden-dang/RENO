@@ -110,6 +110,29 @@ impl Rig {
         .await
     }
 
+    /// Like `with`, with `workspace` as the kernel's `Workspace` port.
+    pub(super) async fn with_workspace(
+        policy_text: &str,
+        steps: Vec<MockStep>,
+        config: KernelConfig,
+        workspace: Arc<dyn crate::Workspace>,
+    ) -> Self {
+        let mock = mock(steps);
+        let port = FakePort::with(vec![
+            bot("keeper", ""),
+            bot("scout", ""),
+            policy(policy_text),
+        ]);
+        let fx = Fx::with_workspace(
+            config,
+            registry(std::slice::from_ref(&mock)),
+            Some(setup(&port)),
+            workspace,
+        )
+        .await;
+        Self { fx, port, mock }
+    }
+
     async fn with_setup(
         policy_text: &str,
         steps: Vec<MockStep>,

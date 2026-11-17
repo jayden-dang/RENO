@@ -4,7 +4,11 @@
 //! # Where a rule comes from
 //!
 //! A person answers an approval in the Inbox and picks how far the answer reaches
-//! ([`Remember`]): this run, this bot, or always. The daemon turns the answer into a
+//! ([`Remember`]): this run, this bot, this project, or always. A **project** is the git
+//! repository root of the directory a run was submitted for; the daemon resolves it (canonical
+//! path, nearest ancestor with a `.git`) and never takes a client's path for matching. A person
+//! may also write a project rule without waiting for an approval (`rule.add`, from an exact
+//! command line). The daemon turns the answer into a
 //! [`StandingRule`] whose [`RuleMatcher`] is derived from the approval's structured subject
 //! ([`RuleMatcher::derive`]) and is never broader than it. Rules are evaluated by the run
 //! supervisor before it asks anyone; the precedence against the policy file is in
@@ -39,7 +43,7 @@
 //! A rule derived from a subject that has only a tool (a fetch has no command and no paths) is a
 //! grant for that whole tool: say so when showing it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -57,6 +61,17 @@ pub const RULE_MAX_EXPIRY_SECS: u64 = 366 * 24 * 60 * 60;
 /// decision may be made by a standing rule (`ResolvedBy::Rule` named `standing:<rule id>`).
 pub const FEATURE_RULES: &str = "rules";
 
+/// Feature: `rules.project`: scope `project` (`approval.decide` `remember`, `rule.list`'s
+/// `project` filter), the `rule.add` method, and the project rules' place in the precedence (see
+/// `reno-kernel`'s `supervisor::approval` docs). Needs feature `rules` as well.
+pub const FEATURE_PROJECT_RULES: &str = "rules.project";
+
+/// The tool `rule.add` makes a rule for when none is named: Claude's shell tool.
+pub const RULE_ADD_DEFAULT_TOOL: &str = "Bash";
+
+/// The longest command line `rule.add` takes.
+pub const RULE_ADD_COMMAND_MAX_CHARS: usize = 4096;
+
 /// The name a decision made by a standing rule carries in `ResolvedBy::Rule`.
 pub fn standing_rule_name(id: &RuleId) -> String {
     format!("standing:{id}")
@@ -70,6 +85,10 @@ pub enum RememberScope {
     Run,
     /// Every later matching action of any run of this run's bot. Refused for a run with no bot.
     Bot,
+    /// Every later matching action of any run in this run's project: the git repository root of
+    /// the directory the run was submitted for. Refused for a run with no project. Needs feature
+    /// `rules.project`.
+    Project,
     /// Every later matching action, whatever the run or bot.
     Always,
 }
@@ -104,6 +123,13 @@ pub enum StandingScope {
     Bot {
         /// The bot's name.
         bot: String,
+    },
+    /// Every run in one project.
+    Project {
+        /// The project's root: the canonical path of a git repository root, as the daemon
+        /// resolved it. A rule matches a run only when the run's own project (resolved by the
+        /// daemon from its working directory) equals this path.
+        root: PathBuf,
     },
     /// Every run.
     Always,
@@ -294,6 +320,12 @@ pub struct RuleListParams {
     /// Also return revoked and expired rules. Default: only the ones in force.
     #[serde(default)]
     pub include_inactive: bool,
+    /// Only the rules whose scope is this project. Any directory of the project will do: the
+    /// daemon resolves it to the repository root (and compares the path as given when there is
+    /// none, which matches nothing). Global and bot rules are not included; ask without this
+    /// filter for them. Needs feature `rules.project`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
 }
 
 /// Result of `rule.list`.
@@ -302,6 +334,31 @@ pub struct RuleListParams {
 pub struct RuleListResult {
     /// Newest first.
     pub rules: Vec<StandingRule>,
+}
+
+/// Params of `rule.add`: a rule for one project, from an exact command line, as if a person had
+/// approved (or denied) that command in that project and chosen "always in this project". The
+/// rule is [`RuleMatcher::derive`]d from the subject a command makes: action `command`, the
+/// given tool, [`CommandPattern::Exact`] with the line, no paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleAddParams {
+    /// A directory of the project. The daemon resolves it to the git repository root; refused
+    /// (`InvalidParams`) when it is in none.
+    pub project: PathBuf,
+    /// What the rule does.
+    pub effect: StandingEffect,
+    /// The command line, character for character. Not empty, at most
+    /// [`RULE_ADD_COMMAND_MAX_CHARS`] characters.
+    pub command: String,
+    /// The harness tool the command comes through, as an approval's subject names it (Claude's
+    /// is `Bash`, Codex's is `exec`). Default [`RULE_ADD_DEFAULT_TOOL`] (`Bash`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The rule stops applying after this many seconds. Absent: it holds until revoked. Between
+    /// 1 and [`RULE_MAX_EXPIRY_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 /// Params of `rule.revoke`.

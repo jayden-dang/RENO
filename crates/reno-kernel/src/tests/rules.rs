@@ -685,3 +685,340 @@ async fn the_decision_that_makes_a_rule_leaves_its_events_and_the_journal_stays_
         "a rule made by a person is journaled like any answer"
     );
 }
+
+// ---- project rules ---------------------------------------------------------------------------
+//
+// A project is the git repository root of the directory a run was submitted for, as the
+// `Workspace` port says (the kernel touches no disk). Here the port is the in-memory fake with two
+// declared repositories, and `/scratch` is Reno's own scratch directory, which is in no project.
+// How the real port finds a root (symlinks, `.git` files) is tested with it, in `reno-harness`.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use reno_proto::RULE_MAX_EXPIRY_SECS;
+
+use crate::FakeWorkspace;
+
+const REPO_A: &str = "/repos/a";
+const REPO_B: &str = "/repos/b";
+const SUB_A: &str = "/repos/a/crates/x";
+const NO_PROJECT: &str = "/scratch/run";
+
+impl Rig {
+    /// Like `new`, with `/repos/a` and `/repos/b` git repositories.
+    async fn in_repos(steps: Vec<reno_harness::exec::MockStep>) -> Self {
+        let workspace = Arc::new(FakeWorkspace::new().with_repo(REPO_A).with_repo(REPO_B));
+        Self::with_workspace(
+            ASK,
+            steps,
+            crate::KernelConfig {
+                scratch_root: Some("/scratch".into()),
+                ..super::config(1)
+            },
+            workspace,
+        )
+        .await
+    }
+
+    async fn run_in(&self, bot: &str, cwd: &str) -> RunId {
+        self.fx
+            .kernel
+            .submit_for_bot(bot, "go", None, cwd.into(), None)
+            .await
+            .unwrap()
+    }
+}
+
+fn project(root: &str) -> StandingScope {
+    StandingScope::Project { root: root.into() }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_project_rule_covers_runs_in_that_project_including_subdirectories_and_no_other() {
+    let rig = Rig::in_repos(script(vec![("r1", command("git push"))])).await;
+    let first = rig.run_in("keeper", REPO_A).await;
+    answer(
+        &rig,
+        ApprovalDecision::ApproveOnce,
+        remember(RememberScope::Project),
+    )
+    .await;
+    finish(&rig, &first).await;
+    let rules = rig.fx.kernel.list_rules(false).await.unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].scope, project(REPO_A));
+    let name = standing_name(&rig).await;
+
+    // A run in a subdirectory of the repository, of another bot, and one with no bot at all.
+    for run in [
+        rig.run_in("keeper", SUB_A).await,
+        rig.run_in("scout", SUB_A).await,
+        rig.fx
+            .kernel
+            .submit("go", super::id("mock"), REPO_A.into(), None)
+            .await
+            .unwrap(),
+    ] {
+        finish(&rig, &run).await;
+        assert_eq!(rig.history(&run).await[0].decided_by, Some(rule(&name)));
+    }
+
+    // Another project asks; so does a run outside any repository.
+    for cwd in ["/repos/b/src", NO_PROJECT] {
+        let run = rig.run_in("keeper", cwd).await;
+        let pending = rig.pending().await;
+        assert_eq!(pending.run_id, run);
+        rig.fx
+            .kernel
+            .decide(&pending.id, ApprovalDecision::Deny)
+            .await
+            .unwrap();
+        finish(&rig, &run).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn remembering_for_a_project_is_refused_for_a_run_with_no_project() {
+    let rig = Rig::in_repos(script(vec![("r1", command("git push"))])).await;
+    let run = rig.run_in("keeper", NO_PROJECT).await;
+    let pending = rig.pending().await;
+    let refused = rig
+        .fx
+        .kernel
+        .decide_remembering(
+            &pending.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            remember(RememberScope::Project),
+        )
+        .await;
+    match refused {
+        Err(KernelError::Invalid(why)) => assert!(why.contains("project"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(rig.fx.kernel.list_rules(true).await.unwrap().is_empty());
+    // Still held, and answerable once.
+    assert_eq!(rig.pending().await.id, pending.id);
+    rig.fx
+        .kernel
+        .decide(&pending.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    finish(&rig, &run).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_never_in_the_policy_file_beats_a_project_allow() {
+    let rig = Rig::in_repos(script(vec![("r1", command("git push"))])).await;
+    let first = rig.run_in("keeper", REPO_A).await;
+    answer(
+        &rig,
+        ApprovalDecision::ApproveOnce,
+        remember(RememberScope::Project),
+    )
+    .await;
+    finish(&rig, &first).await;
+
+    rig.reload(
+        r#"
+        default = "ask"
+        [[rules]]
+        note = "never push"
+        effect = "deny"
+        match = { action = "command", command = "git push*" }
+        "#,
+    )
+    .await;
+    let second = rig.run_in("keeper", SUB_A).await;
+    finish(&rig, &second).await;
+    assert_eq!(
+        rig.history(&second).await[0].decided_by,
+        Some(rule("never push"))
+    );
+    assert_eq!(rig.decisions(), [Decision::Allow, Decision::Deny]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_project_deny_beats_a_global_allow() {
+    let rig = Rig::in_repos(script(vec![("r1", command("git push"))])).await;
+    let first = rig.run_in("keeper", REPO_A).await;
+    answer(
+        &rig,
+        ApprovalDecision::ApproveOnce,
+        remember(RememberScope::Always),
+    )
+    .await;
+    finish(&rig, &first).await;
+    // A project deny, added by a person, wins over the global allow.
+    let deny = rig
+        .fx
+        .kernel
+        .add_project_rule(
+            Path::new(SUB_A),
+            StandingEffect::Deny,
+            "git push",
+            Some("bash"),
+            None,
+        )
+        .await
+        .unwrap();
+    let second = rig.run_in("keeper", REPO_A).await;
+    finish(&rig, &second).await;
+    assert_eq!(
+        rig.history(&second).await[0].decided_by,
+        Some(rule(&format!("standing:{}", deny.id)))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_added_for_a_project_is_listed_by_project_applies_unasked_and_can_be_revoked() {
+    let rig = Rig::in_repos(script(vec![("r1", command("cargo test"))])).await;
+    let kernel = &rig.fx.kernel;
+    // Any directory of the project names it; the rule holds the repository root.
+    let added = kernel
+        .add_project_rule(
+            Path::new(SUB_A),
+            StandingEffect::Allow,
+            "cargo test",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(added.scope, project(REPO_A));
+    assert_eq!(added.effect, StandingEffect::Allow);
+    assert_eq!(added.created_by, "human");
+    assert_eq!(added.matcher.tool, "Bash");
+    assert_eq!(added.matcher.action, ActionClass::Command);
+    assert_eq!(added.matcher.paths, Vec::<String>::new());
+    assert_eq!(
+        added.matcher.command,
+        Some(reno_proto::CommandPattern::Exact {
+            command: "cargo test".into()
+        })
+    );
+    assert_eq!(added.source_approval, None);
+
+    let listed = kernel
+        .list_project_rules(Path::new(SUB_A), false)
+        .await
+        .unwrap();
+    assert_eq!(listed, std::slice::from_ref(&added));
+    for other in [REPO_B, NO_PROJECT] {
+        assert!(
+            kernel
+                .list_project_rules(Path::new(other), false)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{other}"
+        );
+    }
+
+    // The harness's tool is "bash" in this script: the default tool name does not match it, a
+    // rule added with that name does.
+    let tooled = kernel
+        .add_project_rule(
+            Path::new(REPO_A),
+            StandingEffect::Allow,
+            "cargo test",
+            Some("bash"),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = rig.run_in("keeper", SUB_A).await;
+    finish(&rig, &run).await;
+    assert!(kernel.pending_approvals().await.unwrap().is_empty());
+    assert_eq!(
+        rig.history(&run).await[0].decided_by,
+        Some(rule(&format!("standing:{}", tooled.id)))
+    );
+
+    kernel.revoke_rule(&tooled.id).await.unwrap();
+    kernel.revoke_rule(&added.id).await.unwrap();
+    assert!(
+        kernel
+            .list_project_rules(Path::new(REPO_A), false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        kernel
+            .list_project_rules(Path::new(REPO_A), true)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let again = rig.run_in("keeper", REPO_A).await;
+    let pending = rig.pending().await;
+    assert_eq!(pending.run_id, again);
+    kernel
+        .decide(&pending.id, ApprovalDecision::Deny)
+        .await
+        .unwrap();
+    finish(&rig, &again).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn adding_a_project_rule_refuses_what_it_cannot_hold() {
+    let rig = Rig::in_repos(script(vec![("r1", command("git push"))])).await;
+    let kernel = &rig.fx.kernel;
+    async fn add(
+        kernel: &crate::Kernel,
+        dir: &str,
+        command: &str,
+        tool: Option<&str>,
+        expires: Option<u64>,
+    ) -> crate::Result<reno_proto::StandingRule> {
+        kernel
+            .add_project_rule(
+                &PathBuf::from(dir),
+                StandingEffect::Allow,
+                command,
+                tool,
+                expires,
+            )
+            .await
+    }
+    // Outside any repository, and Reno's scratch directory.
+    for dir in ["/elsewhere", NO_PROJECT] {
+        assert!(
+            matches!(
+                add(kernel, dir, "ls", None, None).await,
+                Err(KernelError::Invalid(_))
+            ),
+            "{dir}"
+        );
+    }
+    for bad in ["", "   ", "git push\nrm -rf ~"] {
+        assert!(
+            matches!(
+                add(kernel, REPO_A, bad, None, None).await,
+                Err(KernelError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert!(matches!(
+        add(kernel, REPO_A, &"x".repeat(4097), None, None).await,
+        Err(KernelError::Invalid(_))
+    ));
+    assert!(matches!(
+        add(kernel, REPO_A, "ls", Some(" "), None).await,
+        Err(KernelError::Invalid(_))
+    ));
+    for secs in [0, RULE_MAX_EXPIRY_SECS + 1] {
+        assert!(matches!(
+            add(kernel, REPO_A, "ls", None, Some(secs)).await,
+            Err(KernelError::Invalid(_))
+        ));
+    }
+    assert!(kernel.list_rules(true).await.unwrap().is_empty());
+    // A good one with an expiry.
+    let ok = add(kernel, REPO_A, "ls", None, Some(60)).await.unwrap();
+    assert_eq!(ok.expires_at_ms, Some(ok.created_at_ms + 60_000));
+}

@@ -127,6 +127,12 @@ pub trait Workspace: Send + Sync + fmt::Debug {
     /// Whether `dir` exists and is a directory. The kernel touches no disk itself.
     async fn dir_exists(&self, dir: &Path) -> bool;
 
+    /// The project of `dir`: the canonical root of the git repository it is in (any directory
+    /// of a repository, a subdirectory or the root, gives the same path, however it is spelled),
+    /// or `None` when it is in none. Standing rules scoped to a project match on this path;
+    /// see `reno_proto::rules`.
+    async fn project_of(&self, dir: &Path) -> Option<PathBuf>;
+
     /// Creates the worktree and branch of `plan`. Idempotent for the same plan.
     async fn create(&self, plan: &WorkspaceInfo) -> Result<(), WorkspaceError>;
 
@@ -325,6 +331,16 @@ impl Workspace for FakeWorkspace {
 
     async fn dir_exists(&self, dir: &Path) -> bool {
         self.lock().repos.iter().any(|repo| dir.starts_with(repo))
+    }
+
+    async fn project_of(&self, dir: &Path) -> Option<PathBuf> {
+        // The deepest declared repository that holds `dir`, as a nearer `.git` would win.
+        self.lock()
+            .repos
+            .iter()
+            .filter(|repo| dir.starts_with(repo))
+            .max_by_key(|repo| repo.components().count())
+            .cloned()
     }
 
     async fn create(&self, plan: &WorkspaceInfo) -> Result<(), WorkspaceError> {

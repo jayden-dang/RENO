@@ -208,9 +208,10 @@ CREATE TABLE sqlite_sequence(name,seq);
 
 CREATE TABLE standing_rules (
     id              TEXT PRIMARY KEY,
-    scope           TEXT NOT NULL CHECK (scope IN ('run', 'bot', 'global')),
+    scope           TEXT NOT NULL CHECK (scope IN ('run', 'bot', 'project', 'global')),
     scope_run       TEXT REFERENCES runs (id),
     scope_bot       TEXT,
+    scope_project   TEXT,
     effect          TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
     matcher         TEXT NOT NULL CHECK (json_valid(matcher)),
     created_by      TEXT NOT NULL CHECK (created_by = 'human'),
@@ -220,6 +221,7 @@ CREATE TABLE standing_rules (
     source_approval TEXT REFERENCES approvals (id),
     CHECK ((scope = 'run') = (scope_run IS NOT NULL)),
     CHECK ((scope = 'bot') = (scope_bot IS NOT NULL)),
+    CHECK ((scope = 'project') = (scope_project IS NOT NULL)),
     CHECK (expires_at IS NULL OR expires_at > created_at)
 );
 
@@ -232,11 +234,14 @@ CREATE TRIGGER standing_rules_only_revoke BEFORE UPDATE ON standing_rules
 WHEN OLD.revoked_at IS NOT NULL
   OR NEW.revoked_at IS NULL
   OR NEW.id IS NOT OLD.id OR NEW.scope IS NOT OLD.scope OR NEW.scope_run IS NOT OLD.scope_run
-  OR NEW.scope_bot IS NOT OLD.scope_bot OR NEW.effect IS NOT OLD.effect
+  OR NEW.scope_bot IS NOT OLD.scope_bot OR NEW.scope_project IS NOT OLD.scope_project
+  OR NEW.effect IS NOT OLD.effect
   OR NEW.matcher IS NOT OLD.matcher OR NEW.created_by IS NOT OLD.created_by
   OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at
   OR NEW.source_approval IS NOT OLD.source_approval
 BEGIN SELECT RAISE(ABORT, 'a standing rule changes only by being revoked, once'); END;
+
+CREATE INDEX standing_rules_project ON standing_rules (scope_project) WHERE scope_project IS NOT NULL;
 
 CREATE INDEX standing_rules_run ON standing_rules (scope_run) WHERE scope_run IS NOT NULL;
 

@@ -35,7 +35,9 @@ use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
 };
-use crate::rules::{Remember, RuleListParams, RuleListResult, RuleRevokeParams, RuleRevokeResult};
+use crate::rules::{
+    Remember, RuleAddParams, RuleListParams, RuleListResult, RuleRevokeParams, RuleRevokeResult,
+};
 use crate::run::{NotResumed, RunStatus, StopDetail, StopReason};
 use crate::secrets::{
     SecretDeleteParams, SecretDeleteResult, SecretListResult, SecretSetParams, SecretSetResult,
@@ -143,6 +145,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_SECRETS,
     FEATURE_EXECUTOR_FRAMES,
     crate::rules::FEATURE_RULES,
+    crate::rules::FEATURE_PROJECT_RULES,
 ];
 
 /// A request with a single reply.
@@ -803,6 +806,11 @@ method!(
     RuleList, "rule.list", RuleListParams => RuleListResult
 );
 method!(
+    /// `rule.add`: makes a standing rule for one project from an exact command line; the reply
+    /// is the rule. Needs features `rules` and `rules.project`.
+    RuleAdd, "rule.add", RuleAddParams => crate::rules::StandingRule
+);
+method!(
     /// `rule.revoke`: stops a standing rule applying, for good; it stays in `rule.list
     /// {includeInactive}` and in the audit trail. Needs feature `rules`.
     RuleRevoke, "rule.revoke", RuleRevokeParams => RuleRevokeResult
@@ -947,6 +955,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<SecretSet>(),
             method_entry::<SecretDelete>(),
             method_entry::<RuleList>(),
+            method_entry::<RuleAdd>(),
             method_entry::<RuleRevoke>(),
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),

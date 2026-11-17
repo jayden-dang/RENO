@@ -228,6 +228,22 @@ impl std::fmt::Debug for Shared {
 }
 
 impl Shared {
+    /// The project of `dir`: what the `Workspace` port says (ARCH-7: the kernel touches no
+    /// disk), except that Reno's own scratch directory is in none, even when something above it
+    /// is a repository, because what runs there is not work on that repository. A kernel with no
+    /// port has no projects.
+    pub(crate) async fn project_of(&self, dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        if self
+            .config
+            .scratch_root
+            .as_ref()
+            .is_some_and(|root| dir.starts_with(root))
+        {
+            return None;
+        }
+        self.workspace.as_ref()?.project_of(dir).await
+    }
+
     pub(crate) fn new(
         db: Db,
         executors: ExecutorRegistry,
