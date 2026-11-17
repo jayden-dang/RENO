@@ -76,8 +76,11 @@ pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Optio
             .to_owned();
         models.push((
             ModelInfo {
-                default_effort: None,
-                efforts: vec![],
+                default_effort: item
+                    .get("defaultReasoningEffort")
+                    .and_then(Value::as_str)
+                    .and_then(Effort::from_word),
+                efforts: supported_efforts(item),
                 id: id.to_owned(),
                 display_name: Some(display_name),
                 description: None,
@@ -90,6 +93,28 @@ pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Optio
         .and_then(Value::as_str)
         .map(str::to_owned);
     (models, next_cursor)
+}
+
+/// `supportedReasoningEfforts`: objects `{reasoningEffort, description}` (0.169 schema) or bare
+/// words from an older build. Words Reno does not know (`ultra`) are skipped.
+fn supported_efforts(item: &Value) -> Vec<Effort> {
+    let mut levels: Vec<Effort> = Vec::new();
+    for entry in item
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let word = entry
+            .as_str()
+            .or_else(|| entry.get("reasoningEffort").and_then(Value::as_str));
+        if let Some(level) = word.and_then(Effort::from_word) {
+            if !levels.contains(&level) {
+                levels.push(level);
+            }
+        }
+    }
+    levels
 }
 
 /// The curated fallback catalog: newest family first. The live `model/list` remains
@@ -193,7 +218,12 @@ mod tests {
                     "model": "gpt-6-astra",
                     "displayName": " GPT-6-Astra ",
                     "hidden": false,
-                    "supportedReasoningEfforts": [{ "reasoningEffort": "future" }],
+                    "supportedReasoningEfforts": [
+                        { "reasoningEffort": "future", "description": "" },
+                        { "reasoningEffort": "medium", "description": "" },
+                        "xhigh"
+                    ],
+                    "defaultReasoningEffort": "medium",
                     "isDefault": true
                 },
                 // An older build: no `model`, no name, no hidden flag.
@@ -208,8 +238,8 @@ mod tests {
             vec![
                 (
                     ModelInfo {
-                        default_effort: None,
-                        efforts: vec![],
+                        default_effort: Some(Effort::Medium),
+                        efforts: vec![Effort::Medium, Effort::XHigh],
                         id: "gpt-6-astra".into(),
                         display_name: Some("GPT-6-Astra".into()),
                         description: None,

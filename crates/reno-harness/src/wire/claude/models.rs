@@ -5,7 +5,7 @@
 //! what `--model` / `set_model` accept (an alias such as `sonnet`, `default`, or a full id), and
 //! `resolvedModel` the id it means. Several values can mean one model.
 
-use reno_proto::ModelInfo;
+use reno_proto::{Effort, ModelInfo};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -30,6 +30,24 @@ struct Row {
     display_name: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    /// Absent for a model that takes no effort (Haiku 4.5).
+    #[serde(default)]
+    supported_effort_levels: Vec<String>,
+}
+
+/// The levels a row lists, as Reno knows them: unknown words are dropped, order kept.
+fn efforts(row: &Row) -> Vec<Effort> {
+    let mut levels: Vec<Effort> = Vec::new();
+    for level in row
+        .supported_effort_levels
+        .iter()
+        .filter_map(|w| Effort::from_word(w))
+    {
+        if !levels.contains(&level) {
+            levels.push(level);
+        }
+    }
+    levels
 }
 
 /// The `response.response` payload of the `initialize` answer as a model list; `None` when it
@@ -61,7 +79,7 @@ pub(crate) fn parse_initialize(payload: &Value) -> Option<LiveModels> {
         {
             live.models.push(ModelInfo {
                 default_effort: None,
-                efforts: vec![],
+                efforts: efforts(&row),
                 id: row.resolved_model,
                 display_name: row.display_name.filter(|name| !name.is_empty()),
                 description: row.description.filter(|text| !text.is_empty()),
@@ -126,6 +144,45 @@ mod tests {
         ] {
             assert_eq!(parse_initialize(&payload), None, "{payload}");
         }
+    }
+
+    #[test]
+    fn efforts_come_from_the_supported_levels_per_model() {
+        let live = parse_initialize(&payload()).unwrap();
+        let of = |id: &str| {
+            live.models
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap()
+                .efforts
+                .clone()
+        };
+        assert_eq!(
+            of("claude-opus-5-5"),
+            [
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::XHigh,
+                Effort::Max
+            ]
+        );
+        assert_eq!(
+            of("claude-sonnet-4-6"),
+            [Effort::Low, Effort::Medium, Effort::High, Effort::Max]
+        );
+        assert!(of("claude-haiku-4-5-20251001").is_empty());
+        assert!(live.models.iter().all(|m| m.default_effort.is_none()));
+    }
+
+    #[test]
+    fn unknown_effort_words_are_skipped() {
+        let live = parse_initialize(&serde_json::json!({"models": [{
+            "value": "m", "resolvedModel": "m",
+            "supportedEffortLevels": ["low", "ultra", "high", "low"]
+        }]}))
+        .unwrap();
+        assert_eq!(live.models[0].efforts, [Effort::Low, Effort::High]);
     }
 
     #[test]
