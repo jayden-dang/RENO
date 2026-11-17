@@ -987,6 +987,7 @@ mod tests {
     fn bot_routing() -> RoutingDecision {
         use reno_proto::{Rejection, RuleMatched};
         let unlisted = |name: &str| Rejection {
+            also: Vec::new(),
             executor: name.parse().unwrap(),
             reason: reno_proto::RejectReason::unlisted_by_bot("keeper"),
         };
@@ -996,6 +997,7 @@ mod tests {
             rejected: vec![
                 unlisted("gemini"),
                 Rejection {
+                    also: Vec::new(),
                     executor: "opencode".parse().unwrap(),
                     reason: reno_proto::RejectReason::SignedOut {
                         hint: "run `opencode auth`".into(),

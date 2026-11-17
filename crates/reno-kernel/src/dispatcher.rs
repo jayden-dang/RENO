@@ -40,7 +40,7 @@ use reno_proto::defs::{BotDef, DefKind};
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorHealth, ExecutorId, RejectReason,
     RoutingDecision, RuleMatched, RunId, RunStatus, SandboxLevel, SecretsMissing, SessionRef,
-    StartFailureKind, StartRefusal, StopDetail, StopReason,
+    StartFailureKind, StartRefusal, StopDetail, StopReason, list_in_words,
 };
 use reno_store::{Claim, ClaimFilter, RunRecord, StoreError};
 use tokio::sync::mpsc;
@@ -294,7 +294,7 @@ fn in_place_opt_in(row: &RunRecord, settings: &LaunchSettings) -> bool {
 /// Why an executor may not start a run, and how a trigger's backoff accounts for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Refusal {
-    /// The run's diagnostic, starting `NoEligibleExecutor:`.
+    /// The run's diagnostic, in words; its kind is the typed `reason` and `account`.
     pub(crate) why: String,
     /// The account-level failure the scheduler backs off on.
     pub(crate) account: StartFailure,
@@ -313,26 +313,39 @@ pub(crate) fn no_eligible_executor(
     access: AccessMode,
     sandbox: SandboxLevel,
 ) -> Option<Refusal> {
-    let reason = router::ineligibility(descriptor, health, access, sandbox)?;
+    let mut found = router::ineligibilities(descriptor, health, access, sandbox).into_iter();
+    let reason = found.next()?;
     let id = &descriptor.id;
-    let why = match &reason {
+    // What the last probe found, in its own words (it says what to do about it).
+    let finding = |reason: &RejectReason| {
+        health
+            .and_then(ExecutorHealth::ineligible)
+            .map_or_else(|| reason.to_string(), |found| found.to_string())
+    };
+    let mut why = match &reason {
         RejectReason::AccessNotOffered { requested, offered } => format!(
-            "NoEligibleExecutor: the run asks for access mode {requested:?}, and executor {id} \
-             supports only {offered:?}; a run is never started with a different access mode than \
-             it asked for"
+            "the run asks for access mode {requested}, and executor {id} supports only {}; a run \
+             is never started with a different access mode than it asked for",
+            list_in_words(offered)
         ),
         RejectReason::SandboxNotEnforced { requested, offered } => format!(
-            "NoEligibleExecutor: the run asks for sandbox level {requested:?}, and executor {id} \
-             declares only {offered:?}; a run is never started with a different sandbox than it \
-             asked for"
+            "the run asks for sandbox level {requested}, and executor {id} declares only {}; a \
+             run is never started with a different sandbox than it asked for",
+            list_in_words(offered)
         ),
-        other => {
-            let finding = health
-                .and_then(ExecutorHealth::ineligible)
-                .map_or_else(|| other.to_string(), |found| found.to_string());
-            format!("NoEligibleExecutor: executor {id} is not usable: {finding}")
-        }
+        other => format!("executor {id} is not usable: {}", finding(other)),
     };
+    // Both facts are true and a person has to put both right.
+    for also in found {
+        match also {
+            RejectReason::NotInstalled { .. }
+            | RejectReason::TooOld { .. }
+            | RejectReason::SignedOut { .. } => {
+                why.push_str(&format!("; it is also not usable: {}", finding(&also)));
+            }
+            other => why.push_str(&format!("; it also {other}")),
+        }
+    }
     let account = match router::failure_kind(&reason) {
         StartFailureKind::NotInstalled => StartFailure::NotInstalled,
         StartFailureKind::NotSignedIn => StartFailure::NotSignedIn,
@@ -526,9 +539,7 @@ async fn attempt(
     if spec.resume.is_some() && !descriptor.caps.resume {
         // A session belongs to the executor that made it; there is no other to go to.
         return Attempt::Failed {
-            why: format!(
-                "NoEligibleExecutor: executor {id} cannot resume a session, and the run has one"
-            ),
+            why: format!("executor {id} cannot resume a session, and the run has one"),
             refusal: StartRefusal::NoEligibleExecutor,
             account: None,
         };
@@ -601,14 +612,9 @@ fn refused_by_all(refusals: &[(ExecutorId, String)]) -> String {
         many => {
             let tried: Vec<String> = many
                 .iter()
-                .map(|(id, why)| {
-                    format!("{id}: {}", why.trim_start_matches("NoEligibleExecutor: "))
-                })
+                .map(|(id, why)| format!("{id}: {why}"))
                 .collect();
-            format!(
-                "NoEligibleExecutor: no executor could take the run ({})",
-                tried.join("; ")
-            )
+            format!("no executor could take the run ({})", tried.join("; "))
         }
     }
 }
@@ -775,7 +781,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 .any(|r| r.executor == current && matches!(r.reason, RejectReason::Excluded { .. }))
     }) {
         let why = format!(
-            "NoEligibleExecutor: no default executor can take the task ({}); {NAME_ONE}",
+            "no default executor can take the task ({}); {NAME_ONE}",
             left_out.explain_verbose()
         );
         let account = Some(StartFailure::NoEligibleExecutor);
@@ -991,4 +997,92 @@ async fn conclude(
     }
     drop(slot);
     drop(cmd_rx);
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use reno_harness::exec::{Executor, MockExecutor};
+    use reno_proto::{
+        ExecutorHealth, InstallStatus, ModelCatalog, NotInstalledReason, SignedIn, VersionGate,
+    };
+
+    use super::*;
+
+    fn descriptor(access: &[AccessMode], sandbox: &[SandboxLevel]) -> ExecutorDescriptor {
+        let mut descriptor = MockExecutor::new("acp.devin".parse().unwrap()).descriptor();
+        descriptor.caps.access_modes = access.to_vec();
+        descriptor.caps.sandbox_levels = sandbox.to_vec();
+        descriptor
+    }
+
+    fn missing() -> ExecutorHealth {
+        ExecutorHealth {
+            installed: InstallStatus::NotInstalled {
+                why: NotInstalledReason::NotFound {
+                    hint: "install it with `devin install`".into(),
+                },
+            },
+            version_gate: VersionGate::Ok,
+            signed_in: SignedIn::Unknown,
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn the_refusal_reads_in_words_and_names_every_reason() {
+        let both = no_eligible_executor(
+            &descriptor(&[AccessMode::FullAccess], &[SandboxLevel::Unrestricted]),
+            Some(&missing()),
+            AccessMode::Supervised,
+            SandboxLevel::Unrestricted,
+        )
+        .unwrap();
+        for debug in ["NoEligibleExecutor", "FullAccess", "["] {
+            assert!(!both.why.contains(debug), "{debug} in {}", both.why);
+        }
+        assert!(
+            both.why.contains("asks for access mode Supervised")
+                && both.why.contains("acp.devin supports only Full access"),
+            "{}",
+            both.why
+        );
+        assert!(
+            both.why.contains("not installed") && both.why.contains("devin install"),
+            "{}",
+            both.why
+        );
+        // The typed finding and the account failure are what they were.
+        assert!(matches!(both.reason, RejectReason::AccessNotOffered { .. }));
+        assert_eq!(both.account, StartFailure::NoEligibleExecutor);
+
+        // Offering the mode, only the install is wrong: the message does not mention access.
+        let only_install = no_eligible_executor(
+            &descriptor(&[AccessMode::Supervised], &[SandboxLevel::Unrestricted]),
+            Some(&missing()),
+            AccessMode::Supervised,
+            SandboxLevel::Unrestricted,
+        )
+        .unwrap();
+        assert!(
+            !only_install.why.contains("access mode"),
+            "{}",
+            only_install.why
+        );
+        assert_eq!(only_install.account, StartFailure::NotInstalled);
+
+        let sandbox = no_eligible_executor(
+            &descriptor(&[AccessMode::Supervised], &[SandboxLevel::ReadOnly]),
+            None,
+            AccessMode::Supervised,
+            SandboxLevel::WorkspaceWrite,
+        )
+        .unwrap();
+        assert!(
+            sandbox.why.contains("sandbox level Workspace write")
+                && sandbox.why.contains("declares only Read-only"),
+            "{}",
+            sandbox.why
+        );
+    }
 }

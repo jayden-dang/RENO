@@ -224,7 +224,7 @@ async fn a_signed_out_executor_is_refused_before_it_is_started_and_the_diagnosti
     let journal = fx.journal_with_done(&run).await;
     let done = last_done(&journal);
     let text = diagnostic(done);
-    assert!(text.starts_with("NoEligibleExecutor:"), "{text}");
+    assert!(!text.contains("NoEligibleExecutor"), "{text}");
     assert!(text.contains("not signed in"), "{text}");
     assert!(text.contains("run `mock login`"), "{text}");
     assert!(matches!(

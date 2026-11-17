@@ -744,7 +744,7 @@ async fn a_run_no_executor_will_take_says_why_in_a_typed_reason() {
     match failed_start(&fx, &run).await {
         StopDetail::StartRefused { failure, detail } => {
             assert_eq!(failure, StartRefusal::NoEligibleExecutor);
-            assert!(detail.starts_with("NoEligibleExecutor"), "{detail}");
+            assert!(!detail.contains("NoEligibleExecutor"), "{detail}");
         }
         other => panic!("{other:?}"),
     }

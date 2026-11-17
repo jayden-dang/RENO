@@ -204,7 +204,7 @@ daemon_test! {
         let Some(ExecEvent::Done { diagnostic: Some(text), .. }) = events.last().map(|e| &e.event) else {
             panic!("{events:?}");
         };
-        assert!(text.starts_with("NoEligibleExecutor:"), "{text}");
+        assert!(!text.contains("NoEligibleExecutor"), "{text}");
         assert!(text.contains("not installed"), "{text}");
         let summary = within(fx.client.get_run(&run)).await.unwrap();
         assert_eq!(summary.status, RunStatus::Failed);

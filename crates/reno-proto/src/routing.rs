@@ -8,7 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::exec::{AccessMode, SandboxLevel};
+use crate::exec::{AccessMode, SandboxLevel, list_in_words};
 use crate::ids::{ExecutorId, RunId};
 use crate::protocol::TaskRunParams;
 
@@ -91,8 +91,15 @@ pub enum StartFailureKind {
 pub struct Rejection {
     /// The executor.
     pub executor: ExecutorId,
-    /// Why.
+    /// Why. When more than one thing is wrong this is the first the filter checks (access mode,
+    /// then sandbox, then health), and what else is wrong is in `also`.
     pub reason: RejectReason,
+    /// The other reasons that hold too, in the filter's order: an executor that does not offer
+    /// the access mode and is not installed has the first as `reason` and the second here, so a
+    /// person sees what they would have to change. Absent from older daemons, and when there is
+    /// only one reason. Which executors are eligible does not depend on it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<RejectReason>,
 }
 
 /// The stage 2 rule that ordered the candidates. The first rule that matches wins.
@@ -188,9 +195,13 @@ impl RoutingDecision {
     /// [`Self::explain_verbose`] or [`Self::left_out_lines`] for them.
     pub fn explain(&self) -> String {
         let mut text = self.headline(true);
-        for Rejection { executor, reason } in &self.rejected {
-            if !matches!(reason, RejectReason::Excluded { .. }) {
-                text.push_str(&format!("; not {executor}: {reason}"));
+        for rejection in &self.rejected {
+            if !matches!(rejection.reason, RejectReason::Excluded { .. }) {
+                text.push_str(&format!(
+                    "; not {}: {}",
+                    rejection.executor,
+                    rejection.reasons()
+                ));
             }
         }
         text
@@ -199,8 +210,12 @@ impl RoutingDecision {
     /// [`Self::explain`] with every passed-over executor and its reason.
     pub fn explain_verbose(&self) -> String {
         let mut text = self.headline(false);
-        for Rejection { executor, reason } in &self.rejected {
-            text.push_str(&format!("; not {executor}: {reason}"));
+        for rejection in &self.rejected {
+            text.push_str(&format!(
+                "; not {}: {}",
+                rejection.executor,
+                rejection.reasons()
+            ));
         }
         text
     }
@@ -264,18 +279,51 @@ impl std::fmt::Display for RejectReason {
             Self::SignedOut { hint } => write!(f, "signed out ({hint})"),
             Self::AccessNotOffered { requested, offered } => write!(
                 f,
-                "does not offer access mode {requested:?} (offers {offered:?})"
+                "does not offer access mode {requested} (offers {})",
+                list_in_words(offered)
             ),
             Self::SandboxNotEnforced { requested, offered } => write!(
                 f,
-                "does not enforce sandbox {requested:?} (enforces {offered:?})"
+                "does not enforce sandbox {requested} (enforces {})",
+                list_in_words(offered)
             ),
             Self::Excluded { why } => write!(f, "excluded ({why})"),
             Self::NotRegistered => write!(f, "not an executor of this daemon"),
             Self::StartFailed { failure, detail } => {
-                write!(f, "would not start ({failure:?}): {detail}")
+                write!(f, "would not start ({failure}): {detail}")
             }
         }
+    }
+}
+
+impl std::fmt::Display for StartFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotInstalled => "not installed",
+            Self::NotSignedIn => "not signed in",
+            Self::NoEligibleExecutor => "no eligible executor",
+        })
+    }
+}
+
+impl Rejection {
+    /// An executor dropped for one reason.
+    pub fn new(executor: ExecutorId, reason: RejectReason) -> Self {
+        Self {
+            executor,
+            reason,
+            also: Vec::new(),
+        }
+    }
+
+    /// Every reason, the first one first, as a person reads it: `does not offer access mode
+    /// Supervised (offers Full access), and not installed (install it)`.
+    pub fn reasons(&self) -> String {
+        let mut text = self.reason.to_string();
+        for also in &self.also {
+            text.push_str(&format!(", and {also}"));
+        }
+        text
     }
 }
 

@@ -23,6 +23,29 @@ pub enum AccessMode {
     FullAccess,
 }
 
+impl std::fmt::Display for AccessMode {
+    /// The mode in words, for a person: never the variant name.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Supervised => "Supervised",
+            Self::AutoAcceptEdits => "Auto-accept edits",
+            Self::FullAccess => "Full access",
+        })
+    }
+}
+
+/// `items` in words, joined with commas; `nothing` when there are none.
+pub fn list_in_words<T: std::fmt::Display>(items: &[T]) -> String {
+    if items.is_empty() {
+        return "nothing".to_owned();
+    }
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The sandbox the harness itself enforces around its tools: a ceiling below the access mode.
 /// A run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that
 /// level; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.
@@ -35,6 +58,17 @@ pub enum SandboxLevel {
     WorkspaceWrite,
     /// No sandbox ceiling beyond the access mode (and the run's worktree).
     Unrestricted,
+}
+
+impl std::fmt::Display for SandboxLevel {
+    /// The level in words, for a person: never the variant name.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ReadOnly => "Read-only",
+            Self::WorkspaceWrite => "Workspace write",
+            Self::Unrestricted => "Unrestricted",
+        })
+    }
 }
 
 /// Requested reasoning effort.

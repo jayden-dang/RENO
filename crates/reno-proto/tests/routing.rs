@@ -60,6 +60,7 @@ fn routing_decision_wire_shape() {
         chosen: Some(codex.clone()),
         ranked: vec![codex.clone()],
         rejected: vec![Rejection {
+            also: Vec::new(),
             executor: claude.clone(),
             reason: RejectReason::StartFailed {
                 failure: StartFailureKind::NotSignedIn,
@@ -152,6 +153,101 @@ fn every_reject_reason_has_a_wire_name() {
     for (reason, wire) in cases {
         golden(&reason, wire);
     }
+}
+
+#[test]
+fn a_rejection_carries_its_other_reasons_only_when_it_has_some() {
+    let devin: ExecutorId = "acp.devin".parse().unwrap();
+    let access = RejectReason::AccessNotOffered {
+        requested: AccessMode::Supervised,
+        offered: vec![AccessMode::FullAccess],
+    };
+    // An older daemon sends none: the field is absent and reads as empty.
+    let old: Rejection = serde_json::from_value(json!({
+        "executor": "acp.devin",
+        "reason": {"type": "access_not_offered", "requested": "supervised",
+                   "offered": ["full_access"]}
+    }))
+    .unwrap();
+    assert_eq!(old.also, Vec::new());
+    assert_eq!(
+        serde_json::to_value(&old).unwrap().get("also"),
+        None,
+        "nothing extra goes to an older client"
+    );
+    golden(
+        &Rejection {
+            executor: devin,
+            reason: access,
+            also: vec![RejectReason::NotInstalled {
+                detail: "install it".into(),
+            }],
+        },
+        json!({"executor": "acp.devin",
+               "reason": {"type": "access_not_offered", "requested": "supervised",
+                          "offered": ["full_access"]},
+               "also": [{"type": "not_installed", "detail": "install it"}]}),
+    );
+}
+
+#[test]
+fn access_modes_and_sandbox_levels_read_in_words() {
+    assert_eq!(AccessMode::FullAccess.to_string(), "Full access");
+    assert_eq!(AccessMode::Supervised.to_string(), "Supervised");
+    assert_eq!(AccessMode::AutoAcceptEdits.to_string(), "Auto-accept edits");
+    assert_eq!(SandboxLevel::ReadOnly.to_string(), "Read-only");
+    assert_eq!(SandboxLevel::WorkspaceWrite.to_string(), "Workspace write");
+    assert_eq!(SandboxLevel::Unrestricted.to_string(), "Unrestricted");
+    let access = RejectReason::AccessNotOffered {
+        requested: AccessMode::Supervised,
+        offered: vec![AccessMode::FullAccess, AccessMode::AutoAcceptEdits],
+    };
+    assert_eq!(
+        access.to_string(),
+        "does not offer access mode Supervised (offers Full access, Auto-accept edits)"
+    );
+    let sandbox = RejectReason::SandboxNotEnforced {
+        requested: SandboxLevel::WorkspaceWrite,
+        offered: vec![SandboxLevel::Unrestricted],
+    };
+    assert_eq!(
+        sandbox.to_string(),
+        "does not enforce sandbox Workspace write (enforces Unrestricted)"
+    );
+    let none = RejectReason::AccessNotOffered {
+        requested: AccessMode::Supervised,
+        offered: vec![],
+    };
+    assert_eq!(
+        none.to_string(),
+        "does not offer access mode Supervised (offers nothing)"
+    );
+    let failed = RejectReason::StartFailed {
+        failure: StartFailureKind::NoEligibleExecutor,
+        detail: "x".into(),
+    };
+    assert_eq!(
+        failed.to_string(),
+        "would not start (no eligible executor): x"
+    );
+}
+
+#[test]
+fn the_explanation_names_every_reason_an_executor_was_dropped_for() {
+    let decision: RoutingDecision = serde_json::from_value(json!({
+        "ranked": [],
+        "rejected": [{"executor": "acp.devin",
+            "reason": {"type": "access_not_offered", "requested": "supervised",
+                       "offered": ["full_access"]},
+            "also": [{"type": "not_installed", "detail": "install it"}]}],
+        "ruleMatched": {"type": "default"}, "atMs": 1
+    }))
+    .unwrap();
+    assert_eq!(
+        decision.explain_verbose(),
+        "no eligible executor (default order); not acp.devin: does not offer access mode \
+         Supervised (offers Full access), and not installed (install it)"
+    );
 }
 
 #[test]

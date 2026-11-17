@@ -317,7 +317,7 @@ async fn an_agent_that_cannot_honor_the_access_mode_is_refused_before_it_spawns(
             diagnostic: Some(why),
             ..
         }) => assert!(
-            why.contains("NoEligibleExecutor") && why.contains("supports only"),
+            !why.contains("NoEligibleExecutor") && why.contains("supports only Full access"),
             "{why}"
         ),
         other => panic!("{other:?} in {journal:?}"),

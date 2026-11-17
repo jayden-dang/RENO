@@ -100,7 +100,9 @@ pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport, TaskRequest};
 pub use link::{FakeRunLink, IssuedLink, LinkError, RunLink};
 pub use registry::ExecutorRegistry;
-pub use router::{BotPreference, Candidate, RouteRequest, fall_back, ineligibility, route};
+pub use router::{
+    BotPreference, Candidate, RouteRequest, fall_back, ineligibilities, ineligibility, route,
+};
 pub use secrets::{FakeSecrets, SecretValue, Secrets, SecretsError, check_name, check_secret};
 pub use wake::WakeSignal;
 pub use watch::{Watch, WatchBackoff, WatchSpec, WatchStream};

@@ -69,42 +69,63 @@ pub struct RouteRequest {
 }
 
 /// Why `descriptor` cannot take a task that asks for `access` and `sandbox`, given what its last
-/// probe found; `None` when it can. The order is the dispatcher's: access, sandbox, health.
+/// probe found; `None` when it can. When several things are wrong this is the first, in the
+/// dispatcher's order: access, sandbox, health. [`ineligibilities`] has all of them.
 pub fn ineligibility(
     descriptor: &ExecutorDescriptor,
     health: Option<&ExecutorHealth>,
     access: AccessMode,
     sandbox: SandboxLevel,
 ) -> Option<RejectReason> {
+    ineligibilities(descriptor, health, access, sandbox)
+        .into_iter()
+        .next()
+}
+
+/// Every reason `descriptor` cannot take the task, in the order of [`ineligibility`]; empty when
+/// it can. An executor that does not offer the access mode and is not installed has both, and a
+/// person has to put both right. Eligibility is the same as for [`ineligibility`].
+pub fn ineligibilities(
+    descriptor: &ExecutorDescriptor,
+    health: Option<&ExecutorHealth>,
+    access: AccessMode,
+    sandbox: SandboxLevel,
+) -> Vec<RejectReason> {
+    let mut found = Vec::new();
     if !descriptor.caps.access_modes.contains(&access) {
-        return Some(RejectReason::AccessNotOffered {
+        found.push(RejectReason::AccessNotOffered {
             requested: access,
             offered: descriptor.caps.access_modes.clone(),
         });
     }
     // `Unrestricted` asks for no ceiling beyond the access mode, so it needs no declaration.
     if sandbox != SandboxLevel::Unrestricted && !descriptor.caps.sandbox_levels.contains(&sandbox) {
-        return Some(RejectReason::SandboxNotEnforced {
+        found.push(RejectReason::SandboxNotEnforced {
             requested: sandbox,
             offered: descriptor.caps.sandbox_levels.clone(),
         });
     }
-    health?.ineligible().map(|why| match why {
-        Ineligible::NotInstalled(why) => RejectReason::NotInstalled {
-            detail: match why {
-                NotInstalledReason::NotFound { hint } => hint,
-                NotInstalledReason::NeedsInstall { what } => {
-                    format!("{what} needs to be installed")
-                }
-                NotInstalledReason::Unusable { detail } => detail,
-                NotInstalledReason::ProbeFailed { detail } => {
-                    format!("the probe failed: {detail}")
-                }
-            },
-        },
-        Ineligible::TooOld { found, min } => RejectReason::TooOld { found, min },
-        Ineligible::SignedOut(hint) => RejectReason::SignedOut { hint },
-    })
+    found.extend(
+        health
+            .and_then(ExecutorHealth::ineligible)
+            .map(|why| match why {
+                Ineligible::NotInstalled(why) => RejectReason::NotInstalled {
+                    detail: match why {
+                        NotInstalledReason::NotFound { hint } => hint,
+                        NotInstalledReason::NeedsInstall { what } => {
+                            format!("{what} needs to be installed")
+                        }
+                        NotInstalledReason::Unusable { detail } => detail,
+                        NotInstalledReason::ProbeFailed { detail } => {
+                            format!("the probe failed: {detail}")
+                        }
+                    },
+                },
+                Ineligible::TooOld { found, min } => RejectReason::TooOld { found, min },
+                Ineligible::SignedOut(hint) => RejectReason::SignedOut { hint },
+            }),
+    );
+    found
 }
 
 /// Decides where a task goes. `candidates` are the registered executors; `at_ms` is the time to
@@ -144,22 +165,26 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
     let mut ranked = Vec::new();
     let mut rejected = Vec::new();
     for id in order {
-        let verdict = match candidates.iter().find(|c| c.descriptor.id == id) {
-            None => Some(RejectReason::NotRegistered),
-            Some(candidate) => excluded(request, &id).or_else(|| {
-                ineligibility(
+        // The first reason is the verdict; an executor the task leaves out has only that one.
+        let mut reasons = match candidates.iter().find(|c| c.descriptor.id == id) {
+            None => vec![RejectReason::NotRegistered],
+            Some(candidate) => match excluded(request, &id) {
+                Some(left_out) => vec![left_out],
+                None => ineligibilities(
                     &candidate.descriptor,
                     candidate.health.as_ref(),
                     request.access,
                     request.sandbox,
-                )
-            }),
-        };
-        match verdict {
+                ),
+            },
+        }
+        .into_iter();
+        match reasons.next() {
             None => ranked.push(id),
             Some(reason) => rejected.push(Rejection {
                 executor: id,
                 reason,
+                also: reasons.collect(),
             }),
         }
     }
@@ -216,6 +241,7 @@ pub fn fall_back(
 ) {
     decision.ranked.retain(|id| id != failed);
     decision.rejected.push(Rejection {
+        also: Vec::new(),
         executor: failed.clone(),
         reason: RejectReason::StartFailed {
             failure: failure_kind(reason),
@@ -314,6 +340,71 @@ mod tests {
     }
 
     #[test]
+    fn an_executor_that_fails_two_checks_is_dropped_for_both() {
+        let missing = health(
+            InstallStatus::NotInstalled {
+                why: NotInstalledReason::NotFound {
+                    hint: "install it".into(),
+                },
+            },
+            VersionGate::Ok,
+            SignedIn::Unknown,
+        );
+        // Offers only full access and is not installed; a supervised run needs both changed.
+        let devin = Candidate {
+            descriptor: descriptor(
+                "acp.devin",
+                &[AccessMode::FullAccess],
+                &[SandboxLevel::Unrestricted],
+            ),
+            health: Some(missing),
+        };
+        let named = RouteRequest {
+            explicit: Some(id("acp.devin")),
+            ..request()
+        };
+        let decision = route(&named, std::slice::from_ref(&devin), 1);
+        assert!(decision.ranked.is_empty());
+        let [rejection] = decision.rejected.as_slice() else {
+            panic!("{decision:?}");
+        };
+        // The first reason is the one the dispatcher has always given.
+        assert_eq!(
+            rejection.reason,
+            RejectReason::AccessNotOffered {
+                requested: AccessMode::Supervised,
+                offered: vec![AccessMode::FullAccess],
+            }
+        );
+        assert_eq!(
+            rejection.also,
+            [RejectReason::NotInstalled {
+                detail: "install it".into()
+            }]
+        );
+        assert_eq!(
+            ineligibility(
+                &devin.descriptor,
+                devin.health.as_ref(),
+                AccessMode::Supervised,
+                SandboxLevel::Unrestricted
+            ),
+            Some(rejection.reason.clone())
+        );
+        // With the access mode it offers, only the health is wrong: one reason, as before.
+        let full = RouteRequest {
+            access: AccessMode::FullAccess,
+            ..named
+        };
+        let decision = route(&full, &[devin], 1);
+        assert!(matches!(
+            decision.rejected[0].reason,
+            RejectReason::NotInstalled { .. }
+        ));
+        assert!(decision.rejected[0].also.is_empty());
+    }
+
+    #[test]
     fn with_no_rule_the_eligible_executors_are_ranked_by_id() {
         let candidates = [
             candidate("codex", None),
@@ -385,6 +476,7 @@ mod tests {
         assert_eq!(
             decision.rejected,
             [Rejection {
+                also: Vec::new(),
                 executor: id("claude-code"),
                 reason: RejectReason::Excluded {
                     why: "the task names codex".into()
@@ -566,6 +658,7 @@ mod tests {
         assert_eq!(
             decision.rejected,
             [Rejection {
+                also: Vec::new(),
                 executor: id("claude-code"),
                 reason: RejectReason::StartFailed {
                     failure: StartFailureKind::NotSignedIn,

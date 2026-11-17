@@ -1154,13 +1154,20 @@ expression: protocol_schema()
           "Rejection": {
             "description": "An executor that was dropped, and why.",
             "properties": {
+              "also": {
+                "description": "The other reasons that hold too, in the filter's order: an executor that does not offer\nthe access mode and is not installed has the first as `reason` and the second here, so a\nperson sees what they would have to change. Absent from older daemons, and when there is\nonly one reason. Which executors are eligible does not depend on it.",
+                "items": {
+                  "$ref": "#/$defs/RejectReason"
+                },
+                "type": "array"
+              },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
                 "description": "The executor."
               },
               "reason": {
                 "$ref": "#/$defs/RejectReason",
-                "description": "Why."
+                "description": "Why. When more than one thing is wrong this is the first the filter checks (access mode,\nthen sandbox, then health), and what else is wrong is in `also`."
               }
             },
             "required": [
@@ -2286,13 +2293,20 @@ expression: protocol_schema()
           "Rejection": {
             "description": "An executor that was dropped, and why.",
             "properties": {
+              "also": {
+                "description": "The other reasons that hold too, in the filter's order: an executor that does not offer\nthe access mode and is not installed has the first as `reason` and the second here, so a\nperson sees what they would have to change. Absent from older daemons, and when there is\nonly one reason. Which executors are eligible does not depend on it.",
+                "items": {
+                  "$ref": "#/$defs/RejectReason"
+                },
+                "type": "array"
+              },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
                 "description": "The executor."
               },
               "reason": {
                 "$ref": "#/$defs/RejectReason",
-                "description": "Why."
+                "description": "Why. When more than one thing is wrong this is the first the filter checks (access mode,\nthen sandbox, then health), and what else is wrong is in `also`."
               }
             },
             "required": [
@@ -2823,13 +2837,20 @@ expression: protocol_schema()
           "Rejection": {
             "description": "An executor that was dropped, and why.",
             "properties": {
+              "also": {
+                "description": "The other reasons that hold too, in the filter's order: an executor that does not offer\nthe access mode and is not installed has the first as `reason` and the second here, so a\nperson sees what they would have to change. Absent from older daemons, and when there is\nonly one reason. Which executors are eligible does not depend on it.",
+                "items": {
+                  "$ref": "#/$defs/RejectReason"
+                },
+                "type": "array"
+              },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
                 "description": "The executor."
               },
               "reason": {
                 "$ref": "#/$defs/RejectReason",
-                "description": "Why."
+                "description": "Why. When more than one thing is wrong this is the first the filter checks (access mode,\nthen sandbox, then health), and what else is wrong is in `also`."
               }
             },
             "required": [

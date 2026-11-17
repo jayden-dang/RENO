@@ -1391,9 +1391,11 @@ async fn no_eligible_executor_fails_the_run_instead_of_downgrading_it() {
     };
     assert_eq!(*stop, StopReason::Error);
     let why = diagnostic.clone().unwrap();
-    assert!(why.starts_with("NoEligibleExecutor:"), "{why}");
+    assert!(!why.contains("NoEligibleExecutor"), "{why}");
     assert!(
-        why.contains("FullAccess") && why.contains("[Supervised]"),
+        why.contains("Full access")
+            && why.contains("supports only Supervised")
+            && !why.contains("["),
         "{why}"
     );
     assert!(

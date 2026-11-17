@@ -122,7 +122,10 @@ pub trait Executor: Send + Sync {
 pub enum ExecError {
     /// The executor cannot honour the requested access mode, and never runs with more than asked
     /// (ARCH-15).
-    #[error("access mode {requested:?} is not supported; supported: {supported:?}")]
+    #[error(
+        "access mode {requested} is not supported; supported: {}",
+        reno_proto::list_in_words(supported)
+    )]
     UnsupportedAccess {
         /// What the spec asked for.
         requested: AccessMode,
@@ -388,7 +391,8 @@ pub(crate) fn require_sandbox(
         Ok(())
     } else {
         Err(ExecError::InvalidSpec(format!(
-            "sandbox level {requested:?} is not supported; supported: {supported:?}"
+            "sandbox level {requested} is not supported; supported: {}",
+            reno_proto::list_in_words(supported)
         )))
     }
 }
@@ -403,6 +407,6 @@ mod tests {
         assert!(require_sandbox(SandboxLevel::Unrestricted, &supported).is_ok());
         assert!(require_sandbox(SandboxLevel::Unrestricted, &[]).is_ok());
         let refused = require_sandbox(SandboxLevel::ReadOnly, &supported);
-        assert!(matches!(refused, Err(ExecError::InvalidSpec(why)) if why.contains("ReadOnly")));
+        assert!(matches!(refused, Err(ExecError::InvalidSpec(why)) if why.contains("Read-only")));
     }
 }

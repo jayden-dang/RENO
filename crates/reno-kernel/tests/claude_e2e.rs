@@ -244,7 +244,7 @@ async fn a_run_asking_for_a_sandbox_claude_does_not_declare_is_refused_before_it
             diagnostic: Some(why),
             ..
         }) => assert!(
-            why.contains("NoEligibleExecutor") && why.contains("WorkspaceWrite"),
+            !why.contains("NoEligibleExecutor") && why.contains("Workspace write"),
             "{why}"
         ),
         other => panic!("{other:?} in {journal:?}"),

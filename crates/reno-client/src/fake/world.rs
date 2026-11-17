@@ -142,6 +142,7 @@ impl World {
                 detail: "grok 0.4.0 is older than 0.9.0".to_owned(),
             };
             decision.rejected = vec![Rejection {
+                also: Vec::new(),
                 executor: grok.clone(),
                 reason: reason.clone(),
             }];
@@ -306,6 +307,7 @@ impl World {
             match reason {
                 None => ranked.push(id),
                 Some(reason) => rejected.push(Rejection {
+                    also: Vec::new(),
                     executor: id,
                     reason,
                 }),

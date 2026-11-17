@@ -147,7 +147,7 @@ async fn work(script: &Script, prompt: &str) -> bool {
                         .map(|r| r.summary.executor.to_string())
                         .unwrap_or_default();
                     let why = format!(
-                        "NoEligibleExecutor: executor {executor} is not usable: not signed in: \
+                        "executor {executor} is not usable: not signed in: \
                          run its login command"
                     );
                     let reason = reno_proto::StopDetail::StartRefused {

@@ -19,6 +19,7 @@ fn decision(chosen: &str, at: u64) -> RoutingDecision {
         chosen: Some(id(chosen)),
         ranked: vec![id(chosen)],
         rejected: vec![Rejection {
+            also: Vec::new(),
             executor: id("claude-code"),
             reason: RejectReason::SignedOut {
                 hint: "run `claude login`".into(),

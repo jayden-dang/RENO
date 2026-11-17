@@ -413,9 +413,11 @@ async fn an_executor_that_cannot_honour_the_access_mode_is_not_eligible() {
     let events = fx.events(&run, None).await;
     let done = events.last().unwrap().as_ref().unwrap().event.clone();
     let why = diagnostic(&done);
-    assert!(why.starts_with("NoEligibleExecutor:"), "{done:?}");
+    assert!(!why.contains("NoEligibleExecutor"), "{done:?}");
     assert!(
-        why.contains("Supervised") && why.contains("[FullAccess]"),
+        why.contains("Supervised")
+            && why.contains("supports only Full access")
+            && !why.contains("["),
         "{why}"
     );
     assert!(m.log().specs.is_empty(), "nothing was started");
@@ -435,9 +437,12 @@ async fn an_executor_that_does_not_declare_the_sandbox_level_is_not_eligible() {
     let events = fx.events(&run, None).await;
     let done = events.last().unwrap().as_ref().unwrap().event.clone();
     let why = diagnostic(&done);
-    assert!(why.starts_with("NoEligibleExecutor:"), "{done:?}");
+    assert!(!why.contains("NoEligibleExecutor"), "{done:?}");
     assert!(
-        why.contains("sandbox") && why.contains("WorkspaceWrite") && why.contains("[ReadOnly]"),
+        why.contains("sandbox")
+            && why.contains("Workspace write")
+            && why.contains("Read-only")
+            && !why.contains("["),
         "{why}"
     );
     assert!(m.log().specs.is_empty(), "nothing was started");

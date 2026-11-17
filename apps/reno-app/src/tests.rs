@@ -821,6 +821,25 @@ fn the_run_screen_draws_in_both_appearances_and_toggles_details(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_real_run_shows_its_repository_in_the_details_pane(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    // A real daemon's run: a plain title and the folder its task was submitted with.
+    let mut real = store.read_with(cx, |s, _| {
+        s.state().run(&run_id("keeper1")).cloned().unwrap()
+    });
+    real.title = "Fix the porch light".to_owned();
+    real.cwd = Some("/Users/x/Developer/experiments/porch".into());
+    store.update(cx, |s, cx| {
+        s.apply(Update::RunUpserted(real), cx);
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Light);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "details-repository"));
+}
+
+#[gpui::test]
 fn a_daemon_that_will_not_start_is_explained_in_the_banner(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;

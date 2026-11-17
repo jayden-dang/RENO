@@ -8,7 +8,8 @@ use reno_client::State;
 use reno_proto::defs::DefKind;
 use reno_proto::{
     AccessMode, Attachment, ExecutorId, FEATURE_ATTACHMENTS, FEATURE_DEFS, FEATURE_ROUTING,
-    RejectReason, RoutingDecision, RuleMatched, SandboxLevel, StartFailureKind, TaskRunParams,
+    RejectReason, Rejection, RoutingDecision, RuleMatched, SandboxLevel, StartFailureKind,
+    TaskRunParams,
 };
 
 use crate::summary;
@@ -201,7 +202,7 @@ pub(crate) fn view(decision: &RoutingDecision) -> RoutingView {
         .iter()
         .map(|r| Rejected {
             who: Named::new(&r.executor),
-            reason: reason_sentence(&r.reason),
+            reason: rejection_sentence(r),
         })
         .collect();
     let walk: Vec<Step> = decision
@@ -283,6 +284,44 @@ fn happened(reason: &RejectReason) -> &'static str {
         RejectReason::Excluded { .. } => "was left out",
         RejectReason::NotRegistered => "is not set up here",
         RejectReason::StartFailed { .. } => "would not start",
+    }
+}
+
+/// The sentence for a rejection: its first reason, and whatever else is wrong with the executor
+/// (a daemon that has nothing more to say sends nothing more): "Does not offer supervised access,
+/// and is not installed."
+fn rejection_sentence(rejection: &Rejection) -> String {
+    let first = reason_sentence(&rejection.reason);
+    if rejection.also.is_empty() {
+        return first;
+    }
+    let mut parts: Vec<String> = rejection.also.iter().map(predicate).collect();
+    let last = parts.pop().unwrap_or_default();
+    let mut text = first.trim_end_matches('.').to_owned();
+    for part in parts {
+        text.push_str(&format!(", {part}"));
+    }
+    format!("{text}, and {last}.")
+}
+
+/// A reason as the end of a sentence about the executor: "is not installed".
+fn predicate(reason: &RejectReason) -> String {
+    match reason {
+        RejectReason::NotInstalled { .. } => "is not installed".to_owned(),
+        RejectReason::TooOld { found, min } => match found {
+            Some(found) => format!("is too old (found {found}, needs {min} or newer)"),
+            None => format!("is too old (needs {min} or newer)"),
+        },
+        RejectReason::SignedOut { .. } => "is signed out".to_owned(),
+        RejectReason::AccessNotOffered { requested, .. } => {
+            format!("does not offer {}", access_words(*requested))
+        }
+        RejectReason::SandboxNotEnforced { requested, .. } => {
+            format!("does not enforce a {} sandbox", sandbox_words(*requested))
+        }
+        RejectReason::Excluded { why } => format!("was left out: {}", why.trim_end_matches('.')),
+        RejectReason::NotRegistered => "is not set up on this daemon".to_owned(),
+        RejectReason::StartFailed { .. } => "would not start".to_owned(),
     }
 }
 
@@ -370,6 +409,7 @@ mod tests {
 
     fn signed_out(who: &str, hint: &str) -> Rejection {
         Rejection {
+            also: Vec::new(),
             executor: id(who),
             reason: RejectReason::SignedOut { hint: hint.into() },
         }
@@ -407,11 +447,51 @@ mod tests {
     }
 
     #[test]
+    fn an_executor_that_fails_two_checks_says_both() {
+        let mut d = decision(None);
+        d.rejected = vec![Rejection {
+            executor: id("acp.devin"),
+            reason: RejectReason::AccessNotOffered {
+                requested: AccessMode::Supervised,
+                offered: vec![AccessMode::FullAccess],
+            },
+            also: vec![RejectReason::NotInstalled {
+                detail: "install it".into(),
+            }],
+        }];
+        let v = view(&d);
+        assert_eq!(
+            v.rejected[0].reason,
+            "Does not offer supervised access, and is not installed."
+        );
+        // Three: the last is joined with "and", the rest with commas.
+        d.rejected[0].also = vec![
+            RejectReason::SandboxNotEnforced {
+                requested: SandboxLevel::ReadOnly,
+                offered: vec![],
+            },
+            RejectReason::SignedOut { hint: "x".into() },
+        ];
+        assert_eq!(
+            view(&d).rejected[0].reason,
+            "Does not offer supervised access, does not enforce a read-only sandbox, and is \
+             signed out."
+        );
+        // An older daemon says one thing, and the sentence is as it was.
+        d.rejected[0].also.clear();
+        assert_eq!(
+            view(&d).rejected[0].reason,
+            "Does not offer supervised access."
+        );
+    }
+
+    #[test]
     fn many_rejections_are_summarised() {
         let mut d = decision(Some("codex"));
         d.rejected = vec![
             signed_out("claude-code", "run `claude login`"),
             Rejection {
+                also: Vec::new(),
                 executor: id("acp.grok"),
                 reason: RejectReason::TooOld {
                     found: Some("0.4.0".into()),
@@ -419,6 +499,7 @@ mod tests {
                 },
             },
             Rejection {
+                also: Vec::new(),
                 executor: id("acp.hermes"),
                 reason: RejectReason::NotInstalled { detail: "x".into() },
             },

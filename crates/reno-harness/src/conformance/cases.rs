@@ -677,7 +677,7 @@ impl Cx<'_> {
                 }
             } else {
                 match self.target.expect_refusal(spec).await? {
-                    ExecError::InvalidSpec(why) if why.contains(&format!("{level:?}")) => {}
+                    ExecError::InvalidSpec(why) if why.contains(&level.to_string()) => {}
                     other => {
                         return Err(format!(
                             "unclaimed sandbox level {level:?} was refused with {other}, not a typed refusal naming it"
