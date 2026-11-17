@@ -3,6 +3,7 @@
 //! a plain unit test.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use reno_client::State;
 use reno_proto::defs::DefKind;
@@ -49,6 +50,46 @@ pub(crate) struct RunRepo {
 /// The repository of a run: the directory its task was submitted with; only for a run without
 /// one (the fake daemon) what its title names.
 pub(crate) fn run_repo(run: &RunSummary) -> Option<RunRepo> {
+    run_repo_in(run, reno_client::default_data_dir().as_deref())
+}
+
+/// The daemon's working directory for a task that names none: `workspace` in its data
+/// directory. The wire has no flag for it, so a run is a scratch run when its directory is this
+/// one: exactly `<data dir>/workspace` for the data directory this app would use, else a path
+/// ending `Application Support/Reno/workspace` (macOS) or `share/reno/workspace` (XDG), the
+/// default data directories, for a daemon this app's environment does not describe. A repository
+/// that happens to be called `workspace` elsewhere is not matched.
+fn is_scratch_dir(cwd: &Path, data_dir: Option<&Path>) -> bool {
+    let cwd: PathBuf = cwd.components().collect();
+    if data_dir.is_some_and(|dir| cwd == dir.join("workspace")) {
+        return true;
+    }
+    let tail: Vec<_> = cwd
+        .components()
+        .rev()
+        .take(3)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    matches!(
+        tail.as_slice(),
+        [workspace, reno, parent]
+            if workspace == "workspace"
+                && ((reno == "Reno" && parent == "Application Support")
+                    || (reno == "reno" && parent == "share"))
+    )
+}
+
+fn run_repo_in(run: &RunSummary, data_dir: Option<&Path>) -> Option<RunRepo> {
+    if run
+        .cwd
+        .as_deref()
+        .is_some_and(|c| is_scratch_dir(c, data_dir))
+    {
+        return Some(RunRepo {
+            name: "Reno scratch".to_owned(),
+            path: None,
+        });
+    }
     if let Some(cwd) = &run.cwd {
         let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
         if let Some(name) = name.filter(|n| !n.is_empty()) {
@@ -590,6 +631,29 @@ mod tests {
         assert_eq!((p.bot, p.repo, p.what), (None, None, "just a title"));
         let p = parse_title("note: no bot");
         assert_eq!((p.bot, p.what), (None, "note: no bot"));
+    }
+
+    #[test]
+    fn a_run_in_the_daemons_scratch_directory_is_not_a_repository() {
+        let in_dir = |cwd: &str, data: Option<&str>| {
+            let mut r = run("s1", RunStatus::Running, "Fix the build");
+            r.cwd = Some(cwd.into());
+            run_repo_in(&r, data.map(Path::new)).expect("a row").name
+        };
+        let mac = "/Users/x/Library/Application Support/Reno/workspace";
+        assert_eq!(in_dir(mac, None), "Reno scratch");
+        assert_eq!(in_dir(&format!("{mac}/"), None), "Reno scratch");
+        assert_eq!(
+            in_dir("/home/x/.local/share/reno/workspace", None),
+            "Reno scratch"
+        );
+        // A data directory this app knows is exact, wherever it is.
+        assert_eq!(in_dir("/tmp/r/workspace", Some("/tmp/r")), "Reno scratch");
+        // Other folders named workspace, and folders inside the scratch one, are real.
+        assert_eq!(in_dir("/Users/x/Developer/workspace", None), "workspace");
+        assert_eq!(in_dir("/Users/x/reno/workspace", None), "workspace");
+        assert_eq!(in_dir("/tmp/r/workspace", Some("/tmp/other")), "workspace");
+        assert_eq!(in_dir(&format!("{mac}/job"), None), "job");
     }
 
     #[test]
