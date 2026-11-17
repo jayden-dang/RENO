@@ -58,6 +58,9 @@ use crate::workspaces;
 /// How often `submit` mints a new id after the store says the last one exists.
 const MINT_ATTEMPTS: usize = 8;
 
+/// The most ended runs the one-time report backfill looks at, newest first.
+const BACKFILL_MAX_RUNS: usize = 20_000;
+
 /// What `shutdown` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShutdownReport {
@@ -207,6 +210,20 @@ impl Kernel {
         shared.spawn(dispatcher::run(Arc::clone(&shared)));
         shared.spawn(runs_hub(Arc::clone(&shared)));
         shared.wake.notify_one();
+        // Reports of runs that ended before the column existed: filled in the background, once,
+        // after the daemon is up, so a large store does not slow the start.
+        let backfill = Arc::clone(&shared);
+        shared.spawn(async move {
+            match backfill.db.backfill_reports(BACKFILL_MAX_RUNS).await {
+                Ok(reno_store::Backfill::Ran { filled, .. }) if filled > 0 => {
+                    if let Err(error) = backfill.refresh_runs().await {
+                        tracing::warn!(%error, "could not refresh runs after the report backfill");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not backfill run reports"),
+            }
+        });
         Ok(Self { shared })
     }
 

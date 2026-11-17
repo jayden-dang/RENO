@@ -354,6 +354,14 @@ impl Db {
         self.store.set_report(run, fence, report).await
     }
 
+    pub(crate) async fn backfill_reports(
+        &self,
+        max_runs: usize,
+    ) -> Result<reno_store::Backfill> {
+        self.wrote();
+        self.store.backfill_reports(self.now_ms(), max_runs).await
+    }
+
     pub(crate) async fn record_process(
         &self,
         run: &RunId,

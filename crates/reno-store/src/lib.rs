@@ -41,6 +41,7 @@ pub mod events;
 mod executor_health;
 pub mod journal;
 mod migrations;
+mod report_backfill;
 mod routing;
 pub mod rules;
 pub mod runs;
@@ -58,6 +59,7 @@ pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOu
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
 pub use journal::{JournalWriter, Journals, Replay};
+pub use report_backfill::Backfill;
 pub use rules::NewRule;
 pub use runs::{Claim, NewTask, Note, Resumed, RunRecord};
 pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};

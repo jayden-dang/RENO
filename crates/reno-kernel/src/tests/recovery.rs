@@ -259,3 +259,41 @@ async fn a_reported_process_is_recorded_durably_with_its_start_time() {
     assert_eq!(swept.await.unwrap().killed, vec![orphan.record]);
     assert_eq!(orphan.exit().await.signal(), Some(15));
 }
+
+#[tokio::test(start_paused = true)]
+async fn start_backfills_the_report_of_a_run_that_ended_before_reports_were_stored() {
+    use reno_proto::ReportStatus;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("reno.db")).unwrap();
+    let (_, old) = queue(&store, "old", 1).await;
+    let c = store.claim_next("old", 10, 60_000).await.unwrap().unwrap();
+    for to in [
+        RunStatus::Running,
+        RunStatus::Evaluating,
+        RunStatus::Succeeded,
+    ] {
+        store.transition(&old, c.fence, to, 20).await.unwrap();
+    }
+    let mut writer = store.journals().writer(&old).unwrap();
+    writer
+        .append(&ExecEvent::AgentReport {
+            status: ReportStatus::Failed,
+            summary: "could not finish".into(),
+            details: None,
+        })
+        .unwrap();
+    writer.flush().unwrap();
+    drop(writer);
+
+    let fx = Fx::over(dir, store, config(1), registry(&[mock([])])).await;
+    let report = until(async || {
+        fx.store
+            .get_run(&old)
+            .await
+            .unwrap()
+            .and_then(|run| run.report)
+    })
+    .await;
+    assert_eq!(report.status, ReportStatus::Failed);
+    assert_eq!(report.summary, "could not finish");
+}
