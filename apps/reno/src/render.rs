@@ -615,6 +615,7 @@ pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String 
     let scope = match &rule.scope {
         StandingScope::Run { run } => format!("run {run}"),
         StandingScope::Bot { bot } => format!("bot {bot}"),
+        StandingScope::Project { root } => format!("project {}", root.display()),
         StandingScope::Always => "always".to_owned(),
     };
     let matcher = &rule.matcher;

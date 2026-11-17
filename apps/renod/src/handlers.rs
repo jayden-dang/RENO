@@ -18,7 +18,7 @@
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
 //! | `approval.history` | `approval_history` |
-//! | `rule.list`, `rule.revoke` | `list_rules`, `revoke_rule` |
+//! | `rule.list`, `rule.add`, `rule.revoke` | `list_rules` / `list_project_rules`, `add_project_rule`, `revoke_rule` |
 //! | `approvals.watch` | `watch_approvals` |
 //! | `def.list` | `current_defs` |
 //! | `def.get` | `get_definition` |
@@ -94,9 +94,9 @@ use reno_proto::{
     ExecutorsWatchParams,
 };
 use reno_proto::{
-    RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams, RuleRevokeResult,
-    SECRET_VALUE_MAX, SecretDelete, SecretDeleteParams, SecretDeleteResult, SecretInfo, SecretList,
-    SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
+    RuleAdd, RuleAddParams, RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams,
+    RuleRevokeResult, SECRET_VALUE_MAX, SecretDelete, SecretDeleteParams, SecretDeleteResult,
+    SecretInfo, SecretList, SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
 };
 use reno_proto::{
     WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
@@ -185,6 +185,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
         .method::<ApprovalHistory, _, _>(bind(ctx, approval_history))
         .method::<RuleList, _, _>(bind(ctx, rule_list))
+        .method::<RuleAdd, _, _>(bind(ctx, rule_add))
         .method::<RuleRevoke, _, _>(bind(ctx, rule_revoke))
         .method::<DefList, _, _>(bind(ctx, def_list))
         .method::<DefGet, _, _>(bind(ctx, def_get))
@@ -635,13 +636,30 @@ async fn approval_decide(ctx: Arc<Ctx>, p: ApprovalDecideParams) -> Reply<Approv
 }
 
 async fn rule_list(ctx: Arc<Ctx>, p: RuleListParams) -> Reply<RuleListResult> {
+    let rules = match &p.project {
+        Some(project) => {
+            ctx.kernel
+                .list_project_rules(project, p.include_inactive)
+                .await
+        }
+        None => ctx.kernel.list_rules(p.include_inactive).await,
+    };
     Ok(RuleListResult {
-        rules: ctx
-            .kernel
-            .list_rules(p.include_inactive)
-            .await
-            .map_err(|e| kernel_error(&e))?,
+        rules: rules.map_err(|e| kernel_error(&e))?,
     })
+}
+
+async fn rule_add(ctx: Arc<Ctx>, p: RuleAddParams) -> Reply<reno_proto::StandingRule> {
+    ctx.kernel
+        .add_project_rule(
+            &p.project,
+            p.effect,
+            &p.command,
+            p.tool.as_deref(),
+            p.expires_in_secs,
+        )
+        .await
+        .map_err(|e| kernel_error(&e))
 }
 
 async fn rule_revoke(ctx: Arc<Ctx>, p: RuleRevokeParams) -> Reply<RuleRevokeResult> {

@@ -52,6 +52,7 @@ fn scope_text(scope: &StandingScope) -> String {
     match scope {
         StandingScope::Run { .. } => "one run".to_owned(),
         StandingScope::Bot { bot } => format!("bot {bot}"),
+        StandingScope::Project { root } => format!("project {}", root.display()),
         StandingScope::Always => "every run".to_owned(),
     }
 }
@@ -113,6 +114,7 @@ pub(crate) fn hint(subject: &ApprovalSubject, scope: RememberScope, bot: Option<
     let who = match scope {
         RememberScope::Run => "this run".to_owned(),
         RememberScope::Bot => format!("every run of {}", bot.unwrap_or("this bot")),
+        RememberScope::Project => "every run in this project".to_owned(),
         RememberScope::Always => "every run".to_owned(),
     };
     let what = match (&subject.command, subject.paths.is_empty()) {

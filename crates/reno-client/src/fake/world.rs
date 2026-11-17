@@ -488,6 +488,10 @@ impl World {
                             .and_then(|r| r.summary.bot.as_ref().map(|b| b.name.clone()))
                             .ok_or_else(|| Some("this run has no bot".to_owned()))?,
                     },
+                    // The fake runs have no working directory, so no project.
+                    RememberScope::Project => {
+                        return Err(Some("this run has no project".to_owned()));
+                    }
                     RememberScope::Always => StandingScope::Always,
                 })
             }
@@ -536,16 +540,66 @@ impl World {
     }
 
     /// `rule.list`: newest first; only the ones in force unless `all`.
-    pub(super) fn rules(&self, all: bool) -> Vec<reno_proto::StandingRule> {
+    pub(super) fn rules(
+        &self,
+        all: bool,
+        project: Option<&std::path::Path>,
+    ) -> Vec<reno_proto::StandingRule> {
+        use reno_proto::StandingScope;
         let now = self.now_ms;
         let mut rules: Vec<_> = self
             .rules
             .iter()
             .filter(|r| all || r.is_active(now))
+            .filter(|r| {
+                project.is_none_or(
+                    |p| matches!(&r.scope, StandingScope::Project { root } if root == p),
+                )
+            })
             .cloned()
             .collect();
         rules.reverse();
         rules
+    }
+
+    /// `rule.add`: a project rule for the directory as given (the fake resolves nothing).
+    pub(super) fn add_rule(
+        &mut self,
+        p: &reno_proto::RuleAddParams,
+    ) -> Result<reno_proto::StandingRule, String> {
+        use reno_proto::{CommandPattern, RuleId, RuleMatcher, StandingRule, StandingScope};
+        let command = p.command.trim();
+        if command.is_empty() {
+            return Err("a rule's command is one non-empty line".to_owned());
+        }
+        let now = self.tick();
+        let n = self.next_id;
+        self.next_id += 1;
+        let rule = StandingRule {
+            id: RuleId::from_suffix(&format!("fake{n}")).map_err(|e| e.to_string())?,
+            scope: StandingScope::Project {
+                root: p.project.clone(),
+            },
+            effect: p.effect,
+            matcher: RuleMatcher {
+                action: reno_proto::ActionClass::Command,
+                tool: p
+                    .tool
+                    .clone()
+                    .unwrap_or_else(|| reno_proto::RULE_ADD_DEFAULT_TOOL.to_owned()),
+                command: Some(CommandPattern::Exact {
+                    command: command.to_owned(),
+                }),
+                paths: Vec::new(),
+            },
+            created_by: "human".to_owned(),
+            created_at_ms: now,
+            expires_at_ms: p.expires_in_secs.map(|s| now + s * 1_000),
+            revoked_at_ms: None,
+            source_approval: None,
+        };
+        self.rules.push(rule.clone());
+        Ok(rule)
     }
 
     /// `rule.revoke`. `false` when there is no such rule.

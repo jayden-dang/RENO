@@ -411,7 +411,8 @@ pub(crate) struct PolicyCheck {
 pub(crate) struct Decide {
     /// The approval, as `reno approval list` shows it.
     pub(crate) approval: ApprovalId,
-    /// Keep this answer as a standing rule for this run, this run's bot, or everything. The rule
+    /// Keep this answer as a standing rule for this run, this run's bot, this run's project (its
+    /// git repository), or everything. The rule
     /// holds exactly this action (this tool, this command line, these paths), nothing broader.
     /// Without it the answer is for this one request.
     #[arg(long, value_enum, value_name = "SCOPE")]
@@ -440,6 +441,9 @@ pub(crate) enum RememberArg {
     Run,
     /// Every run of this run's bot.
     Bot,
+    /// Every run in this run's project: the git repository its directory is in. Refused for a
+    /// run that is not in one.
+    Project,
     /// Every run.
     Always,
 }
@@ -448,6 +452,8 @@ pub(crate) enum RememberArg {
 pub(crate) enum RuleCommand {
     /// List the standing rules in force, newest first.
     List(RuleList),
+    /// Make a standing rule for one project from a command line.
+    Add(RuleAdd),
     /// Stop a standing rule applying, for good.
     Revoke(RuleRevoke),
 }
@@ -457,6 +463,37 @@ pub(crate) struct RuleList {
     /// Also list rules that were revoked or have expired.
     #[arg(long)]
     pub(crate) all: bool,
+    /// Only the rules for one project: any directory in its git repository. Needs a daemon with
+    /// the `rules.project` feature.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) project: Option<PathBuf>,
+}
+
+/// `reno rule add`: a rule for one project, for exactly this command line. Like answering that
+/// command's approval with "always in this project", without waiting for a run to ask.
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("effect").required(true).multiple(false)))]
+pub(crate) struct RuleAdd {
+    /// Any directory in the project; the daemon finds the git repository root.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) project: PathBuf,
+    /// Allow the command in this project without asking.
+    #[arg(long, group = "effect")]
+    pub(crate) allow: bool,
+    /// Refuse the command in this project without asking.
+    #[arg(long, group = "effect")]
+    pub(crate) deny: bool,
+    /// The harness tool the command comes through, as an approval shows it (Claude's is `Bash`,
+    /// Codex's is `exec`) [default: Bash].
+    #[arg(long, value_name = "TOOL")]
+    pub(crate) tool: Option<String>,
+    /// The rule stops applying after this many seconds [default: never].
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) expires_in: Option<u64>,
+    /// The command line, exactly as the harness runs it (after `--`; several words are joined
+    /// with spaces).
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub(crate) command: Vec<String>,
 }
 
 #[derive(Debug, Args)]

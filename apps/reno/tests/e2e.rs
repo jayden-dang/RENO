@@ -1400,3 +1400,133 @@ fn a_denial_with_a_message_reaches_the_history_the_journal_and_the_agent() {
     assert_eq!(empty.status.code(), Some(1));
     assert!(text(&empty.stderr).contains("--message is empty"));
 }
+
+// ---- project rules ------------------------------------------------------------------------
+
+#[test]
+fn project_rules_are_added_listed_by_project_and_revoked_through_the_cli() {
+    let world = World::new();
+    world.start_daemon();
+    // A repository root (a `.git` directory is all the daemon looks for) and a directory inside it.
+    let repo = world._root.path().join("porch");
+    let inside = repo.join("src");
+    std::fs::create_dir_all(repo.join(".git")).expect("repo");
+    std::fs::create_dir_all(&inside).expect("subdirectory");
+    let repo = std::fs::canonicalize(&repo).expect("canonical");
+    let inside = std::fs::canonicalize(&inside).expect("canonical");
+    let other = world._root.path().join("elsewhere");
+    std::fs::create_dir_all(other.join(".git")).expect("repo");
+    let (repo_s, inside_s, other_s) = (
+        repo.to_str().unwrap(),
+        inside.to_str().unwrap(),
+        other.to_str().unwrap(),
+    );
+
+    // Any directory of the project names it; the rule holds the repository root.
+    let added = world.json(&[
+        "rule",
+        "add",
+        "--project",
+        inside_s,
+        "--allow",
+        "--",
+        "cargo",
+        "test",
+    ]);
+    assert_eq!(added["scope"]["type"], "project");
+    assert_eq!(added["scope"]["root"], repo_s);
+    assert_eq!(added["effect"], "allow");
+    assert_eq!(added["matcher"]["command"]["command"], "cargo test");
+    assert_eq!(added["matcher"]["tool"], "Bash");
+    let id = added["id"].as_str().expect("id").to_owned();
+    let denied = world.json(&[
+        "rule",
+        "add",
+        "--project",
+        repo_s,
+        "--deny",
+        "--tool",
+        "exec",
+        "--",
+        "git push --force",
+    ]);
+    assert_eq!(denied["effect"], "deny");
+    assert_eq!(denied["matcher"]["tool"], "exec");
+
+    // Listed by project, from any directory of it; another project has none; the unfiltered
+    // list has them all.
+    let listed = world.json(&["rule", "list", "--project", inside_s]);
+    assert_eq!(listed["rules"].as_array().unwrap().len(), 2);
+    let none = world.json(&["rule", "list", "--project", other_s]);
+    assert_eq!(none["rules"], serde_json::json!([]));
+    assert_eq!(
+        world.json(&["rule", "list"])["rules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let words = text(&world.reno(&["rule", "list", "--project", repo_s]).stdout);
+    assert!(
+        words.contains("project") && words.contains("cargo test"),
+        "{words}"
+    );
+
+    // Not in a repository, no direction, an empty command: refused, and nothing is made.
+    let plain = world._root.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("plain dir");
+    let outside = world.reno(&[
+        "rule",
+        "add",
+        "--project",
+        plain.to_str().unwrap(),
+        "--allow",
+        "--",
+        "ls",
+    ]);
+    assert_eq!(outside.status.code(), Some(1));
+    assert!(
+        text(&outside.stderr).contains("not in a git repository"),
+        "{}",
+        text(&outside.stderr)
+    );
+    let no_direction = world.reno(&["rule", "add", "--project", repo_s, "--", "ls"]);
+    assert_eq!(no_direction.status.code(), Some(2));
+    let both = world.reno(&[
+        "rule",
+        "add",
+        "--project",
+        repo_s,
+        "--allow",
+        "--deny",
+        "--",
+        "ls",
+    ]);
+    assert_eq!(both.status.code(), Some(2));
+    let no_command = world.reno(&["rule", "add", "--project", repo_s, "--allow"]);
+    assert_eq!(no_command.status.code(), Some(2));
+    assert_eq!(
+        world.json(&["rule", "list"])["rules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // Revoke one; the list shows the other.
+    assert!(world.reno(&["rule", "revoke", &id]).status.success());
+    let left = world.json(&["rule", "list", "--project", repo_s]);
+    assert_eq!(left["rules"].as_array().unwrap().len(), 1);
+    assert_eq!(left["rules"][0]["effect"], "deny");
+    let all = world.json(&["rule", "list", "--project", repo_s, "--all"]);
+    assert_eq!(all["rules"].as_array().unwrap().len(), 2);
+
+    // `--remember project` is a known scope; the approval is not there.
+    let remembered = world.reno(&["approve", "appr_nothere", "--remember", "project"]);
+    assert_eq!(remembered.status.code(), Some(1));
+    assert!(
+        text(&remembered.stderr).contains("not found"),
+        "{}",
+        text(&remembered.stderr)
+    );
+}

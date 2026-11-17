@@ -629,3 +629,136 @@ daemon_test! {
         fx.stop().await;
     }
 }
+
+daemon_test! {
+    async fn project_rules_are_made_listed_matched_and_revoked_over_rpc() {
+        use reno_proto::{
+            ApprovalStatus, Remember, RememberScope, ResolvedBy, RuleAddParams, StandingEffect,
+            StandingScope,
+        };
+        let fx = Fixture::start().await;
+        assert!(fx.client.supports(reno_proto::FEATURE_PROJECT_RULES));
+        // A repository root (the daemon looks for `.git`) with a directory inside it, and a
+        // directory that is in no repository.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("porch");
+        let inside = repo.join("src");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&inside).unwrap();
+        let task = |cwd: &std::path::Path, prompt: &str| TaskRunParams {
+            prompt: prompt.into(),
+            executor: Some(id("mock-approval")),
+            bot: None,
+            cwd: Some(cwd.to_path_buf()),
+            model: None,
+            in_place: true,
+            attachments: Vec::new(),
+        };
+
+        // Not in a repository: `rule.add` and `remember: project` are refused; listing is empty.
+        let nowhere_dir = tempfile::tempdir().unwrap();
+        let nowhere = std::fs::canonicalize(nowhere_dir.path()).unwrap();
+        let refused = within(fx.client.add_rule(RuleAddParams {
+            project: nowhere.clone(),
+            effect: StandingEffect::Allow,
+            command: "ls".into(),
+            tool: None,
+            expires_in_secs: None,
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(code(&refused), ErrorCode::InvalidParams);
+        assert!(within(fx.client.list_project_rules(&nowhere, true)).await.unwrap().is_empty());
+
+        let mut watch = within(fx.client.watch_approvals()).await.unwrap();
+        let _ = within(watch.next()).await;
+        let first = within(fx.client.run_task(task(&inside, "delete the build"))).await.unwrap();
+        let pending = loop {
+            let snapshot = within(watch.next()).await.unwrap().unwrap();
+            if let Some(approval) = snapshot.approvals.first() {
+                break approval.clone();
+            }
+        };
+        within(fx.client.decide_remembering(
+            &pending.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember { scope: RememberScope::Project, expires_in_secs: None }),
+        ))
+        .await
+        .unwrap();
+        let _ = fx.events(&first, None).await;
+
+        // The rule holds the canonical repository root, however the run named its directory.
+        let rules = within(fx.client.list_project_rules(&repo, false)).await.unwrap();
+        assert_eq!(rules.len(), 1);
+        let rule = rules[0].clone();
+        assert_eq!(rule.scope, StandingScope::Project { root: repo.clone() });
+        assert_eq!(
+            within(fx.client.list_project_rules(&inside, false)).await.unwrap(),
+            rules
+        );
+        assert_eq!(within(fx.client.list_rules(false)).await.unwrap(), rules);
+
+        // The next run in the project, from the root, meets it; one outside does not.
+        let second = within(fx.client.run_task(task(&repo, "again"))).await.unwrap();
+        let events = fx.events(&second, None).await;
+        assert!(is_done(&events.last().unwrap().event, StopReason::Completed));
+        let history = within(fx.client.approval_history(Some(second.clone()), None)).await.unwrap();
+        assert_eq!(history[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            history[0].decided_by,
+            Some(ResolvedBy::Rule { name: format!("standing:{}", rule.id) })
+        );
+        let elsewhere = within(fx.client.run_task(task(&nowhere, "elsewhere"))).await.unwrap();
+        let held = loop {
+            let snapshot = within(watch.next()).await.unwrap().unwrap();
+            if let Some(approval) = snapshot.approvals.first() {
+                break approval.clone();
+            }
+        };
+        assert_eq!(held.run_id, elsewhere);
+        // `remember: project` for a run in no project is refused and the approval stays held.
+        let refused = within(fx.client.decide_remembering(
+            &held.id,
+            ApprovalDecision::ApproveOnce,
+            None,
+            Some(Remember { scope: RememberScope::Project, expires_in_secs: None }),
+        ))
+        .await
+        .unwrap_err();
+        assert_eq!(code(&refused), ErrorCode::InvalidParams);
+        assert_eq!(within(fx.client.list_approvals()).await.unwrap().len(), 1);
+        within(fx.client.decide(&held.id, ApprovalDecision::Deny)).await.unwrap();
+        let _ = fx.events(&elsewhere, None).await;
+
+        // `rule.add`: a deny for the project, made from any directory in it, beats the allow.
+        let added = within(fx.client.add_rule(RuleAddParams {
+            project: inside.clone(),
+            effect: StandingEffect::Deny,
+            command: "git push origin main".into(),
+            tool: Some("bash".into()),
+            expires_in_secs: Some(3600),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(added.scope, StandingScope::Project { root: repo.clone() });
+        assert_eq!(added.effect, StandingEffect::Deny);
+        assert!(added.expires_at_ms.is_some());
+        assert_eq!(within(fx.client.list_project_rules(&repo, false)).await.unwrap().len(), 2);
+        let third = within(fx.client.run_task(task(&inside, "a third time"))).await.unwrap();
+        let _ = fx.events(&third, None).await;
+        let history = within(fx.client.approval_history(Some(third.clone()), None)).await.unwrap();
+        assert_eq!(history[0].status, ApprovalStatus::Denied);
+        assert_eq!(
+            history[0].decided_by,
+            Some(ResolvedBy::Rule { name: format!("standing:{}", added.id) })
+        );
+
+        // Revoked rules leave the project's list (and come back with `include_inactive`).
+        within(fx.client.revoke_rule(&added.id)).await.unwrap();
+        within(fx.client.revoke_rule(&rule.id)).await.unwrap();
+        assert!(within(fx.client.list_project_rules(&repo, false)).await.unwrap().is_empty());
+        assert_eq!(within(fx.client.list_project_rules(&repo, true)).await.unwrap().len(), 2);
+    }
+}

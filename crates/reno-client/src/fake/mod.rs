@@ -544,8 +544,18 @@ fn router(shared: &Arc<Shared>) -> Router {
         async move {
             injected(&s, "rule.list")?;
             Ok(reno_proto::RuleListResult {
-                rules: s.read(|w| w.rules(p.include_inactive)),
+                rules: s.read(|w| w.rules(p.include_inactive, p.project.as_deref())),
             })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let rule_add = move |p: reno_proto::RuleAddParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "rule.add")?;
+            s.with(|w| w.add_rule(&p))
+                .map_err(|why| ErrorObject::new(ErrorCode::InvalidParams, why))
         }
     };
 
@@ -993,6 +1003,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
         .method::<reno_proto::RuleList, _, _>(rule_list)
+        .method::<reno_proto::RuleAdd, _, _>(rule_add)
         .method::<reno_proto::RuleRevoke, _, _>(rule_revoke)
         .method::<reno_proto::SecretList, _, _>(secret_list)
         .method::<reno_proto::SecretSet, _, _>(secret_set)

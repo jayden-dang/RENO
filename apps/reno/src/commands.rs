@@ -608,6 +608,7 @@ pub(crate) async fn decide(
         scope: match scope {
             crate::cli::RememberArg::Run => reno_proto::RememberScope::Run,
             crate::cli::RememberArg::Bot => reno_proto::RememberScope::Bot,
+            crate::cli::RememberArg::Project => reno_proto::RememberScope::Project,
             crate::cli::RememberArg::Always => reno_proto::RememberScope::Always,
         },
         expires_in_secs: args.expires_in,

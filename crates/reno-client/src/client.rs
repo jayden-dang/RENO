@@ -547,6 +547,12 @@ impl Client {
         if remember.is_some() {
             self.require(reno_proto::FEATURE_RULES)?;
         }
+        if remember
+            .as_ref()
+            .is_some_and(|r| r.scope == reno_proto::RememberScope::Project)
+        {
+            self.require(reno_proto::FEATURE_PROJECT_RULES)?;
+        }
         let params = ApprovalDecideParams {
             approval_id: approval_id.clone(),
             decision,
@@ -564,8 +570,39 @@ impl Client {
         include_inactive: bool,
     ) -> Result<Vec<reno_proto::StandingRule>, ClientError> {
         self.require(reno_proto::FEATURE_RULES)?;
-        let params = reno_proto::RuleListParams { include_inactive };
+        let params = reno_proto::RuleListParams {
+            include_inactive,
+            project: None,
+        };
         Ok(self.rpc.call::<reno_proto::RuleList>(params).await?.rules)
+    }
+
+    /// `rule.list` with the `project` filter: only the rules whose scope is the project of
+    /// `project` (any directory of it; the daemon resolves the repository root). Needs features
+    /// `rules` and `rules.project`.
+    pub async fn list_project_rules(
+        &self,
+        project: &std::path::Path,
+        include_inactive: bool,
+    ) -> Result<Vec<reno_proto::StandingRule>, ClientError> {
+        self.require(reno_proto::FEATURE_RULES)?;
+        self.require(reno_proto::FEATURE_PROJECT_RULES)?;
+        let params = reno_proto::RuleListParams {
+            include_inactive,
+            project: Some(project.to_path_buf()),
+        };
+        Ok(self.rpc.call::<reno_proto::RuleList>(params).await?.rules)
+    }
+
+    /// `rule.add`: a standing rule for one project from an exact command line; returns the rule.
+    /// Needs features `rules` and `rules.project`.
+    pub async fn add_rule(
+        &self,
+        params: reno_proto::RuleAddParams,
+    ) -> Result<reno_proto::StandingRule, ClientError> {
+        self.require(reno_proto::FEATURE_RULES)?;
+        self.require(reno_proto::FEATURE_PROJECT_RULES)?;
+        Ok(self.rpc.call::<reno_proto::RuleAdd>(params).await?)
     }
 
     /// `rule.revoke`: stops a standing rule applying, for good. Needs feature `rules`.
