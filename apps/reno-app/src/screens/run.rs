@@ -187,7 +187,7 @@ impl RunScreen {
             Some(r) => (
                 r.executor.as_str().to_owned(),
                 summary::parse_title(&r.title).what.to_owned(),
-                Some(r.status),
+                Some((r.status, summary::run_status_label(r))),
             ),
             None => (String::new(), format!("Run {}", self.run), None),
         };
@@ -223,7 +223,7 @@ impl RunScreen {
             )
             .when_some(status, |h, status| {
                 h.child(
-                    kit::status_pill(theme, status)
+                    kit::status_pill_worded(theme, status.0, status.1)
                         .id(SharedString::from(format!("status-{run_id}"))),
                 )
             })
@@ -709,7 +709,7 @@ impl RunScreen {
                     .child(
                         div()
                             .text_color(kit::status_color(theme, run.status))
-                            .child(summary::status_label(run.status)),
+                            .child(summary::run_status_label(run)),
                     )
                     .into_any_element(),
             ))
@@ -1016,7 +1016,11 @@ fn question_card(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(icon(Icon::Question, 15.0, question_icon_tone(theme, resolution)))
+                        .child(icon(
+                            Icon::Question,
+                            15.0,
+                            question_icon_tone(theme, resolution),
+                        ))
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)

@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 
 use reno_client::State;
 use reno_proto::defs::DefKind;
-use reno_proto::{ActionClass, Approval, ApprovalSubject, RunStatus, RunSummary};
+use reno_proto::{
+    ActionClass, Approval, ApprovalSubject, CancelledBy, RunStatus, RunSummary, StopDetail,
+};
 
 /// A run title is `"<bot> · <repo>: <what>"` (the protocol has no bot or repository field yet).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,6 +180,29 @@ pub(crate) fn status_label(status: RunStatus) -> &'static str {
     }
 }
 
+/// Whether `run` is interrupted because a person stopped it. The daemon settles such a run as
+/// `interrupted` for a moment before it is `cancelled`; to a person it is already stopped, not
+/// waiting to resume. Budget, shutdown and crash interruptions are not: those can resume.
+pub(crate) fn stopped_by_person(run: &RunSummary) -> bool {
+    run.status == RunStatus::Interrupted
+        && matches!(
+            run.stop,
+            Some(StopDetail::Cancelled {
+                by: CancelledBy::User
+            })
+        )
+}
+
+/// The state pill's words for a known run: [`status_label`], except that a person's stop reads
+/// "stopping…" while the daemon is still settling it.
+pub(crate) fn run_status_label(run: &RunSummary) -> &'static str {
+    if stopped_by_person(run) {
+        "stopping\u{2026}"
+    } else {
+        status_label(run.status)
+    }
+}
+
 /// An executor's display name, for every place the UI names one.
 ///
 /// The wire carries only the id, so the name is made here: the known ones by table, an ACP
@@ -345,6 +370,37 @@ mod tests {
             not_resumed: None,
             session: None,
         }
+    }
+
+    #[test]
+    fn only_a_persons_stop_reads_as_stopping() {
+        let with = |stop: Option<StopDetail>| RunSummary {
+            stop,
+            ..run("a", RunStatus::Interrupted, "t")
+        };
+        let by_user = with(Some(StopDetail::Cancelled {
+            by: CancelledBy::User,
+        }));
+        assert!(stopped_by_person(&by_user));
+        assert_eq!(run_status_label(&by_user), "stopping\u{2026}");
+        for resumable in [
+            None,
+            Some(StopDetail::Shutdown),
+            Some(StopDetail::Crashed),
+            Some(StopDetail::Cancelled {
+                by: CancelledBy::Pause,
+            }),
+        ] {
+            let r = with(resumable);
+            assert!(!stopped_by_person(&r), "{:?}", r.stop);
+            assert_eq!(run_status_label(&r), "interrupted");
+        }
+        let cancelled = RunSummary {
+            status: RunStatus::Cancelled,
+            ..by_user
+        };
+        assert!(!stopped_by_person(&cancelled));
+        assert_eq!(run_status_label(&cancelled), "stopped");
     }
 
     fn approval(name: &str, run_name: &str, age: u64, command: Option<&str>) -> Approval {

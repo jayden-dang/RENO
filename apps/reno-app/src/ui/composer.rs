@@ -178,12 +178,16 @@ pub(crate) enum SteerState {
     Ended(String),
 }
 
-/// The steer box's state for a run in `status` (`None` before the run is known).
-pub(crate) fn steer_state(status: Option<RunStatus>) -> SteerState {
-    let Some(status) = status else {
+/// The steer box's state for `run` (`None` before the run is known).
+pub(crate) fn steer_state(run: Option<&reno_proto::RunSummary>) -> SteerState {
+    let Some(run) = run else {
         return SteerState::Waiting("Loading the run\u{2026}".to_owned());
     };
-    match status {
+    // A person's stop is final; the daemon only takes a moment to settle it as cancelled.
+    if summary::stopped_by_person(run) {
+        return ended("was stopped");
+    }
+    match run.status {
         RunStatus::Succeeded => ended("passed"),
         RunStatus::Failed => ended("failed"),
         RunStatus::Cancelled => ended("was stopped"),
@@ -390,9 +394,7 @@ impl Composer {
 
     fn steer_state(&self, cx: &App) -> Option<SteerState> {
         match &self.mode {
-            Mode::Steer(run) => Some(steer_state(
-                self.store.read(cx).state().run(run).map(|r| r.status),
-            )),
+            Mode::Steer(run) => Some(steer_state(self.store.read(cx).state().run(run))),
             _ => None,
         }
     }
@@ -428,7 +430,7 @@ impl Composer {
                 .read(cx)
                 .state()
                 .run(run)
-                .is_some_and(|r| !r.status.is_terminal())
+                .is_some_and(|r| !r.status.is_terminal() && !summary::stopped_by_person(r))
     }
 
     /// Enter: send non-blank text to the daemon. A blank draft does nothing; with no daemon the
@@ -1705,24 +1707,75 @@ mod tests {
         assert!(online.contains("The daemon still routes the task when you send it."));
     }
 
+    fn run_in(status: RunStatus, stop: Option<reno_proto::StopDetail>) -> reno_proto::RunSummary {
+        reno_proto::RunSummary {
+            run_id: reno_proto::RunId::from_suffix("a").unwrap(),
+            task_id: reno_proto::TaskId::from_suffix("a").unwrap(),
+            executor: "claude-code".parse().unwrap(),
+            status,
+            attempt: 1,
+            title: "t".into(),
+            prompt: None,
+            model: None,
+            stop_reason: None,
+            bot: None,
+            cwd: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            stop,
+            not_resumed: None,
+            session: None,
+        }
+    }
+
+    #[test]
+    fn a_persons_stop_reads_as_stopped_and_other_interruptions_stay_resumable() {
+        let by_user = reno_proto::StopDetail::Cancelled {
+            by: reno_proto::CancelledBy::User,
+        };
+        let SteerState::Ended(why) =
+            steer_state(Some(&run_in(RunStatus::Interrupted, Some(by_user))))
+        else {
+            panic!("a person's stop is over");
+        };
+        assert_eq!(why, "This run was stopped. It can't be steered any more.");
+        for stop in [
+            reno_proto::StopDetail::Shutdown,
+            reno_proto::StopDetail::Crashed,
+        ] {
+            let SteerState::Waiting(why) =
+                steer_state(Some(&run_in(RunStatus::Interrupted, Some(stop))))
+            else {
+                panic!("a resumable interruption waits");
+            };
+            assert!(why.contains("once it resumes"), "{why}");
+        }
+    }
+
     #[test]
     fn a_live_run_takes_a_steer_a_finished_one_says_why_it_does_not() {
-        assert_eq!(steer_state(Some(RunStatus::Running)), SteerState::Steering);
         assert_eq!(
-            steer_state(Some(RunStatus::WaitingApproval)),
+            steer_state(Some(&run_in(RunStatus::Running, None))),
             SteerState::Steering
         );
-        assert_eq!(steer_state(Some(RunStatus::Queued)), SteerState::Steering);
+        assert_eq!(
+            steer_state(Some(&run_in(RunStatus::WaitingApproval, None))),
+            SteerState::Steering
+        );
+        assert_eq!(
+            steer_state(Some(&run_in(RunStatus::Queued, None))),
+            SteerState::Steering
+        );
         assert!(matches!(
-            steer_state(Some(RunStatus::Interrupted)),
+            steer_state(Some(&run_in(RunStatus::Interrupted, None))),
             SteerState::Waiting(_)
         ));
         assert!(matches!(steer_state(None), SteerState::Waiting(_)));
-        let SteerState::Ended(why) = steer_state(Some(RunStatus::Succeeded)) else {
+        let SteerState::Ended(why) = steer_state(Some(&run_in(RunStatus::Succeeded, None))) else {
             panic!("a passed run is over");
         };
         assert!(why.starts_with("This run passed."), "{why}");
-        let SteerState::Ended(why) = steer_state(Some(RunStatus::Cancelled)) else {
+        let SteerState::Ended(why) = steer_state(Some(&run_in(RunStatus::Cancelled, None))) else {
             panic!("a stopped run is over");
         };
         assert!(why.starts_with("This run was stopped."), "{why}");

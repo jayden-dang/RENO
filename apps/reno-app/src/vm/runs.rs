@@ -66,6 +66,8 @@ pub(crate) struct RunRow {
     pub(crate) repo: Option<String>,
     pub(crate) executor: String,
     pub(crate) status: RunStatus,
+    /// The pill's words: "stopping…" for a person's stop still settling.
+    pub(crate) status_label: &'static str,
     pub(crate) attempt: u32,
     /// "6h ago".
     pub(crate) started: String,
@@ -116,6 +118,7 @@ fn row(run: &RunSummary, now_ms: u64) -> RunRow {
         repo: parts.repo.map(str::to_owned),
         executor: run.executor.as_str().to_owned(),
         status: run.status,
+        status_label: summary::run_status_label(run),
         attempt: run.attempt,
         started: summary::ago_label(now_ms.saturating_sub(run.created_at_ms)),
         // A queued run has not run yet, so it has no duration to show.

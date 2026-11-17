@@ -257,6 +257,11 @@ pub(crate) fn choice_chip(
 
 /// The status mark of a run: a dot and the state's words, in the state's colour.
 pub(crate) fn status_pill(theme: &Theme, status: RunStatus) -> Div {
+    status_pill_worded(theme, status, crate::summary::status_label(status))
+}
+
+/// [`status_pill`] with other words, for a run whose state a person reads differently.
+pub(crate) fn status_pill_worded(theme: &Theme, status: RunStatus, words: &'static str) -> Div {
     let color = status_color(theme, status);
     div()
         .flex_none()
@@ -265,7 +270,7 @@ pub(crate) fn status_pill(theme: &Theme, status: RunStatus) -> Div {
         .gap(px(7.0))
         .text_color(color)
         .child(dot(color, 7.0))
-        .child(crate::summary::status_label(status))
+        .child(words)
 }
 
 #[cfg(test)]
