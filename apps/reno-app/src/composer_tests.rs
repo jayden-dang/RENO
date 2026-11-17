@@ -218,6 +218,96 @@ fn paste_attaches_files_and_screenshots_and_inserts_text(cx: &mut TestAppContext
     );
 }
 
+/// What a Finder copy puts on the macOS pasteboard: the file URL, its name as text, and the
+/// file's icon as an image.
+fn finder_copy(file: &std::path::Path) -> ClipboardItem {
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    ClipboardItem {
+        entries: vec![
+            ClipboardEntry::ExternalPaths(ExternalPaths(
+                [file.to_path_buf()].into_iter().collect(),
+            )),
+            ClipboardEntry::String(gpui::ClipboardString::new(name)),
+            ClipboardEntry::Image(gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![0; 8])),
+        ],
+    }
+}
+
+const STEER_TOAST: (&str, &str) = ("Files", "Only a new task takes files. A steer is text.");
+
+#[gpui::test]
+fn a_finder_copy_pastes_as_a_chip_on_home_and_a_toast_on_a_steer(cx: &mut TestAppContext) {
+    cx.update(bind_keys);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, b"x").unwrap();
+
+    // Home: a chip, not the file's name.
+    let home = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
+    vcx.update(|window, cx| window.focus(&home.read(cx).focus_handle_ref().clone(), cx));
+    vcx.update(|_, cx| cx.write_to_clipboard(finder_copy(&file)));
+    vcx.simulate_keystrokes("cmd-v");
+    assert_eq!(home.read_with(vcx, |c, _| c.files().items().len()), 1);
+    assert_eq!(home.read_with(vcx, |c, _| c.text().to_owned()), "");
+
+    // A steer: a toast, no chip, the text as it was.
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
+    let steer = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .unwrap()
+        .read_with(vcx, |s, _| s.steer_input().clone());
+    steer.update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
+    vcx.update(|_, cx| cx.write_to_clipboard(finder_copy(&file)));
+    vcx.simulate_keystrokes("cmd-v");
+    assert_eq!(
+        steer.read_with(vcx, |c, _| c.text().to_owned()),
+        "use the mirror"
+    );
+    assert!(steer.read_with(vcx, |c, _| c.files().items().is_empty()));
+    let shown = vcx.update(|_, cx| crate::ui::toast::shown(cx));
+    assert!(
+        shown.contains(&(STEER_TOAST.0.to_owned(), STEER_TOAST.1.to_owned())),
+        "{shown:?}"
+    );
+}
+
+#[gpui::test]
+fn dropping_files_on_a_steer_says_a_steer_is_text(cx: &mut TestAppContext) {
+    cx.update(bind_keys);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let steer = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .unwrap()
+        .read_with(vcx, |s, _| s.steer_input().clone());
+    let at = vcx.debug_bounds("composer").unwrap().center();
+    vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: ExternalPaths([file].into_iter().collect()),
+    });
+    vcx.simulate_event(gpui::FileDropEvent::Pending { position: at });
+    vcx.simulate_event(gpui::FileDropEvent::Submit { position: at });
+    vcx.run_until_parked();
+    assert!(steer.read_with(vcx, |c, _| c.files().items().is_empty()));
+    let shown = vcx.update(|_, cx| crate::ui::toast::shown(cx));
+    assert!(
+        shown.contains(&(STEER_TOAST.0.to_owned(), STEER_TOAST.1.to_owned())),
+        "{shown:?}"
+    );
+}
+
 #[gpui::test]
 fn keys_move_by_word_and_line_and_enter_sends_while_shift_enter_breaks_the_line(
     cx: &mut TestAppContext,

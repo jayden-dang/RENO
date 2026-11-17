@@ -922,9 +922,9 @@ impl Composer {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
-        if self.takes_files(cx)
-            && let Some(paths) = pasted_paths(&item)
-        {
+        // Files come before text: a Finder copy carries the file's name as text too. A steer
+        // does not take files, but `add_attachments` is the one that says so.
+        if let Some(paths) = pasted_paths(&item) {
             self.add_attachments(&paths, cx);
             return;
         }
@@ -1607,6 +1607,7 @@ impl Render for Composer {
         let home = self.mode == Mode::Home;
         div()
             .id("composer")
+            .debug_selector(|| "composer".to_owned())
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_submit))
@@ -1644,12 +1645,13 @@ impl Render for Composer {
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_character_palette))
+            // A drop reaches `add_attachments` in every mode, which says why a steer takes none.
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_attachments(paths.paths(), cx);
+            }))
             .when(home, |d| {
                 let accent = theme.accent;
-                d.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                    this.add_attachments(paths.paths(), cx);
-                }))
-                .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                d.drag_over::<ExternalPaths>(move |style, _, _, _| {
                     style.border_color(accent.opacity(0.7))
                 })
             })

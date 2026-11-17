@@ -70,8 +70,8 @@ pub(crate) struct Attention {
     pub(crate) need: u32,
     /// Runs that are moving on their own.
     pub(crate) running: u32,
-    /// Distinct bots: those the daemon has defined, plus any a known run is pinned to (a run can
-    /// outlive its bot's file). The fake daemon defines none and names bots in run titles.
+    /// Distinct bots the daemon has defined; a run pinned to a deleted bot does not count. Only
+    /// when no definitions are known (the fake daemon defines none) the bots the runs name.
     pub(crate) bots: u32,
 }
 
@@ -94,14 +94,18 @@ pub(crate) fn is_live(status: RunStatus) -> bool {
 
 pub(crate) fn attention(state: &State) -> Attention {
     let runs = state.runs();
-    let bots: BTreeSet<&str> = state
+    let mut bots: BTreeSet<&str> = state
         .defs()
         .defs
         .iter()
         .filter(|def| def.kind == DefKind::Bot)
         .map(|def| def.name.as_str())
-        .chain(runs.iter().filter_map(|run| run_bot(run)))
         .collect();
+    if bots.is_empty() {
+        // No definitions (the `--fake` demo, or a daemon not yet heard from): the runs are
+        // all there is to go on.
+        bots = runs.iter().filter_map(|run| run_bot(run)).collect();
+    }
     Attention {
         need: count(state.approvals().len()),
         running: count(runs.iter().filter(|run| is_live(run.status)).count()),
@@ -540,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn attention_bots_come_from_pins_and_definitions() {
+    fn attention_bots_are_the_defined_ones_once_definitions_are_known() {
         let mut state = state_with(
             vec![pinned("s1", RunStatus::Running, "dogfood: hi", "scout")],
             vec![],
@@ -557,7 +561,13 @@ mod tests {
             defs: vec![def("scout"), def("reviewer"), def("keeper")],
             errors: vec![],
         }));
-        // Three defined, one of them already running: three, not four.
+        // Three defined, one of them already running: three.
+        assert_eq!(attention(&state).bots, 3);
+        // An old run pinned to a deleted bot does not count.
+        state.apply(Update::Runs(vec![
+            pinned("s1", RunStatus::Running, "dogfood: hi", "scout"),
+            pinned("s2", RunStatus::Succeeded, "old: x", "builder"),
+        ]));
         assert_eq!(attention(&state).bots, 3);
     }
 

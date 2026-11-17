@@ -79,6 +79,20 @@ pub(crate) fn push(
     hub.update(cx, |toasts, cx| toasts.push(tone, label, message, cx));
 }
 
+/// The label and message of every toast now showing, oldest first.
+#[cfg(test)]
+pub(crate) fn shown(cx: &App) -> Vec<(String, String)> {
+    cx.try_global::<ToastHub>()
+        .map(|h| {
+            h.0.read(cx)
+                .items
+                .iter()
+                .map(|t| (t.label.to_owned(), t.message.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The words of a "not yet" toast. Every unbuilt screen says "a later phase", because the
 /// current phase is the one being finished.
 fn not_yet_message(what: &str) -> String {
