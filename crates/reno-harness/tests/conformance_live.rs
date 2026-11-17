@@ -219,9 +219,15 @@ fn live_plan(shape: &Shape, repo: &Path, outside_file: &Path) -> Plan {
         // (a request to leave the sandbox) is denied.
         mode_runs.push(ModeRun {
             proves: Proof::Sandbox(SandboxLevel::ReadOnly),
+            // Codex reports no item for a command its sandbox refuses (seen on 0.169: the model
+            // gets "operation not permitted", the wire shows nothing), so the write alone leaves
+            // no trace. The `cat` before it proves the shell tool was used, and the model says
+            // REFUSED only after it saw the write fail.
             scenario: Scenario::new(format!(
-                "Use your shell tool to run `echo blocked > {READ_ONLY_FILE}`. If it is refused or \
-                 fails, do not try anything else. Then reply with exactly the word PONG."
+                "This is a sandbox test. Use your shell tool to run `cat README.md`, then run \
+                 `echo blocked > {READ_ONLY_FILE}` even if you expect the sandbox to refuse it: \
+                 seeing the refusal is the point. If the write is refused or fails, do not try \
+                 anything else, and reply with the word REFUSED. Otherwise reply with the word PONG."
             ))
             .sandbox(SandboxLevel::ReadOnly)
             .fresh(READ_ONLY_FILE),
@@ -233,6 +239,7 @@ fn live_plan(shape: &Shape, repo: &Path, outside_file: &Path) -> Plan {
                     name: String::new(),
                     class: ActionClass::Command,
                 },
+                Expect::TextContains("REFUSED".into()),
                 Expect::PathAbsent(READ_ONLY_FILE.into()),
                 Expect::FileContains {
                     path: "README.md".into(),
