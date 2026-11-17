@@ -265,6 +265,21 @@ impl Client {
         Ok(())
     }
 
+    /// `run.set_model`: changes a live run's model from the harness's next model call; the
+    /// answer is the model now in use. Needs feature `run.model`.
+    pub async fn set_run_model(
+        &self,
+        run_id: &RunId,
+        model: String,
+    ) -> Result<reno_proto::RunSetModelResult, ClientError> {
+        self.require(reno_proto::FEATURE_RUN_MODEL)?;
+        let params = reno_proto::RunSetModelParams {
+            run_id: run_id.clone(),
+            model,
+        };
+        Ok(self.rpc.call::<reno_proto::RunSetModel>(params).await?)
+    }
+
     /// `trigger.list`: every trigger and its state. Needs feature `triggers`.
     pub async fn list_triggers(&self) -> Result<Vec<reno_proto::TriggerInfo>, ClientError> {
         self.require(reno_proto::FEATURE_TRIGGERS)?;
