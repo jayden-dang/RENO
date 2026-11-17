@@ -1112,6 +1112,44 @@ async fn a_run_that_ends_while_waiting_closes_its_approval_before_its_done() {
     ));
 }
 
+/// Cancelling a held run does not say "nobody answered in time": the approval ended because the
+/// run did, and the record, the journal and the harness-facing answer all say so. A request that
+/// really timed out carries no such reason.
+#[tokio::test(start_paused = true)]
+async fn cancelling_a_held_run_withdraws_its_approval_instead_of_expiring_it() {
+    let rig = Rig::new("default = \"ask\"\n", script(vec![("r1", command("x"))])).await;
+    let run = rig.run_as("keeper").await;
+    let pending = rig.pending().await;
+    rig.fx.kernel.cancel(&run).await.unwrap();
+    rig.fx.wait_status(&run, RunStatus::Cancelled).await;
+
+    let journal = rig.fx.journal_with_done(&run).await;
+    let resolved = journal.iter().find_map(|(_, e)| match e {
+        ExecEvent::ApprovalResolved { by, message, .. } => Some((by.clone(), message.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        resolved,
+        Some((
+            ResolvedBy::Expired,
+            Some("withdrawn: the run was cancelled".to_owned())
+        ))
+    );
+    let history = rig
+        .fx
+        .kernel
+        .approval_history(Some(&run), None)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, pending.id);
+    assert_eq!(history[0].status, ApprovalStatus::Expired);
+    assert_eq!(
+        history[0].message.as_deref(),
+        Some("withdrawn: the run was cancelled")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn shutdown_closes_what_a_dropped_supervisor_left_pending() {
     // A zero deadline drops the supervisors where they stand, before they can close anything.

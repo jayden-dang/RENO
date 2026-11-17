@@ -458,9 +458,15 @@ impl Db {
         self.store.active_rules(run, bot, self.now_ms()).await
     }
 
-    pub(crate) async fn expire_pending(&self, scope: ExpireScope) -> Result<Vec<Expired>> {
+    pub(crate) async fn expire_pending(
+        &self,
+        scope: ExpireScope,
+        message: Option<String>,
+    ) -> Result<Vec<Expired>> {
         self.wrote();
-        self.store.expire_pending(scope, self.now_ms()).await
+        self.store
+            .expire_pending(scope, message, self.now_ms())
+            .await
     }
 
     pub(crate) async fn pending_approvals(&self) -> Result<Vec<StoredApproval>> {

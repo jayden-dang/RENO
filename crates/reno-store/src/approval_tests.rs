@@ -160,7 +160,10 @@ async fn creating_is_a_normal_write_and_decisions_are_durable_writes() {
     assert_eq!(durable(&store), before + 2);
 
     store.create_approval(new(3, 0, "c"), 1, 40).await.unwrap();
-    store.expire_pending(ExpireScope::All, 50).await.unwrap();
+    store
+        .expire_pending(ExpireScope::All, None, 50)
+        .await
+        .unwrap();
     assert_eq!(durable(&store), before + 3);
 }
 
@@ -385,6 +388,7 @@ async fn expire_pending_closes_all_or_one_runs_requests_and_reports_them() {
                 run: run_id(0),
                 fence: 1,
             },
+            None,
             20,
         )
         .await
@@ -398,7 +402,10 @@ async fn expire_pending_closes_all_or_one_runs_requests_and_reports_them() {
     );
     assert_eq!(store.pending_approvals().await.unwrap().len(), 1);
 
-    let all = store.expire_pending(ExpireScope::All, 30).await.unwrap();
+    let all = store
+        .expire_pending(ExpireScope::All, None, 30)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(
         (all[0].id.clone(), all[0].run_id.clone()),
@@ -407,7 +414,7 @@ async fn expire_pending_closes_all_or_one_runs_requests_and_reports_them() {
     assert!(store.pending_approvals().await.unwrap().is_empty());
     assert!(
         store
-            .expire_pending(ExpireScope::All, 40)
+            .expire_pending(ExpireScope::All, None, 40)
             .await
             .unwrap()
             .is_empty()
@@ -479,6 +486,7 @@ async fn a_stale_fence_is_refused_and_writes_nothing() {
                 run: run_id(0),
                 fence: 2,
             },
+            None,
             20,
         )
         .await;

@@ -383,6 +383,12 @@ pub(crate) fn by_text(by: &ResolvedBy) -> String {
     }
 }
 
+/// Why an approval ended with its run (`withdrawn: the run was cancelled`), when that is what
+/// ended it: an `Expired` decision that carries the daemon's reason, not a time limit.
+fn withdrawn<'a>(by: &ResolvedBy, message: Option<&'a str>) -> Option<&'a str> {
+    message.filter(|message| matches!(by, ResolvedBy::Expired) && message.starts_with("withdrawn:"))
+}
+
 /// The transcript line of a resolved approval: `approved by rule cargo is fine`.
 pub(crate) fn resolved_text(
     decision: ApprovalOutcome,
@@ -393,6 +399,9 @@ pub(crate) fn resolved_text(
         ApprovalOutcome::Approved => "approved",
         ApprovalOutcome::Denied => "denied",
     };
+    if let Some(why) = withdrawn(by, message) {
+        return format!("{outcome}: {why}");
+    }
     let line = match by {
         ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
@@ -408,20 +417,25 @@ pub(crate) fn resolved_text(
 pub(crate) fn history_line(record: &ApprovalRecord) -> String {
     let subject = &record.subject;
     let what = subject.command.as_deref().unwrap_or("");
-    let by = record
+    let why = record
         .decided_by
         .as_ref()
-        .map_or_else(|| "nobody yet".to_owned(), by_text);
+        .and_then(|by| withdrawn(by, record.message.as_deref()));
+    let by = match (why, &record.decided_by) {
+        (Some(why), _) => why.to_owned(),
+        (None, Some(by)) => format!("by {}", by_text(by)),
+        (None, None) => "by nobody yet".to_owned(),
+    };
     let line = format!(
-        "{}  run {}  {:<8}  by {by}  {} {what}",
+        "{}  run {}  {:<8}  {by}  {} {what}",
         record.id,
         record.run_id,
         wire_name(&record.status),
         subject.tool
     );
-    match &record.message {
-        Some(message) => format!("{line} ({message})"),
-        None => line,
+    match (&record.message, why) {
+        (Some(message), None) => format!("{line} ({message})"),
+        _ => line,
     }
 }
 
@@ -1401,6 +1415,43 @@ mod tests {
                 Some(ResolvedBy::RepeatDenial)
             )),
             "appr_a1  run run_r1  denied    by the repeat-denial rule  bash cargo test"
+        );
+    }
+
+    #[test]
+    fn an_approval_withdrawn_with_its_run_does_not_read_as_timed_out() {
+        let withdrawn = Some("withdrawn: the run was cancelled");
+        assert_eq!(
+            resolved_text(ApprovalOutcome::Denied, &ResolvedBy::Expired, withdrawn),
+            "denied: withdrawn: the run was cancelled"
+        );
+        // A real expiry still says so.
+        assert_eq!(
+            resolved_text(ApprovalOutcome::Denied, &ResolvedBy::Expired, None),
+            "denied: nobody answered in time"
+        );
+        let record = ApprovalRecord {
+            id: "appr_a1".parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            request_id: "q".into(),
+            subject: reno_proto::ApprovalSubject {
+                action: ActionClass::Command,
+                tool: "bash".into(),
+                command: Some("cargo test".into()),
+                paths: vec![],
+                raw: json!(null),
+            },
+            subject_digest: None,
+            status: reno_proto::ApprovalStatus::Expired,
+            decided_by: Some(ResolvedBy::Expired),
+            created_at_ms: 1,
+            decided_at_ms: Some(2),
+            expires_at_ms: 3,
+            message: withdrawn.map(str::to_owned),
+        };
+        assert_eq!(
+            history_line(&record),
+            "appr_a1  run run_r1  expired   withdrawn: the run was cancelled  bash cargo test"
         );
     }
 

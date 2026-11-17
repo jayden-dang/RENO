@@ -168,7 +168,7 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
 /// only then are the journals appended to. A journal that cannot be appended to is logged and
 /// left; the record is what counts.
 pub(crate) async fn expire_orphans(shared: &Shared) -> Result<usize> {
-    let expired = shared.db.expire_pending(ExpireScope::All).await?;
+    let expired = shared.db.expire_pending(ExpireScope::All, None).await?;
     if expired.is_empty() {
         return Ok(0);
     }
