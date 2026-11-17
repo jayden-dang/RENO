@@ -307,6 +307,12 @@ pub(crate) fn routing_lines(decision: &RoutingDecision, verbose: bool) -> Vec<St
     lines
 }
 
+/// The reasoning effort a run was started with, for `run show`; `None` when none was asked for.
+pub(crate) fn effort_line(run: &RunSummary) -> Option<String> {
+    run.effort
+        .map(|effort| format!("effort: {}", effort.as_str()))
+}
+
 /// The model a run asks for (a task's, else its bot's) or reports, for `run show`; `None` when
 /// there is none. `started` is the model the executor reported when the run began: when it
 /// differs from what was asked for (an alias such as `sonnet`), both are shown.
@@ -1154,6 +1160,18 @@ mod tests {
         run.status = RunStatus::Failed;
         run.report.as_mut().unwrap().status = reno_proto::ReportStatus::Failed;
         assert!(!run_line(&run).contains("reported"));
+    }
+
+    #[test]
+    fn the_effort_a_run_started_with_is_a_line_of_run_show() {
+        let mut run: RunSummary = serde_json::from_value(serde_json::json!({
+            "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
+            "status": "queued", "attempt": 1, "title": "t", "createdAtMs": 1, "updatedAtMs": 1
+        }))
+        .unwrap();
+        assert_eq!(effort_line(&run), None);
+        run.effort = Some(reno_proto::Effort::XHigh);
+        assert_eq!(effort_line(&run).as_deref(), Some("effort: xhigh"));
     }
 
     #[test]

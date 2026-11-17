@@ -66,6 +66,9 @@ pub struct RouteRequest {
     pub exclude: Vec<ExecutorId>,
     /// The executors a task with neither a bot nor a named executor may go to, in order.
     pub defaults: Vec<ExecutorId>,
+    /// Executors whose models never take the effort the task asks for, with what to say. Only
+    /// filled when the task names no executor.
+    pub unfit_effort: Vec<(ExecutorId, String)>,
 }
 
 /// Why `descriptor` cannot take a task that asks for `access` and `sandbox`, given what its last
@@ -203,6 +206,8 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
 fn excluded(request: &RouteRequest, id: &ExecutorId) -> Option<RejectReason> {
     let why = if request.exclude.contains(id) {
         "the request excludes it".to_owned()
+    } else if let Some((_, why)) = request.unfit_effort.iter().find(|(unfit, _)| unfit == id) {
+        why.clone()
     } else if let Some(explicit) = &request.explicit {
         if explicit == id {
             return None;
@@ -318,6 +323,7 @@ mod tests {
             explicit: None,
             bot: None,
             exclude: vec![],
+            unfit_effort: vec![],
             defaults: [
                 "claude-code",
                 "codex",

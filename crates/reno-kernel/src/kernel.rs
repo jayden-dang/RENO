@@ -27,8 +27,8 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
-    CleanTarget, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision, RuleId,
-    RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, TriggerFireResult,
+    CleanTarget, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
+    RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, TriggerFireResult,
     TriggerInfo, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_proto::{
@@ -47,6 +47,7 @@ use crate::config::KernelConfig;
 use crate::db::Db;
 use crate::defs::{self, CurrentDefs, DefsSetup};
 use crate::dispatcher;
+use crate::effort;
 use crate::error::{KernelError, Result};
 use crate::events;
 use crate::health;
@@ -297,6 +298,7 @@ impl Kernel {
             request.bot.as_deref(),
             request.executor.clone(),
             request.model.as_deref(),
+            request.effort,
         )?;
         let cwd = request
             .cwd
@@ -305,7 +307,11 @@ impl Kernel {
             .to_owned();
         // The model the run asks for, fixed now with the bot version it is pinned to: the
         // task's own, else the bot's, else none (the executor's default).
-        let mut spec = serde_json::json!({ "cwd": cwd, "model": planned.model });
+        let mut spec = serde_json::json!({
+            "cwd": cwd,
+            "model": planned.model,
+            "effort": planned.effort.map(Effort::as_str),
+        });
         if request.in_place {
             spec["inPlace"] = serde_json::Value::Bool(true);
         }
@@ -385,6 +391,7 @@ impl Kernel {
             request.bot.as_deref(),
             request.executor.clone(),
             request.model.as_deref(),
+            request.effort,
         )?
         .decision)
     }
@@ -1035,6 +1042,9 @@ pub struct TaskRequest {
     pub cwd: PathBuf,
     /// The model to ask for.
     pub model: Option<String>,
+    /// The reasoning effort to ask for: one the run's model lists, else the task is refused.
+    /// Absent: the bot's, else the model's own default.
+    pub effort: Option<Effort>,
     /// Allow a write run in `cwd` when it is not a git repository, as a bot's `in_place_writes`
     /// does. A git repository is never written in place.
     pub in_place: bool,
@@ -1049,8 +1059,16 @@ impl TaskRequest {
             bot: None,
             cwd,
             model: None,
+            effort: None,
             in_place: false,
         }
+    }
+
+    /// Asks for `effort`.
+    #[must_use]
+    pub fn effort(mut self, effort: Option<Effort>) -> Self {
+        self.effort = effort;
+        self
     }
 
     /// Names the executor.
@@ -1093,6 +1111,8 @@ pub(crate) struct Planned {
     /// The model the run asks for: the task's, else its bot's; `None` leaves the executor's
     /// default.
     pub(crate) model: Option<String>,
+    /// The effort the run asks for: the task's, else its bot's; `None` leaves the model's own.
+    pub(crate) effort: Option<Effort>,
 }
 
 /// Routes a task: the access, sandbox and preference of its bot (else the kernel's defaults),
@@ -1102,8 +1122,9 @@ pub(crate) fn plan_route(
     bot: Option<&str>,
     explicit: Option<ExecutorId>,
     task_model: Option<&str>,
+    task_effort: Option<Effort>,
 ) -> Result<Planned> {
-    let (access, sandbox, preference, pin, bot_model) = match bot {
+    let (access, sandbox, preference, pin, bot_model, bot_effort) = match bot {
         Some(name) => {
             let current = shared.current_defs();
             let def = current
@@ -1127,6 +1148,7 @@ pub(crate) fn plan_route(
                 Some(preference),
                 Some(pin),
                 def.model.clone(),
+                def.effort,
             )
         }
         None => (
@@ -1135,10 +1157,13 @@ pub(crate) fn plan_route(
             None,
             None,
             None,
+            None,
         ),
     };
     // Precedence: the task's own model, then the bot's; the executor's default is "none".
     let model = task_model.map(str::to_owned).or(bot_model);
+    // Likewise the effort: the task's, then the bot's, else the model's own.
+    let effort = task_effort.or(bot_effort);
     let candidates: Vec<Candidate> = shared
         .executors
         .ids()
@@ -1150,6 +1175,19 @@ pub(crate) fn plan_route(
         })
         .collect();
     let at_ms = u64::try_from(shared.db.now_ms()).unwrap_or(0);
+    // With no executor named, one whose models never take the effort is not a candidate; a named
+    // one is refused below instead.
+    let unfit_effort: Vec<(ExecutorId, String)> = match (effort, &explicit) {
+        (Some(effort), None) => candidates
+            .iter()
+            .filter_map(|candidate| {
+                effort::check(candidate, model.as_deref(), effort)
+                    .err()
+                    .map(|why| (candidate.descriptor.id.clone(), why))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
     let mut decision = router::route(
         &RouteRequest {
             access,
@@ -1157,6 +1195,7 @@ pub(crate) fn plan_route(
             explicit: explicit.clone(),
             bot: preference.clone(),
             exclude: Vec::new(),
+            unfit_effort,
             defaults: shared.config.default_executors.clone(),
         },
         &candidates,
@@ -1181,6 +1220,15 @@ pub(crate) fn plan_route(
                 .cloned(),
         })
         .ok_or_else(|| KernelError::NoExecutor(bot.unwrap_or("(any)").to_owned()))?;
+    // Refused before anything is queued: the run would fail at start, or silently run at another
+    // level, with the executor the run is recorded against.
+    if let Some(effort) = effort
+        && let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.descriptor.id == executor)
+    {
+        effort::check(candidate, model.as_deref(), effort).map_err(KernelError::Invalid)?;
+    }
     // A model the executor's list lacks is a warning, never a refusal: the list may be curated
     // and incomplete, and an executor that really does not know the model fails the run itself.
     if let Some(model) = &model
@@ -1194,6 +1242,7 @@ pub(crate) fn plan_route(
         executor,
         pin,
         model,
+        effort,
     })
 }
 
@@ -1252,16 +1301,14 @@ fn unlisted_model_warning(
 }
 
 /// What a trigger's run starts with: the executor, the bot pin, the routing decision and the
-/// model the bot asks for.
-pub(crate) fn bot_launch(
-    shared: &Shared,
-    bot: &str,
-) -> Result<(ExecutorId, BotPin, RoutingDecision, Option<String>)> {
-    let planned = plan_route(shared, Some(bot), None, None)?;
+/// model and effort the bot asks for.
+pub(crate) fn bot_launch(shared: &Shared, bot: &str) -> Result<(Planned, BotPin)> {
+    let planned = plan_route(shared, Some(bot), None, None, None)?;
     let pin = planned
         .pin
+        .clone()
         .ok_or_else(|| defs::not_found(DefKind::Bot, bot, None))?;
-    Ok((planned.executor, pin, planned.decision, planned.model))
+    Ok((planned, pin))
 }
 
 /// Mint an id until it parses (it always does: the suffix is hex).

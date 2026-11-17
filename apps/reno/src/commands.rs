@@ -102,9 +102,15 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
         .with_context(|| format!("cannot make {} absolute", cwd.display()))?;
 
     let client = env.connect().await?;
+    if args.effort.is_some() && !client.supports(reno_proto::FEATURE_RUN_EFFORT) {
+        anyhow::bail!(
+            "this daemon does not support --effort (feature {}); update it",
+            reno_proto::FEATURE_RUN_EFFORT
+        );
+    }
     let submitted = client
         .submit_task(TaskRunParams {
-            effort: None,
+            effort: args.effort,
             prompt: args.prompt,
             executor,
             bot: args.bot,
@@ -163,6 +169,9 @@ async fn run_show(env: &Env, args: RunShow) -> anyhow::Result<ExitCode> {
     }
     print_line(render::run_line(&run))?;
     if let Some(line) = render::model_line(&run, started.as_deref()) {
+        print_line(line)?;
+    }
+    if let Some(line) = render::effort_line(&run) {
         print_line(line)?;
     }
     for line in render::stop_lines(&run) {

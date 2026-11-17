@@ -143,6 +143,28 @@ daemon_test! {
 }
 
 daemon_test! {
+    async fn an_effort_no_model_lists_is_refused_as_invalid_params_and_nothing_runs() {
+        let fx = Fixture::start().await;
+        let e = within(fx.client.run_task(TaskRunParams {
+            effort: Some(reno_proto::Effort::High),
+            prompt: "think hard".into(),
+            executor: Some(id("mock")),
+            bot: None,
+            cwd: None,
+            model: Some("mock-1".into()),
+            in_place: false,
+            attachments: Vec::new(),
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(code(&e), ErrorCode::InvalidParams);
+        let message = format!("{e}");
+        assert!(message.contains("mock-1") && message.contains("high"), "{message}");
+        assert!(fx.client.supports(reno_proto::FEATURE_RUN_EFFORT));
+    }
+}
+
+daemon_test! {
     async fn set_model_switches_a_live_run_and_refuses_a_model_the_executor_lacks() {
         let fx = Fixture::start().await;
         let run = fx.run("mock-model", "switch me").await;

@@ -476,6 +476,11 @@ fn requested_model(spec: &serde_json::Value) -> Option<String> {
     spec.get("model")?.as_str().map(str::to_owned)
 }
 
+/// The effort a task asked for, from its spec (a word, written by `submit`).
+fn requested_effort(spec: &serde_json::Value) -> Option<reno_proto::Effort> {
+    reno_proto::Effort::from_word(spec.get("effort")?.as_str()?)
+}
+
 /// `prompt` cut to `PROMPT_SUMMARY_CHARS` characters (on a char boundary), with `…` when cut.
 fn truncate_prompt(prompt: &str) -> String {
     match prompt.char_indices().nth(PROMPT_SUMMARY_CHARS) {
@@ -507,7 +512,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         _ => None,
     };
     RunSummary {
-        effort: None,
+        effort: requested_effort(&row.spec),
         run_id: row.id.clone(),
         task_id: row.task_id.clone(),
         executor: row.executor.clone(),

@@ -17,6 +17,7 @@ mod agent;
 mod approvals;
 mod budget;
 mod defs;
+mod effort;
 mod health;
 mod queue;
 mod recovery;

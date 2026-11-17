@@ -141,6 +141,17 @@ pub(crate) enum TaskCommand {
     Run(TaskRun),
 }
 
+/// An `--effort` word.
+fn parse_effort(word: &str) -> Result<reno_proto::Effort, String> {
+    reno_proto::Effort::from_word(word).ok_or_else(|| {
+        let all: Vec<&str> = reno_proto::Effort::ALL.iter().map(|e| e.as_str()).collect();
+        format!(
+            "`{word}` is not an effort level (one of {})",
+            all.join(", ")
+        )
+    })
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct TaskRun {
     /// The executor to run on. Without it, and without --bot, the daemon tries its default
@@ -159,6 +170,10 @@ pub(crate) struct TaskRun {
     /// The model to ask for.
     #[arg(long)]
     pub(crate) model: Option<String>,
+    /// The reasoning effort: minimal, low, medium, high, xhigh or max. It must be one the run's
+    /// model lists (see `reno executor list --json`); otherwise the task is refused.
+    #[arg(long, value_parser = parse_effort)]
+    pub(crate) effort: Option<reno_proto::Effort>,
     /// Allow a write run to work directly in a directory that is not a git repository (as a
     /// bot's `in_place_writes` does). A git repository is never written in place.
     #[arg(long)]

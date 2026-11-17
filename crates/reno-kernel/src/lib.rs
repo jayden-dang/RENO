@@ -70,6 +70,7 @@ mod config;
 mod db;
 mod defs;
 mod dispatcher;
+mod effort;
 mod error;
 mod events;
 mod health;

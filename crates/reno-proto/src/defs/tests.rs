@@ -1503,6 +1503,35 @@ fn opting_in_to_user_config_or_pinning_a_model_changes_the_hash() {
 }
 
 #[test]
+fn a_bots_effort_is_a_known_level_word() {
+    for word in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+        let set = load(&[file(
+            DefKind::Bot,
+            "keeper",
+            &bot_with(&format!("effort = \"{word}\"")),
+        )])
+        .unwrap();
+        assert_eq!(
+            set.bot("keeper").unwrap().effort.map(crate::Effort::as_str),
+            Some(word)
+        );
+    }
+    for bad in ["\"ultra\"", "\"\"", "\"High\"", "3"] {
+        assert!(
+            !bot_errors(&bot_with(&format!("effort = {bad}"))).is_empty(),
+            "{bad}"
+        );
+    }
+    // Naming one changes the hash; leaving it out keeps the canonical form.
+    assert_ne!(
+        hash_of_bot(&bot_with("effort = \"high\"")),
+        hash_of_bot(&bot_with(""))
+    );
+    let set = load(&[file(DefKind::Bot, "keeper", &bot_with(""))]).unwrap();
+    assert!(!set.bot("keeper").unwrap().canonical().contains("effort"));
+}
+
+#[test]
 fn a_blank_or_malformed_model_is_refused() {
     for bad in ["\"\"", "\"  \"", "\"two words\"", "\"line\\nbreak\""] {
         let errors = bot_errors(&bot_with(&format!("model = {bad}")));

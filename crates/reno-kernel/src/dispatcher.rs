@@ -230,6 +230,8 @@ struct LaunchSettings {
     inherit_user_config: bool,
     /// The model the pinned bot asks for, for a run whose task did not fix one.
     model: Option<String>,
+    /// The effort the pinned bot asks for, for a run whose task did not fix one.
+    effort: Option<reno_proto::Effort>,
 }
 
 /// The settings a run launches with: its pinned bot version's, else the kernel's defaults.
@@ -246,6 +248,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
             secrets: Vec::new(),
             inherit_user_config: false,
             model: None,
+            effort: None,
         });
     };
     let stored = shared
@@ -276,6 +279,7 @@ async fn launch_settings(shared: &Shared, row: &RunRecord) -> Result<LaunchSetti
         secrets: bot.secrets,
         inherit_user_config: bot.inherit_user_config,
         model: bot.model,
+        effort: bot.effort,
     })
 }
 
@@ -380,6 +384,12 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         // harness reported (a resumed run continues on it).
         .or_else(|| settings.model.clone())
         .or_else(|| row.model.clone());
+    // The effort fixed at submit (a word, or null for none); a run made before efforts were
+    // stored has no key and takes the pinned bot's.
+    let effort = match row.spec.get("effort") {
+        Some(value) => value.as_str().and_then(reno_proto::Effort::from_word),
+        None => settings.effort,
+    };
     let resume = row.session_ref.clone().map(SessionRef);
     let prompt = match &resume {
         Some(_) => row
@@ -394,7 +404,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         cwd: PathBuf::from(cwd),
         model,
         instructions: settings.instructions.clone(),
-        effort: None,
+        effort,
         access: settings.access,
         sandbox: settings.sandbox,
         resume,

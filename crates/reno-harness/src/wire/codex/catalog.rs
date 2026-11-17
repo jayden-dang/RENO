@@ -108,10 +108,10 @@ fn supported_efforts(item: &Value) -> Vec<Effort> {
         let word = entry
             .as_str()
             .or_else(|| entry.get("reasoningEffort").and_then(Value::as_str));
-        if let Some(level) = word.and_then(Effort::from_word) {
-            if !levels.contains(&level) {
-                levels.push(level);
-            }
+        if let Some(level) = word.and_then(Effort::from_word)
+            && !levels.contains(&level)
+        {
+            levels.push(level);
         }
     }
     levels
