@@ -319,6 +319,7 @@ mod tests {
             model: None,
             stop_reason: None,
             bot: None,
+            cwd: None,
             created_at_ms: 1,
             updated_at_ms: 2,
             stop: None,

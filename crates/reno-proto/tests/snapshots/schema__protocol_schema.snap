@@ -1920,6 +1920,13 @@ expression: protocol_schema()
             "minimum": 0,
             "type": "integer"
           },
+          "cwd": {
+            "description": "The working directory the task was submitted with: the repository a write run is\nisolated from, or the folder a read-only run looks at. Absent from daemons that predate\nit, and from a run whose task recorded none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "executor": {
             "$ref": "#/$defs/ExecutorId",
             "description": "The executor running it."
@@ -3673,6 +3680,13 @@ expression: protocol_schema()
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "cwd": {
+                "description": "The working directory the task was submitted with: the repository a write run is\nisolated from, or the folder a read-only run looks at. Absent from daemons that predate\nit, and from a run whose task recorded none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",
@@ -9964,6 +9978,13 @@ expression: protocol_schema()
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "cwd": {
+                "description": "The working directory the task was submitted with: the repository a write run is\nisolated from, or the folder a read-only run looks at. Absent from daemons that predate\nit, and from a run whose task recorded none.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "executor": {
                 "$ref": "#/$defs/ExecutorId",

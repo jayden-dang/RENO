@@ -89,6 +89,7 @@ fn summary(
             name: bot.to_owned(),
             version: 1,
         }),
+        cwd: None,
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
         stop: None,

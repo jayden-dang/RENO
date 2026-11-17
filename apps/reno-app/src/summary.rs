@@ -35,6 +35,34 @@ pub(crate) fn parse_title(title: &str) -> TitleParts<'_> {
     }
 }
 
+/// The repository a run works on, for the details pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunRepo {
+    /// The directory's name.
+    pub(crate) name: String,
+    /// The whole path, when the daemon gave one.
+    pub(crate) path: Option<String>,
+}
+
+/// The repository of a run: the directory its task was submitted with; only for a run without
+/// one (the fake daemon) what its title names.
+pub(crate) fn run_repo(run: &RunSummary) -> Option<RunRepo> {
+    if let Some(cwd) = &run.cwd {
+        let name = cwd.file_name().map(|n| n.to_string_lossy().into_owned());
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            let path = cwd.to_string_lossy();
+            return Some(RunRepo {
+                name,
+                path: Some(path.trim_end_matches('/').to_owned()),
+            });
+        }
+    }
+    parse_title(&run.title).repo.map(|name| RunRepo {
+        name: name.to_owned(),
+        path: None,
+    })
+}
+
 /// The counts on the attention pill and in the sidebar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Attention {
@@ -306,6 +334,7 @@ mod tests {
             model: None,
             stop_reason: None,
             bot: None,
+            cwd: None,
             created_at_ms: NOW - HOUR,
             updated_at_ms: NOW - 1000,
             stop: None,
@@ -355,6 +384,32 @@ mod tests {
         assert_eq!((p.bot, p.repo, p.what), (None, None, "just a title"));
         let p = parse_title("note: no bot");
         assert_eq!((p.bot, p.what), (None, "note: no bot"));
+    }
+
+    #[test]
+    fn a_real_run_names_its_repository_from_its_working_directory() {
+        let mut real = run("r1", RunStatus::Running, "Fix the build");
+        real.cwd = Some("/Users/x/Developer/experiments/porch/".into());
+        let repo = run_repo(&real).expect("a repository");
+        assert_eq!(repo.name, "porch");
+        assert_eq!(
+            repo.path.as_deref(),
+            Some("/Users/x/Developer/experiments/porch")
+        );
+        // The fake daemon has no working directory: its title says it.
+        let demo = run(
+            "r2",
+            RunStatus::Running,
+            "keeper \u{b7} atlas-api: bump deps",
+        );
+        let repo = run_repo(&demo).expect("a repository");
+        assert_eq!((repo.name.as_str(), repo.path), ("atlas-api", None));
+        // Neither: no row.
+        assert!(run_repo(&run("r3", RunStatus::Running, "plain")).is_none());
+        // The directory wins over a title that merely looks like the demo's.
+        let mut both = run("r4", RunStatus::Running, "keeper \u{b7} other: x");
+        both.cwd = Some("/w/porch".into());
+        assert_eq!(run_repo(&both).expect("repo").name, "porch");
     }
 
     #[test]

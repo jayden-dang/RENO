@@ -680,7 +680,6 @@ impl RunScreen {
         let Some(run) = run else {
             return pane.child(kv("State", text("starting".to_owned())));
         };
-        let parts = summary::parse_title(&run.title);
         let model = self.facts.model.clone().or_else(|| run.model.clone());
         let end = if run.status.is_terminal() {
             run.updated_at_ms
@@ -735,8 +734,24 @@ impl RunScreen {
             ))
             .when_some(access, |p, access| p.child(kv("Access", text(access))))
             .when_some(model, |p, model| p.child(kv("Model", text(model))))
-            .when_some(parts.repo, |p, repo| {
-                p.child(kv("Repository", text(repo.to_owned())))
+            .when_some(summary::run_repo(run), |p, repo| {
+                // The folder's name, with the whole path under it when the daemon gave one.
+                p.child(kv(
+                    "Repository",
+                    div()
+                        .id("details-repository")
+                        .debug_selector(|| "details-repository".to_owned())
+                        .child(repo.name)
+                        .when_some(repo.path, |d, path| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.faint)
+                                    .child(SharedString::from(path)),
+                            )
+                        })
+                        .into_any_element(),
+                ))
             })
             .when(run.attempt > 1, |p| {
                 p.child(kv("Attempt", text(run.attempt.to_string())))

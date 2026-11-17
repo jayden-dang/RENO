@@ -158,6 +158,8 @@ async fn the_summary_carries_the_prompt_and_the_requested_model() {
     assert_eq!(summary.title, "first line");
     assert_eq!(summary.prompt.as_deref(), Some(prompt));
     assert_eq!(summary.model.as_deref(), Some("mock-1"));
+    // The folder the task was submitted for, so a client can name the repository.
+    assert_eq!(summary.cwd, Some(PathBuf::from("/work")));
     fx.kernel.shutdown().await;
 }
 

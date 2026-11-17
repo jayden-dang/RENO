@@ -318,14 +318,34 @@ fn bot_executors_must_be_known() {
 
 #[test]
 fn bot_executors_come_from_the_context() {
-    let text = bot_with("").replace("[\"codex\"]", "[\"acp.grok\"]");
+    let text = bot_with("").replace("[\"codex\"]", "[\"other-agent\"]");
     assert_one(
         &bot_errors(&text),
         "bots/keeper.toml: executors[0]: unknown executor",
     );
-    let known = ValidationContext::new(["acp.grok".parse().unwrap()]);
+    let known = ValidationContext::new(["other-agent".parse().unwrap()]);
     let set = load_set(&[file(DefKind::Bot, "keeper", &text)], &known);
     assert!(set.is_ok());
+}
+
+#[test]
+fn the_acp_agents_a_daemon_always_has_are_built_in() {
+    let text = bot_with("").replace("[\"codex\"]", "[\"acp.devin\", \"acp.grok\"]");
+    assert!(bot_errors(&text).is_empty());
+}
+
+#[test]
+fn an_offline_context_takes_any_registry_agent_but_not_any_name() {
+    let accepted = bot_with("").replace("[\"codex\"]", "[\"acp.gemini\"]");
+    let ctx = ValidationContext::offline([]);
+    assert!(load_set(&[file(DefKind::Bot, "keeper", &accepted)], &ctx).is_ok());
+    // A daemon's own context lists exactly the agents it has added.
+    assert_one(
+        &bot_errors(&accepted),
+        "bots/keeper.toml: executors[0]: unknown executor",
+    );
+    let other = bot_with("").replace("[\"codex\"]", "[\"gemini\"]");
+    assert!(load_set(&[file(DefKind::Bot, "keeper", &other)], &ctx).is_err());
 }
 
 #[test]

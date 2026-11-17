@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
@@ -443,6 +444,11 @@ fn title(goal: &str) -> String {
         .collect()
 }
 
+/// The working directory a task was submitted with, from its spec.
+fn requested_cwd(spec: &serde_json::Value) -> Option<PathBuf> {
+    spec.get("cwd")?.as_str().map(PathBuf::from)
+}
+
 /// The model a task asked for, from its spec (`{"cwd": .., "model": ..}`, written by `submit`).
 fn requested_model(spec: &serde_json::Value) -> Option<String> {
     spec.get("model")?.as_str().map(str::to_owned)
@@ -495,6 +501,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
             .filter(|_| row.status == RunStatus::Interrupted),
         session: row.session_ref.clone().map(SessionRef),
         bot: row.bot.clone(),
+        cwd: requested_cwd(&row.spec),
         created_at_ms: u64::try_from(row.created_at).unwrap_or(0),
         updated_at_ms: u64::try_from(row.updated_at).unwrap_or(0),
     }

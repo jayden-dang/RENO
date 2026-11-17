@@ -221,6 +221,11 @@ pub struct RunSummary {
     /// to. Absent for a run submitted without a bot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bot: Option<BotPin>,
+    /// The working directory the task was submitted with: the repository a write run is
+    /// isolated from, or the folder a read-only run looks at. Absent from daemons that predate
+    /// it, and from a run whose task recorded none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     /// Creation time, in milliseconds since the Unix epoch.
     pub created_at_ms: u64,
     /// Last state change, in milliseconds since the Unix epoch.

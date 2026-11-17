@@ -719,6 +719,7 @@ mod tests {
             executor: "codex".parse().unwrap(),
             status,
             attempt: 1,
+            cwd: None,
             created_at_ms: NOW,
             updated_at_ms: NOW,
             model: None,

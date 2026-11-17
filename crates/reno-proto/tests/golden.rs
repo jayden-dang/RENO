@@ -596,6 +596,7 @@ fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
         model: model.map(str::to_owned),
         stop_reason: None,
         bot: None,
+        cwd: None,
         created_at_ms: 10,
         updated_at_ms: 20,
         stop: None,
