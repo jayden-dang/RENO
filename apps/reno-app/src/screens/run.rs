@@ -187,7 +187,10 @@ impl RunScreen {
             Some(r) => (
                 r.executor.as_str().to_owned(),
                 summary::parse_title(&r.title).what.to_owned(),
-                Some((r.status, summary::run_status_label(r))),
+                Some((
+                    kit::run_color(theme, r.status, summary::reported_problem(r)),
+                    summary::run_status_label(r),
+                )),
             ),
             None => (String::new(), format!("Run {}", self.run), None),
         };
@@ -223,7 +226,7 @@ impl RunScreen {
             )
             .when_some(status, |h, status| {
                 h.child(
-                    kit::status_pill_worded(theme, status.0, status.1)
+                    kit::status_pill_worded(status.0, status.1)
                         .id(SharedString::from(format!("status-{run_id}"))),
                 )
             })
@@ -698,6 +701,8 @@ impl RunScreen {
                 .to_owned()
         });
 
+        let problem = summary::reported_problem(run);
+        let state_color = kit::run_color(theme, run.status, problem);
         pane = pane
             .child(kv(
                 "State",
@@ -705,14 +710,27 @@ impl RunScreen {
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .child(kit::dot(kit::status_color(theme, run.status), 7.0))
+                    .child(kit::dot(state_color, 7.0))
                     .child(
                         div()
-                            .text_color(kit::status_color(theme, run.status))
+                            .text_color(state_color)
                             .child(summary::run_status_label(run)),
                     )
                     .into_any_element(),
             ))
+            .when_some(
+                run.report.as_ref().filter(|_| problem.is_some()),
+                |p, report| {
+                    p.child(kv(
+                        "Report",
+                        div()
+                            .id("details-report")
+                            .debug_selector(|| "details-report".to_owned())
+                            .child(report.summary.clone())
+                            .into_any_element(),
+                    ))
+                },
+            )
             .when_some(summary::run_bot(run), |p, bot| {
                 p.child(kv("Bot", text(bot.to_owned())))
             })

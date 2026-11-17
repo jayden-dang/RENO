@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use reno_client::State;
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ActionClass, Approval, ApprovalSubject, CancelledBy, RunStatus, RunSummary, StopDetail,
+    ActionClass, Approval, ApprovalSubject, CancelledBy, ReportStatus, RunStatus, RunSummary,
+    StopDetail,
 };
 
 /// A run title is `"<bot> · <repo>: <what>"` (the protocol has no bot or repository field yet).
@@ -258,23 +259,65 @@ pub(crate) fn stopped_by_person(run: &RunSummary) -> bool {
         )
 }
 
+/// How a finished run's agent said the work went wrong, when the run itself still counts as
+/// passed: the harness completed, but the agent reported `failed` or `blocked`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Problem {
+    Failed,
+    Blocked,
+}
+
+/// The problem the agent reported on a run that `succeeded`. A run that already failed, was
+/// stopped or is still going keeps its own state: its pill is already right, or a mid-run
+/// report is not yet the outcome.
+pub(crate) fn reported_problem(run: &RunSummary) -> Option<Problem> {
+    if run.status != RunStatus::Succeeded {
+        return None;
+    }
+    match run.report.as_ref()?.status {
+        ReportStatus::Failed => Some(Problem::Failed),
+        ReportStatus::Blocked => Some(Problem::Blocked),
+        ReportStatus::Done | ReportStatus::Progress => None,
+    }
+}
+
+/// The pill's words for a run in `status` with an agent-reported `problem`.
+pub(crate) fn status_words(status: RunStatus, problem: Option<Problem>) -> &'static str {
+    match problem {
+        Some(Problem::Failed) => "reported failed",
+        Some(Problem::Blocked) => "blocked",
+        None => status_label(status),
+    }
+}
+
 /// The state pill's words for a known run: [`status_label`], except that a person's stop reads
-/// "stopping…" while the daemon is still settling it.
+/// "stopping…" while the daemon is still settling it, and a passed run whose agent reported a
+/// failure or a block says so instead of "passed".
 pub(crate) fn run_status_label(run: &RunSummary) -> &'static str {
     if stopped_by_person(run) {
         "stopping\u{2026}"
     } else {
-        status_label(run.status)
+        status_words(run.status, reported_problem(run))
     }
 }
 
-/// A rule that decided an approval, named the way a person would: an unnamed policy rule
-/// (`rules[7]`, the daemon's index) is "policy rule 8", a standing rule the person made
-/// (`standing:rule_<id>`) is "your rule", and a rule with a name of its own is "rule <name>".
+/// The reason in a withdrawn approval's message ("withdrawn: the run was cancelled"), or `None`
+/// for any other message: an approval closed because its run ended, not one nobody answered.
+pub(crate) fn withdrawn_reason(message: Option<&str>) -> Option<&str> {
+    message?.strip_prefix("withdrawn:").map(str::trim)
+}
+
+/// A rule that decided an approval, named the way a person would: an unnamed policy rule the
+/// daemon already worded (`policy rule 8 (command ...)`) is shown as sent; an older daemon's
+/// index (`rules[7]`) is "policy rule 8"; a standing rule the person made
+/// (`standing:rule_<id>`) is "your rule"; and a rule with a name of its own is "rule <name>".
 /// Anything unrecognised is shown as sent, so a daemon that later sends nicer text still reads.
 pub(crate) fn rule_words(name: &str) -> String {
     if name.starts_with("standing:") {
         return "your rule".to_owned();
+    }
+    if name.starts_with("policy rule ") {
+        return name.to_owned();
     }
     let index = name
         .strip_prefix("rules[")
@@ -592,6 +635,59 @@ mod tests {
         assert_eq!(rule_words("rules[7]x"), "rule rules[7]x");
         let huge = "rules[99999999999999999999]";
         assert_eq!(rule_words(huge), format!("rule {huge}"));
+    }
+
+    #[test]
+    fn a_rule_the_daemon_already_named_is_shown_as_sent() {
+        let named = "policy rule 8 (command `git checkout -- Cargo.lock`)";
+        assert_eq!(rule_words(named), named);
+        assert_eq!(rule_words("policy rule 1"), "policy rule 1");
+    }
+
+    #[test]
+    fn a_passed_run_whose_agent_reported_failure_or_a_block_does_not_read_as_passed() {
+        use reno_proto::{ReportStatus, RunReport};
+        let reported = |status: RunStatus, report: ReportStatus| {
+            let mut r = run("r", status, "t");
+            r.report = Some(RunReport {
+                status: report,
+                summary: "could not reach the registry".to_owned(),
+            });
+            r
+        };
+        let failed = reported(RunStatus::Succeeded, ReportStatus::Failed);
+        assert_eq!(reported_problem(&failed), Some(Problem::Failed));
+        assert_eq!(run_status_label(&failed), "reported failed");
+        let blocked = reported(RunStatus::Succeeded, ReportStatus::Blocked);
+        assert_eq!(reported_problem(&blocked), Some(Problem::Blocked));
+        assert_eq!(run_status_label(&blocked), "blocked");
+        // Done and progress reports, and no report, leave the pill alone.
+        for fine in [ReportStatus::Done, ReportStatus::Progress] {
+            let r = reported(RunStatus::Succeeded, fine);
+            assert_eq!(reported_problem(&r), None);
+            assert_eq!(run_status_label(&r), "passed");
+        }
+        assert_eq!(reported_problem(&run("n", RunStatus::Succeeded, "t")), None);
+        // A run that already failed, or was stopped, keeps its own state.
+        for status in [RunStatus::Failed, RunStatus::Cancelled, RunStatus::Running] {
+            let r = reported(status, ReportStatus::Failed);
+            assert_eq!(reported_problem(&r), None, "{status:?}");
+            assert_eq!(run_status_label(&r), status_label(status));
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_approval_message_is_told_from_one_a_person_gave() {
+        assert_eq!(
+            withdrawn_reason(Some("withdrawn: the run was cancelled")),
+            Some("the run was cancelled")
+        );
+        assert_eq!(
+            withdrawn_reason(Some("withdrawn: budget spent")),
+            Some("budget spent")
+        );
+        assert_eq!(withdrawn_reason(Some("use the staging bucket")), None);
+        assert_eq!(withdrawn_reason(None), None);
     }
 
     #[test]

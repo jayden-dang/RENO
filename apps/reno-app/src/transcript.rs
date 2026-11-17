@@ -479,7 +479,11 @@ fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&st
                 None => format!("{outcome} by {rule}"),
             }
         }
-        ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
+        // Closed because the run ended, not because nobody answered.
+        ResolvedBy::Expired => match summary::withdrawn_reason(message) {
+            Some(reason) => format!("Withdrawn: {reason}"),
+            None => format!("{outcome}: nobody answered in time"),
+        },
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
     }
 }
@@ -1030,6 +1034,14 @@ mod tests {
             (
                 resolved(ApprovalOutcome::Denied, ResolvedBy::Expired, None),
                 "Denied: nobody answered in time",
+            ),
+            (
+                resolved(
+                    ApprovalOutcome::Denied,
+                    ResolvedBy::Expired,
+                    Some("withdrawn: the run was cancelled"),
+                ),
+                "Withdrawn: the run was cancelled",
             ),
             (
                 resolved(ApprovalOutcome::Denied, ResolvedBy::RepeatDenial, None),

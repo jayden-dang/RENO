@@ -507,7 +507,10 @@ impl InboxScreen {
             Verdict::Approved => (Icon::Check, theme.success, "approved"),
             Verdict::Denied => (Icon::X, theme.danger, "denied"),
             Verdict::Expired => (Icon::Clock, theme.faint, "expired"),
+            // The `by` cell says it all: "withdrawn — the run was cancelled".
+            Verdict::Withdrawn => (Icon::Clock, theme.faint, ""),
         };
+        let withdrawn = row.verdict == Verdict::Withdrawn;
         let open = {
             let run = row.run.clone();
             cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone())))
@@ -566,8 +569,12 @@ impl InboxScreen {
                 div()
                     .map(|d| page::cell(d, Some(190.0)))
                     .truncate()
-                    .text_color(theme.muted)
-                    .child(format!("by {}", row.by)),
+                    .text_color(if withdrawn { theme.faint } else { theme.muted })
+                    .child(if withdrawn {
+                        row.by.clone()
+                    } else {
+                        format!("by {}", row.by)
+                    }),
             )
             .child(
                 div()

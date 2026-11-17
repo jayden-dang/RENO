@@ -184,7 +184,10 @@ pub(crate) fn sidebar(
                     })
                     .on_click(move |_, window, cx| open(run_id.clone(), window, cx))
                     .debug_selector(|| format!("recent-{}", run.run_id))
-                    .child(kit::dot(kit::status_color(theme, run.status), 7.0))
+                    .child(kit::dot(
+                        kit::run_color(theme, run.status, crate::summary::reported_problem(run)),
+                        7.0,
+                    ))
                     .child(kit::exec_glyph(theme, run.executor.as_str(), 12.0))
                     .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
             }));

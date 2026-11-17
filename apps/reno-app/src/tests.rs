@@ -841,6 +841,28 @@ fn a_real_run_shows_its_repository_in_the_details_pane(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn the_details_pane_shows_what_the_agent_reported_when_it_did_not_go_well(cx: &mut TestAppContext) {
+    use reno_proto::{ReportStatus, RunReport};
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let mut run = store.read_with(cx, |s, _| {
+        s.state().run(&run_id("keeper1")).cloned().unwrap()
+    });
+    run.status = RunStatus::Succeeded;
+    run.report = Some(RunReport {
+        status: ReportStatus::Failed,
+        summary: "the registry was unreachable".to_owned(),
+    });
+    store.update(cx, |s, cx| {
+        s.apply(Update::RunUpserted(run), cx);
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Light);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "details-report"));
+}
+
+#[gpui::test]
 fn a_daemon_that_will_not_start_is_explained_in_the_banner(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;

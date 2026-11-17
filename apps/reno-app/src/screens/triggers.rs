@@ -87,7 +87,9 @@ impl TriggersScreen {
             if let Some(last) = &row.last_run {
                 let run = last.run.clone();
                 let status = match last.status {
-                    Some(status) => kit::status_pill(theme, status).into_any_element(),
+                    Some(status) => {
+                        kit::status_pill(theme, status, last.problem).into_any_element()
+                    }
                     None => div()
                         .text_size(px(12.0))
                         .text_color(theme.faint)

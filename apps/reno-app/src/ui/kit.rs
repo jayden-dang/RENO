@@ -7,6 +7,7 @@ use reno_proto::RunStatus;
 
 use super::icon::{Icon, icon};
 use super::theme::Theme;
+use crate::summary::Problem;
 
 /// The monospace family bundled in `assets/fonts`.
 pub(crate) const MONO: &str = "Geist Mono";
@@ -63,7 +64,15 @@ pub(crate) fn dot(color: Hsla, size: f32) -> Div {
 
 /// The state colour of a run: warning held, accent running, success passed, danger failed,
 /// faint idle (UI brief, semantic colours).
-pub(crate) fn status_color(theme: &Theme, status: RunStatus) -> Hsla {
+///
+/// A run whose agent reported a problem takes the problem's colour instead: a failure is danger
+/// and a block is warning, whatever the green "passed" would have been.
+pub(crate) fn run_color(theme: &Theme, status: RunStatus, problem: Option<Problem>) -> Hsla {
+    match problem {
+        Some(Problem::Failed) => return theme.danger,
+        Some(Problem::Blocked) => return theme.warning,
+        None => {}
+    }
     match status {
         RunStatus::WaitingApproval | RunStatus::WaitingInput => theme.warning,
         RunStatus::Leased | RunStatus::Running | RunStatus::Evaluating | RunStatus::Queued => {
@@ -256,13 +265,15 @@ pub(crate) fn choice_chip(
 }
 
 /// The status mark of a run: a dot and the state's words, in the state's colour.
-pub(crate) fn status_pill(theme: &Theme, status: RunStatus) -> Div {
-    status_pill_worded(theme, status, crate::summary::status_label(status))
+pub(crate) fn status_pill(theme: &Theme, status: RunStatus, problem: Option<Problem>) -> Div {
+    status_pill_worded(
+        run_color(theme, status, problem),
+        crate::summary::status_words(status, problem),
+    )
 }
 
-/// [`status_pill`] with other words, for a run whose state a person reads differently.
-pub(crate) fn status_pill_worded(theme: &Theme, status: RunStatus, words: &'static str) -> Div {
-    let color = status_color(theme, status);
+/// A pill in `color` with other words, for a run whose state a person reads differently.
+pub(crate) fn status_pill_worded(color: Hsla, words: &'static str) -> Div {
     div()
         .flex_none()
         .flex()

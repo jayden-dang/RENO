@@ -44,6 +44,19 @@ impl RunFilter {
         }
     }
 
+    /// Whether `run` belongs under this chip. The statuses decide, with one exception: a run
+    /// that `succeeded` but whose agent reported `failed` or `blocked` did not pass, so it counts
+    /// under Failed and not Passed. (The daemon pages by status, so such a run only shows under
+    /// Failed once it is known here; the Passed and Failed pages themselves are unchanged.)
+    pub(crate) fn matches(self, run: &RunSummary) -> bool {
+        let problem = summary::reported_problem(run).is_some();
+        match self {
+            Self::Passed => run.status == RunStatus::Succeeded && !problem,
+            Self::Failed => problem || self.statuses().contains(&run.status),
+            _ => self.statuses().is_empty() || self.statuses().contains(&run.status),
+        }
+    }
+
     /// The statuses it matches; empty is every status.
     pub(crate) const fn statuses(self) -> &'static [RunStatus] {
         match self {
@@ -66,6 +79,8 @@ pub(crate) struct RunRow {
     pub(crate) repo: Option<String>,
     pub(crate) executor: String,
     pub(crate) status: RunStatus,
+    /// What the agent reported, when it says the passed run did not go well.
+    pub(crate) problem: Option<summary::Problem>,
     /// The pill's words: "stopping…" for a person's stop still settling.
     pub(crate) status_label: &'static str,
     pub(crate) attempt: u32,
@@ -118,6 +133,7 @@ fn row(run: &RunSummary, now_ms: u64) -> RunRow {
         repo: parts.repo.map(str::to_owned),
         executor: run.executor.as_str().to_owned(),
         status: run.status,
+        problem: summary::reported_problem(run),
         status_label: summary::run_status_label(run),
         attempt: run.attempt,
         started: summary::ago_label(now_ms.saturating_sub(run.created_at_ms)),
@@ -135,21 +151,11 @@ pub(crate) fn build(state: &State, filter: RunFilter, paging: bool, now_ms: u64)
     let everything = state.all_runs(&[]);
     let counts = RunFilter::ALL
         .iter()
-        .map(|f| {
-            let n = if f.statuses().is_empty() {
-                everything.len()
-            } else {
-                everything
-                    .iter()
-                    .filter(|r| f.statuses().contains(&r.status))
-                    .count()
-            };
-            (*f, n)
-        })
+        .map(|f| (*f, everything.iter().filter(|r| f.matches(r)).count()))
         .collect();
-    let rows: Vec<RunRow> = state
-        .all_runs(filter.statuses())
-        .into_iter()
+    let rows: Vec<RunRow> = everything
+        .iter()
+        .filter(|r| filter.matches(r))
         .map(|r| row(r, now_ms))
         .collect();
     let offline = super::is_offline(state);
@@ -314,6 +320,50 @@ mod tests {
             "\u{2014}",
             "a queued run has not run yet"
         );
+    }
+
+    #[test]
+    fn a_run_whose_agent_reported_failure_counts_as_failed_not_passed() {
+        use reno_proto::{ReportStatus, RunReport};
+        let mut reported = run("f", RunStatus::Succeeded, 6);
+        reported.report = Some(RunReport {
+            status: ReportStatus::Failed,
+            summary: "the registry was unreachable".to_owned(),
+        });
+        let mut done = run("d", RunStatus::Succeeded, 7);
+        done.report = Some(RunReport {
+            status: ReportStatus::Done,
+            summary: "shipped".to_owned(),
+        });
+        let mut state = State::new();
+        state.apply(Update::Runs(vec![
+            reported,
+            done,
+            run("x", RunStatus::Failed, 8),
+        ]));
+        let passed = build(&state, RunFilter::Passed, false, NOW);
+        let ids: Vec<_> = passed
+            .rows
+            .rows()
+            .iter()
+            .map(|r| r.run.to_string())
+            .collect();
+        assert_eq!(ids, ["run_d"]);
+        let failed = build(&state, RunFilter::Failed, false, NOW);
+        let ids: Vec<_> = failed
+            .rows
+            .rows()
+            .iter()
+            .map(|r| r.run.to_string())
+            .collect();
+        assert_eq!(ids, ["run_f", "run_x"]);
+        assert_eq!(failed.rows.rows()[0].status_label, "reported failed");
+        assert_eq!(
+            failed.rows.rows()[0].problem,
+            Some(summary::Problem::Failed)
+        );
+        let counts: Vec<_> = failed.counts.iter().map(|(f, n)| (f.label(), *n)).collect();
+        assert!(counts.contains(&("Passed", 1)) && counts.contains(&("Failed", 2)));
     }
 
     #[test]

@@ -144,7 +144,10 @@ impl RunsScreen {
             .child(
                 div()
                     .map(|d| page::cell(d, Some(120.0)))
-                    .child(kit::status_pill_worded(theme, row.status, row.status_label)),
+                    .child(kit::status_pill_worded(
+                        kit::run_color(theme, row.status, row.problem),
+                        row.status_label,
+                    )),
             )
             .child(
                 div()

@@ -47,6 +47,9 @@ pub(crate) enum Verdict {
     Approved,
     Denied,
     Expired,
+    /// Closed because its run ended ("withdrawn: the run was cancelled"), not because nobody
+    /// answered.
+    Withdrawn,
 }
 
 /// One decided approval.
@@ -57,7 +60,8 @@ pub(crate) struct HistoryRow {
     pub(crate) action: &'static str,
     pub(crate) line: String,
     pub(crate) verdict: Verdict,
-    /// "you", "policy rule 8", "your rule", "nobody in time", "repeat of a denial".
+    /// "you", "policy rule 8", "your rule", "nobody in time", "repeat of a denial"; for a
+    /// withdrawn one the whole phrase, "withdrawn — the run was cancelled".
     pub(crate) by: String,
     pub(crate) when: String,
     /// The reason given with a denial.
@@ -138,6 +142,9 @@ fn history_row(state: &State, record: &ApprovalRecord, now_ms: u64) -> Option<Hi
         // `approval.history` never returns pending ones.
         ApprovalStatus::Pending => return None,
     };
+    let withdrawn = (verdict == Verdict::Expired)
+        .then(|| summary::withdrawn_reason(record.message.as_deref()))
+        .flatten();
     let (bot, _, _) = run_bot(state, &record.run_id);
     let decided = record.decided_at_ms.unwrap_or(record.created_at_ms);
     Some(HistoryRow {
@@ -145,10 +152,18 @@ fn history_row(state: &State, record: &ApprovalRecord, now_ms: u64) -> Option<Hi
         bot,
         action: summary::action_word(&record.subject),
         line: summary::subject_line(&record.subject),
-        verdict,
-        by: who(record.decided_by.as_ref(), record.status),
+        verdict: if withdrawn.is_some() {
+            Verdict::Withdrawn
+        } else {
+            verdict
+        },
+        by: match withdrawn {
+            Some(reason) => format!("withdrawn \u{2014} {reason}"),
+            None => who(record.decided_by.as_ref(), record.status),
+        },
         when: summary::ago_label(now_ms.saturating_sub(decided)),
-        message: record.message.clone(),
+        // A withdrawn approval's message is the reason shown in `by`, not one a person gave.
+        message: record.message.clone().filter(|_| withdrawn.is_none()),
     })
 }
 
@@ -395,6 +410,28 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].when, "2h ago");
+    }
+
+    #[test]
+    fn an_approval_closed_because_the_run_ended_is_withdrawn_not_expired() {
+        let mut state = State::new();
+        let mut withdrawn = record("a", ApprovalStatus::Expired, Some(ResolvedBy::Expired));
+        withdrawn.message = Some("withdrawn: the run was cancelled".into());
+        state.apply(Update::ApprovalHistory(vec![
+            withdrawn,
+            record("b", ApprovalStatus::Expired, Some(ResolvedBy::Expired)),
+        ]));
+        let inbox = build(&state, NOW);
+        let rows = inbox.history.rows();
+        assert_eq!(rows[0].verdict, Verdict::Withdrawn);
+        assert_eq!(rows[0].by, "withdrawn \u{2014} the run was cancelled");
+        assert_eq!(rows[0].message, None, "the reason is not shown twice");
+        assert_eq!(
+            rows[1].verdict,
+            Verdict::Expired,
+            "a real time-out stays one"
+        );
+        assert_eq!(rows[1].by, "nobody in time");
     }
 
     #[test]

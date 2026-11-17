@@ -16,6 +16,8 @@ pub(crate) struct LastRun {
     pub(crate) run: RunId,
     /// `None` until the run's summary is known.
     pub(crate) status: Option<RunStatus>,
+    /// What the agent reported, when it says a passed run did not go well.
+    pub(crate) problem: Option<summary::Problem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +128,7 @@ fn row(state: &State, info: &TriggerInfo, now_ms: u64) -> TriggerRow {
         last_run: info.last_run_id.as_ref().map(|run| LastRun {
             run: run.clone(),
             status: state.run(run).map(|r| r.status),
+            problem: state.run(run).and_then(summary::reported_problem),
         }),
         backoff,
         error: info.error.clone(),
@@ -226,6 +229,41 @@ mod tests {
         assert_eq!(build(&state, NOW).rows, Section::Empty);
         state.apply(Update::Feed(Feed::Triggers, FeedState::Unavailable));
         assert_eq!(build(&state, NOW).rows, Section::Unavailable);
+    }
+
+    #[test]
+    fn a_last_run_the_agent_reported_failed_carries_that() {
+        use reno_proto::{ReportStatus, RunReport, RunSummary, TaskId};
+        let mut state = State::new();
+        let mut t = info("nightly", "cron", TriggerStatus::Scheduled);
+        t.last_run_id = Some(RunId::from_suffix("r1").unwrap());
+        state.apply(Update::Triggers(vec![t]));
+        state.apply(Update::RunUpserted(RunSummary {
+            run_id: RunId::from_suffix("r1").unwrap(),
+            task_id: TaskId::from_suffix("r1").unwrap(),
+            executor: "claude-code".parse().unwrap(),
+            status: RunStatus::Succeeded,
+            attempt: 1,
+            title: "x".into(),
+            prompt: None,
+            model: None,
+            stop_reason: None,
+            bot: None,
+            cwd: None,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            stop: None,
+            report: Some(RunReport {
+                status: ReportStatus::Blocked,
+                summary: "needs a token".to_owned(),
+            }),
+            not_resumed: None,
+            session: None,
+        }));
+        let view = build(&state, NOW);
+        let last = view.rows.rows()[0].last_run.as_ref().unwrap();
+        assert_eq!(last.status, Some(RunStatus::Succeeded));
+        assert_eq!(last.problem, Some(summary::Problem::Blocked));
     }
 
     #[test]
