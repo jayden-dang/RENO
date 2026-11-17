@@ -697,6 +697,58 @@ impl Kernel {
             .map_err(|_| KernelError::RunEnded(run.clone()))?
     }
 
+    /// Switch a live run to `model` from the harness's next model call. Returns the model the
+    /// harness resolved it to (`sonnet` becomes `claude-sonnet-5-5`); the run's journal then
+    /// holds `ExecEvent::ModelChanged`, its summary shows the model, and a resumed attempt
+    /// starts on it.
+    ///
+    /// Refused with [`KernelError::RunEnded`] when the run is not live,
+    /// [`KernelError::Invalid`] when its executor cannot switch a model or does not know
+    /// `model` (an id of its model list or an alias of its own, as at submit; an executor that
+    /// lists no models accepts any name and lets the harness decide), and with the harness's own
+    /// reason when it refuses.
+    pub async fn set_model(&self, run: &RunId, model: impl Into<String>) -> Result<String> {
+        let model = model.into();
+        if model.trim().is_empty() {
+            return Err(KernelError::Invalid("the model is empty".into()));
+        }
+        let record = self.shared.run_record(run).await?;
+        let commands = self
+            .shared
+            .live_commands(run)
+            .ok_or_else(|| KernelError::RunEnded(run.clone()))?;
+        let descriptor = self
+            .shared
+            .executors
+            .get(&record.executor)
+            .ok_or_else(|| KernelError::ExecutorNotFound(record.executor.clone()))?
+            .descriptor();
+        if !descriptor.caps.model_switch {
+            return Err(KernelError::Invalid(format!(
+                "{} cannot change a running run's model",
+                record.executor
+            )));
+        }
+        let candidate = Candidate {
+            descriptor,
+            health: self.shared.live_health(&record.executor),
+        };
+        if !knows_model(&candidate, &model) {
+            return Err(KernelError::Invalid(format!(
+                "{} has no model {model:?}",
+                record.executor
+            )));
+        }
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(SupCmd::SetModel { model, reply })
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))?;
+        answer
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))?
+    }
+
     /// Approvals waiting for a human, oldest first, as the store holds them.
     pub async fn pending_approvals(&self) -> Result<Vec<Approval>> {
         Ok(self
@@ -1143,6 +1195,25 @@ pub(crate) fn plan_route(
         pin,
         model,
     })
+}
+
+/// Whether the executor accepts `model`: one of the models it lists (the live list its last
+/// probe found, else the adapter's curated one), one of its aliases, or anything at all when it
+/// lists nothing to check against.
+fn knows_model(candidate: &Candidate, model: &str) -> bool {
+    let caps = &candidate.descriptor.caps;
+    let live = candidate
+        .health
+        .as_ref()
+        .map(|health| health.models.models.as_slice())
+        .filter(|models| !models.is_empty());
+    let listed = live.unwrap_or(caps.models.as_slice());
+    let base = caps.base_model(model);
+    caps.is_model_alias(model)
+        || listed.is_empty()
+        || listed
+            .iter()
+            .any(|known| known.id == model || known.id == base)
 }
 
 /// The warning for `model` when the models `executor` lists (the live list its last probe

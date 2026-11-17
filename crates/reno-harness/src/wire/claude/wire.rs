@@ -44,6 +44,10 @@ pub(crate) struct ControlResponseBody {
     /// Why an `error` response failed (a string on every CLI seen so far).
     #[serde(default)]
     pub error: Option<Value>,
+    /// The payload of a `success` response: `{models, ...}` for `initialize`,
+    /// `{model}` for `set_model`.
+    #[serde(default)]
+    pub response: Option<Value>,
 }
 
 impl ControlResponseBody {
@@ -604,6 +608,18 @@ pub(crate) fn exit_plan_response(updated_input: Value, mode: &str) -> Value {
 /// `can_use_tool` deny payload: the model reads `message` as the result.
 pub(crate) fn deny_response(message: &str) -> Value {
     json!({ "behavior": "deny", "message": message })
+}
+
+/// Client→CLI `set_model` control request: the CLI answers `{model}` (the resolved id) or an
+/// error ("Model 'x' not found"), and uses the model from its next model call, mid-turn
+/// (verified live against 2.1.326).
+pub(crate) fn set_model_request_line(request_id: &str, model: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "set_model", "model": model },
+    })
+    .to_string()
 }
 
 /// Client→CLI interrupt control request.

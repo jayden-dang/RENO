@@ -14,6 +14,7 @@
 //! | `budget.status` | `budget_status` |
 //! | `budget.pause`, `budget.resume` | `pause`, `resume` |
 //! | `run.steer` | `get_run`, `steer` |
+//! | `run.set_model` | `get_run`, `set_model` |
 //! | `run.events` | `run_events` |
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
@@ -74,9 +75,9 @@ use reno_proto::{
     DaemonShutdownResult, DaemonStatus, DaemonStatusInfo, ErrorCode, ErrorObject, ExecutorId,
     FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams,
     RunCancelResult, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunList,
-    RunListParams, RunListResult, RunResume, RunResumeParams, RunResumeResult, RunStatus, RunSteer,
-    RunSteerParams, RunSteerResult, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun,
-    TaskRunParams, TaskRunResult,
+    RunListParams, RunListResult, RunResume, RunResumeParams, RunResumeResult, RunSetModel,
+    RunSetModelParams, RunSetModelResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult,
+    RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
 };
 use reno_proto::{
     BudgetPause, BudgetPauseParams, BudgetPauseResult, BudgetResume, BudgetResumeParams,
@@ -181,6 +182,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<RunCancel, _, _>(bind(ctx, run_cancel))
         .method::<RunResume, _, _>(bind(ctx, run_resume))
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
+        .method::<RunSetModel, _, _>(bind(ctx, run_set_model))
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
         .method::<ApprovalHistory, _, _>(bind(ctx, approval_history))
@@ -605,6 +607,18 @@ async fn run_steer(ctx: Arc<Ctx>, p: RunSteerParams) -> Reply<RunSteerResult> {
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(RunSteerResult {})
+}
+
+async fn run_set_model(ctx: Arc<Ctx>, p: RunSetModelParams) -> Reply<RunSetModelResult> {
+    if p.model.trim().is_empty() {
+        return Err(invalid("the model is empty"));
+    }
+    let model = ctx
+        .kernel
+        .set_model(&p.run_id, p.model.trim())
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(RunSetModelResult { model })
 }
 
 async fn approval_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<ApprovalListResult> {

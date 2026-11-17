@@ -19,8 +19,8 @@ use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall,
-    ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunResume, RunShow, RunTail,
-    TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
+    ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunModel, RunResume, RunShow,
+    RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
     WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
@@ -39,6 +39,7 @@ pub(crate) async fn run(env: &Env, command: RunCommand) -> anyhow::Result<ExitCo
         RunCommand::Tail(args) => run_tail(env, args).await,
         RunCommand::Cancel(args) => run_cancel(env, args).await,
         RunCommand::Resume(args) => run_resume(env, args).await,
+        RunCommand::Model(args) => run_model(env, args).await,
     }
 }
 
@@ -331,6 +332,20 @@ async fn run_resume(env: &Env, args: RunResume) -> anyhow::Result<ExitCode> {
             "resuming {} as attempt {attempt}; follow it with `reno run tail {}`",
             args.run, args.run
         ))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_model(env: &Env, args: RunModel) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let switched = client
+        .set_run_model(&args.run, args.model)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&switched)?;
+    } else {
+        print_line(format_args!("{} now uses {}", args.run, switched.model))?;
     }
     Ok(ExitCode::SUCCESS)
 }

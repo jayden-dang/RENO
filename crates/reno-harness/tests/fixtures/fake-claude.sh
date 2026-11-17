@@ -28,6 +28,19 @@ read -r first || exit 1
 initialized=false
 while :; do
   case "$first" in
+    # The probe's model handshake (`discover.rs`): one question, one answer, no run. The
+    # answer is the frame FAKE_CLAUDE_MODELS names (a recorded `initialize` response) or an
+    # `initialize` answer without models; FAKE_CLAUDE_MODELS=hang never answers.
+    *'"request_id":"reno_probe_models"'*)
+      case "${FAKE_CLAUDE_MODELS:-}" in
+        hang) exec sleep 30 ;;
+        '') emit_probe='{"type":"control_response","response":{"subtype":"success","request_id":"reno_probe_models","response":{}}}'
+            printf '%s\n' "$emit_probe" ;;
+        *) tr -d '\n' < "$FAKE_CLAUDE_MODELS" | sed 's/"request_id": *"[^"]*"/"request_id":"reno_probe_models"/'
+           echo ;;
+      esac
+      exit 0
+      ;;
     *'"request_id":"reno_initialize"'*)
       case "$first" in *'"perTaskStopAffordance":true'*) initialized=true ;; esac
       printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"reno_initialize","response":{}}}'
@@ -351,6 +364,25 @@ case "$first" in
   esac
   emit "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fable-5\",\"tools\":[],\"cwd\":\"/tmp\",\"session_id\":\"$sid\"}"
   emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"resumed=$resumed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"$sid\"}"
+  ;;
+
+*scenario:setmodel*)
+  # `ExecHandle::try_set_model` -> a `set_model` control request: answered with the resolved
+  # model, or an error for a model the CLI does not know (as the real CLI does, 2.1.326).
+  emit '{"type":"system","subtype":"init","model":"claude-haiku-5-5","tools":[],"cwd":"/tmp","session_id":"sess-sm"}'
+  read -r ask || exit 1
+  id=$(printf '%s\n' "$ask" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  case "$ask" in
+  *'"model":"sonnet"'*)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"model\":\"claude-sonnet-5-5\"}}}" ;;
+  *)
+    emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"$id\",\"error\":\"Model 'no-such-model-xyz' not found\"}}" ;;
+  esac
+  # A second request is answered the same way, then the turn ends.
+  read -r ask2 || exit 1
+  id2=$(printf '%s\n' "$ask2" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+  emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id2\",\"response\":{\"model\":\"claude-sonnet-5-5\"}}}"
+  emit '{"type":"result","subtype":"success","result":"switched","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sm"}'
   ;;
 
 *scenario:unknown-control*)

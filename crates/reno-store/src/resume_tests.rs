@@ -206,3 +206,36 @@ async fn not_resumed_is_recorded_on_the_interrupted_run() {
     store.set_not_resumed(&run(), 1, &why, 50).await.unwrap();
     assert_eq!(record(&store).await.not_resumed, Some(why));
 }
+
+#[tokio::test]
+async fn the_model_in_use_is_recorded_and_a_switch_is_pinned_for_the_next_attempt() {
+    let (_d, store) = running().await;
+    assert_eq!(record(&store).await.model, None);
+    // What the harness reported at start: shown, but not a pin.
+    store
+        .record_model(&run(), 1, "claude-haiku-5-5", false)
+        .await
+        .unwrap();
+    let row = record(&store).await;
+    assert_eq!(row.model.as_deref(), Some("claude-haiku-5-5"));
+    assert!(row.spec.get("model").is_none());
+    // A switch overrides what the task asked for, so a resumed attempt keeps it.
+    store
+        .record_model(&run(), 1, "claude-sonnet-5-5", true)
+        .await
+        .unwrap();
+    let row = record(&store).await;
+    assert_eq!(row.model.as_deref(), Some("claude-sonnet-5-5"));
+    assert_eq!(row.spec["model"], "claude-sonnet-5-5");
+    // A stale attempt cannot change it.
+    assert!(
+        store
+            .record_model(&run(), 7, "claude-opus-5-5", true)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        record(&store).await.model.as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+}

@@ -345,6 +345,17 @@ impl Db {
             .await
     }
 
+    pub(crate) async fn record_model(
+        &self,
+        run: &RunId,
+        fence: u64,
+        model: &str,
+        pin: bool,
+    ) -> Result<()> {
+        self.wrote();
+        self.store.record_model(run, fence, model, pin).await
+    }
+
     pub(crate) async fn set_report(
         &self,
         run: &RunId,

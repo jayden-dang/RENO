@@ -131,6 +131,7 @@ impl<W: Write> Transcript<W> {
                 )
             }
             ExecEvent::UserMessage { text } => writeln!(self.out, "you: {text}"),
+            ExecEvent::ModelChanged { model } => writeln!(self.out, "model: now {model}"),
             ExecEvent::AgentReport {
                 status,
                 summary,

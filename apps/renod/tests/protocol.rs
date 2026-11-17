@@ -93,7 +93,14 @@ daemon_test! {
         assert_eq!((status.active_runs, status.queued_runs), (0, 0));
         let mut names: Vec<_> = status.executors.iter().map(|e| e.as_str().to_owned()).collect();
         names.sort();
-        assert_eq!(names, ["mock", "mock-approval", "mock-burst", "mock-danger", "mock-hold"]);
+        assert_eq!(names, [
+                "mock",
+                "mock-approval",
+                "mock-burst",
+                "mock-danger",
+                "mock-hold",
+                "mock-model"
+            ]);
         fx.stop().await;
     }
 }
@@ -130,6 +137,39 @@ daemon_test! {
         assert_eq!(events.len(), 402);
         assert_eq!(seqs(&events), (1..=402).collect::<Vec<_>>());
         assert!(is_done(&events.last().unwrap().event, StopReason::Completed));
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
+    async fn set_model_switches_a_live_run_and_refuses_a_model_the_executor_lacks() {
+        let fx = Fixture::start().await;
+        let run = fx.run("mock-model", "switch me").await;
+        let mut events = Box::pin(fx.client.run_events(run.clone(), None));
+        loop {
+            let item = within(events.next()).await.unwrap().unwrap();
+            if matches!(item.event, ExecEvent::Text { .. }) {
+                break;
+            }
+        }
+        // A model the executor does not list is refused, and nothing changes.
+        let e = within(fx.client.set_run_model(&run, "no-such-model".into())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::InvalidParams);
+        assert_eq!(fx.client.get_run(&run).await.unwrap().model.as_deref(), Some("mock-1"));
+
+        let switched = within(fx.client.set_run_model(&run, "mock-2".into())).await.unwrap();
+        assert_eq!(switched.model, "mock-2");
+        assert_eq!(fx.client.get_run(&run).await.unwrap().model.as_deref(), Some("mock-2"));
+        let mut rest = Vec::new();
+        while let Some(item) = within(events.next()).await {
+            rest.push(item.unwrap().event);
+        }
+        let changes: Vec<_> = rest
+            .iter()
+            .filter(|e| matches!(e, ExecEvent::ModelChanged { model } if model == "mock-2"))
+            .collect();
+        assert_eq!(changes.len(), 1, "{rest:?}");
+        assert!(is_done(rest.last().unwrap(), StopReason::Completed));
         fx.stop().await;
     }
 }
@@ -468,6 +508,14 @@ daemon_test! {
         let e = within(fx.client.steer(&done, "late".into())).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::Conflict);
         let e = within(fx.client.steer(&done, "  ".into())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::InvalidParams);
+
+        // run.set_model on a run that does not exist, and on one that is over.
+        let e = within(fx.client.set_run_model(&missing, "mock-2".into())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::NotFound);
+        let e = within(fx.client.set_run_model(&done, "mock-2".into())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::Conflict);
+        let e = within(fx.client.set_run_model(&done, " ".into())).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::InvalidParams);
 
         // approval.decide on an approval that is not there.

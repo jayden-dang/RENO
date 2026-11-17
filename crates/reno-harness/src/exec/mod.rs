@@ -195,9 +195,22 @@ pub struct ExecControls {
     /// Answers to `NeedsInput` and `NeedsApproval` requests. Bounded. A request still unanswered
     /// when `cancel` fires is denied.
     pub answers: mpsc::Receiver<ExecAnswer>,
+    /// Requests to change the run's model (`ExecHandle::try_set_model`). Bounded. Only an
+    /// executor that claims `ExecutorCaps::model_switch` serves them; for any other the
+    /// requests are dropped unanswered, and the caller sees the run no longer accepts them.
+    pub models: mpsc::Receiver<ModelRequest>,
     /// Where to report each child process the run spawns. Bounded.
     #[cfg(unix)]
     pub processes: ProcessSink,
+}
+
+/// One request to change the model of the run, with the way to answer it.
+#[derive(Debug)]
+pub struct ModelRequest {
+    /// The model asked for: an id or alias the harness accepts.
+    pub model: String,
+    /// The model the harness resolved it to, or the harness's reason for refusing it.
+    pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
 }
 
 /// The executor's end of the process-record queue: report every child as soon as it is spawned.
@@ -231,6 +244,7 @@ pub struct ExecHandle {
     steering: mpsc::Sender<String>,
     cancel: CancellationToken,
     answers: mpsc::Sender<ExecAnswer>,
+    models: mpsc::Sender<ModelRequest>,
     /// The receiving end of the process-record queue, taken once.
     #[cfg(unix)]
     records: std::sync::Arc<std::sync::Mutex<Option<mpsc::Receiver<ProcessRecord>>>>,
@@ -264,6 +278,7 @@ impl ExecControls {
         let capacity = capacity.max(1);
         let (steer_tx, steer_rx) = mpsc::channel(capacity);
         let (answer_tx, answer_rx) = mpsc::channel(capacity);
+        let (model_tx, model_rx) = mpsc::channel(capacity);
         #[cfg(unix)]
         let (record_tx, record_rx) = mpsc::channel(capacity);
         (
@@ -271,6 +286,7 @@ impl ExecControls {
                 steering: steer_rx,
                 cancel: cancel.clone(),
                 answers: answer_rx,
+                models: model_rx,
                 #[cfg(unix)]
                 processes: ProcessSink { records: record_tx },
             },
@@ -278,6 +294,7 @@ impl ExecControls {
                 steering: steer_tx,
                 cancel,
                 answers: answer_tx,
+                models: model_tx,
                 #[cfg(unix)]
                 records: std::sync::Arc::new(std::sync::Mutex::new(Some(record_rx))),
             },
@@ -300,6 +317,26 @@ impl ExecHandle {
             mpsc::error::TrySendError::Full(_) => SteerRejected::Full,
             mpsc::error::TrySendError::Closed(_) => SteerRejected::Closed,
         })
+    }
+
+    /// Ask the executor to switch the run to `model` without waiting: the answer (the resolved
+    /// model, or why the harness refused) arrives on the returned receiver. The caller must not
+    /// block the executor's event stream on it (a supervisor awaits it off its own task).
+    pub fn try_set_model(
+        &self,
+        model: impl Into<String>,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<String, String>>, SteerRejected> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.models
+            .try_send(ModelRequest {
+                model: model.into(),
+                reply,
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => SteerRejected::Full,
+                mpsc::error::TrySendError::Closed(_) => SteerRejected::Closed,
+            })?;
+        Ok(answer)
     }
 
     /// Answer a `NeedsInput` request. An empty `answers` declines it.

@@ -621,6 +621,107 @@ async fn steer_reaches_a_live_run_and_a_finished_one_refuses() {
     ));
 }
 
+/// A mock that lists two models and one alias, and can switch.
+fn switching(steps: impl IntoIterator<Item = MockStep>) -> reno_harness::exec::MockExecutor {
+    let m = mock(steps);
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
+    descriptor.caps.models.push(reno_proto::ModelInfo {
+        id: "mock-2".into(),
+        display_name: Some("Mock 2".into()),
+        description: None,
+    });
+    descriptor.caps.model_aliases = vec!["fast".into()];
+    descriptor.caps.model_switch = true;
+    m.with_descriptor(descriptor)
+}
+
+#[tokio::test(start_paused = true)]
+async fn set_model_switches_a_live_run_and_shows_in_its_summary_and_journal() {
+    let m = switching([
+        MockStep::started("s1", "mock-1"),
+        MockStep::AwaitModel,
+        MockStep::AwaitModel,
+        MockStep::text("on"),
+    ]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let run = fx.submit("go").await;
+    until(async || {
+        (fx.kernel.get_run(&run).await.unwrap().model.as_deref() == Some("mock-1")).then_some(())
+    })
+    .await;
+    // What the harness reported in `Started` is the run's model.
+    assert_eq!(fx.kernel.set_model(&run, "mock-2").await.unwrap(), "mock-2");
+    // The reply is after the change is stored.
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model.as_deref(),
+        Some("mock-2")
+    );
+    // An alias is accepted as the executor lists it, and the harness says what it means.
+    assert_eq!(fx.kernel.set_model(&run, "fast").await.unwrap(), "mock-1");
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(m.log().model_requests, ["mock-2", "fast"]);
+    let changes: Vec<String> = fx
+        .journal(&run)
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            ExecEvent::ModelChanged { model } => Some(model),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        ["mock-2", "mock-1"],
+        "one journal entry per switch"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn set_model_refuses_what_cannot_be_switched() {
+    let m = switching([MockStep::started("s1", "mock-1"), MockStep::AwaitSteer]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    // A model the executor does not list.
+    assert!(matches!(
+        fx.kernel.set_model(&run, "gpt-nope").await,
+        Err(KernelError::Invalid(_))
+    ));
+    assert!(matches!(
+        fx.kernel.set_model(&run, "  ").await,
+        Err(KernelError::Invalid(_))
+    ));
+    assert!(matches!(
+        fx.kernel
+            .set_model(&RunId::from_suffix("nope").unwrap(), "mock-2")
+            .await,
+        Err(KernelError::RunNotFound(_))
+    ));
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert!(matches!(
+        fx.kernel.set_model(&run, "mock-2").await,
+        Err(KernelError::RunEnded(_))
+    ));
+    assert!(
+        m.log().model_requests.is_empty(),
+        "nothing reached the harness"
+    );
+
+    // An executor that cannot switch is not asked.
+    let plain = mock([MockStep::started("s1", "mock-1"), MockStep::AwaitSteer]);
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&plain);
+    descriptor.caps.model_switch = false;
+    let plain = plain.with_descriptor(descriptor);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&plain))).await;
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    assert!(matches!(
+        fx.kernel.set_model(&run, "mock-1").await,
+        Err(KernelError::Invalid(why)) if why.contains("cannot change")
+    ));
+    assert!(plain.log().model_requests.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_live_run_heartbeats_every_third_of_the_lease() {
     let m = mock([MockStep::Sleep(Duration::from_secs(3600))]);

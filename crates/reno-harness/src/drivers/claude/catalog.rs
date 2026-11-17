@@ -1,9 +1,9 @@
 //! The curated Claude model list, and which Claude Code versions know each model.
 //!
 //! The executor's descriptor lists these (`ExecutorCaps::models`): `descriptor()` is
-//! synchronous and runs in no test, so the list is data, not a discovery call. A live
-//! `initialize` handshake could append the models an account or gateway adds; no caller asks
-//! for that yet.
+//! synchronous and runs in no test, so the list is data, not a discovery call. It is the
+//! fallback: the probe's live `initialize` handshake (see `discover`) replaces it, and its
+//! aliases join [`aliases`], whenever the CLI answers.
 
 use reno_proto::ModelInfo;
 
@@ -37,9 +37,17 @@ const ALIASES: &[&str] = &[
     "opusplan[1m]",
 ];
 
-/// The aliases the CLI accepts: see [`ALIASES`].
-pub(super) fn aliases() -> Vec<String> {
-    ALIASES.iter().map(|alias| (*alias).to_owned()).collect()
+/// The aliases the CLI accepts: the documented [`ALIASES`], then any the CLI's own model list
+/// added (`live`, from its `initialize` answer). The documented ones stay when a list is
+/// known: `opusplan` and the `[1m]` forms are not rows of it but are accepted all the same.
+pub(super) fn aliases(live: Option<&[String]>) -> Vec<String> {
+    let mut all: Vec<String> = ALIASES.iter().map(|alias| (*alias).to_owned()).collect();
+    for alias in live.unwrap_or_default() {
+        if !all.contains(alias) {
+            all.push(alias.clone());
+        }
+    }
+    all
 }
 
 /// The oldest Claude Code that lists each curated model (T3 Code's model
@@ -92,7 +100,7 @@ mod tests {
 
     #[test]
     fn the_cli_aliases_are_the_documented_ones() {
-        let aliases = aliases();
+        let aliases = aliases(None);
         for alias in [
             "sonnet",
             "opus",
@@ -110,6 +118,15 @@ mod tests {
                 .iter()
                 .all(|(id, _)| !aliases.iter().any(|a| a == id))
         );
+    }
+
+    #[test]
+    fn the_live_aliases_join_the_documented_ones_without_repeats() {
+        let live = ["sonnet".to_owned(), "newalias".to_owned()];
+        let all = aliases(Some(&live));
+        assert!(all.iter().any(|a| a == "opusplan"));
+        assert_eq!(all.iter().filter(|a| *a == "sonnet").count(), 1);
+        assert!(all.iter().any(|a| a == "newalias"));
     }
 
     #[test]

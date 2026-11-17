@@ -60,6 +60,9 @@ pub(crate) struct Executors {
     pub(crate) burst: MockExecutor,
     /// `mock-danger`: asks to run `rm -rf build`, which the default policy denies outright.
     pub(crate) danger: MockExecutor,
+    /// `mock-model`: lists `mock-1`, `mock-2` and the alias `fast`, and holds until a model
+    /// change reaches it.
+    pub(crate) model: MockExecutor,
 }
 
 impl Executors {
@@ -68,7 +71,23 @@ impl Executors {
         let mut burst: Vec<MockStep> = vec![MockStep::started("burst", "mock-1")];
         burst.extend((0..400).map(|n| MockStep::text(format!("{n} "))));
         burst.push(MockStep::done(StopReason::Completed));
+        let model = named("mock-model").with_steps([
+            MockStep::started("model", "mock-1"),
+            MockStep::text("holding. "),
+            MockStep::AwaitModel,
+            MockStep::text("switched."),
+            MockStep::done(StopReason::Completed),
+        ]);
+        let mut descriptor = reno_harness::exec::Executor::descriptor(&model);
+        descriptor.caps.models.push(reno_proto::ModelInfo {
+            id: "mock-2".into(),
+            display_name: Some("Mock 2".into()),
+            description: None,
+        });
+        descriptor.caps.model_aliases = vec!["fast".into()];
+        let model = model.with_descriptor(descriptor);
         Self {
+            model,
             mock: mock_executor(false).expect("mock"),
             hold: named("mock-hold").with_steps(mock_script(true)),
             approval: named("mock-approval").with_steps([
@@ -113,6 +132,7 @@ impl Executors {
             &self.approval,
             &self.burst,
             &self.danger,
+            &self.model,
         ]
         .into_iter()
         .fold(ExecutorRegistry::new(), |registry, mock| {

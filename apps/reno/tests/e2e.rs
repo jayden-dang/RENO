@@ -432,6 +432,15 @@ fn an_interrupted_run_is_resumed_from_the_command_line() {
         Some(1)
     );
 
+    // A model change needs a live run; one that does not exist is not found.
+    assert_eq!(
+        world
+            .reno(&["run", "model", "run_nothere", "sonnet"])
+            .status
+            .code(),
+        Some(1)
+    );
+
     // The kill switch interrupts it. A person's cancel would end it for good instead.
     assert!(world.reno(&["pause", "--stop-live"]).status.success());
     task.wait_with_output().expect("task run ends");

@@ -62,6 +62,15 @@ use crate::procs::{Records, Spawned};
 use crate::shared::{AgentDecision, Shared, Slot, StopCause, Subscription, SupCmd};
 use crate::wake::{WakeSignal, system_woke};
 
+/// How long the harness has to answer a model change.
+const MODEL_SWITCH_WAIT: Duration = Duration::from_secs(30);
+
+/// What the harness said to one `set_model`, with the caller's way to hear of it.
+struct ModelAnswer {
+    outcome: Result<String, KernelError>,
+    reply: oneshot::Sender<Result<String, KernelError>>,
+}
+
 /// A `run_events` subscriber's queue, from the supervisor's side.
 #[derive(Debug)]
 struct Sub {
@@ -156,6 +165,15 @@ pub(crate) struct Supervisor {
     /// The budget that stopped the run, which becomes the diagnostic of its `Done` when the
     /// executor ends because of the cancel.
     budget: Option<BudgetStop>,
+    /// Where the answers to `set_model` requests come back to (see [`Self::set_model`]).
+    model_answers_tx: mpsc::Sender<ModelAnswer>,
+    model_answers: mpsc::Receiver<ModelAnswer>,
+    /// A `ModelChanged` event processed before the answer to its request, and an answer
+    /// processed before its event: each is journaled once, by whichever of the two comes first.
+    model_events_ahead: u32,
+    model_answers_ahead: u32,
+    /// Requests whose answer has not come back; an event with none open is the harness's own.
+    model_requests_open: u32,
     /// Last field: the slot is freed after everything else is dropped.
     _slot: Slot,
 }
@@ -200,6 +218,7 @@ impl Supervisor {
         slot: Slot,
     ) -> Self {
         let records = Records::take(&handle);
+        let (model_answers_tx, model_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
         let stream = match info.redactor.clone() {
             Some(redactor) => stream
                 .map(move |event| redactor.redact_event(event))
@@ -230,6 +249,11 @@ impl Supervisor {
             lost: false,
             wall: None,
             budget: None,
+            model_answers_tx,
+            model_answers,
+            model_events_ahead: 0,
+            model_answers_ahead: 0,
+            model_requests_open: 0,
             _slot: slot,
         }
     }
@@ -255,6 +279,7 @@ impl Supervisor {
                 biased;
                 () = system_woke(&mut woke) => self.expire_past_wall_clock().await,
                 spawned = self.records.next() => self.persist(spawned).await,
+                Some(answer) = self.model_answers.recv() => self.model_answered(answer).await,
                 cmd = self.cmd_rx.recv(), if commands_open => match cmd {
                     Some(cmd) => self.command(cmd).await,
                     None => commands_open = false,
@@ -351,6 +376,20 @@ impl Supervisor {
         if let ExecEvent::NeedsInput { request_id, .. } = &event {
             self.input_requested(request_id).await;
         }
+        if let ExecEvent::ModelChanged { model } = &event {
+            if self.model_answers_ahead > 0 {
+                // The answer to its request got here first and journaled it.
+                self.model_answers_ahead -= 1;
+                return;
+            }
+            if self.model_requests_open > 0 {
+                self.model_events_ahead += 1;
+            }
+            self.record_model(model, true).await;
+        }
+        if let ExecEvent::Started { model, .. } = &event {
+            self.record_model(model, false).await;
+        }
         if let ExecEvent::Started { session, .. } = &event {
             // The session is what a resume continues: it is durable before anyone sees it.
             if let Err(error) = self
@@ -379,6 +418,72 @@ impl Supervisor {
             })
             .await;
         }
+    }
+
+    /// Stores the model the harness reports in use. `pin` also makes it the model of the run's
+    /// next attempt (a switch outlives a crash or a resume); a store failure is logged and the
+    /// run goes on.
+    async fn record_model(&mut self, model: &str, pin: bool) {
+        if self.lost {
+            return;
+        }
+        match self
+            .shared
+            .db
+            .record_model(&self.run, self.fence, model, pin)
+            .await
+        {
+            Ok(()) => self.shared.mark_runs_dirty(),
+            Err(error) => {
+                tracing::warn!(run = %self.run, %error, "could not record the run's model")
+            }
+        }
+    }
+
+    /// Passes a `set_model` request to the executor. The answer is awaited off this task (the
+    /// executor may be waiting for this one to read its stream) and comes back as a
+    /// [`ModelAnswer`].
+    fn set_model(&mut self, model: String, reply: oneshot::Sender<Result<String, KernelError>>) {
+        let answer = match self.handle.try_set_model(model) {
+            Ok(answer) => answer,
+            Err(rejected) => {
+                let _ = reply.send(Err(match rejected {
+                    SteerRejected::Full => KernelError::SteerQueueFull(self.run.clone()),
+                    SteerRejected::Closed => KernelError::RunEnded(self.run.clone()),
+                }));
+                return;
+            }
+        };
+        self.model_requests_open += 1;
+        let (run, back) = (self.run.clone(), self.model_answers_tx.clone());
+        tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(MODEL_SWITCH_WAIT, answer).await {
+                Ok(Ok(Ok(model))) => Ok(model),
+                Ok(Ok(Err(why))) => Err(KernelError::Invalid(why)),
+                Ok(Err(_)) => Err(KernelError::RunEnded(run)),
+                Err(_) => Err(KernelError::ModelSwitchTimedOut(run)),
+            };
+            let _ = back.send(ModelAnswer { outcome, reply }).await;
+        });
+    }
+
+    /// The harness answered a `set_model`. A switch that took is journaled and stored before
+    /// the caller hears of it, unless its event came through the stream first.
+    async fn model_answered(&mut self, answer: ModelAnswer) {
+        let ModelAnswer { outcome, reply } = answer;
+        self.model_requests_open = self.model_requests_open.saturating_sub(1);
+        if let Ok(model) = &outcome {
+            if self.model_events_ahead > 0 {
+                self.model_events_ahead -= 1;
+            } else {
+                self.model_answers_ahead += 1;
+                self.record_model(model, true).await;
+                self.publish(&ExecEvent::ModelChanged {
+                    model: model.clone(),
+                });
+            }
+        }
+        let _ = reply.send(outcome);
     }
 
     /// Stops the run for `stop`: the executor is told to cancel, and the run ends `interrupted`
@@ -514,6 +619,7 @@ impl Supervisor {
                 }
                 let _ = reply.send(Ok(()));
             }
+            SupCmd::SetModel { model, reply } => self.set_model(model, reply),
             SupCmd::AgentApproval { subject, reply } => self.agent_approval(subject, reply).await,
             SupCmd::Steer { prompt, reply } => {
                 // Never wait here: the executor drains steering from inside the stream this task

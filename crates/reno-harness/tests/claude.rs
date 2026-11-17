@@ -1569,3 +1569,137 @@ async fn live_unrestorable_session_relaunches_fresh() {
     );
     assert_eq!(done(&outcome.events).0, StopReason::Error);
 }
+
+fn models_fixture() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude/live-2.1.326-initialize-models.json")
+        .display()
+        .to_string()
+}
+
+#[tokio::test]
+async fn probe_asks_the_cli_for_its_models_and_the_descriptor_follows() {
+    let (executor, _dir) = probed(&[("FAKE_CLAUDE_MODELS", &models_fixture())]);
+    let before = executor.descriptor();
+    let health = executor.probe().await;
+    assert_eq!(health.models.source, ModelSource::Live);
+    let ids: Vec<&str> = health.models.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids.len(), 13, "{ids:?}");
+    assert_eq!(
+        ids[..4],
+        [
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5"
+        ]
+    );
+    assert_eq!(
+        health.models.models[0].display_name.as_deref(),
+        Some("Opus 5.5")
+    );
+    // What validation reads is the live list, and `sonnet` (the keeper bot's model) stays a name
+    // the CLI accepts, as do the documented aliases the list does not carry.
+    let caps = executor.descriptor().caps;
+    assert_eq!(caps.models, health.models.models);
+    assert_ne!(caps.models, before.caps.models);
+    for alias in ["sonnet", "opus", "haiku", "fable", "opusplan", "sonnet[1m]"] {
+        assert!(caps.is_model_alias(alias), "{alias}");
+    }
+    assert!(!caps.is_model_alias("default"));
+    assert!(caps.model_switch);
+}
+
+#[tokio::test]
+async fn a_cli_that_lists_no_models_or_never_answers_leaves_the_curated_list() {
+    let (executor, _dir) = probed(&[]);
+    let health = executor.probe().await;
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert!(executor.descriptor().caps.is_model_alias("sonnet"));
+
+    let (executor, _dir) = probed(&[("FAKE_CLAUDE_MODELS", "hang")]);
+    let started = std::time::Instant::now();
+    let health = executor
+        .with_probe_budget(Duration::from_millis(300))
+        .probe()
+        .await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(health.models.source, ModelSource::Curated);
+    assert!(!health.models.models.is_empty());
+}
+
+#[tokio::test]
+async fn set_model_reaches_the_cli_and_announces_the_resolved_model() {
+    let mut live = start(&executor(), spec("scenario:setmodel")).await;
+    // The CLI refuses a model it does not know, and says why.
+    let refused = live
+        .handle
+        .try_set_model("no-such-model-xyz")
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused,
+        Err("Model 'no-such-model-xyz' not found".to_owned())
+    );
+    // An alias resolves to the model it means, and the run says it changed.
+    let switched = live.handle.try_set_model("sonnet").unwrap();
+    let events = drive(&mut live, |_| Decision::Allow).await.events;
+    assert_eq!(switched.await.unwrap(), Ok("claude-sonnet-5-5".to_owned()));
+    let changes: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::ModelChanged { model } => Some(model.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        ["claude-sonnet-5-5"],
+        "only a success is announced: {events:?}"
+    );
+    assert_eq!(done(&events).0, StopReason::Completed);
+}
+
+#[tokio::test]
+#[ignore = "spawns the real claude CLI (a handshake, no model call); reads its login state"]
+async fn live_probe_lists_the_clis_models() {
+    let executor = ClaudeExecutor::new();
+    let health = executor.probe().await;
+    assert_eq!(health.models.source, ModelSource::Live, "{health:?}");
+    assert!(executor.descriptor().caps.is_model_alias("sonnet"));
+}
+
+#[tokio::test]
+#[ignore = "spawns the real claude CLI; needs install + auth + network"]
+async fn live_set_model_switches_a_running_turn() {
+    let mut spec = spec_with("Reply with exactly the word: pong", AccessMode::Supervised);
+    spec.model = Some("haiku".into());
+    let mut live = start(&ClaudeExecutor::new(), spec).await;
+    let mut switched = None;
+    let run = async {
+        while let Some(event) = live.stream.next().await {
+            match event {
+                ExecEvent::Started { .. } => {
+                    switched = Some(live.handle.try_set_model("sonnet").unwrap());
+                }
+                ExecEvent::ModelChanged { model } => {
+                    assert_eq!(model, "claude-sonnet-5-5");
+                    return true;
+                }
+                ExecEvent::Done { .. } => return false,
+                _ => {}
+            }
+        }
+        false
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_secs(120), run)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        switched.unwrap().await.unwrap(),
+        Ok("claude-sonnet-5-5".into())
+    );
+}

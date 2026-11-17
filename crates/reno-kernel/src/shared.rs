@@ -62,6 +62,12 @@ pub(crate) enum SupCmd {
         prompt: String,
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Ask the executor to switch the run to a model. The reply carries the model the harness
+    /// resolved it to, once the change is journaled and stored.
+    SetModel {
+        model: String,
+        reply: oneshot::Sender<Result<String>>,
+    },
     /// Journal a structured report the run made through Reno's MCP server.
     Report {
         event: ExecEvent,

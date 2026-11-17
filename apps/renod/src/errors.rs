@@ -23,9 +23,10 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         KernelError::NotCancellable { .. }
         | KernelError::NotResumable { .. }
         | KernelError::RunEnded(_) => ErrorCode::Conflict,
-        KernelError::SteerQueueFull(_) | KernelError::ShuttingDown | KernelError::Gap { .. } => {
-            ErrorCode::Unavailable
-        }
+        KernelError::SteerQueueFull(_)
+        | KernelError::ModelSwitchTimedOut(_)
+        | KernelError::ShuttingDown
+        | KernelError::Gap { .. } => ErrorCode::Unavailable,
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
         // One answer for every cause: a caller learns nothing about which tokens exist.
@@ -187,6 +188,10 @@ mod tests {
                 ErrorCode::Conflict,
             ),
             (KernelError::SteerQueueFull(run()), ErrorCode::Unavailable),
+            (
+                KernelError::ModelSwitchTimedOut(run()),
+                ErrorCode::Unavailable,
+            ),
             (KernelError::ShuttingDown, ErrorCode::Unavailable),
             (
                 KernelError::Gap {

@@ -36,6 +36,11 @@ pub enum MockStep {
     },
     /// Wait until the run's controls carry a steering prompt.
     AwaitSteer,
+    /// Wait until the run's controls carry a model change request, answer it (the model itself
+    /// when the descriptor lists it or has it as an alias, else a refusal, as the harness does)
+    /// and, when it took, emit `ExecEvent::ModelChanged` for it. An alias resolves to the
+    /// first listed model.
+    AwaitModel,
     /// Report a spawned child on the run's process-record queue, as a real executor does right
     /// after it spawns. Unix only, like `ProcessRecord`.
     #[cfg(unix)]
@@ -76,6 +81,8 @@ pub struct MockLog {
     pub steers: Vec<String>,
     /// Every answer received, in order, matched or not.
     pub answers: Vec<ExecAnswer>,
+    /// Every model the run was asked to switch to, in order, accepted or not.
+    pub model_requests: Vec<String>,
 }
 
 /// An [`Executor`] that plays a script. Cheap to clone; clones share the log.
@@ -137,7 +144,7 @@ impl MockExecutor {
                     display_name: Some("Mock 1".into()),
                     description: None,
                 }],
-                model_switch: false,
+                model_switch: true,
                 isolates_user_config: false,
                 model_aliases: vec![],
             },
@@ -209,6 +216,7 @@ impl Executor for MockExecutor {
             lock(&self.log).specs.push(spec);
         }
         let run = Run {
+            descriptor: self.descriptor.clone(),
             steps: self.steps.iter().cloned().collect(),
             controls,
             log: Arc::clone(&self.log),
@@ -233,6 +241,7 @@ enum Waited {
 
 /// The state of one playing script.
 struct Run {
+    descriptor: ExecutorDescriptor,
     steps: VecDeque<MockStep>,
     controls: ExecControls,
     log: Arc<Mutex<MockLog>>,
@@ -283,6 +292,10 @@ impl Run {
                 }
                 MockStep::AwaitAnswer { request_id } => self.wait_answer(&request_id).await,
                 MockStep::AwaitSteer => self.wait_steer().await,
+                MockStep::AwaitModel => match self.wait_model().await {
+                    (Waited::Got, Some(event)) => return Some(event),
+                    (waited, _) => waited,
+                },
                 #[cfg(unix)]
                 MockStep::Spawned(record) => self.report_process(record).await,
             };
@@ -335,6 +348,41 @@ impl Run {
             () = self.controls.cancel.cancelled() => Waited::Cancelled,
             _ = self.controls.processes.report(record) => Waited::Got,
         }
+    }
+
+    /// What the descriptor makes of a requested model: itself when listed, the first listed
+    /// model for an alias, else the harness's refusal.
+    fn resolve_model(&self, model: &str) -> Result<String, String> {
+        let caps = &self.descriptor.caps;
+        let base = caps.base_model(model);
+        if caps.models.iter().any(|known| known.id == base) {
+            return Ok(base.to_owned());
+        }
+        match caps.models.first() {
+            Some(first) if caps.is_model_alias(model) => Ok(first.id.clone()),
+            _ => Err(format!("Model '{model}' not found")),
+        }
+    }
+
+    async fn wait_model(&mut self) -> (Waited, Option<ExecEvent>) {
+        let received = tokio::select! {
+            biased;
+            () = self.controls.cancel.cancelled() => return (Waited::Cancelled, None),
+            received = self.controls.models.recv() => received,
+        };
+        let Some(request) = received else {
+            return (Waited::Closed, None);
+        };
+        if self.recording {
+            lock(&self.log).model_requests.push(request.model.clone());
+        }
+        let resolved = self.resolve_model(&request.model);
+        let event = resolved
+            .clone()
+            .ok()
+            .map(|model| ExecEvent::ModelChanged { model });
+        let _ = request.reply.send(resolved);
+        (Waited::Got, event)
     }
 
     async fn wait_steer(&mut self) -> Waited {
@@ -680,6 +728,53 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_model_request_is_answered_and_announced_or_refused() {
+        let mut descriptor = MockExecutor::default_descriptor(id("mock"));
+        descriptor.caps.model_aliases = vec!["small".into()];
+        let mock = MockExecutor::new(id("mock"))
+            .with_descriptor(descriptor)
+            .with_steps([
+                MockStep::AwaitModel,
+                MockStep::AwaitModel,
+                MockStep::AwaitModel,
+                MockStep::text("after"),
+            ]);
+        let (controls, handle) = ExecControls::new(4);
+        let mut stream = mock
+            .start(spec(AccessMode::Supervised), controls)
+            .await
+            .unwrap();
+        let refused = handle.try_set_model("nope").unwrap();
+        let alias = handle.try_set_model("small").unwrap();
+        let listed = handle.try_set_model("mock-1").unwrap();
+        assert_eq!(
+            stream.next().await,
+            Some(ExecEvent::ModelChanged {
+                model: "mock-1".into()
+            })
+        );
+        assert_eq!(
+            stream.next().await,
+            Some(ExecEvent::ModelChanged {
+                model: "mock-1".into()
+            })
+        );
+        assert_eq!(
+            stream.next().await,
+            Some(ExecEvent::Text {
+                text: "after".into()
+            })
+        );
+        assert_eq!(
+            refused.await.unwrap(),
+            Err("Model 'nope' not found".to_owned())
+        );
+        assert_eq!(alias.await.unwrap(), Ok("mock-1".to_owned()));
+        assert_eq!(listed.await.unwrap(), Ok("mock-1".to_owned()));
+        assert_eq!(mock.log().model_requests, ["nope", "small", "mock-1"]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_spawned_step_reports_the_record_once_on_the_handle() {
         let record = ProcessRecord {

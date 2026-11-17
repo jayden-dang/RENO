@@ -666,6 +666,8 @@ impl Executor for AcpExecutor {
             cancel,
             answers,
             processes,
+            // Neither can switch a run's model (`model_switch: false`): requests are not read.
+            ..
         } = controls;
         let Spawned {
             child,

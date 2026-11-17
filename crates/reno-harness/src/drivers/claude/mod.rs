@@ -52,6 +52,7 @@
 //!   the orphan sweep (ARCHITECTURE 17.3).
 
 pub(crate) mod catalog;
+mod discover;
 mod health;
 pub mod refresh_lock;
 mod resume;
@@ -83,6 +84,7 @@ use crate::exec::{
 };
 use crate::process::owned::Child;
 use crate::process::{ChildStdin, Command, Stdio};
+use crate::wire::claude::models::LiveModels;
 use crate::{Signal, send_signal};
 use resume::Transcript;
 use wire::{ControlRequestFrame, Frame, control_error_line, control_response_line};
@@ -237,6 +239,9 @@ pub struct ClaudeExecutor {
     access_modes: Vec<AccessMode>,
     /// The CLI version `probe` last read, for the descriptor.
     cli_version: Arc<Mutex<Option<String>>>,
+    /// The model list the CLI gave `probe` last (its `initialize` answer), for the descriptor.
+    /// `None` until a handshake succeeded; a failed one keeps the last good list.
+    live_models: Arc<Mutex<Option<LiveModels>>>,
     /// How long `probe` lets each status command (`--version`, `auth status`) run.
     probe_budget: Duration,
     /// Where `probe` looks for a credential in the environment.
@@ -267,6 +272,7 @@ impl Default for ClaudeExecutor {
                 AccessMode::FullAccess,
             ],
             cli_version: Arc::new(Mutex::new(None)),
+            live_models: Arc::new(Mutex::new(None)),
             probe_budget: probe::COMMAND_BUDGET,
             probe_env: health::process_env(),
             tracker: TaskTracker::new(),
@@ -495,7 +501,16 @@ impl Executor for ClaudeExecutor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let models = catalog::supported_models(cli.as_deref());
+        let live = self
+            .live_models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let models = match &live {
+            Some(live) => live.models.clone(),
+            None => catalog::supported_models(cli.as_deref()),
+        };
+        let aliases = catalog::aliases(live.as_ref().map(|live| live.aliases.as_slice()));
         ExecutorDescriptor {
             id: ID.clone(),
             contract_version: CONTRACT_VERSION,
@@ -531,11 +546,13 @@ impl Executor for ClaudeExecutor {
                 // cannot request it yet; never declare a capability a caller cannot use (ARCH-15).
                 plan_mode: false,
                 models,
-                model_switch: false,
+                // The `set_model` control request, live-verified against 2.1.326: the CLI
+                // switches from its next model call, inside the running turn.
+                model_switch: true,
                 // `--setting-sources project,local` and two environment switches (see
                 // `isolation_args`), unless the run opts in with `inherit_user_config`.
                 isolates_user_config: true,
-                model_aliases: catalog::aliases(),
+                model_aliases: aliases,
             },
         }
     }
@@ -579,11 +596,30 @@ impl Executor for ClaudeExecutor {
         } else {
             health::sign_in(&exe, self.probe_budget, &self.probe_env).await
         };
+        // What the CLI lists, when it can say: the list model validation and the picker use. An
+        // older CLI is not asked, and a handshake that fails leaves the curated list (or the
+        // last live one the executor kept).
+        let live = if matches!(version_gate, VersionGate::TooOld { .. }) {
+            None
+        } else {
+            discover::live_models(&exe, self.probe_budget, self.kill_grace).await
+        };
+        let models = match live {
+            Some(live) => {
+                let catalog = ModelCatalog::live(live.models.clone());
+                *self
+                    .live_models
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(live);
+                catalog
+            }
+            None => curated(version.as_deref()),
+        };
         HealthProbe {
             installed: probe::installed(exe, version.clone()),
             version_gate,
             signed_in,
-            models: curated(version.as_deref()),
+            models,
         }
     }
 
@@ -607,6 +643,7 @@ impl Executor for ClaudeExecutor {
             steering,
             cancel,
             answers,
+            models,
             processes,
         } = controls;
 
@@ -670,6 +707,7 @@ impl Executor for ClaudeExecutor {
             steering,
             cancel,
             answers,
+            models,
             processes,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -785,6 +823,7 @@ struct Session {
     steering: mpsc::Receiver<String>,
     cancel: CancellationToken,
     answers: mpsc::Receiver<ExecAnswer>,
+    models: mpsc::Receiver<crate::exec::ModelRequest>,
     processes: crate::exec::ProcessSink,
     interrupt_grace: Duration,
     kill_grace: Duration,
@@ -796,6 +835,9 @@ struct Session {
     tracker: TaskTracker,
     unknown: UnknownFrames,
 }
+
+/// Where the answer to a `set_model` control request goes.
+type ModelReply = tokio::sync::oneshot::Sender<Result<String, String>>;
 
 /// What the driver needs to answer an approval later: the tool's input, which an allow echoes
 /// back, and whether the call asks to leave plan mode.
@@ -995,6 +1037,7 @@ async fn run_session(session: Session) {
         mut steering,
         cancel,
         mut answers,
+        mut models,
         processes,
         interrupt_grace,
         kill_grace,
@@ -1012,6 +1055,11 @@ async fn run_session(session: Session) {
     let mut open_tools = std::collections::HashSet::new();
     let mut steering_open = true;
     let mut answers_open = true;
+    let mut models_open = true;
+    // `set_model` requests written and not yet answered, by control request id.
+    let mut model_replies: std::collections::HashMap<String, ModelReply> =
+        std::collections::HashMap::new();
+    let mut model_requests = 0_u64;
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // The run's one `Done` has gone out (or the consumer left).
@@ -1120,6 +1168,34 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     if let Frame::ControlResponse(response) = &frame {
+                        // A `set_model` the consumer asked for: the CLI says which model it
+                        // resolved the name to, or why it refused. The change is announced
+                        // before the caller hears of it.
+                        if let Some(reply) = model_replies.remove(&response.response.request_id) {
+                            let answer = match response.response.error_message() {
+                                Some(error) => Err(error),
+                                None => response
+                                    .response
+                                    .response
+                                    .as_ref()
+                                    .and_then(|body| body.get("model"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                                    .ok_or_else(|| {
+                                        "the CLI did not say which model it switched to".to_owned()
+                                    }),
+                            };
+                            if let Ok(model) = &answer
+                                && event_tx
+                                    .send(ExecEvent::ModelChanged { model: model.clone() })
+                                    .await
+                                    .is_err()
+                            {
+                                break 'main; // consumer gone: reap below
+                            }
+                            let _ = reply.send(answer);
+                            continue;
+                        }
                         // Only requests this driver sends itself (the initialize handshake,
                         // the interrupt) are answered here; a failure of one is worth a line.
                         if let Some(error) = response.response.error_message() {
@@ -1260,6 +1336,19 @@ async fn run_session(session: Session) {
                 // The queue closed. Stdin stays open: approvals and answers still need it, and
                 // the run ends with its `Done`.
                 None => steering_open = false,
+            },
+
+            request = models.recv(), if models_open && !interrupted => match request {
+                Some(crate::exec::ModelRequest { model, reply }) => {
+                    model_requests += 1;
+                    let id = format!("reno_model_{model_requests}");
+                    if stdin.line(wire::set_model_request_line(&id, &model)) {
+                        model_replies.insert(id, reply);
+                    } else {
+                        let _ = reply.send(Err("the CLI is not reading".to_owned()));
+                    }
+                }
+                None => models_open = false,
             },
 
             answer = answers.recv(), if answers_open => match answer {

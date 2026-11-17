@@ -182,6 +182,18 @@ pub(crate) enum RunCommand {
     /// The daemon already does this on its own after a restart when the run's executor and bot
     /// allow it; this is for the ones it left alone.
     Resume(RunResume),
+    /// Switch a live run to another model, from the harness's next model call. Prints the model
+    /// now in use, as the harness resolved it. Only executors that can (Claude Code) accept it;
+    /// the model is an id or alias from `reno executor list`.
+    Model(RunModel),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunModel {
+    /// The run.
+    pub(crate) run: RunId,
+    /// The model: an id or an alias such as `sonnet`.
+    pub(crate) model: String,
 }
 
 #[derive(Debug, Args)]

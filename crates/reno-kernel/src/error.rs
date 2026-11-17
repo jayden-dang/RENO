@@ -40,6 +40,9 @@ pub enum KernelError {
     /// The run's steering queue is full; try again once the executor has taken some.
     #[error("run {0} has too many steering prompts queued")]
     SteerQueueFull(RunId),
+    /// The harness did not answer a model change in time.
+    #[error("run {0}'s harness did not answer the model change in time")]
+    ModelSwitchTimedOut(RunId),
     /// The run ended before it took the decision.
     #[error("run {0} no longer accepts decisions")]
     RunEnded(RunId),

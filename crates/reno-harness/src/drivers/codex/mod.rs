@@ -686,6 +686,8 @@ impl Executor for CodexExecutor {
             cancel,
             answers,
             processes,
+            // Neither can switch a run's model (`model_switch: false`): requests are not read.
+            ..
         } = controls;
 
         let app = match launch(&self.tracker, &exe, &spec, &processes).await {

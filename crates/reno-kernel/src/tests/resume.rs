@@ -808,3 +808,55 @@ async fn an_executor_that_ends_a_run_by_itself_has_its_own_reason_and_is_not_res
         Some(NotResumed::ExecutorStopped)
     );
 }
+
+// ---- a switched model --------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_attempt_keeps_the_model_the_run_was_switched_to() {
+    // The task asked for `mock-1`; the run was switched to `mock-2` and then the daemon stopped.
+    let first = mock([
+        MockStep::started("sess-1", "mock-1"),
+        MockStep::AwaitModel,
+        MockStep::Sleep(hour()),
+    ]);
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&first);
+    descriptor.caps.models.push(reno_proto::ModelInfo {
+        id: "mock-2".into(),
+        display_name: None,
+        description: None,
+    });
+    let first = first.with_descriptor(descriptor.clone());
+    let after = finishing().with_descriptor(descriptor);
+    let fx = Fx::new(config(1), registry(&[first])).await;
+    let run = fx
+        .kernel
+        .submit(
+            "work",
+            id("mock"),
+            PathBuf::from("/work"),
+            Some("mock-1".into()),
+        )
+        .await
+        .unwrap();
+    until(async || session_of(&fx, &run).await).await;
+    assert_eq!(fx.kernel.set_model(&run, "mock-2").await.unwrap(), "mock-2");
+    drain(&fx).await;
+    let (dir, store) = fx.into_store();
+    let fx = Fx::over(
+        dir,
+        store,
+        config(1),
+        registry(std::slice::from_ref(&after)),
+    )
+    .await;
+
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let specs = after.log().specs;
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].resume, Some(SessionRef("sess-1".into())));
+    assert_eq!(
+        specs[0].model.as_deref(),
+        Some("mock-2"),
+        "the resumed attempt starts on the switched model, not the task's"
+    );
+}
