@@ -27,10 +27,20 @@ pub(crate) struct HeldRow {
     pub(crate) network: bool,
 }
 
+/// One question a waiting run asks, with its suggested answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AskedQuestion {
+    pub(crate) prompt: String,
+    pub(crate) options: Vec<String>,
+}
+
 /// One run waiting on a harness question (`waiting_input`). The question's own text lives in the
-/// run's transcript, so the row names the run and sends the person there.
+/// run's transcript: `asked` has it once the transcript is loaded (the store follows waiting
+/// runs for this), and the card shows the run's title until then.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QuestionRow {
+    /// The questions still open on the run; empty while its transcript is not loaded.
+    pub(crate) asked: Vec<AskedQuestion>,
     pub(crate) run: RunId,
     pub(crate) bot: Option<String>,
     pub(crate) repo: Option<String>,
@@ -167,6 +177,37 @@ fn history_row(state: &State, record: &ApprovalRecord, now_ms: u64) -> Option<Hi
     })
 }
 
+/// The questions a run still has open, read from its loaded transcript with the same rules the
+/// run screen uses (an expired or passed-over question is not open). Empty when the transcript
+/// is not loaded.
+fn open_questions(state: &State, run: &RunId) -> Vec<AskedQuestion> {
+    let Some(transcript) = state.transcript(run) else {
+        return Vec::new();
+    };
+    let built = crate::transcript::build_rows(None, &transcript.events, &[]);
+    built
+        .rows
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            crate::transcript::Row::Question {
+                questions,
+                resolution: crate::transcript::Resolution::Pending,
+                ..
+            } => Some(
+                questions
+                    .iter()
+                    .map(|q| AskedQuestion {
+                        prompt: q.prompt.clone(),
+                        options: q.options.clone(),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// The runs waiting on a question, longest-waiting first.
 fn question_rows(state: &State, now_ms: u64) -> Vec<QuestionRow> {
     let mut waiting = summary::waiting_questions(state);
@@ -176,6 +217,7 @@ fn question_rows(state: &State, now_ms: u64) -> Vec<QuestionRow> {
         .map(|run| {
             let (bot, repo, executor) = run_bot(state, &run.run_id);
             QuestionRow {
+                asked: open_questions(state, &run.run_id),
                 run: run.run_id.clone(),
                 bot,
                 repo,
@@ -511,6 +553,59 @@ mod tests {
         assert_eq!(inbox.questions[0].bot.as_deref(), Some("builder"));
         assert_eq!(inbox.questions[0].waited, "6h");
         assert_eq!(inbox.questions[0].what, "pick");
+    }
+
+    #[test]
+    fn a_waiting_question_shows_its_own_text_when_the_transcript_is_loaded() {
+        use reno_proto::{ExecEvent, Question, Seq};
+        let mut state = State::new();
+        state.apply(Update::Approvals(vec![]));
+        state.apply(Update::Runs(vec![
+            waiting_run("ask", "keeper \u{b7} atlas: ask", HOUR),
+            waiting_run("bare", "keeper \u{b7} atlas: bare", HOUR),
+        ]));
+        let asks = |request: &str, prompt: &str| ExecEvent::NeedsInput {
+            request_id: request.into(),
+            questions: vec![Question {
+                id: "q".into(),
+                prompt: prompt.into(),
+                options: vec!["Red".into(), "Blue".into()],
+                multi_select: false,
+            }],
+        };
+        let run = RunId::from_suffix("ask").unwrap();
+        // An earlier question the run moved past, then the one it waits on.
+        for (n, event) in [
+            asks("old", "Which size?"),
+            ExecEvent::InputExpired {
+                request_id: "old".into(),
+            },
+            asks("new", "Which colour do you prefer?"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.apply(Update::RunEvent {
+                run: run.clone(),
+                seq: Seq(n as u64 + 1),
+                event,
+            });
+        }
+        let inbox = build(&state, NOW);
+        let by_run = |name: &str| {
+            inbox
+                .questions
+                .iter()
+                .find(|q| q.run.to_string() == format!("run_{name}"))
+                .unwrap()
+        };
+        let asked = &by_run("ask").asked;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].prompt, "Which colour do you prefer?");
+        assert_eq!(asked[0].options, ["Red", "Blue"]);
+        // Not loaded: nothing asked, so the card falls back to the run's title.
+        assert!(by_run("bare").asked.is_empty());
+        assert_eq!(by_run("bare").what, "bare");
     }
 
     #[test]

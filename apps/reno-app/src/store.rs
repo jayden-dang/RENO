@@ -247,6 +247,9 @@ impl Store {
                 self.ensure_run(&run, cx);
             }
         }
+        if changed.runs {
+            self.follow_waiting_questions(cx);
+        }
         if changed.approvals && self.state.feed(Feed::ApprovalHistory) == FeedState::Live {
             self.load_history(cx);
         }
@@ -505,6 +508,23 @@ impl Store {
             self.ensure_bot(&bot, version, cx);
         }
         cx.notify();
+    }
+
+    /// Starts following the transcript of every run waiting on a question, so the Inbox can show
+    /// the question itself. Only waiting runs are loaded (not every run), each followed once
+    /// from where its transcript stands; the follow ends when the run does.
+    fn follow_waiting_questions(&mut self, cx: &mut Context<Self>) {
+        let Some(mirror) = &self.mirror else {
+            return;
+        };
+        let _entered = Tokio::handle(cx).enter();
+        for run in summary::waiting_questions(&self.state) {
+            let from = self
+                .state
+                .transcript(&run.run_id)
+                .map(Transcript::resume_from);
+            mirror.follow_run(run.run_id.clone(), from);
+        }
     }
 
     /// Runs one request on tokio. `done` runs on the foreground with the answer; a failure is

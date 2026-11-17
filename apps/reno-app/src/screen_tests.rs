@@ -157,6 +157,27 @@ fn inbox_lists_a_run_waiting_on_a_question_and_opens_it(cx: &mut TestAppContext)
     wait_drawn(vcx, |vcx| painted(vcx, "inbox-questions"));
     let v = root.read_with(vcx, |r, cx| r.inbox().read(cx).view(cx));
     assert_eq!(v.lede, "1 thing needs you");
+    // Until its transcript is loaded the card has only the run's title.
+    assert!(!painted(vcx, "asked-run_ask1-0"));
+    store.update(vcx, |s, cx| {
+        s.apply(
+            reno_client::Update::RunEvent {
+                run: reno_proto::RunId::from_suffix("ask1").unwrap(),
+                seq: reno_proto::Seq(1),
+                event: reno_proto::ExecEvent::NeedsInput {
+                    request_id: "r1".into(),
+                    questions: vec![reno_proto::Question {
+                        id: "q".into(),
+                        prompt: "Which colour do you prefer?".into(),
+                        options: vec!["Red".into(), "Blue".into()],
+                        multi_select: false,
+                    }],
+                },
+            },
+            cx,
+        );
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "asked-run_ask1-0"));
     click(vcx, "open-question-run_ask1");
     wait_drawn(vcx, |vcx| {
         root.read_with(vcx, |r, cx| {

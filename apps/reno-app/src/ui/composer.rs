@@ -1728,7 +1728,9 @@ mod tests {
         );
         assert_eq!(
             reported(ReportStatus::Blocked),
-            SteerState::Ended("This run reported it is blocked. It can't be steered any more.".into())
+            SteerState::Ended(
+                "This run reported it is blocked. It can't be steered any more.".into()
+            )
         );
         assert_eq!(
             reported(ReportStatus::Done),

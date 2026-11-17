@@ -466,7 +466,10 @@ impl InboxScreen {
                             .child(
                                 div()
                                     .id(SharedString::from(format!("open-question-{id}")))
-                                    .debug_selector(move || format!("open-question-{id}"))
+                                    .debug_selector({
+                                        let id = id.clone();
+                                        move || format!("open-question-{id}")
+                                    })
                                     .text_size(px(12.5))
                                     .text_color(theme.muted)
                                     .cursor_pointer()
@@ -478,12 +481,49 @@ impl InboxScreen {
                                     .child("Open run"),
                             ),
                     )
-                    .child(
+                    .when(row.asked.is_empty(), |d| {
+                        // The question is not loaded yet: say what the run is for.
+                        d.child(
+                            div()
+                                .text_size(px(13.5))
+                                .text_color(theme.text)
+                                .child(SharedString::from(row.what.clone())),
+                        )
+                    })
+                    .children(row.asked.iter().enumerate().map(|(n, asked)| {
                         div()
-                            .text_size(px(13.5))
-                            .text_color(theme.text)
-                            .child(SharedString::from(row.what.clone())),
-                    )
+                            .id(SharedString::from(format!("asked-{id}-{n}")))
+                            .debug_selector({
+                                let id = id.clone();
+                                move || format!("asked-{id}-{n}")
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(asked.prompt.clone())),
+                            )
+                            .when(!asked.options.is_empty(), |d| {
+                                d.child(
+                                    div().flex().flex_wrap().gap(px(6.0)).children(
+                                        asked.options.iter().map(|option| {
+                                            div()
+                                                .px(px(8.0))
+                                                .py(px(2.0))
+                                                .rounded(px(10.0))
+                                                .border_1()
+                                                .border_color(theme.hairline)
+                                                .text_size(px(12.0))
+                                                .text_color(theme.faint)
+                                                .child(SharedString::from(option.clone()))
+                                        }),
+                                    ),
+                                )
+                            })
+                    }))
                     .child(
                         div()
                             .text_size(px(12.5))
