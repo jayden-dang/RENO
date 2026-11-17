@@ -177,7 +177,7 @@ pub(crate) fn hover_fill(theme: &Theme, tone: Tone, enabled: bool) -> Option<Hsl
 pub(crate) fn pill_button(
     theme: &Theme,
     id: impl Into<SharedString>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     tone: Tone,
 ) -> Stateful<Div> {
     pill_button_enabled(theme, id, label, tone, true)
@@ -188,10 +188,11 @@ pub(crate) fn pill_button(
 pub(crate) fn pill_button_enabled(
     theme: &Theme,
     id: impl Into<SharedString>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     tone: Tone,
     enabled: bool,
 ) -> Stateful<Div> {
+    let label: SharedString = label.into();
     let id: SharedString = id.into();
     let selector = id.clone();
     let base = div()

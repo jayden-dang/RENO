@@ -174,7 +174,8 @@ pub(crate) enum SteerState {
     Steering,
     /// The run is not over but cannot take a message now. Stop still works.
     Waiting(String),
-    /// The run is over: the box is disabled, with the reason.
+    /// The run is over: what is sent starts a new run in the same project (ui-brief
+    /// 2026-11-17), and the reason says how it ended.
     Ended(String),
 }
 
@@ -203,7 +204,22 @@ pub(crate) fn steer_state(run: Option<&reno_proto::RunSummary>) -> SteerState {
 }
 
 fn ended(how: &str) -> SteerState {
-    SteerState::Ended(format!("This run {how}. It can't be steered any more."))
+    SteerState::Ended(format!("This run {how}."))
+}
+
+/// The task a message to an ended run starts: the same folder and bot, a fresh session.
+pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunParams {
+    let bot = run.bot.as_ref().map(|pin| pin.name.clone());
+    TaskRunParams {
+        prompt: prompt.to_owned(),
+        // A bot picks its own executor; a run without one keeps the executor it had.
+        executor: bot.is_none().then(|| run.executor.clone()),
+        bot,
+        cwd: run.cwd.clone(),
+        model: None,
+        in_place: false,
+        attachments: Vec::new(),
+    }
 }
 
 /// What the route preview was last asked for. A new request goes out only when this changes.
@@ -310,6 +326,12 @@ impl Composer {
         self.model.text()
     }
 
+    /// What is typed in a reason field, trimmed; `None` when blank.
+    pub(crate) fn typed_reason(&self) -> Option<String> {
+        let reason = self.model.text().trim();
+        (!reason.is_empty()).then(|| reason.to_owned())
+    }
+
     #[cfg(test)]
     pub(crate) fn preview(&self) -> &Preview {
         &self.preview
@@ -403,17 +425,31 @@ impl Composer {
         }
     }
 
-    /// Whether the box takes text: not on the Run screen of a run that is over.
-    fn input_enabled(&self, cx: &App) -> bool {
-        !matches!(self.steer_state(cx), Some(SteerState::Ended(_)))
+    /// Whether the box takes text: always; an ended run's box starts a new run.
+    #[allow(clippy::unused_self)]
+    fn input_enabled(&self, _: &App) -> bool {
+        true
     }
 
-    /// Steering needs a run that takes messages.
+    /// Whether what is typed can go: a steer needs a run that takes messages; an ended run's
+    /// message starts a new run, so it can always go.
     fn target_live(&self, cx: &App) -> bool {
-        !matches!(
-            self.steer_state(cx),
-            Some(SteerState::Ended(_) | SteerState::Waiting(_))
-        )
+        !matches!(self.steer_state(cx), Some(SteerState::Waiting(_)))
+    }
+
+    /// The project name an ended run's follow-up goes to: its repository's folder name.
+    fn project_name(&self, cx: &App) -> String {
+        let Mode::Steer(run) = &self.mode else {
+            return String::new();
+        };
+        let store = self.store.read(cx);
+        store
+            .state()
+            .run(run)
+            .and_then(|r| r.cwd.as_deref())
+            .and_then(|cwd| store.root_of(cwd))
+            .and_then(|root| root.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "scratch".to_owned())
     }
 
     pub(crate) fn can_send(&self, cx: &App) -> bool {
@@ -486,9 +522,23 @@ impl Composer {
                     .update(cx, |store, cx| store.submit_task(params, ticket, cx));
             }
             Mode::Steer(run) => {
-                self.store
-                    .update(cx, |store, cx| store.steer(run, prompt, ticket, cx));
-                self.show_sent(cx);
+                let ended = self
+                    .store
+                    .read(cx)
+                    .state()
+                    .run(&run)
+                    .filter(|_| matches!(self.steer_state(cx), Some(SteerState::Ended(_))))
+                    .map(|summary| follow_up(summary, &prompt));
+                match ended {
+                    Some(params) => self
+                        .store
+                        .update(cx, |store, cx| store.submit_task(params, ticket, cx)),
+                    None => {
+                        self.store
+                            .update(cx, |store, cx| store.steer(run, prompt, ticket, cx));
+                        self.show_sent(cx);
+                    }
+                }
             }
             Mode::Reason => {}
         }
@@ -709,7 +759,9 @@ impl Composer {
 
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         if self.mode == Mode::Reason {
+            self.model.set_text("");
             cx.emit(ReasonEvent::Cancelled);
+            cx.notify();
         } else {
             // Escape is somebody else's outside a reason input.
             cx.propagate();
@@ -1179,7 +1231,7 @@ impl Composer {
     fn placeholder(&self, cx: &App) -> SharedString {
         match &self.mode {
             Mode::Home => "What should Reno orchestrate?".into(),
-            Mode::Reason => "Why? The agent reads this. Optional.".into(),
+            Mode::Reason => "Or tell it what to do instead \u{2014} Deny sends your words".into(),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
                 let bot = store
@@ -1188,7 +1240,9 @@ impl Composer {
                     .and_then(|r| summary::run_bot(r).map(str::to_owned))
                     .unwrap_or_else(|| "the run".to_owned());
                 match self.steer_state(cx) {
-                    Some(SteerState::Ended(_)) => format!("{bot} has finished").into(),
+                    Some(SteerState::Ended(_)) => {
+                        format!("New run in {}\u{2026}", self.project_name(cx)).into()
+                    }
                     Some(SteerState::Waiting(_)) => {
                         format!("Steer {bot} when it is running").into()
                     }
@@ -1558,7 +1612,7 @@ impl Render for Composer {
                 .pb(px(8.0))
                 .text_size(px(12.0))
                 .text_color(theme.faint)
-                .child("Enter to deny \u{b7} Esc to cancel"),
+                .child("Enter to deny \u{b7} Esc to clear"),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
                 let summary = store.state().run(run);
@@ -1572,16 +1626,21 @@ impl Render for Composer {
                 };
                 let state = self.steer_state(cx);
                 let note: Option<(SharedString, gpui::Hsla)> = match &state {
-                    Some(SteerState::Ended(why) | SteerState::Waiting(why)) => {
-                        Some((why.clone().into(), theme.muted))
-                    }
+                    Some(SteerState::Ended(why)) => Some((
+                        format!(
+                            "{why} What you send starts a new run in {}.",
+                            self.project_name(cx)
+                        )
+                        .into(),
+                        theme.muted,
+                    )),
+                    Some(SteerState::Waiting(why)) => Some((why.clone().into(), theme.muted)),
                     _ if self.sent_note.is_some() => {
                         Some(("Sent \u{b7} delivered at the next step".into(), theme.faint))
                     }
                     _ if sending => Some(("Sending\u{2026}".into(), theme.faint)),
                     _ => None,
                 };
-                let ended = matches!(state, Some(SteerState::Ended(_)));
                 div()
                     .flex()
                     .items_center()
@@ -1606,7 +1665,7 @@ impl Render for Composer {
                         )
                     })
                     .child(div().flex_1())
-                    .when(!ended, |d| d.child(self.action_button(&theme, cx)))
+                    .child(self.action_button(&theme, cx))
             }
         };
 
@@ -1724,17 +1783,15 @@ mod tests {
         };
         assert_eq!(
             reported(ReportStatus::Failed),
-            SteerState::Ended("This run reported a failure. It can't be steered any more.".into())
+            SteerState::Ended("This run reported a failure.".into())
         );
         assert_eq!(
             reported(ReportStatus::Blocked),
-            SteerState::Ended(
-                "This run reported it is blocked. It can't be steered any more.".into()
-            )
+            SteerState::Ended("This run reported it is blocked.".into())
         );
         assert_eq!(
             reported(ReportStatus::Done),
-            SteerState::Ended("This run passed. It can't be steered any more.".into())
+            SteerState::Ended("This run passed.".into())
         );
     }
 
@@ -1770,7 +1827,7 @@ mod tests {
         else {
             panic!("a person's stop is over");
         };
-        assert_eq!(why, "This run was stopped. It can't be steered any more.");
+        assert_eq!(why, "This run was stopped.");
         for stop in [
             reno_proto::StopDetail::Shutdown,
             reno_proto::StopDetail::Crashed,

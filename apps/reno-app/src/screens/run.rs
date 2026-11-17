@@ -12,7 +12,10 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
     ListState, Render, SharedString, Subscription, Window, div, list, prelude::*, px,
 };
-use reno_proto::{Approval, ApprovalDecision, ExecutorId, RunId, RunSummary, StopReason};
+use reno_proto::{
+    Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunSummary,
+    StopReason,
+};
 
 use super::ScreenEvent;
 use super::executors::health_lines;
@@ -20,7 +23,7 @@ use crate::actions::GoRuns;
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Outcome, Resolution, Row, ToolEntry};
-use crate::ui::composer::Composer;
+use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
@@ -28,6 +31,7 @@ use crate::ui::theme::{self, Theme};
 use crate::ui::toast;
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
+use crate::vm::rules;
 use crate::vm::runs as run_facts;
 
 /// Width of the transcript column and of the steer input.
@@ -49,6 +53,11 @@ pub(crate) struct RunScreen {
     open: HashSet<Key>,
     details_open: bool,
     steer: Entity<Composer>,
+    /// The reason field under each held action of this run: typing in it and pressing Deny (or
+    /// Enter) denies with those words (ui-brief 2026-11-17, from direction B).
+    reasons: HashMap<ApprovalId, (Entity<Composer>, Subscription)>,
+    /// The held action whose Approve ▾ menu is open.
+    menu_open: Option<ApprovalId>,
     _store: Subscription,
 }
 
@@ -74,6 +83,8 @@ impl RunScreen {
             open: HashSet::new(),
             details_open: true,
             steer,
+            reasons: HashMap::new(),
+            menu_open: None,
         };
         screen.refresh(cx);
         screen
@@ -91,6 +102,11 @@ impl RunScreen {
     pub(crate) fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         use gpui::Focusable as _;
         self.steer.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reason_input(&self, approval: &ApprovalId) -> Option<&Entity<Composer>> {
+        self.reasons.get(approval).map(|(input, _)| input)
     }
 
     #[cfg(test)]
@@ -150,9 +166,68 @@ impl RunScreen {
             });
             let mut built = transcript::build_rows(prompt, events, &pending);
             built.rows = transcript::with_routing(built.rows, routing);
-            built
+            (built, pending)
         };
+        let (built, pending) = built;
+        self.keep_reasons(&pending, cx);
         self.apply(built);
+    }
+
+    /// One reason field per held action of this run; a field goes when its action is answered.
+    fn keep_reasons(&mut self, pending: &[Approval], cx: &mut Context<Self>) {
+        self.reasons
+            .retain(|id, _| pending.iter().any(|approval| &approval.id == id));
+        if self
+            .menu_open
+            .as_ref()
+            .is_some_and(|id| !pending.iter().any(|approval| &approval.id == id))
+        {
+            self.menu_open = None;
+        }
+        for approval in pending {
+            if self.reasons.contains_key(&approval.id) {
+                continue;
+            }
+            let store = self.store.clone();
+            let input = cx.new(|cx| Composer::reason(store, cx));
+            let id = approval.id.clone();
+            let events = cx.subscribe(&input, move |this, _, event: &ReasonEvent, cx| {
+                if let ReasonEvent::Submitted(message) = event {
+                    this.deny(id.clone(), message.clone(), cx);
+                }
+            });
+            self.reasons.insert(approval.id.clone(), (input, events));
+        }
+    }
+
+    /// Deny `approval`, with the reason the agent is told.
+    fn deny(&mut self, approval: ApprovalId, message: Option<String>, cx: &mut Context<Self>) {
+        let reasons = self
+            .store
+            .read(cx)
+            .state()
+            .supports(reno_proto::FEATURE_APPROVAL_MESSAGE);
+        let message = message.filter(|_| reasons);
+        self.store.update(cx, |store, cx| {
+            store.decide_with_message(approval, ApprovalDecision::Deny, message, cx);
+        });
+    }
+
+    /// Approve `approval`, keeping the answer as far as `scope` reaches (`None`: once).
+    fn approve(
+        &mut self,
+        approval: ApprovalId,
+        scope: Option<RememberScope>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_open = None;
+        let remember = scope.map(|scope| Remember {
+            scope,
+            expires_in_secs: None,
+        });
+        self.store.update(cx, |store, cx| {
+            store.decide_remembering(approval, ApprovalDecision::ApproveOnce, None, remember, cx);
+        });
     }
 
     fn apply(&mut self, built: Built) {
@@ -515,6 +590,9 @@ impl RunScreen {
             .into_any_element()
     }
 
+    /// A held action, answered where the agent asked (ui-brief 2026-11-17): who and what, the
+    /// exact command, why it waits, Approve once ▾ (how far the answer reaches), and a reason
+    /// field with Deny under it.
     fn approval_card(
         &self,
         theme: &Theme,
@@ -525,40 +603,100 @@ impl RunScreen {
         let store = self.store.read(cx);
         let state = store.state();
         let busy = store.is_deciding(&approval.id);
+        let keeps_rules = state.supports(reno_proto::FEATURE_RULES);
         let summary = state.run(&approval.run_id);
-        let bot = summary.and_then(|r| summary::run_bot(r)).unwrap_or("run");
+        let bot = summary.and_then(|r| summary::run_bot(r));
+        let who = bot.unwrap_or("The run").to_owned();
         let executor = summary.map_or("", |r| r.executor.as_str());
         let age = summary::age_label(store.now_ms().saturating_sub(approval.requested_at_ms));
         let command = summary::subject_line(&approval.subject);
         let word = summary::action_word(&approval.subject);
+        let choices = rules::approve_choices(bot);
+        let menu_open = self.menu_open.as_ref() == Some(&approval.id);
 
         let id = approval.id.clone();
+        let approve = {
+            let id = id.clone();
+            cx.listener(move |this, _, _, cx| this.approve(id.clone(), None, cx))
+        };
+        let toggle_menu = {
+            let id = id.clone();
+            cx.listener(move |this, _, _, cx| {
+                this.menu_open = if this.menu_open.as_ref() == Some(&id) {
+                    None
+                } else {
+                    Some(id.clone())
+                };
+                cx.notify();
+            })
+        };
         let deny = {
             let id = id.clone();
             cx.listener(move |this, _, _, cx| {
-                let id = id.clone();
-                this.store
-                    .update(cx, |s, cx| s.decide(id, ApprovalDecision::Deny, cx));
+                let message = this
+                    .reasons
+                    .get(&id)
+                    .and_then(|(input, _)| input.read(cx).typed_reason());
+                this.deny(id.clone(), message, cx);
             })
         };
-        let approve = cx.listener(move |this, _, _, cx| {
-            let id = id.clone();
-            this.store
-                .update(cx, |s, cx| s.decide(id, ApprovalDecision::ApproveOnce, cx));
-        });
 
-        let deny_button = kit::pill_button(theme, "deny", "Deny", kit::Tone::Danger)
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.on_click(deny));
-        let approve_button = kit::pill_button(theme, "approve", "Approve once", kit::Tone::Primary)
+        let approve_button = kit::pill_button(theme, "approve", "Approve once", Tone::Primary)
             .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| b.on_click(approve));
+        let more_button = keeps_rules.then(|| {
+            kit::icon_button(
+                theme,
+                "approve-more",
+                if menu_open {
+                    Icon::ChevUp
+                } else {
+                    Icon::ChevDown
+                },
+                28.0,
+            )
+            .debug_selector(|| "approve-more".to_owned())
+            .when(!busy, |b| b.on_click(toggle_menu))
+        });
+        let deny_button = kit::pill_button(theme, "deny", "Deny", Tone::Danger)
+            .when(busy, |b| b.opacity(0.4))
+            .when(!busy, |b| b.on_click(deny));
+        let menu =
+            (menu_open && keeps_rules).then(|| {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .children(choices.into_iter().enumerate().skip(1).map(
+                        |(ix, (scope, label))| {
+                            let id = id.clone();
+                            kit::pill_button(
+                                theme,
+                                format!("approve-scope-{ix}"),
+                                label,
+                                Tone::Quiet,
+                            )
+                            .debug_selector(move || format!("approve-scope-{ix}"))
+                            .when(!busy, |b| {
+                                b.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.approve(id.clone(), scope, cx);
+                                }))
+                            })
+                        },
+                    ))
+            });
+        let reason = self
+            .reasons
+            .get(&approval.id)
+            .map(|(input, _)| input.clone());
 
         div()
             .id(SharedString::from(format!("approval-card-{}", key.0)))
             .w_full()
             .flex()
-            .gap(px(14.0))
+            .flex_col()
+            .gap(px(10.0))
             .p(px(16.0))
             .rounded(px(18.0))
             .bg(theme.surface)
@@ -566,71 +704,50 @@ impl RunScreen {
             .border_color(theme.hairline)
             .child(
                 div()
-                    .flex_none()
-                    .size(px(44.0))
-                    .rounded(px(22.0))
-                    .bg(theme.raised.opacity(0.5))
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .child(kit::exec_glyph(theme, executor, 18.0)),
+                    .gap(px(8.0))
+                    .text_size(px(13.5))
+                    .child(kit::exec_glyph(theme, executor, 14.0))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(who))
+                    .child(div().text_color(theme.muted).child("wants to run"))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.warning)
+                            .child(format!("held {age}")),
+                    ),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
+                    .w_full()
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .rounded(px(10.0))
+                    .bg(theme.shell)
+                    .font_family(MONO)
+                    .text_size(px(13.0))
+                    .child(command),
+            )
+            .child(
+                div()
                     .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.0))
-                            .text_size(px(14.0))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(bot.to_owned()),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.muted)
-                                    .child(format!("\u{b7} {}", summary::executor_name(executor))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .px(px(14.0))
-                                    .py(px(9.0))
-                                    .rounded(px(10.0))
-                                    .bg(theme.shell)
-                                    .font_family(MONO)
-                                    .text_size(px(13.0))
-                                    .child(command),
-                            )
-                            .child(deny_button)
-                            .child(approve_button),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(kit::tag(theme.warning, format!("{word} needs a human")))
-                            .child(
-                                div()
-                                    .text_size(px(12.5))
-                                    .text_color(theme.muted)
-                                    .child(format!("held {age}")),
-                            ),
-                    ),
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(kit::tag(theme.warning, format!("{word} needs a human")))
+                    .child(div().flex_1())
+                    .child(approve_button)
+                    .children(more_button),
+            )
+            .children(menu)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().flex_1().min_w_0().children(reason))
+                    .child(deny_button),
             )
             .into_any_element()
     }

@@ -444,7 +444,12 @@ fn a_live_run_shows_stop_until_something_is_typed_and_steer_then(cx: &mut TestAp
                 .any(|r| r.run_id.to_string() == "run_keeper1" && r.status == RunStatus::Cancelled)
         })
     });
-    wait_drawn(vcx, |vcx| !painted(vcx, "stop") && !painted(vcx, "send"));
+    // Ended: no Stop; the box now offers a new run in the project, so Send stays (disabled
+    // until something is typed).
+    wait_drawn(vcx, |vcx| {
+        !painted(vcx, "stop") && painted(vcx, "composer-note")
+    });
+    assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
 }
 
 #[gpui::test]

@@ -812,3 +812,99 @@ fn on_an_older_daemon_deny_is_one_click(cx: &mut TestAppContext) {
     click(vcx, "deny-appr_scoutfetch");
     wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
 }
+
+// --- Answering inside the run (ui-brief 2026-11-17) ------------------------------------------
+
+fn open_run_screen(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+    run: &str,
+) -> Entity<crate::screens::run::RunScreen> {
+    click(vcx, &format!("recent-run_{run}"));
+    draw(vcx);
+    root.read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("a run screen")
+}
+
+#[gpui::test]
+fn deny_in_the_run_sends_what_was_typed_beside_it(cx: &mut TestAppContext) {
+    cx.update(crate::ui::composer::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open_run_screen(vcx, &root, "scout1");
+    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
+    let approval = reno_proto::ApprovalId::from_suffix("scoutfetch").unwrap();
+    let input = screen
+        .read_with(vcx, |s, _| s.reason_input(&approval).cloned())
+        .expect("the reason field sits under the card");
+    input.update_in(vcx, |c, window, cx| {
+        c.fill("use the mirror instead", window, cx);
+    });
+    click(vcx, "deny");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        store.update(vcx, |s, cx| s.load_history(cx));
+        history_of(&store, vcx, "appr_scoutfetch")
+            .is_some_and(|r| r.message.as_deref() == Some("use the mirror instead"))
+    });
+}
+
+#[gpui::test]
+fn enter_in_the_reason_field_denies_too(cx: &mut TestAppContext) {
+    cx.update(crate::ui::composer::bind_keys);
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open_run_screen(vcx, &root, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
+    let approval = reno_proto::ApprovalId::from_suffix("keeperpush").unwrap();
+    let input = screen
+        .read_with(vcx, |s, _| s.reason_input(&approval).cloned())
+        .expect("the reason field");
+    input.update_in(vcx, |c, window, cx| {
+        c.fill("not tonight", window, cx);
+        c.submit(window, cx);
+    });
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        store.update(vcx, |s, cx| s.load_history(cx));
+        history_of(&store, vcx, "appr_keeperpush")
+            .is_some_and(|r| r.message.as_deref() == Some("not tonight"))
+    });
+}
+
+#[gpui::test]
+fn the_approve_menu_keeps_the_answer_for_the_bot(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    connected(cx, &store);
+    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    open_run_screen(vcx, &root, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
+    assert!(!painted(vcx, "approve-scope-1"), "the menu starts closed");
+    click(vcx, "approve-more");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-scope-1"));
+    click(vcx, "approve-scope-1");
+    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        store.update(vcx, |s, cx| s.load_rules(cx));
+        store.read_with(vcx, |s, _| {
+            s.rules()
+                .and_then(|r| r.as_ref().ok())
+                .is_some_and(|rules| {
+                    rules.iter().any(|rule| {
+                        rule.scope
+                            == reno_proto::StandingScope::Bot {
+                                bot: "keeper".to_owned(),
+                            }
+                    })
+                })
+        })
+    });
+}

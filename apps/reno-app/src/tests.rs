@@ -9,10 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    AppContext as _, Entity, EntityInputHandler as _, Modifiers, TestAppContext, VisualTestContext,
-    px, size,
-};
+use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use reno_client::{ConnectionStatus, Update};
 use reno_proto::{ApprovalDecision, RunId, RunStatus, StopReason};
 
@@ -761,7 +758,7 @@ fn steering_appends_the_message_and_a_reply(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_finished_run_cannot_be_steered(cx: &mut TestAppContext) {
+fn a_finished_run_sends_a_new_run_in_its_project(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -770,32 +767,39 @@ fn a_finished_run_cannot_be_steered(cx: &mut TestAppContext) {
     wait_drawn(vcx, |vcx| {
         kinds(&rows_of(vcx, &root)).last() == Some(&"done")
     });
+    // The box says what sending does, and takes typing.
+    assert!(painted(vcx, "composer-note"));
+    assert!(!painted(vcx, "stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
     steer.update_in(vcx, |c, window, cx| c.fill("one more thing", window, cx));
     draw(vcx);
-    assert!(
-        !steer.read_with(vcx, |c, cx| c.can_send(cx)),
-        "follow-up is disabled in Phase 0"
-    );
-    // The box says why instead of offering a button, and takes no typing.
-    assert!(!painted(vcx, "send") && !painted(vcx, "stop"));
-    assert!(painted(vcx, "composer-note"));
-    steer.update_in(vcx, |c, window, cx| {
-        c.replace_text_in_range(None, "typed", window, cx);
-        c.submit(window, cx);
+    assert!(steer.read_with(vcx, |c, cx| c.can_send(cx)));
+    click(vcx, "send");
+
+    // A new run starts, in the same repository and for the same bot, and opens.
+    let ended = run_id("reviewer1");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, cx| {
+            r.run_screen()
+                .is_some_and(|s| s.read(cx).run_id() != &ended)
+        })
     });
-    assert_eq!(
-        steer.read_with(vcx, |c, _| c.text().to_owned()),
-        "one more thing",
-        "the draft stays, and nothing typed gets in"
-    );
-    let rows = rows_of(vcx, &root);
-    assert!(
-        !rows
-            .iter()
-            .any(|r| matches!(r, Row::User { steer: true, .. }))
-    );
+    let new = root
+        .read_with(vcx, |r, cx| {
+            r.run_screen().map(|s| s.read(cx).run_id().clone())
+        })
+        .unwrap();
+    store.read_with(vcx, |s, _| {
+        let old = s.state().run(&ended).unwrap();
+        let new = s.state().run(&new).unwrap();
+        assert_eq!(new.cwd, old.cwd);
+        assert_eq!(
+            new.bot.as_ref().map(|b| b.name.clone()),
+            old.bot.as_ref().map(|b| b.name.clone())
+        );
+        assert_eq!(new.prompt.as_deref(), Some("one more thing"));
+    });
 }
 
 #[gpui::test]

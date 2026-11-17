@@ -50,6 +50,8 @@ pub(crate) struct Options {
     pub(crate) reduce_motion: bool,
     /// `RENO_OPEN=inbox|runs|triggers|executors|settings`: open on that screen (screenshots, reviews).
     pub(crate) open: Option<Nav>,
+    /// `RENO_OPEN=run_<id>`: open on that run's screen (screenshots, reviews).
+    pub(crate) open_run: Option<RunId>,
 }
 
 impl Options {
@@ -80,6 +82,14 @@ impl Options {
             Some("triggers") => Some(Nav::Triggers),
             Some("executors") => Some(Nav::Executors),
             Some("settings") => Some(Nav::Settings),
+            Some(other) if other.starts_with("run_") => {
+                options.open_run = Some(
+                    other
+                        .parse()
+                        .map_err(|e| format!("RENO_OPEN: not a run id: {e}"))?,
+                );
+                None
+            }
             Some(other) => return Err(format!("unknown RENO_OPEN screen: {other}")),
         };
         Ok(options)
@@ -132,6 +142,7 @@ pub(crate) fn run(options: Options) {
         let bounds = default_bounds(cx);
         let appearance = options.appearance;
         let open = options.open;
+        let open_run = options.open_run;
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -150,6 +161,19 @@ pub(crate) fn run(options: Options) {
                     root.focus_composer(window, cx);
                     if let Some(nav) = open {
                         root.navigate(nav, window, cx);
+                    }
+                    if let Some(run) = open_run {
+                        // After the store has connected, so the run's transcript is followed.
+                        cx.spawn_in(window, async move |root, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1500))
+                                .await;
+                            root.update_in(cx, |root, window, cx| {
+                                root.open_run(run, window, cx);
+                            })
+                            .ok();
+                        })
+                        .detach();
                     }
                 });
                 root
@@ -698,7 +722,14 @@ mod tests {
                 quit_after: Some(Duration::from_millis(250)),
                 reduce_motion: true,
                 open: Some(Nav::Executors),
+                open_run: None,
             })
+        );
+        let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();
+        assert_eq!(run.open, None);
+        assert_eq!(
+            run.open_run.map(|r| r.to_string()).as_deref(),
+            Some("run_keeper1")
         );
     }
 

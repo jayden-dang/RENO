@@ -107,6 +107,21 @@ pub(crate) fn choices(has_bot: bool) -> Vec<(Option<RememberScope>, &'static str
     all
 }
 
+/// The Approve ▾ menu of a held action in the run (ui-brief 2026-11-17): approve once, then how
+/// far a kept answer reaches. A run with a bot keeps it for the bot; one without, for the run.
+pub(crate) fn approve_choices(bot: Option<&str>) -> Vec<(Option<RememberScope>, String)> {
+    let mut all = vec![(None, "Approve once".to_owned())];
+    all.push(match bot {
+        Some(bot) => (Some(RememberScope::Bot), format!("Always for {bot}")),
+        None => (Some(RememberScope::Run), "Always in this run".to_owned()),
+    });
+    all.push((
+        Some(RememberScope::Always),
+        "Always, every project".to_owned(),
+    ));
+    all
+}
+
 /// One sentence under the card's choice: what exactly is kept, and for whom. It names the
 /// subject's own parts, because that is all the rule will ever match.
 pub(crate) fn hint(subject: &ApprovalSubject, scope: RememberScope, bot: Option<&str>) -> String {
@@ -137,6 +152,40 @@ pub(crate) fn hint(subject: &ApprovalSubject, scope: RememberScope, bot: Option<
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn the_approve_menu_keeps_for_the_bot_or_else_the_run() {
+        let labels = |bot| -> Vec<String> {
+            super::approve_choices(bot)
+                .into_iter()
+                .map(|(_, l)| l)
+                .collect()
+        };
+        assert_eq!(
+            labels(Some("keeper")),
+            ["Approve once", "Always for keeper", "Always, every project"]
+        );
+        assert_eq!(
+            labels(None),
+            [
+                "Approve once",
+                "Always in this run",
+                "Always, every project"
+            ]
+        );
+        let scopes: Vec<_> = super::approve_choices(Some("keeper"))
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(
+            scopes,
+            [
+                None,
+                Some(reno_proto::RememberScope::Bot),
+                Some(reno_proto::RememberScope::Always)
+            ]
+        );
+    }
+
     use super::*;
 
     fn subject(command: Option<&str>, paths: &[&str]) -> ApprovalSubject {
