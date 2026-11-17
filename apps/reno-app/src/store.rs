@@ -123,6 +123,13 @@ pub(crate) struct Store {
     routings: BTreeMap<RunId, RoutingEntry>,
     /// Tasks and steers sent and not yet answered.
     sending: u32,
+    /// Repository roots of the folders runs were submitted in (the sidebar's projects).
+    roots: crate::local::Roots,
+    /// When you last opened each run; kept on disk next to the socket for the real daemon.
+    seen: crate::vm::projects::Seen,
+    seen_file: Option<PathBuf>,
+    /// The run on screen: it is seen as it changes.
+    looking: Option<RunId>,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
     bridge: Option<Task<()>>,
 }
@@ -152,8 +159,41 @@ impl Store {
             open: None,
             routings: BTreeMap::new(),
             sending: 0,
+            roots: crate::local::Roots::default(),
+            seen: crate::vm::projects::Seen::default(),
+            seen_file: None,
+            looking: None,
             bridge: None,
         }
+    }
+
+    /// The canonical repository root `dir` is in, if any.
+    pub(crate) fn root_of(&self, dir: &std::path::Path) -> Option<PathBuf> {
+        self.roots.root_of(dir)
+    }
+
+    /// When you last opened each run.
+    pub(crate) fn seen(&self) -> &crate::vm::projects::Seen {
+        &self.seen
+    }
+
+    /// The run on screen, if one is.
+    pub(crate) fn looking_at(&self) -> Option<&RunId> {
+        self.looking.as_ref()
+    }
+
+    /// The Run screen shows `run` (`None`: no run is on screen). The run left and the run shown
+    /// are both seen now.
+    pub(crate) fn look_at(&mut self, run: Option<RunId>, cx: &mut Context<Self>) {
+        let now = self.now_ms();
+        for run in self.looking.iter().chain(run.iter()) {
+            self.seen.mark(run, now);
+        }
+        self.looking = run;
+        if let Some(path) = &self.seen_file {
+            crate::local::save_seen(path, &self.seen);
+        }
+        cx.notify();
     }
 
     pub(crate) fn state(&self) -> &State {
@@ -283,6 +323,7 @@ impl Store {
 
     /// Like [`Store::start_fake`], with a config (an empty world, missing features).
     pub(crate) fn start_fake_with(&mut self, config: FakeConfig, cx: &mut Context<Self>) {
+        self.roots = crate::local::Roots::literal();
         match FakeDaemon::start(config) {
             Ok(daemon) => {
                 let daemon = Arc::new(daemon);
@@ -306,6 +347,10 @@ impl Store {
             self.go_offline("Cannot locate the daemon socket: HOME is not set.", cx);
             return;
         };
+        if let Some(file) = crate::local::seen_path(&path) {
+            self.seen = crate::local::load_seen(&file, system_now_ms());
+            self.seen_file = Some(file);
+        }
         match daemon_keeper(&path, |key| std::env::var(key).ok()) {
             Some(keeper) => {
                 self.socket = Some(path);

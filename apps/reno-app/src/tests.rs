@@ -341,9 +341,6 @@ fn palette_navigation_and_actions(cx: &mut TestAppContext) {
     draw(vcx);
     root.update_in(vcx, |r, window, cx| r.toggle_theme(window, cx));
     draw(vcx);
-    // Other destinations do not navigate.
-    root.update_in(vcx, |r, window, cx| r.navigate(Nav::Flows, window, cx));
-    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
 }
 
 // --- Simulated mouse clicks -----------------------------------------------------------------
@@ -558,12 +555,9 @@ fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
     draw(vcx);
 
-    // A destination with no screen yet stays put.
-    click(vcx, "nav-Flows");
-    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
-    // One that has a screen goes there.
-    click(vcx, "nav-Inbox");
-    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Inbox);
+    // Every nav row has a screen; Settings is a row now.
+    click(vcx, "nav-Settings");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
 }
 
 // --- The Run screen -------------------------------------------------------------------------

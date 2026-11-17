@@ -1,45 +1,29 @@
-//! Navigation destinations. Home, Inbox, Runs, Triggers, Executors and Settings are built; the
-//! rest are listed in the sidebar and say so when chosen.
+//! Navigation destinations: the sidebar's five rows (ui-brief 2026-11-17). Screens of later
+//! phases (flows, bots, teams, boards, messages, evaluations, improvements) get a row when they
+//! are built, not before.
 
 use crate::ui::icon::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Nav {
     Home,
+    /// Being retired: answers live in each run (ui-brief 2026-11-17). Reached only from the
+    /// palette and ⌘-shortcut until its history has moved to the project page.
     Inbox,
     Runs,
-    Flows,
-    Bots,
-    Teams,
-    Boards,
-    Messages,
-    Evaluations,
-    Improvements,
     Triggers,
     Executors,
-    /// Reached from the sidebar footer and the palette, not from a row.
     Settings,
 }
 
 impl Nav {
-    /// The top group of the sidebar.
-    pub(crate) const MAIN: [Self; 6] = [
+    /// The sidebar's rows, in order.
+    pub(crate) const ROWS: [Self; 5] = [
         Self::Home,
-        Self::Inbox,
         Self::Runs,
-        Self::Flows,
-        Self::Bots,
-        Self::Teams,
-    ];
-
-    /// The "ORCHESTRATION" group.
-    pub(crate) const ORCHESTRATION: [Self; 6] = [
-        Self::Boards,
-        Self::Messages,
-        Self::Evaluations,
-        Self::Improvements,
         Self::Triggers,
         Self::Executors,
+        Self::Settings,
     ];
 
     pub(crate) const fn label(self) -> &'static str {
@@ -47,13 +31,6 @@ impl Nav {
             Self::Home => "Home",
             Self::Inbox => "Inbox",
             Self::Runs => "Runs",
-            Self::Flows => "Flows",
-            Self::Bots => "Bots",
-            Self::Teams => "Teams",
-            Self::Boards => "Boards",
-            Self::Messages => "Messages",
-            Self::Evaluations => "Evaluations",
-            Self::Improvements => "Improvements",
             Self::Triggers => "Triggers",
             Self::Executors => "Executors",
             Self::Settings => "Settings",
@@ -66,30 +43,10 @@ impl Nav {
             Self::Home => Icon::Home,
             Self::Inbox => Icon::Inbox,
             Self::Runs => Icon::Terminal,
-            Self::Flows => Icon::Flow,
-            Self::Bots => Icon::Bot,
-            Self::Teams => Icon::Team,
-            Self::Boards => Icon::Board,
-            Self::Messages => Icon::Msg,
-            Self::Evaluations => Icon::Eval,
-            Self::Improvements => Icon::Wand,
             Self::Triggers => Icon::Clock,
             Self::Executors => Icon::Cpu,
             Self::Settings => Icon::Settings,
         }
-    }
-
-    /// Whether the screen exists yet.
-    pub(crate) const fn is_built(self) -> bool {
-        matches!(
-            self,
-            Self::Home
-                | Self::Inbox
-                | Self::Runs
-                | Self::Triggers
-                | Self::Executors
-                | Self::Settings
-        )
     }
 }
 
@@ -98,20 +55,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_built_screens_and_unique_labels() {
-        let all: Vec<Nav> = Nav::MAIN.into_iter().chain(Nav::ORCHESTRATION).collect();
-        assert_eq!(all.len(), 12);
-        let built: Vec<_> = all
-            .iter()
-            .filter(|n| n.is_built())
-            .map(|n| n.label())
-            .collect();
-        assert_eq!(built, ["Home", "Inbox", "Runs", "Triggers", "Executors"]);
-        assert!(Nav::Settings.is_built() && !all.contains(&Nav::Settings));
-        let mut labels: Vec<_> = all.iter().map(|n| n.label()).collect();
-        labels.push(Nav::Settings.label());
-        labels.sort_unstable();
-        labels.dedup();
-        assert_eq!(labels.len(), 13);
+    fn the_sidebar_has_five_rows_and_no_inbox() {
+        let labels: Vec<_> = Nav::ROWS.iter().map(|n| n.label()).collect();
+        assert_eq!(
+            labels,
+            ["Home", "Runs", "Triggers", "Executors", "Settings"]
+        );
+        assert!(!Nav::ROWS.contains(&Nav::Inbox));
     }
 }

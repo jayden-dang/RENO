@@ -29,18 +29,13 @@ pub(crate) struct Entry {
 pub(crate) fn entries() -> Vec<Entry> {
     let go = |nav: Nav| Entry {
         label: nav.label(),
-        hint: if nav.is_built() {
-            "Go to"
-        } else {
-            "Coming soon"
-        },
+        hint: "Go to",
         icon: nav.icon(),
         action: PaletteAction::Go(nav),
     };
-    Nav::MAIN
+    Nav::ROWS
         .into_iter()
-        .chain(Nav::ORCHESTRATION)
-        .chain([Nav::Settings])
+        .chain([Nav::Inbox])
         .map(go)
         .chain([
             Entry {
@@ -280,7 +275,7 @@ mod tests {
     #[test]
     fn entries_cover_every_destination_and_the_actions() {
         let all = entries();
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 8);
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleTheme));
         assert!(all.iter().any(|e| e.action == PaletteAction::ToggleSidebar));
         assert_eq!(all[0].action, PaletteAction::Go(Nav::Home));
@@ -307,7 +302,7 @@ mod tests {
         if let (Some(non), Some(last)) = (first_non_prefix, last_prefix) {
             assert!(last < non, "{hits:?}");
         }
-        assert_eq!(hits[0], "Evaluations");
+        assert_eq!(hits[0], "Executors");
     }
 
     #[gpui::test]

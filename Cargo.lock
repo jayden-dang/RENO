@@ -5123,6 +5123,7 @@ dependencies = [
  "reno-markdown",
  "reno-proto",
  "reno-syntax",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

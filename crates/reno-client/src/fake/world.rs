@@ -359,7 +359,7 @@ impl World {
                     name: name.clone(),
                     version: 1,
                 }),
-                cwd: None,
+                cwd: params.cwd.clone(),
                 created_at_ms: now,
                 updated_at_ms: now,
                 stop: None,

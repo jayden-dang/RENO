@@ -89,7 +89,11 @@ fn summary(
             name: bot.to_owned(),
             version: 1,
         }),
-        cwd: None,
+        // "keeper · atlas-api: bump …" was submitted in the demo repository `/demo/atlas-api`.
+        cwd: title
+            .split_once(" \u{b7} ")
+            .and_then(|(_, rest)| rest.split_once(':'))
+            .map(|(repo, _)| std::path::PathBuf::from(format!("/demo/{repo}"))),
         created_at_ms: NOW_MS - age,
         updated_at_ms: NOW_MS - last_change_age,
         stop: None,

@@ -1,7 +1,8 @@
-//! The sidebar: nav rows, the "ORCHESTRATION" group, recent runs from state, and a footer with
-//! the daemon status dot. It sits on `shell`. Only Home is functional; the shell turns the other
-//! rows into "coming in a later phase" toasts.
+//! The sidebar (ui-brief 2026-11-17): five nav rows, then "Projects": one folder per repository
+//! with its runs and their status dots, and a footer with the daemon status dot. It sits on
+//! `shell`. A closed folder still lists the runs that wait for you.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{App, Div, FontWeight, SharedString, Window, div, prelude::*, px};
@@ -14,23 +15,26 @@ use super::theme::Theme;
 use crate::nav::Nav;
 use crate::store::Store;
 use crate::summary;
+use crate::vm::projects::{self, Dot, Folder, FolderKey};
 
 /// Width of the sidebar column, padding included.
 pub(crate) const WIDTH: f32 = 248.0;
 /// Height of the titlebar band the traffic lights sit in.
 pub(crate) const TITLEBAR: f32 = 40.0;
-/// How many runs "RECENT RUNS" lists.
-const RECENT: usize = 6;
 
 pub(crate) type NavHandler = Rc<dyn Fn(Nav, &mut Window, &mut App)>;
 pub(crate) type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub(crate) type RunHandler = Rc<dyn Fn(RunId, &mut Window, &mut App)>;
+pub(crate) type FolderHandler = Rc<dyn Fn(FolderKey, &mut Window, &mut App)>;
 
 pub(crate) struct SidebarHandlers {
     pub(crate) navigate: NavHandler,
     pub(crate) hide: ActionHandler,
     pub(crate) recent_run: RunHandler,
-    pub(crate) settings: ActionHandler,
+    /// Opens or closes a project folder.
+    pub(crate) toggle_folder: FolderHandler,
+    /// "N more": the Runs screen, which lists every run.
+    pub(crate) more: ActionHandler,
 }
 
 /// The counts shown beside rows, so the view and the tests agree.
@@ -43,9 +47,7 @@ pub(crate) struct RowBadge {
 
 pub(crate) fn badge(nav: Nav, counts: &summary::Attention) -> Option<RowBadge> {
     let (text, hot) = match nav {
-        Nav::Inbox if counts.needs_you() > 0 => (counts.needs_you().to_string(), true),
         Nav::Runs if counts.running > 0 => (format!("{} live", counts.running), false),
-        Nav::Bots if counts.bots > 0 => (counts.bots.to_string(), false),
         _ => return None,
     };
     Some(RowBadge { text, hot })
@@ -112,11 +114,140 @@ fn group_label(theme: &Theme, text: &'static str) -> Div {
         .child(text)
 }
 
+/// A run's dot as drawn: a filled circle, a ring for a stopped run, nothing for a seen one.
+pub(crate) fn run_dot(theme: &Theme, dot: Dot, size: f32) -> Div {
+    let fill = match dot {
+        Dot::Running => Some(theme.accent),
+        Dot::Waiting => Some(theme.warning),
+        Dot::New => Some(theme.text),
+        Dot::Failed => Some(theme.danger),
+        Dot::Seen | Dot::Stopped => None,
+    };
+    let base = div().flex_none().size(px(size)).rounded(px(size / 2.0));
+    match (fill, dot) {
+        (Some(color), _) => base.bg(color),
+        (None, Dot::Stopped) => base.border_1().border_color(theme.faint),
+        (None, _) => base,
+    }
+}
+
+fn folder_view(
+    theme: &Theme,
+    folder: &Folder,
+    selected: Option<&RunId>,
+    handlers: &SidebarHandlers,
+) -> Div {
+    let toggle = Rc::clone(&handlers.toggle_folder);
+    let key = folder.key.clone();
+    let slug = folder.name.replace(' ', "-");
+    let hover = theme.row_selected().opacity(0.6);
+    let head = div()
+        .id(SharedString::from(format!("folder-{slug}")))
+        .debug_selector({
+            let slug = slug.clone();
+            move || format!("folder-{slug}")
+        })
+        .h(px(30.0))
+        .pl(px(4.0))
+        .pr(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(9.0))
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .on_click(move |_, window, cx| toggle(key.clone(), window, cx))
+        .child(icon(
+            if folder.open {
+                Icon::ChevDown
+            } else {
+                Icon::Fwd
+            },
+            12.0,
+            theme.faint,
+        ))
+        .child(icon(Icon::Folder, 15.0, theme.muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(folder.name.clone()),
+        )
+        .when(folder.waiting > 0, |d| {
+            d.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.warning)
+                    .child(format!("{} waiting", folder.waiting)),
+            )
+        });
+    let more = (folder.more > 0).then(|| {
+        let more = Rc::clone(&handlers.more);
+        div()
+            .id(SharedString::from(format!("folder-more-{slug}")))
+            .h(px(24.0))
+            .pl(px(30.0))
+            .flex()
+            .items_center()
+            .text_size(px(12.0))
+            .text_color(theme.faint)
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .on_click(move |_, window, cx| more(window, cx))
+            .child(format!("{} more", folder.more))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(head)
+        .children(folder.rows.iter().map(|row| {
+            let open = Rc::clone(&handlers.recent_run);
+            let run_id = row.run.clone();
+            let is_selected = selected == Some(&row.run);
+            let hover = theme.row_selected().opacity(0.6);
+            div()
+                .id(SharedString::from(format!("recent-{}", row.run)))
+                .debug_selector({
+                    let run = row.run.clone();
+                    move || format!("recent-{run}")
+                })
+                .h(px(30.0))
+                .ml(px(14.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(9.0))
+                .rounded(px(9.0))
+                .text_size(px(13.0))
+                .text_color(if is_selected { theme.text } else { theme.muted })
+                .cursor_pointer()
+                .when(is_selected, |r| r.bg(theme.row_selected()))
+                .when(!is_selected, |r| r.hover(move |s| s.bg(hover)))
+                .on_click(move |_, window, cx| open(run_id.clone(), window, cx))
+                .child(run_dot(theme, row.dot, 7.0))
+                .child(div().flex_1().min_w_0().truncate().child(row.title.clone()))
+                .child(
+                    div()
+                        .font_family(kit::MONO)
+                        .text_size(px(11.0))
+                        .text_color(theme.faint)
+                        .child(row.age.clone()),
+                )
+        }))
+        .children(more)
+}
+
 /// The sidebar column. `active` marks the current destination.
 pub(crate) fn sidebar(
     theme: &Theme,
     store: &Store,
     active: Nav,
+    toggled: &HashSet<FolderKey>,
     handlers: &SidebarHandlers,
 ) -> impl IntoElement {
     let state = store.state();
@@ -152,47 +283,27 @@ pub(crate) fn sidebar(
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .children(Nav::MAIN.map(|nav| nav_row(theme, nav, active, &counts, &handlers.navigate)))
-        .child(group_label(theme, "ORCHESTRATION"))
-        .children(
-            Nav::ORCHESTRATION.map(|nav| nav_row(theme, nav, active, &counts, &handlers.navigate)),
-        )
-        .child(group_label(theme, "RECENT RUNS"));
+        .children(Nav::ROWS.map(|nav| nav_row(theme, nav, active, &counts, &handlers.navigate)))
+        .child(group_label(theme, "Projects"));
 
-    let recent =
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(state.runs().into_iter().take(RECENT).map(|run| {
-                let open = Rc::clone(&handlers.recent_run);
-                let run_id = run.run_id.clone();
-                div()
-                    .id(SharedString::from(format!("recent-{}", run.run_id)))
-                    .h(px(32.0))
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(9.0))
-                    .rounded(px(9.0))
-                    .text_size(px(13.5))
-                    .text_color(theme.muted)
-                    .cursor_pointer()
-                    .hover({
-                        let hover = theme.row_selected().opacity(0.6);
-                        move |s| s.bg(hover)
-                    })
-                    .on_click(move |_, window, cx| open(run_id.clone(), window, cx))
-                    .debug_selector(|| format!("recent-{}", run.run_id))
-                    .child(kit::dot(
-                        kit::run_color(theme, run.status, crate::summary::reported_problem(run)),
-                        7.0,
-                    ))
-                    .child(kit::exec_glyph(theme, run.executor.as_str(), 12.0))
-                    .child(div().flex_1().min_w_0().truncate().child(run.title.clone()))
-            }));
+    let runs = state.runs();
+    let folders = projects::folders(
+        &runs,
+        |dir| store.root_of(dir),
+        &projects::Inputs {
+            seen: store.seen(),
+            toggled,
+            looking_at: store.looking_at(),
+            now_ms: store.now_ms(),
+        },
+    );
+    let selected_run = store.looking_at().cloned();
+    let recent = div().flex().flex_col().gap(px(2.0)).pb(px(10.0)).children(
+        folders
+            .iter()
+            .map(|folder| folder_view(theme, folder, selected_run.as_ref(), handlers)),
+    );
 
-    let settings = Rc::clone(&handlers.settings);
     let foot = div()
         .flex_none()
         .h(px(52.0))
@@ -231,10 +342,6 @@ pub(crate) fn sidebar(
                 .text_color(theme.muted)
                 .child(kit::dot(daemon_color, 7.0))
                 .child(daemon_text),
-        )
-        .child(
-            kit::icon_button(theme, "settings", Icon::Settings, 28.0)
-                .on_click(move |_, window, cx| settings(window, cx)),
         );
 
     div()
@@ -272,23 +379,14 @@ mod tests {
             bots: 5,
         };
         assert_eq!(
-            badge(Nav::Inbox, &counts),
-            Some(RowBadge {
-                text: "3".into(),
-                hot: true
-            })
-        );
-        assert_eq!(
             badge(Nav::Runs, &counts),
             Some(RowBadge {
                 text: "3 live".into(),
                 hot: false
             })
         );
-        assert_eq!(badge(Nav::Bots, &counts).map(|b| b.text), Some("5".into()));
-        assert_eq!(badge(Nav::Flows, &counts), None);
+        assert_eq!(badge(Nav::Home, &counts), None);
         let none = summary::Attention::default();
-        assert_eq!(badge(Nav::Inbox, &none), None);
         assert_eq!(badge(Nav::Runs, &none), None);
     }
 

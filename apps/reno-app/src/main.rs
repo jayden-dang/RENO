@@ -9,6 +9,7 @@
 mod actions;
 mod app;
 mod attach;
+mod local;
 mod nav;
 mod screens;
 mod store;

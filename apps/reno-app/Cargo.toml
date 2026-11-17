@@ -17,6 +17,7 @@ reno-syntax.workspace = true
 reno-client = { workspace = true, features = ["fake"] }
 futures.workspace = true
 mimalloc = { workspace = true, optional = true }
+serde.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 gpui.workspace = true

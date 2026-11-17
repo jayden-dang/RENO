@@ -219,6 +219,8 @@ pub(crate) struct RootView {
     toasts: Entity<Toasts>,
     screen: Screen,
     sidebar_hidden: bool,
+    /// Project folders opened or closed against their default.
+    folders_toggled: std::collections::HashSet<crate::vm::projects::FolderKey>,
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
     appearance_override: Option<Appearance>,
     palette: Option<Entity<Palette>>,
@@ -309,6 +311,7 @@ impl RootView {
             toasts,
             screen: Screen::Home,
             sidebar_hidden: false,
+            folders_toggled: std::collections::HashSet::new(),
             appearance_override,
             palette: None,
             _run_events: None,
@@ -408,10 +411,7 @@ impl RootView {
 
     /// Shows a built destination; the others say they are not built yet.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
-        if !nav.is_built() {
-            toast::not_yet(cx, nav.label());
-            return;
-        }
+        self.store.update(cx, |store, cx| store.look_at(None, cx));
         self.screen = match nav {
             Nav::Inbox => {
                 self.inbox.update(cx, |screen, cx| screen.shown(cx));
@@ -427,7 +427,7 @@ impl RootView {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Settings
             }
-            _ => Screen::Home,
+            Nav::Home => Screen::Home,
         };
         self.focus_composer(window, cx);
         cx.notify();
@@ -441,11 +441,25 @@ impl RootView {
             return;
         }
         self.pending_fired = None;
+        self.store
+            .update(cx, |store, cx| store.look_at(Some(run.clone()), cx));
         let store = self.store.clone();
         let screen = cx.new(|cx| RunScreen::new(store, run, cx));
         self._run_events = Some(cx.subscribe_in(&screen, window, Self::on_screen_event));
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Opens a closed project folder, or closes an open one.
+    pub(crate) fn toggle_folder(
+        &mut self,
+        key: crate::vm::projects::FolderKey,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.folders_toggled.remove(&key) {
+            self.folders_toggled.insert(key);
+        }
         cx.notify();
     }
 
@@ -524,10 +538,18 @@ impl RootView {
                     this.update(cx, |root, cx| root.open_run(run, window, cx));
                 })
             },
-            settings: {
+            toggle_folder: {
+                let this = this.clone();
+                Rc::new(
+                    move |key: crate::vm::projects::FolderKey, _: &mut Window, cx: &mut App| {
+                        this.update(cx, |root, cx| root.toggle_folder(key, cx));
+                    },
+                )
+            },
+            more: {
                 let this = this.clone();
                 Rc::new(move |window: &mut Window, cx: &mut App| {
-                    this.update(cx, |root, cx| root.navigate(Nav::Settings, window, cx));
+                    this.update(cx, |root, cx| root.navigate(Nav::Runs, window, cx));
                 })
             },
         }
@@ -629,6 +651,7 @@ impl Render for RootView {
                     &theme,
                     self.store.read(cx),
                     self.nav(),
+                    &self.folders_toggled,
                     &handlers,
                 ))
             })
