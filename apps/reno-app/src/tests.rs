@@ -387,6 +387,7 @@ fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::Question { .. } => "question",
             Row::Approval { .. } => "approval",
             Row::Asked { .. } => "asked",
+            Row::ModelChanged { .. } => "model",
             Row::Routing { .. } => "routing",
             Row::Done { .. } => "done",
         })
@@ -785,6 +786,9 @@ fn a_finished_run_sends_a_new_run_in_its_project(cx: &mut TestAppContext) {
             old.bot.as_ref().map(|b| b.name.clone())
         );
         assert_eq!(new.prompt.as_deref(), Some("one more thing"));
+        // The harness and model it ended on go with it.
+        assert_eq!(new.executor, old.executor);
+        assert_eq!(new.model, old.model);
     });
 }
 

@@ -514,3 +514,120 @@ fn the_class_chips_travel_as_bots_the_daemon_has(cx: &mut TestAppContext) {
         "Codex is signed out"
     );
 }
+
+// --- The harness · model picker (2026-11-17) --------------------------------------------------
+
+fn home_composer(
+    vcx: &mut gpui::VisualTestContext,
+    root: &gpui::Entity<crate::app::RootView>,
+) -> gpui::Entity<crate::ui::composer::Composer> {
+    root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone())
+}
+
+#[gpui::test]
+fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    assert!(painted(vcx, "model-chip"));
+    assert!(
+        !painted(vcx, "pick-harness-claude-code"),
+        "the picker starts closed"
+    );
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-claude-code"));
+    click(vcx, "pick-harness-claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
+    click(vcx, "pick-model-claude-sonnet-5-5");
+    draw(vcx);
+    let composer = home_composer(vcx, &root);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().cloned()),
+        Some(crate::vm::models::Pick {
+            executor: "claude-code".parse().unwrap(),
+            model: Some("claude-sonnet-5-5".into()),
+        })
+    );
+    assert!(
+        !painted(vcx, "pick-model-claude-sonnet-5-5"),
+        "choosing closes it"
+    );
+
+    composer.update_in(vcx, |c, window, cx| c.fill("pick test", window, cx));
+    draw(vcx);
+    click(vcx, "send");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+    let run = root
+        .read_with(vcx, |r, cx| {
+            r.run_screen().map(|s| s.read(cx).run_id().clone())
+        })
+        .unwrap();
+    store.read_with(vcx, |s, _| {
+        let summary = s.state().run(&run).unwrap();
+        assert_eq!(summary.executor.as_str(), "claude-code");
+        assert_eq!(summary.model.as_deref(), Some("claude-sonnet-5-5"));
+    });
+}
+
+#[gpui::test]
+fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(
+        !painted(vcx, "pick-harness-codex"),
+        "a live run keeps its harness: only its models are offered"
+    );
+    click(vcx, "pick-model-claude-haiku-5-5");
+    let keeper = crate::tests::run_id("keeper1");
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .and_then(|r| r.model.clone())
+                .as_deref()
+                == Some("claude-haiku-5-5")
+        })
+    });
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |s, _| {
+            s.rows()
+                .iter()
+                .any(|r| matches!(r, crate::transcript::Row::ModelChanged { model, .. } if model == "claude-haiku-5-5"))
+        })
+    });
+}
+
+#[gpui::test]
+fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_scout1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "pick-model-gpt-6-astra"),
+        "Codex fixes its model per turn: no picker on a live run"
+    );
+}

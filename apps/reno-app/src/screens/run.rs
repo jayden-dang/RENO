@@ -360,6 +360,22 @@ impl RunScreen {
             } => question_card(&theme, questions, resolution),
             Row::Approval { key, approval } => self.approval_card(&theme, *key, approval, cx),
             Row::Asked { line, .. } => event_line(&theme, Icon::Shield, theme.muted, line),
+            Row::ModelChanged { model, .. } => {
+                let name = {
+                    let store = self.store.read(cx);
+                    let executor = store.state().run(&self.run).map(|r| r.executor.clone());
+                    executor.map_or_else(
+                        || model.clone(),
+                        |e| crate::vm::models::model_name(store.state(), &e, model),
+                    )
+                };
+                event_line(
+                    &theme,
+                    Icon::Route,
+                    theme.muted,
+                    &format!("Switched to {name}"),
+                )
+            }
             Row::Routing { key, view } => self.routing_card(&theme, *key, view, cx),
             Row::Done {
                 stop,

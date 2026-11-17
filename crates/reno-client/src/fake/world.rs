@@ -8,7 +8,10 @@ use reno_proto::{
     Approval, ApprovalId, ExecEvent, ExecutorId, IdError, RunId, RunStatus, RunSummary, Seq,
     StopReason, TaskId,
 };
-use reno_proto::{ApprovalDecision, ApprovalRecord, ApprovalStatus, ResolvedBy, TriggerInfo};
+use reno_proto::{
+    ApprovalDecision, ApprovalRecord, ApprovalStatus, ErrorCode, ErrorObject, ResolvedBy,
+    TriggerInfo,
+};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -432,6 +435,59 @@ impl World {
             },
         );
         Some(id.clone())
+    }
+
+    /// `run.set_model`: the live run's executor must switch models, and `model` must be one of
+    /// its models (by id or display name). Journals `ModelChanged` and returns the model id.
+    pub(super) fn set_model(&mut self, id: &RunId, model: &str) -> Result<String, ErrorObject> {
+        let run = self
+            .run(id)
+            .ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such run"))?;
+        if run.finished() {
+            return Err(ErrorObject::new(
+                ErrorCode::Conflict,
+                "the run has already ended",
+            ));
+        }
+        let executor = run.summary.executor.clone();
+        let caps = self
+            .executors
+            .iter()
+            .find(|e| e.descriptor.id == executor)
+            .map(|e| e.descriptor.caps.clone())
+            .ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such executor"))?;
+        if !caps.model_switch {
+            return Err(ErrorObject::new(
+                ErrorCode::Conflict,
+                format!("{executor} cannot change a running run's model"),
+            ));
+        }
+        let resolved = caps
+            .models
+            .iter()
+            .find(|m| {
+                m.id == model
+                    || m.display_name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(model))
+            })
+            .map(|m| m.id.clone())
+            .ok_or_else(|| {
+                ErrorObject::new(
+                    ErrorCode::InvalidParams,
+                    format!("{model} is not a model of {executor}"),
+                )
+            })?;
+        self.push(
+            id,
+            ExecEvent::ModelChanged {
+                model: resolved.clone(),
+            },
+        );
+        if let Some(run) = self.run_mut(id) {
+            run.summary.model = Some(resolved.clone());
+        }
+        Ok(resolved)
     }
 
     /// Adds a pending approval for `run`, returning it.

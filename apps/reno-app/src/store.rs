@@ -1020,6 +1020,24 @@ impl Store {
         );
     }
 
+    /// `run.set_model`: the live run uses `model` from its next model call. The run's summary
+    /// and a journalled `ModelChanged` bring the change; a refusal is a toast.
+    pub(crate) fn set_run_model(&mut self, run: RunId, model: String, cx: &mut Context<Self>) {
+        if !self.state.supports(reno_proto::FEATURE_RUN_MODEL) {
+            return;
+        }
+        self.call(
+            "Could not change the model",
+            move |client| async move { client.set_run_model(&run, model).await },
+            cx,
+            D {
+                ok: Box::new(|_, _result: reno_proto::RunSetModelResult, cx| cx.notify()),
+                err: Box::new(|_, cx| cx.notify()),
+                quiet: false,
+            },
+        );
+    }
+
     /// `rule.revoke`, then the list is read again.
     pub(crate) fn revoke_rule(&mut self, id: reno_proto::RuleId, cx: &mut Context<Self>) {
         if self.client().is_none() || !self.revoking.insert(id.clone()) {

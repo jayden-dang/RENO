@@ -730,6 +730,15 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let run_set_model = move |p: reno_proto::RunSetModelParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            let model = s.with(|w| w.set_model(&p.run_id, &p.model))?;
+            Ok(reno_proto::RunSetModelResult { model })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let approval_list = move |_: NoParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -1015,6 +1024,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunCancel, _, _>(run_cancel)
         .method::<reno_proto::RunResume, _, _>(run_resume)
         .method::<RunSteer, _, _>(run_steer)
+        .method::<reno_proto::RunSetModel, _, _>(run_set_model)
         .method::<ApprovalList, _, _>(approval_list)
         .method::<ApprovalDecide, _, _>(approval_decide)
         .subscription::<RunEvents, _, _, _>(run_events)

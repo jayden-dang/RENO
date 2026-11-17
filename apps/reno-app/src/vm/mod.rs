@@ -6,6 +6,7 @@
 
 pub(crate) mod executors;
 pub(crate) mod history;
+pub(crate) mod models;
 pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod routing;

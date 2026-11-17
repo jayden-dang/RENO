@@ -346,7 +346,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     deterministic_turn_end: true,
                     plan_mode: false,
                     models: health.models.models.clone(),
-                    model_switch: false,
+                    // Claude Code switches a live run's model (set_model); the others do not.
+                    model_switch: id == "claude-code",
                     isolates_user_config: false,
                     model_aliases: vec![],
                 },
@@ -387,9 +388,10 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 signed_in: SignedIn::Yes {
                     account: Some("ada@example.com".to_owned()),
                 },
-                models: ModelCatalog::curated(models(&[
+                models: ModelCatalog::live(models(&[
                     ("claude-opus-5-5", "Opus 5.5"),
                     ("claude-sonnet-5-5", "Sonnet 5.5"),
+                    ("claude-haiku-5-5", "Haiku 5.5"),
                 ])),
                 checked_at_ms: at,
             },

@@ -46,6 +46,7 @@ use super::toast;
 use crate::attach;
 use crate::store::{Store, StoreEvent};
 use crate::summary;
+use crate::vm::models;
 use crate::vm::routing::{self, Class, Preview};
 
 actions!(
@@ -212,11 +213,12 @@ pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunPa
     let bot = run.bot.as_ref().map(|pin| pin.name.clone());
     TaskRunParams {
         prompt: prompt.to_owned(),
-        // A bot picks its own executor; a run without one keeps the executor it had.
-        executor: bot.is_none().then(|| run.executor.clone()),
+        // The harness and model the run ended on (a model switched mid-run included), unless the
+        // box picks others.
+        executor: Some(run.executor.clone()),
         bot,
         cwd: run.cwd.clone(),
-        model: None,
+        model: run.model.clone(),
         in_place: false,
         attachments: Vec::new(),
     }
@@ -264,6 +266,12 @@ pub(crate) struct Composer {
     sent_note: Option<Task<()>>,
     /// A [`Mode::Reason`] field's own placeholder and hint, when it is not a denial's reason.
     labels: Option<(SharedString, SharedString)>,
+    /// The harness · model chosen for the next task (`None`: Auto). On a live run's steer box
+    /// it is unused: a live run's model is changed on the daemon (`run.set_model`).
+    pick: Option<models::Pick>,
+    /// Whether the harness · model picker is open, and which harness it is showing.
+    picker_open: bool,
+    picker_harness: Option<ExecutorId>,
     _store: Subscription,
     _events: Subscription,
 }
@@ -305,6 +313,9 @@ impl Composer {
             sent: None,
             sent_note: None,
             labels: None,
+            pick: None,
+            picker_open: false,
+            picker_harness: None,
         };
         composer.refresh_preview(cx);
         composer
@@ -346,6 +357,22 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         self.model.text()
+    }
+
+    /// The harness · model chosen for the next task; `None` is Auto.
+    #[cfg(test)]
+    pub(crate) fn pick(&self) -> Option<&models::Pick> {
+        self.pick.as_ref()
+    }
+
+    /// A task's params with the chosen harness and model: a pick names the harness (so there is
+    /// no fallback to another) and wins over a bot's own list.
+    fn with_pick(&self, mut params: TaskRunParams) -> TaskRunParams {
+        if let Some(pick) = &self.pick {
+            params.executor = Some(pick.executor.clone());
+            params.model.clone_from(&pick.model);
+        }
+        params
     }
 
     /// What is typed in a reason field, trimmed; `None` when blank.
@@ -538,8 +565,12 @@ impl Composer {
         });
         match self.mode.clone() {
             Mode::Home => {
-                let params =
-                    routing::task_params(&prompt, self.class, &wire, self.store.read(cx).state());
+                let params = self.with_pick(routing::task_params(
+                    &prompt,
+                    self.class,
+                    &wire,
+                    self.store.read(cx).state(),
+                ));
                 self.store
                     .update(cx, |store, cx| store.submit_task(params, ticket, cx));
             }
@@ -550,7 +581,7 @@ impl Composer {
                     .state()
                     .run(&run)
                     .filter(|_| matches!(self.steer_state(cx), Some(SteerState::Ended(_))))
-                    .map(|summary| follow_up(summary, &prompt));
+                    .map(|summary| self.with_pick(follow_up(summary, &prompt)));
                 match ended {
                     Some(params) => self
                         .store
@@ -601,6 +632,265 @@ impl Composer {
         self.reveal = true;
         self.refresh_preview(cx);
         cx.notify();
+    }
+
+    // ---- harness · model --------------------------------------------------------------------
+
+    /// The live run this box steers, while it can still take a message (not ended).
+    fn live_run<'a>(&self, cx: &'a App) -> Option<&'a reno_proto::RunSummary> {
+        let Mode::Steer(run) = &self.mode else {
+            return None;
+        };
+        if matches!(self.steer_state(cx), Some(SteerState::Ended(_))) {
+            return None;
+        }
+        self.store.read(cx).state().run(run)
+    }
+
+    /// Whether the chip opens the picker: on Home and on an ended run (the next task's harness
+    /// and model), and on a live run whose harness switches models.
+    fn chip_opens(&self, cx: &App) -> bool {
+        match &self.mode {
+            Mode::Home => true,
+            Mode::Reason => false,
+            Mode::Steer(_) => match self.live_run(cx) {
+                None => true,
+                Some(run) => {
+                    let state = self.store.read(cx).state();
+                    state.supports(reno_proto::FEATURE_RUN_MODEL)
+                        && models::harness(state, &run.executor).is_some_and(|h| h.switches)
+                }
+            },
+        }
+    }
+
+    /// The chip's executor (for the glyph) and words.
+    fn chip_label(&self, cx: &App) -> (Option<ExecutorId>, String) {
+        let state = self.store.read(cx).state();
+        if let Some(pick) = &self.pick {
+            return (
+                Some(pick.executor.clone()),
+                models::label(state, Some(pick)),
+            );
+        }
+        match &self.mode {
+            Mode::Steer(run) => state.run(run).map_or((None, String::new()), |r| {
+                let pick = models::Pick {
+                    executor: r.executor.clone(),
+                    model: r.model.clone(),
+                };
+                (Some(r.executor.clone()), models::label(state, Some(&pick)))
+            }),
+            _ => (None, models::label(state, None)),
+        }
+    }
+
+    fn model_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let (executor, label) = self.chip_label(cx);
+        let opens = self.chip_opens(cx);
+        let chip = kit::chip(theme, "")
+            .id("model-chip")
+            .debug_selector(|| "model-chip".to_owned())
+            .when_some(executor, |c, e| {
+                c.child(kit::exec_glyph(theme, e.as_str(), 13.0))
+            })
+            .when(executor_is_none(&self.pick, &self.mode), |c| {
+                c.child(icon(Icon::Route, 13.0, theme.muted))
+            })
+            .child(SharedString::from(label));
+        if !opens {
+            return chip;
+        }
+        chip.cursor_pointer()
+            .child(icon(
+                if self.picker_open {
+                    Icon::ChevUp
+                } else {
+                    Icon::ChevDown
+                },
+                12.0,
+                theme.faint,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.picker_open = !this.picker_open;
+                if this.picker_open {
+                    this.picker_harness = this
+                        .pick
+                        .as_ref()
+                        .map(|p| p.executor.clone())
+                        .or_else(|| this.live_run(cx).map(|r| r.executor.clone()));
+                }
+                cx.notify();
+            }))
+    }
+
+    /// Choose a model: on a live run the daemon switches it; otherwise it is the next task's.
+    fn choose_model(
+        &mut self,
+        executor: ExecutorId,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker_open = false;
+        if let (Some(run), Some(model)) =
+            (self.live_run(cx).map(|r| r.run_id.clone()), model.clone())
+        {
+            self.store
+                .update(cx, |store, cx| store.set_run_model(run, model, cx));
+            cx.notify();
+            return;
+        }
+        self.pick = Some(models::Pick { executor, model });
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    /// The picker: harnesses (not on a live run, whose harness is fixed), then the models the
+    /// shown harness's CLI reported.
+    fn picker(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let live = self.live_run(cx).map(|r| r.executor.clone());
+        let state = self.store.read(cx).state();
+        let harnesses = models::harnesses(state);
+        let shown = live
+            .clone()
+            .or_else(|| self.picker_harness.clone())
+            .and_then(|id| harnesses.iter().find(|h| h.id == id).cloned());
+        let pill = |id: String, label: String, on: bool| {
+            div()
+                .id(SharedString::from(id.clone()))
+                .debug_selector(move || id.clone())
+                .h(px(26.0))
+                .px(px(11.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(999.0))
+                .border_1()
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(on, |c| {
+                    c.border_color(theme.accent.opacity(0.7))
+                        .bg(theme.accent.opacity(0.14))
+                        .text_color(theme.text)
+                })
+                .when(!on, |c| {
+                    c.border_color(theme.hairline)
+                        .text_color(theme.muted)
+                        .hover(|s| s.bg(theme.raised))
+                })
+                .child(label)
+        };
+        let mut panel = div()
+            .id("model-picker")
+            .debug_selector(|| "model-picker".to_owned())
+            .mx(px(14.0))
+            .mb(px(12.0))
+            .p(px(12.0))
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.hairline)
+            .flex()
+            .flex_col()
+            .gap(px(10.0));
+        if live.is_none() {
+            let auto_on = self.pick.is_none() && self.picker_harness.is_none();
+            let row = div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .child(
+                    pill("pick-harness-auto".into(), "Auto".into(), auto_on).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.pick = None;
+                            this.picker_harness = None;
+                            this.picker_open = false;
+                            this.refresh_preview(cx);
+                            cx.notify();
+                        },
+                    )),
+                )
+                .children(harnesses.iter().map(|h| {
+                    let id = h.id.clone();
+                    let on = shown.as_ref().is_some_and(|s| s.id == h.id);
+                    let label = if h.usable {
+                        h.name.clone()
+                    } else {
+                        format!("{} (signed out)", h.name)
+                    };
+                    pill(format!("pick-harness-{}", h.id), label, on)
+                        .when(!h.usable, |p| p.opacity(0.5))
+                        .when(h.usable, |p| {
+                            p.on_click(cx.listener(move |this, _, _, cx| {
+                                this.picker_harness = Some(id.clone());
+                                cx.notify();
+                            }))
+                        })
+                }));
+            panel = panel.child(row);
+        }
+        match shown {
+            None => panel.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.muted)
+                    .child("Auto: Reno picks the harness, which uses its default model."),
+            ),
+            Some(h) => {
+                let current = match &live {
+                    Some(_) => self.live_run(cx).and_then(|r| r.model.clone()),
+                    None => self
+                        .pick
+                        .as_ref()
+                        .filter(|p| p.executor == h.id)
+                        .and_then(|p| p.model.clone()),
+                };
+                let source = if h.live {
+                    format!("Models {} reported", h.name)
+                } else {
+                    format!(
+                        "{}'s CLI did not list its models; this is Reno's fallback list",
+                        h.name
+                    )
+                };
+                let id = h.id.clone();
+                let default = (live.is_none()).then(|| {
+                    let id = id.clone();
+                    pill(
+                        "pick-model-default".into(),
+                        "Default".into(),
+                        current.is_none() && self.pick.as_ref().is_some_and(|p| p.executor == h.id),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_model(id.clone(), None, cx);
+                    }))
+                });
+                let row = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.0))
+                    .children(default)
+                    .children(h.models.iter().map(|m| {
+                        let (id, model) = (h.id.clone(), m.id.clone());
+                        pill(
+                            format!("pick-model-{}", m.id),
+                            m.name.clone(),
+                            current.as_deref() == Some(m.id.as_str()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.choose_model(id.clone(), Some(model.clone()), cx);
+                        }))
+                    }));
+                panel
+                    .child(div().text_size(px(12.0)).text_color(theme.faint).child(
+                        if live.is_some() {
+                            format!("{source}. The switch applies from its next step.")
+                        } else {
+                            source
+                        },
+                    ))
+                    .child(row)
+            }
+        }
     }
 
     // ---- attachments ----------------------------------------------------------------------
@@ -701,7 +991,12 @@ impl Composer {
         let key = {
             let state = self.store.read(cx).state();
             PreviewKey {
-                task: routing::task_params(self.model.text().trim(), self.class, &[], state),
+                task: self.with_pick(routing::task_params(
+                    self.model.text().trim(),
+                    self.class,
+                    &[],
+                    state,
+                )),
                 probes: state
                     .executors()
                     .iter()
@@ -1629,6 +1924,7 @@ impl Render for Composer {
                         .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
                 )
                 .children(self.class_chips(&theme, cx))
+                .child(self.model_chip(&theme, cx))
                 .child(div().flex_1())
                 .child(self.route_line(&theme, cx))
                 .child(self.action_button(&theme, cx)),
@@ -1641,17 +1937,7 @@ impl Render for Composer {
                     || "Enter to deny \u{b7} Esc to clear".into(),
                     |(_, hint)| hint.clone(),
                 )),
-            Mode::Steer(run) => {
-                let store = self.store.read(cx);
-                let summary = store.state().run(run);
-                let executor = summary.map_or("", |r| r.executor.as_str());
-                let chip = {
-                    let name = summary::executor_name(executor);
-                    match summary.and_then(|r| r.model.as_deref()) {
-                        Some(model) => format!("{name} \u{b7} {model}"),
-                        None => name,
-                    }
-                };
+            Mode::Steer(_) => {
                 let state = self.steer_state(cx);
                 let note: Option<(SharedString, gpui::Hsla)> = match &state {
                     Some(SteerState::Ended(why)) => Some((
@@ -1675,11 +1961,7 @@ impl Render for Composer {
                     .gap(px(8.0))
                     .px(px(18.0))
                     .pb(px(14.0))
-                    .child(
-                        kit::chip(&theme, "")
-                            .child(kit::exec_glyph(&theme, executor, 13.0))
-                            .child(SharedString::from(chip)),
-                    )
+                    .child(self.model_chip(&theme, cx))
                     .when_some(note, |d, (text, tone)| {
                         d.child(
                             div()
@@ -1764,10 +2046,18 @@ impl Render for Composer {
             .child(text_area)
             .children(self.attachment_row(&theme, cx))
             .child(foot)
+            .when(self.picker_open && self.chip_opens(cx), |c| {
+                c.child(self.picker(&theme, cx))
+            })
             .when(home && self.why_open, |c| {
                 c.child(self.why_panel(&theme, connected))
             })
     }
+}
+
+/// Whether the chip has no harness to show a glyph for: Auto on Home.
+fn executor_is_none(pick: &Option<models::Pick>, mode: &Mode) -> bool {
+    pick.is_none() && matches!(mode, Mode::Home)
 }
 
 /// The "why?" panel's line when no route preview came back. Only a connected daemon routes the

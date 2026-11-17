@@ -95,6 +95,9 @@ pub(crate) enum Row {
     Asked { key: Key, line: String },
     /// Where the run was routed and why: a card after the prompt, with the "why" collapsed.
     Routing { key: Key, view: RoutingView },
+    /// The run's model was changed while it ran: "Switched to Haiku 5.5". `model` is the id the
+    /// harness reported.
+    ModelChanged { key: Key, model: String },
     /// The final status line.
     Done {
         key: Key,
@@ -160,6 +163,7 @@ impl Row {
             | Self::Approval { key, .. }
             | Self::Asked { key, .. }
             | Self::Routing { key, .. }
+            | Self::ModelChanged { key, .. }
             | Self::Done { key, .. } => *key,
         }
     }
@@ -371,8 +375,10 @@ pub(crate) fn build_rows(
                 questions: questions.clone(),
                 resolution: Resolution::Pending,
             }),
-            // Drawn by the model-picker change (app side).
-            ExecEvent::ModelChanged { .. } => {}
+            ExecEvent::ModelChanged { model } => built.rows.push(Row::ModelChanged {
+                key,
+                model: model.clone(),
+            }),
             ExecEvent::InputExpired { request_id } => {
                 let card = built.rows.iter_mut().find_map(|row| match row {
                     Row::Question {
@@ -1271,6 +1277,7 @@ mod tests {
                 Row::Approval { .. } => "approval",
                 Row::Asked { .. } => "asked",
                 Row::Routing { .. } => "routing",
+                Row::ModelChanged { .. } => "model",
                 Row::Done { .. } => "done",
             })
             .collect();
