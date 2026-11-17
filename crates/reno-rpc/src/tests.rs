@@ -48,6 +48,7 @@ fn summary(n: u64) -> RunSummary {
         stop: None,
         not_resumed: None,
         session: None,
+        report: None,
     }
 }
 

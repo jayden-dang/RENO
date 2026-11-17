@@ -87,7 +87,7 @@ use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, RuleRef, evaluate
 use reno_proto::{
     ActionClass, ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent, MCP_SERVER_NAME,
     MCP_TOOLS, Remember, RememberScope, ResolvedBy, RuleId, RuleMatcher, RunStatus, StandingEffect,
-    StandingRule, StandingScope, standing_rule_name,
+    StandingRule, StandingScope, StopDetail, standing_rule_name,
 };
 use reno_store::{ExpireScope, NewApproval, NewRule, StoreError};
 use tokio::sync::oneshot;
@@ -736,7 +736,11 @@ impl Supervisor {
     }
 
     /// The run is over: close what it still has open, in the store and in the journal.
-    pub(super) async fn close_approvals(&mut self) {
+    ///
+    /// When the run ended for a reason (a person's cancel, the kill switch, a budget, the
+    /// shutdown), each approval records it: `withdrawn: the run was cancelled`, not the time
+    /// limit it never reached.
+    pub(super) async fn close_approvals(&mut self, reason: Option<&StopDetail>) {
         if self.open_approvals.is_empty() && !self.approvals_unrecorded {
             return;
         }
@@ -746,13 +750,14 @@ impl Supervisor {
             run: self.run.clone(),
             fence: self.fence,
         };
-        match self.shared.db.expire_pending(scope).await {
+        let message = reason.map(|reason| format!("withdrawn: {reason}"));
+        match self.shared.db.expire_pending(scope, message.clone()).await {
             Ok(expired) => {
                 for closed in expired {
                     self.answer(
                         &closed.request_id,
                         ApprovalOutcome::Denied,
-                        None,
+                        message.clone(),
                         &ResolvedBy::Expired,
                     )
                     .await;
@@ -760,7 +765,7 @@ impl Supervisor {
                         request_id: closed.request_id,
                         decision: ApprovalOutcome::Denied,
                         by: ResolvedBy::Expired,
-                        message: None,
+                        message: message.clone(),
                     });
                 }
             }

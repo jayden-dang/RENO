@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RuleId, RunId, RunStatus, SessionRef, StandingRule, TaskId, WorkspaceChanges,
-    WorkspaceInfo, WorkspaceStatus,
+    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule, TaskId,
+    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
@@ -295,6 +295,19 @@ impl Db {
             .await
     }
 
+    /// Transitions that commit together; see `Store::transition_through`.
+    pub(crate) async fn transition_through(
+        &self,
+        run: &RunId,
+        fence: u64,
+        steps: Vec<(RunStatus, Note)>,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .transition_through(run, fence, steps, self.now_ms())
+            .await
+    }
+
     pub(crate) async fn record_session(
         &self,
         run: &RunId,
@@ -329,6 +342,16 @@ impl Db {
         self.store
             .set_not_resumed(run, fence, why, self.now_ms())
             .await
+    }
+
+    pub(crate) async fn set_report(
+        &self,
+        run: &RunId,
+        fence: u64,
+        report: &RunReport,
+    ) -> Result<()> {
+        self.wrote();
+        self.store.set_report(run, fence, report).await
     }
 
     pub(crate) async fn record_process(
@@ -435,9 +458,15 @@ impl Db {
         self.store.active_rules(run, bot, self.now_ms()).await
     }
 
-    pub(crate) async fn expire_pending(&self, scope: ExpireScope) -> Result<Vec<Expired>> {
+    pub(crate) async fn expire_pending(
+        &self,
+        scope: ExpireScope,
+        message: Option<String>,
+    ) -> Result<Vec<Expired>> {
         self.wrote();
-        self.store.expire_pending(scope, self.now_ms()).await
+        self.store
+            .expire_pending(scope, message, self.now_ms())
+            .await
     }
 
     pub(crate) async fn pending_approvals(&self) -> Result<Vec<StoredApproval>> {

@@ -2,7 +2,7 @@
 //! takes. Every step is one fenced store transition, so each is atomic with its event row
 //! (ARCH-8) and each is checked against `RunStatus::can_transition_to`.
 
-use reno_proto::{ExecEvent, RunId, RunStatus, StopDetail, StopReason};
+use reno_proto::{CancelledBy, ExecEvent, RunId, RunStatus, StopDetail, StopReason};
 use reno_store::{Note, StoreError};
 
 use crate::db::Db;
@@ -35,6 +35,32 @@ pub(crate) async fn end_run(
     reason: Option<&StopDetail>,
 ) -> Result<RunStatus, StoreError> {
     let end = evaluated(stop);
+    if end == RunStatus::Interrupted
+        && matches!(
+            reason,
+            Some(StopDetail::Cancelled {
+                by: CancelledBy::User
+            })
+        )
+    {
+        // A person's cancel is final, and no client may see the run `interrupted` (resumable)
+        // on the way: both edges commit together. The stop is the reason; nothing is left
+        // to resume.
+        let note = Note {
+            stop: reason.cloned(),
+            not_resumed: None,
+        };
+        db.transition_through(
+            run,
+            fence,
+            vec![
+                (RunStatus::Interrupted, note.clone()),
+                (RunStatus::Cancelled, note),
+            ],
+        )
+        .await?;
+        return Ok(RunStatus::Cancelled);
+    }
     let note = Note {
         stop: reason.cloned(),
         not_resumed: reason

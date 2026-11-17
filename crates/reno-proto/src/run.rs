@@ -37,6 +37,23 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// The run in this status, in plain words for a sentence: "a cancelled run", "a run that
+    /// succeeded", "a run waiting for approval".
+    pub fn a_run(self) -> &'static str {
+        match self {
+            Self::Queued => "a queued run",
+            Self::Leased => "a run that is starting",
+            Self::Running => "a running run",
+            Self::WaitingInput => "a run waiting for an answer",
+            Self::WaitingApproval => "a run waiting for approval",
+            Self::Evaluating => "a run being checked",
+            Self::Succeeded => "a run that succeeded",
+            Self::Failed => "a failed run",
+            Self::Interrupted => "an interrupted run",
+            Self::Cancelled => "a cancelled run",
+        }
+    }
+
     /// Every status, in lifecycle order.
     pub const ALL: [RunStatus; 10] = [
         Self::Queued,
@@ -311,8 +328,9 @@ impl fmt::Display for NotResumed {
             Self::StillStopping => f.write_str("its executor is still stopping"),
             Self::WrongStatus { status } => write!(
                 f,
-                "a {status:?} run cannot be resumed; only interrupted runs, and failed runs that \
-                 have a session, can"
+                "{} cannot be resumed; only interrupted runs, and failed runs that have a \
+                 session, can",
+                status.a_run()
             ),
         }
     }
@@ -321,6 +339,24 @@ impl fmt::Display for NotResumed {
 #[cfg(test)]
 mod tests {
     use super::RunStatus::{self, *};
+
+    #[test]
+    fn a_resume_refusal_names_the_run_in_plain_words() {
+        let why = |status| super::NotResumed::WrongStatus { status }.to_string();
+        assert_eq!(
+            why(Cancelled),
+            "a cancelled run cannot be resumed; only interrupted runs, and failed runs that have a session, can"
+        );
+        assert!(why(Succeeded).starts_with("a run that succeeded cannot be resumed"));
+        assert!(why(Running).starts_with("a running run cannot be resumed"));
+        assert!(why(WaitingApproval).starts_with("a run waiting for approval cannot be resumed"));
+        // No debug names (`Cancelled`) and no stray capitals reach a person.
+        for status in RunStatus::ALL {
+            let text = why(status);
+            assert!(text.starts_with("a ") || text.starts_with("an "), "{text}");
+            assert!(!text.contains(&format!("{status:?}")), "{text}");
+        }
+    }
 
     /// Every edge of the diagram. Any pair not listed here must be rejected.
     const EDGES: &[(RunStatus, RunStatus)] = &[

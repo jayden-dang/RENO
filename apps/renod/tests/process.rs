@@ -15,9 +15,7 @@ use std::time::Duration;
 use common::{id, is_done, within};
 use futures::StreamExt;
 use reno_client::{Client, ClientError};
-use reno_proto::{
-    CancelledBy, ExecEvent, NotResumed, RunId, RunStatus, StopDetail, StopReason, TaskRunParams,
-};
+use reno_proto::{CancelledBy, ExecEvent, RunId, RunStatus, StopDetail, StopReason, TaskRunParams};
 
 /// A `renod` process that is killed if the test panics before it is stopped.
 struct Renod {
@@ -325,7 +323,7 @@ process_test! {
 }
 
 process_test! {
-    async fn a_run_a_person_cancelled_stays_interrupted_through_a_kill_until_they_resume_it() {
+    async fn a_run_a_person_cancelled_stays_cancelled_through_a_kill_and_is_not_taken_back() {
         let (_root, dir) = data_dir();
         let mut daemon = Renod::spawn(&dir);
         let client = daemon.client().await;
@@ -338,21 +336,16 @@ process_test! {
 
         let mut next = Renod::spawn(&dir);
         let client = next.client().await;
-        // Another start did not take the run back: a person's cancel stands, and the run says so.
+        // Another start did not take the run back: a person's cancel is final, and the run says
+        // who ended it. It was never `interrupted`, so nothing offers it for resuming.
         let summary = within(client.get_run(&run)).await.expect("run.get");
-        assert_eq!(summary.status, RunStatus::Interrupted);
-        assert_eq!(summary.not_resumed, Some(NotResumed::Cancelled));
+        assert_eq!(summary.status, RunStatus::Cancelled);
+        assert_eq!(summary.not_resumed, None);
         assert_eq!(
             summary.stop,
             Some(StopDetail::Cancelled { by: CancelledBy::User })
         );
-
-        // A person's own resume does take it back, as attempt 2 on the same session.
-        assert_eq!(within(client.resume_run(&run, None)).await.expect("run.resume"), 2);
-        wait_for_texts(&client, &run, 2).await;
-        within(client.steer(&run, "finish".into())).await.expect("steer");
-        let events: Vec<_> = within(client.run_events(run.clone(), None).collect::<Vec<_>>()).await;
-        assert!(is_done(&events.last().expect("events").as_ref().expect("ok").event, StopReason::Completed));
+        assert!(within(client.resume_run(&run, None)).await.is_err());
         next.signal("TERM");
         assert!(next.exit().await.success());
     }
@@ -491,7 +484,7 @@ process_test! {
         assert!(is_done(&last.event, StopReason::Interrupted));
         assert_eq!(
             within(client.get_run(&fresh)).await.unwrap().status,
-            RunStatus::Interrupted
+            RunStatus::Cancelled
         );
         next.signal("TERM");
         assert!(next.exit().await.success());

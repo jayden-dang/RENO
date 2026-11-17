@@ -71,24 +71,25 @@ async fn texts_until_held(fx: &Fixture, run: &RunId, texts: usize) {
 }
 
 daemon_test! {
-    async fn a_person_resumes_a_cancelled_run_and_it_continues_the_same_session() {
+    async fn a_person_resumes_a_run_the_kill_switch_stopped_and_it_continues_the_same_session() {
         let fx = Fixture::start().await;
         let run = fx.run("mock-hold", "wait for me").await;
         texts_until_held(&fx, &run, 1).await;
 
-        within(fx.client.cancel_run(&run, None)).await.unwrap();
+        within(fx.client.pause(None, true)).await.unwrap();
         // Wait for the journal to close: the run is `interrupted` and says who stopped it.
         let first = fx.events(&run, None).await;
         let Some(ExecEvent::Done { stop, reason, .. }) = first.last().map(|i| &i.event) else {
             panic!("no Done: {first:?}");
         };
         assert_eq!(*stop, StopReason::Interrupted);
-        assert_eq!(*reason, Some(StopDetail::Cancelled { by: CancelledBy::User }));
+        assert_eq!(*reason, Some(StopDetail::Cancelled { by: CancelledBy::Pause }));
         let summary = within(fx.client.get_run(&run)).await.unwrap();
         assert_eq!(summary.status, RunStatus::Interrupted);
-        assert_eq!(summary.stop, Some(StopDetail::Cancelled { by: CancelledBy::User }));
-        assert_eq!(summary.not_resumed, Some(NotResumed::Cancelled));
+        assert_eq!(summary.stop, Some(StopDetail::Cancelled { by: CancelledBy::Pause }));
+        assert_eq!(summary.not_resumed, Some(NotResumed::Paused));
         assert_eq!(summary.session, Some(SessionRef("mock-session".into())));
+        within(fx.client.resume(None)).await.unwrap();
 
         let attempt = resume_when_stopped(&fx, &run, Some("carry on".into())).await.unwrap();
         assert_eq!(attempt, 2);
@@ -106,6 +107,32 @@ daemon_test! {
         );
         let done = within(fx.client.get_run(&run)).await.unwrap();
         assert_eq!((done.status, done.attempt), (RunStatus::Succeeded, 2));
+        fx.stop().await;
+    }
+}
+
+daemon_test! {
+    async fn a_run_a_person_cancelled_is_cancelled_at_once_and_is_not_offered_for_resuming() {
+        let fx = Fixture::start().await;
+        let run = fx.run("mock-hold", "wait for me").await;
+        texts_until_held(&fx, &run, 1).await;
+
+        within(fx.client.cancel_run(&run, None)).await.unwrap();
+        let first = fx.events(&run, None).await;
+        let Some(ExecEvent::Done { reason, .. }) = first.last().map(|i| &i.event) else {
+            panic!("no Done: {first:?}");
+        };
+        assert_eq!(*reason, Some(StopDetail::Cancelled { by: CancelledBy::User }));
+        // Never `interrupted` on the way: this is the state clients read as stopped.
+        let summary = within(fx.client.get_run(&run)).await.unwrap();
+        assert_eq!(summary.status, RunStatus::Cancelled);
+        assert_eq!(summary.stop, Some(StopDetail::Cancelled { by: CancelledBy::User }));
+        assert_eq!(summary.not_resumed, None);
+        let refused = resume_when_stopped(&fx, &run, None).await.unwrap_err();
+        assert_eq!(
+            refused_for(refused),
+            NotResumed::WrongStatus { status: RunStatus::Cancelled }
+        );
         fx.stop().await;
     }
 }

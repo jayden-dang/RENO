@@ -86,6 +86,10 @@ CREATE TABLE attempts (
 
 /// Migration 2: the start time of the recorded child, so the orphan sweep can refuse a pid that
 /// was reused (ARCHITECTURE 17.3).
+/// V15: the last report the run's agent made, as a JSON `RunReport`.
+const V15: &str =
+    "ALTER TABLE runs ADD COLUMN report TEXT CHECK (report IS NULL OR json_valid(report));";
+
 const V2: &str = "ALTER TABLE runs ADD COLUMN process_start INTEGER;";
 
 /// Migration 3: run listings page by `(created_at, rowid)`, newest first, so the order has an
@@ -407,6 +411,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V12),
         M::up(V13),
         M::up(V14),
+        M::up(V15),
     ])
 }
 
@@ -455,7 +460,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema

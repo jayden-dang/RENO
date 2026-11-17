@@ -614,6 +614,7 @@ mod tests {
             stop: None,
             not_resumed: None,
             session: None,
+            report: None,
         }
     }
 

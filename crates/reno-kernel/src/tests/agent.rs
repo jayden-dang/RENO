@@ -400,6 +400,44 @@ async fn a_report_is_journaled_as_the_runs_own_event() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_runs_summary_carries_the_agents_last_report_beside_its_status() {
+    let rig = Rig::new(hold(), config(1)).await;
+    let (run, session) = rig.live(None).await;
+    assert_eq!(rig.fx.kernel.get_run(&run).await.unwrap().report, None);
+    for (status, summary) in [
+        (ReportStatus::Progress, "halfway"),
+        (ReportStatus::Failed, "tests failed, Cargo.lock reverted"),
+    ] {
+        rig.fx
+            .kernel
+            .agent_report(
+                &session,
+                AgentReportParams {
+                    status,
+                    summary: summary.into(),
+                    details: Some("long details stay in the journal".into()),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    rig.finish(&run).await;
+    // The run's own status is untouched; the report is beside it.
+    let summary = rig.fx.kernel.get_run(&run).await.unwrap();
+    assert_eq!(summary.status, RunStatus::Succeeded);
+    assert_eq!(
+        summary.report,
+        Some(reno_proto::RunReport {
+            status: ReportStatus::Failed,
+            summary: "tests failed, Cargo.lock reverted".into(),
+        })
+    );
+    // The list carries it too.
+    let (page, _) = rig.fx.kernel.list_runs(None, None, None).await.unwrap();
+    assert_eq!(page[0].report, summary.report);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_bot_less_run_has_its_own_scope_and_a_bots_runs_share_theirs() {
     let rig = Rig::new(hold(), config(3)).await;
     let (first_run, first) = rig.live(Some("keeper")).await;

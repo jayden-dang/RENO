@@ -336,7 +336,13 @@ async fn a_resumed_run_gets_its_secrets_again_and_stays_redacted() {
     let m = mock([
         MockStep::started("sess-1", "mock-1"),
         MockStep::text(format!("token {TOKEN}")),
-        MockStep::Sleep(std::time::Duration::from_secs(3600)),
+        // The executor stops by itself: interrupted, and a person can resume it.
+        MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Interrupted,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }),
     ]);
     let fx = fx_with(
         bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]"),
@@ -353,7 +359,6 @@ async fn a_resumed_run_gets_its_secrets_again_and_stays_redacted() {
             .and_then(|row| row.session_ref)
     })
     .await;
-    fx.kernel.cancel(&run).await.unwrap();
     fx.wait_status(&run, RunStatus::Interrupted).await;
     fx.journal_with_done(&run).await;
 
@@ -365,8 +370,6 @@ async fn a_resumed_run_gets_its_secrets_again_and_stays_redacted() {
     assert_eq!(specs[1].env["RENO_RUN_ID"], run.as_str());
     assert_eq!(secrets.asked().len(), 2, "resolved once per attempt");
 
-    fx.kernel.cancel(&run).await.unwrap();
-    fx.wait_status(&run, RunStatus::Interrupted).await;
     let shown = serde_json::to_string(&fx.journal_with_done(&run).await).unwrap();
     assert!(!shown.contains(TOKEN), "{shown}");
 }

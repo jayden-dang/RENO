@@ -25,7 +25,7 @@ async fn a_flood_of_steers_is_refused_and_never_wedges_the_run() {
     ));
     // The supervisor is still listening and still ends the run.
     fx.kernel.cancel(&run).await.unwrap();
-    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.wait_status(&run, RunStatus::Cancelled).await;
 }
 
 #[tokio::test(start_paused = true)]

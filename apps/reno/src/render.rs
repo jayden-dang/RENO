@@ -11,9 +11,9 @@ use reno_proto::defs::format_instant;
 use reno_proto::{
     Approval, ApprovalId, ApprovalOutcome, ApprovalRecord, ApprovalStatus, ApprovalSubject,
     CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
-    InstallStatus, ModelSource, NotInstalledReason, ResolvedBy, RoutingDecision, RunEventItem,
-    RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo, TriggerStatus,
-    VersionGate, WorkspaceInfo, WorkspaceStatus,
+    InstallStatus, ModelSource, NotInstalledReason, ReportStatus, ResolvedBy, RoutingDecision,
+    RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo,
+    TriggerStatus, VersionGate, WorkspaceInfo, WorkspaceStatus,
 };
 use serde::Serialize;
 
@@ -322,19 +322,41 @@ pub(crate) fn model_line(run: &RunSummary, started: Option<&str>) -> Option<Stri
 
 /// One run on one line: `id  status  executor  title`.
 pub(crate) fn run_line(run: &RunSummary) -> String {
+    let mut status = status_name(run.status);
+    if let Some(flag) = reported_flag(run) {
+        status = format!("{status} (reported {flag})");
+    }
     format!(
         "{}  {:<16}  {:<12}  {}",
         run.run_id,
-        status_name(run.status),
+        status,
         run.executor.as_str(),
         run.title
     )
 }
 
-/// What a run's stop and resume state add to its one line, as extra lines: why it stopped, and
-/// why it was not resumed.
+/// The word a list adds beside a status when the agent's own report disagrees with it: the agent
+/// reported `failed` or `blocked` while the run did not fail. `None` when they agree or the
+/// report is only progress or done.
+fn reported_flag(run: &RunSummary) -> Option<&'static str> {
+    match run.report.as_ref()?.status {
+        ReportStatus::Failed if run.status != RunStatus::Failed => Some("failed"),
+        ReportStatus::Blocked => Some("blocked"),
+        _ => None,
+    }
+}
+
+/// What a run's stop and resume state add to its one line, as extra lines: the agent's last
+/// report, why it stopped, and why it was not resumed.
 pub(crate) fn stop_lines(run: &RunSummary) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(report) = &run.report {
+        lines.push(format!(
+            "report: {} \u{2014} {}",
+            wire_name(&report.status),
+            report.summary
+        ));
+    }
     if let Some(stop) = &run.stop {
         lines.push(format!("stopped: {stop}"));
     }
@@ -355,10 +377,21 @@ pub(crate) fn status_name(status: RunStatus) -> String {
 pub(crate) fn by_text(by: &ResolvedBy) -> String {
     match by {
         ResolvedBy::Human => "you".to_owned(),
-        ResolvedBy::Rule { name } => format!("rule {name}"),
+        ResolvedBy::Rule { name } => match name.strip_prefix("standing:") {
+            Some(id) => format!("your rule {id}"),
+            // The daemon's own label for an unnamed policy rule already says what it is.
+            None if name.starts_with("policy rule ") => name.clone(),
+            None => format!("rule {name}"),
+        },
         ResolvedBy::Expired => "the time limit".to_owned(),
         ResolvedBy::RepeatDenial => "the repeat-denial rule".to_owned(),
     }
+}
+
+/// Why an approval ended with its run (`withdrawn: the run was cancelled`), when that is what
+/// ended it: an `Expired` decision that carries the daemon's reason, not a time limit.
+fn withdrawn<'a>(by: &ResolvedBy, message: Option<&'a str>) -> Option<&'a str> {
+    message.filter(|message| matches!(by, ResolvedBy::Expired) && message.starts_with("withdrawn:"))
 }
 
 /// The transcript line of a resolved approval: `approved by rule cargo is fine`.
@@ -371,6 +404,9 @@ pub(crate) fn resolved_text(
         ApprovalOutcome::Approved => "approved",
         ApprovalOutcome::Denied => "denied",
     };
+    if let Some(why) = withdrawn(by, message) {
+        return format!("{outcome}: {why}");
+    }
     let line = match by {
         ResolvedBy::Expired => format!("{outcome}: nobody answered in time"),
         ResolvedBy::RepeatDenial => format!("{outcome}: it was denied earlier in this run"),
@@ -386,20 +422,25 @@ pub(crate) fn resolved_text(
 pub(crate) fn history_line(record: &ApprovalRecord) -> String {
     let subject = &record.subject;
     let what = subject.command.as_deref().unwrap_or("");
-    let by = record
+    let why = record
         .decided_by
         .as_ref()
-        .map_or_else(|| "nobody yet".to_owned(), by_text);
+        .and_then(|by| withdrawn(by, record.message.as_deref()));
+    let by = match (why, &record.decided_by) {
+        (Some(why), _) => why.to_owned(),
+        (None, Some(by)) => format!("by {}", by_text(by)),
+        (None, None) => "by nobody yet".to_owned(),
+    };
     let line = format!(
-        "{}  run {}  {:<8}  by {by}  {} {what}",
+        "{}  run {}  {:<8}  {by}  {} {what}",
         record.id,
         record.run_id,
         wire_name(&record.status),
         subject.tool
     );
-    match &record.message {
-        Some(message) => format!("{line} ({message})"),
-        None => line,
+    match (&record.message, why) {
+        (Some(message), None) => format!("{line} ({message})"),
+        _ => line,
     }
 }
 
@@ -623,7 +664,9 @@ pub(crate) fn fired_line(name: &str, fired: &TriggerFireResult) -> String {
 
 /// One standing rule on one line: id, effect, scope, what it matches, and its end.
 /// `now_ms` is the time to read the expiry against.
-pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String {
+///
+/// `run_over` is true for a rule of one run whose run has ended: it holds no more, and says so.
+pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64, run_over: bool) -> String {
     use reno_proto::{CommandPattern, StandingScope};
     let scope = match &rule.scope {
         StandingScope::Run { run } => format!("run {run}"),
@@ -644,6 +687,7 @@ pub(crate) fn rule_line(rule: &reno_proto::StandingRule, now_ms: u64) -> String 
         (Some(_), _) => "  revoked".to_owned(),
         (None, Some(at)) if at <= now_ms => "  expired".to_owned(),
         (None, Some(at)) => format!("  expires in {}", duration((at - now_ms) / 1000)),
+        (None, None) if run_over => "  ended with its run".to_owned(),
         (None, None) => String::new(),
     };
     format!(
@@ -1070,6 +1114,38 @@ mod tests {
     }
 
     #[test]
+    fn a_run_whose_agent_reported_failure_says_so_beside_its_status() {
+        let mut run: RunSummary = serde_json::from_value(serde_json::json!({
+            "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
+            "status": "succeeded", "attempt": 1, "title": "nightly update",
+            "createdAtMs": 1, "updatedAtMs": 1
+        }))
+        .unwrap();
+        assert!(!run_line(&run).contains("reported"));
+        assert!(stop_lines(&run).is_empty());
+        run.report = Some(reno_proto::RunReport {
+            status: reno_proto::ReportStatus::Failed,
+            summary: "tests failed, Cargo.lock reverted".into(),
+        });
+        assert!(
+            run_line(&run).contains("succeeded (reported failed)"),
+            "{}",
+            run_line(&run)
+        );
+        assert_eq!(
+            stop_lines(&run),
+            ["report: failed \u{2014} tests failed, Cargo.lock reverted"]
+        );
+        // A report that agrees with the run, or is only a checkpoint, adds no flag to the line.
+        run.report.as_mut().unwrap().status = reno_proto::ReportStatus::Done;
+        assert!(!run_line(&run).contains("reported"));
+        // A failed run whose agent said it failed is not told twice.
+        run.status = RunStatus::Failed;
+        run.report.as_mut().unwrap().status = reno_proto::ReportStatus::Failed;
+        assert!(!run_line(&run).contains("reported"));
+    }
+
+    #[test]
     fn the_model_a_run_asks_for_is_a_line_of_run_show() {
         let mut run: RunSummary = serde_json::from_value(serde_json::json!({
             "runId": "run_01HZX9", "taskId": "task_01HZX9", "executor": "claude-code",
@@ -1264,15 +1340,29 @@ mod tests {
             source_approval: None,
         };
         assert_eq!(
-            rule_line(&rule, 10),
+            rule_line(&rule, 10, false),
             "rule_a1  allow  bot keeper  command bash `git push`"
         );
         let timed = StandingRule {
             expires_at_ms: Some(3_700_000),
             ..rule.clone()
         };
-        assert!(rule_line(&timed, 100_000).ends_with("  expires in 1h 00m"));
-        assert!(rule_line(&timed, 3_700_000).ends_with("  expired"));
+        assert!(rule_line(&timed, 100_000, false).ends_with("  expires in 1h 00m"));
+        assert!(rule_line(&timed, 3_700_000, false).ends_with("  expired"));
+        // A rule of a run that has ended says so, unless it was revoked first.
+        let scoped = StandingRule {
+            scope: StandingScope::Run {
+                run: "run_r1".parse().unwrap(),
+            },
+            ..rule.clone()
+        };
+        assert!(rule_line(&scoped, 10, true).ends_with("  ended with its run"));
+        assert!(!rule_line(&scoped, 10, false).contains("ended"));
+        let revoked = StandingRule {
+            revoked_at_ms: Some(5),
+            ..scoped
+        };
+        assert!(rule_line(&revoked, 10, true).ends_with("  revoked"));
         let edit = StandingRule {
             effect: StandingEffect::Deny,
             scope: StandingScope::Always,
@@ -1286,7 +1376,7 @@ mod tests {
             ..rule
         };
         assert_eq!(
-            rule_line(&edit, 10),
+            rule_line(&edit, 10, false),
             "rule_a1  deny   always  edit write on src/lib.rs, /etc/hosts  revoked"
         );
     }
@@ -1347,6 +1437,66 @@ mod tests {
                 Some(ResolvedBy::RepeatDenial)
             )),
             "appr_a1  run run_r1  denied    by the repeat-denial rule  bash cargo test"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_named_in_words_a_person_uses() {
+        let by = |name: &str| by_text(&ResolvedBy::Rule { name: name.into() });
+        // A policy rule with a note, or without one (the daemon's own label for it).
+        assert_eq!(by("cargo is fine"), "rule cargo is fine");
+        assert_eq!(
+            by("policy rule 8 (command `git checkout -- Cargo.lock`)"),
+            "policy rule 8 (command `git checkout -- Cargo.lock`)"
+        );
+        // A standing rule a person made: theirs, with its id kept.
+        assert_eq!(by("standing:rule_01HZX9"), "your rule rule_01HZX9");
+        assert_eq!(
+            resolved_text(
+                ApprovalOutcome::Approved,
+                &ResolvedBy::Rule {
+                    name: "standing:rule_01HZX9".into()
+                },
+                None
+            ),
+            "approved by your rule rule_01HZX9"
+        );
+    }
+
+    #[test]
+    fn an_approval_withdrawn_with_its_run_does_not_read_as_timed_out() {
+        let withdrawn = Some("withdrawn: the run was cancelled");
+        assert_eq!(
+            resolved_text(ApprovalOutcome::Denied, &ResolvedBy::Expired, withdrawn),
+            "denied: withdrawn: the run was cancelled"
+        );
+        // A real expiry still says so.
+        assert_eq!(
+            resolved_text(ApprovalOutcome::Denied, &ResolvedBy::Expired, None),
+            "denied: nobody answered in time"
+        );
+        let record = ApprovalRecord {
+            id: "appr_a1".parse().unwrap(),
+            run_id: "run_r1".parse().unwrap(),
+            request_id: "q".into(),
+            subject: reno_proto::ApprovalSubject {
+                action: ActionClass::Command,
+                tool: "bash".into(),
+                command: Some("cargo test".into()),
+                paths: vec![],
+                raw: json!(null),
+            },
+            subject_digest: None,
+            status: reno_proto::ApprovalStatus::Expired,
+            decided_by: Some(ResolvedBy::Expired),
+            created_at_ms: 1,
+            decided_at_ms: Some(2),
+            expires_at_ms: 3,
+            message: withdrawn.map(str::to_owned),
+        };
+        assert_eq!(
+            history_line(&record),
+            "appr_a1  run run_r1  expired   withdrawn: the run was cancelled  bash cargo test"
         );
     }
 

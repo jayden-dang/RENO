@@ -427,7 +427,12 @@ pub(crate) fn tx_resolve(
     )
 }
 
-fn tx_expire(conn: &Connection, scope: &ExpireScope, now: i64) -> Result<Vec<Expired>> {
+fn tx_expire(
+    conn: &Connection,
+    scope: &ExpireScope,
+    message: Option<&str>,
+    now: i64,
+) -> Result<Vec<Expired>> {
     let pending = match scope {
         ExpireScope::All => query(
             conn,
@@ -460,7 +465,7 @@ fn tx_expire(conn: &Connection, scope: &ExpireScope, now: i64) -> Result<Vec<Exp
                 run: &row.run_id,
                 request_id: &row.request_id,
                 digest: &row.subject_digest,
-                message: None,
+                message,
             },
             ApprovalStatus::Expired,
             &by,
@@ -544,9 +549,18 @@ impl Store {
 
     /// Expires pending requests (`expired`, decided by [`ResolvedBy::Expired`]) and returns
     /// them, each with its `approval.decided` event, in one [`Durability::Full`] transaction.
-    pub async fn expire_pending(&self, scope: ExpireScope, now: i64) -> Result<Vec<Expired>> {
-        self.write(Durability::Full, move |c| tx_expire(c, &scope, now))
-            .await
+    /// `message` is the reason recorded with each when it was not the time limit that ended it
+    /// (`withdrawn: the run was cancelled`).
+    pub async fn expire_pending(
+        &self,
+        scope: ExpireScope,
+        message: Option<String>,
+        now: i64,
+    ) -> Result<Vec<Expired>> {
+        self.write(Durability::Full, move |c| {
+            tx_expire(c, &scope, message.as_deref(), now)
+        })
+        .await
     }
 
     /// The pending requests, oldest first.
