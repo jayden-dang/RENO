@@ -53,6 +53,12 @@ pub(crate) enum Command {
     /// (`reno task run --thread`) continues the thread's branch.
     #[command(subcommand)]
     Thread(ThreadCommand),
+    /// Read a run's worktree, read-only: list, print, find files by name, search their text.
+    #[command(subcommand)]
+    Fs(crate::files::FsCommand),
+    /// Git state of a run's worktree.
+    #[command(subcommand)]
+    Git(crate::files::GitCommand),
     /// List the executors (the agent CLIs Reno drives) with what the daemon found out about
     /// each, and ask it to look again.
     #[command(subcommand)]

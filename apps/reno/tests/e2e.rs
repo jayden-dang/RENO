@@ -1768,3 +1768,100 @@ fn project_rules_are_added_listed_by_project_and_revoked_through_the_cli() {
         text(&remembered.stderr)
     );
 }
+
+// ---- files (RP1) --------------------------------------------------------------------------
+
+#[test]
+fn fs_and_git_status_read_a_runs_worktree_through_the_cli() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    let repo = world._root.path().canonicalize().unwrap().join("proj");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "hello alpha\n").unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "one"]);
+    world.start_daemon();
+
+    let cwd = repo.to_str().unwrap();
+    let mut task = world
+        .command(&["task", "run", "--cwd", cwd, "work in a worktree"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let run = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let path = PathBuf::from(
+        world.json(&["workspace", "show", &run])["path"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(path.join("README.md"), "edited alpha\n").unwrap();
+    std::fs::write(path.join("new.txt"), "n\n").unwrap();
+
+    let listed = text(&world.reno(&["fs", "ls", &run]).stdout);
+    let lines: Vec<&str> = listed.lines().collect();
+    assert!(
+        lines[0].ends_with("src/") && lines[0].starts_with("d "),
+        "{listed}"
+    );
+    assert!(lines.iter().any(|l| l.ends_with("README.md")), "{listed}");
+    assert!(!listed.contains(".git"), "{listed}");
+    let sub = text(&world.reno(&["fs", "ls", &run, "src"]).stdout);
+    assert!(sub.contains("lib.rs"), "{sub}");
+    let json = world.json(&["fs", "ls", &run]);
+    assert_eq!(json["entries"][0]["name"], "src");
+
+    // `cat` prints the file as it is, no newline added.
+    let cat = world.reno(&["fs", "cat", &run, "src/lib.rs"]);
+    assert_eq!(text(&cat.stdout), "fn alpha() {}\n");
+    std::fs::write(path.join("blob.bin"), b"\0\0").unwrap();
+    let binary = world.reno(&["fs", "cat", &run, "blob.bin"]);
+    assert_eq!(binary.status.code(), Some(1));
+    assert!(
+        text(&binary.stderr).contains("binary"),
+        "{}",
+        text(&binary.stderr)
+    );
+    let escape = world.reno(&["fs", "cat", &run, "../outside"]);
+    assert_eq!(escape.status.code(), Some(1));
+    assert!(
+        text(&escape.stderr).contains("refused"),
+        "{}",
+        text(&escape.stderr)
+    );
+
+    let found = text(&world.reno(&["fs", "find", &run, "lib"]).stdout);
+    assert_eq!(found.lines().next(), Some("src/lib.rs"));
+    assert_eq!(
+        world.reno(&["fs", "find", &run, "zzzz"]).status.code(),
+        Some(1)
+    );
+    let grep = text(&world.reno(&["fs", "grep", &run, "alpha"]).stdout);
+    assert_eq!(
+        grep,
+        "README.md:1:edited alpha\nsrc/lib.rs:1:fn alpha() {}\n"
+    );
+    let folded = world.reno(&["fs", "grep", &run, "ALPHA", "-i", "--limit", "1"]);
+    assert_eq!(text(&folded.stdout).lines().count(), 1);
+    assert_eq!(
+        world
+            .reno(&["fs", "grep", &run, "nothing-like-this"])
+            .status
+            .code(),
+        Some(1)
+    );
+
+    let status = text(&world.reno(&["git", "status", &run]).stdout);
+    assert!(status.starts_with("On branch reno/"), "{status}");
+    assert!(status.contains(" M README.md"), "{status}");
+    assert!(status.contains("?? new.txt"), "{status}");
+    let status = world.json(&["git", "status", &run]);
+    assert_eq!(status["repo"], true);
+    assert_eq!(status["files"].as_array().unwrap().len(), 3);
+
+    assert!(world.reno(&["run", "cancel", &run]).status.success());
+    task.wait_with_output().expect("task run ends");
+}
