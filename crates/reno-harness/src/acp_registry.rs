@@ -242,14 +242,15 @@ fn relative_cmd(cmd: &str) -> Option<PathBuf> {
     (out.components().count() > 0 && !cmd.starts_with('/')).then_some(out)
 }
 
-const PLATFORMS: [&str; 6] = [
-    "darwin-aarch64",
-    "darwin-x86_64",
-    "linux-aarch64",
-    "linux-x86_64",
-    "windows-aarch64",
-    "windows-x86_64",
-];
+/// A platform key as the registry writes them (`darwin-aarch64`, `linux-x86_64-musl`): a name,
+/// not a path. Platforms this device doesn't run are valid data, only never chosen.
+fn platform_name(key: &str) -> bool {
+    key.len() <= 40
+        && key.contains('-')
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+}
 
 fn valid(e: &Entry) -> bool {
     let d = &e.distribution;
@@ -267,7 +268,7 @@ fn valid(e: &Entry) -> bool {
             .all(|u| u.as_deref().is_none_or(safe_url))
         && (!d.binary.is_empty() || d.npx.is_some() || d.uvx.is_some())
         && d.binary.iter().all(|(platform, t)| {
-            PLATFORMS.contains(&platform.as_str())
+            platform_name(platform)
                 && safe_url(&t.archive)
                 && relative_cmd(&t.cmd).is_some()
                 && args_ok(&t.args)
@@ -1306,6 +1307,30 @@ mod tests {
         assert!(!version_in_use(dir, Some(&[])));
         // Can't tell: keep it.
         assert!(version_in_use(dir, None));
+    }
+
+    /// The registry publishes musl builds (`linux-x86_64-musl`) beside the glibc ones, and may
+    /// name platforms Reno doesn't run: an entry keeps listing for the platforms it can use.
+    #[test]
+    fn an_entry_with_platforms_this_device_doesnt_know_still_lists() {
+        let entry = |platform: &str| {
+            serde_json::json!({ "agents": [{
+                "id": "multi", "name": "Multi", "version": "1.0.0", "description": "x",
+                "distribution": { "binary": {
+                    "darwin-aarch64": { "archive": "https://x.dev/a.tar.gz", "cmd": "./a" },
+                    platform: { "archive": "https://x.dev/b.tar.gz", "cmd": "./b" },
+                } }
+            }] })
+        };
+        for platform in ["linux-x86_64-musl", "linux-aarch64-musl", "freebsd-x86_64"] {
+            let entries = parse_index(&serde_json::to_vec(&entry(platform)).unwrap()).unwrap();
+            assert_eq!(entries.len(), 1, "{platform} dropped the entry");
+        }
+        // A key that isn't a platform name at all is still bad data.
+        for platform in ["../etc", "Linux X86", ""] {
+            let entries = parse_index(&serde_json::to_vec(&entry(platform)).unwrap()).unwrap();
+            assert!(entries.is_empty(), "{platform:?} was accepted");
+        }
     }
 
     #[test]
