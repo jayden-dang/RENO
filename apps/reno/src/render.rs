@@ -500,8 +500,6 @@ pub(crate) fn approval_line(approval: &Approval) -> String {
 
 /// What `reno workspace diff` prints without `--path`: the run's branch and base, then one line
 /// per changed file (status letter, `+added -removed`, path), then a total.
-// Used by `reno workspace diff` once `Client::workspace_diff` is on this branch.
-#[allow(dead_code)]
 pub(crate) fn diff_lines(diff: &WorkspaceDiffResult) -> Vec<String> {
     let mut lines = vec![format!(
         "{} on {} since {} ({} commit(s))",

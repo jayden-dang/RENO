@@ -21,7 +21,7 @@ use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall,
     ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunModel, RunResume, RunShow,
     RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
-    WorkspaceList, WorkspaceShow,
+    WorkspaceDiffArgs, WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
@@ -63,6 +63,7 @@ pub(crate) async fn workspace(env: &Env, command: WorkspaceCommand) -> anyhow::R
     match command {
         WorkspaceCommand::List(args) => workspace_list(env, args).await,
         WorkspaceCommand::Show(args) => workspace_show(env, args).await,
+        WorkspaceCommand::Diff(args) => workspace_diff(env, args).await,
         WorkspaceCommand::Clean(args) => workspace_clean(env, args).await,
     }
 }
@@ -544,6 +545,33 @@ async fn workspace_show(env: &Env, args: WorkspaceShow) -> anyhow::Result<ExitCo
         for line in render::workspace_detail(&workspace) {
             print_line(line)?;
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn workspace_diff(env: &Env, args: WorkspaceDiffArgs) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let diff = client
+        .workspace_diff(args.run, args.path.clone())
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&diff)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    for line in render::diff_lines(&diff) {
+        print_line(line)?;
+    }
+    if let Some(patch) = &diff.patch {
+        print_line(String::new())?;
+        for line in patch.lines() {
+            print_line(line.to_owned())?;
+        }
+        if diff.patch_truncated {
+            print_note("(patch cut at 256 KiB)")?;
+        }
+    } else if args.path.is_some() {
+        print_note("no patch: the file is binary, unchanged or not in the changes")?;
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -343,6 +343,9 @@ pub(crate) enum WorkspaceCommand {
     List(WorkspaceList),
     /// Show one run's workspace: where it is, which branch, what it was cut from, what it holds.
     Show(WorkspaceShow),
+    /// What one run changed in its workspace against the commit it was cut from: every changed
+    /// file with its added and removed lines. With --path, the patch of that file too.
+    Diff(WorkspaceDiffArgs),
     /// Remove workspaces that hold nothing to lose. A workspace with unmerged commits or
     /// uncommitted changes is kept unless --force.
     ///
@@ -367,6 +370,15 @@ fn parse_workspace_status(text: &str) -> Result<WorkspaceStatus, String> {
         .into_iter()
         .find(|status| crate::render::wire_name(status) == text)
         .ok_or_else(|| "expected one of preparing, active, kept, removed, lost".to_owned())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceDiffArgs {
+    /// The run.
+    pub(crate) run: RunId,
+    /// Also print this file's patch (repository-relative path).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Debug, Args)]
