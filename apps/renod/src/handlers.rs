@@ -1263,3 +1263,38 @@ where
         Some((SubItem::latest(item), (rx, map, false)))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A connection bound to a run may call `daemon.hello` and `agent.*` and nothing else, so a
+    /// method added later is out of its reach until someone decides otherwise (ARCH-13, T1.9).
+    /// Every method and subscription the protocol has is checked, the Files tab's among them.
+    #[test]
+    fn a_run_connection_may_call_only_the_handshake_and_agent_methods() {
+        let schema = reno_proto::protocol_schema();
+        let mut checked = 0;
+        for section in ["methods", "subscriptions"] {
+            for entry in schema[section].as_array().into_iter().flatten() {
+                let name = entry["name"].as_str().unwrap_or_default();
+                let allowed =
+                    name == "daemon.hello" || (name.starts_with("agent.") && name != "agent.auth");
+                assert_eq!(run_connection_may_call(name), allowed, "{name}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 40);
+        for name in [
+            "fs.list",
+            "fs.read",
+            "fs.read_image",
+            "fs.search_files",
+            "fs.search_content",
+            "git.status",
+            "fs.watch",
+        ] {
+            assert!(!run_connection_may_call(name), "{name}");
+        }
+    }
+}

@@ -772,6 +772,63 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
     );
     unauthorized(within(run.list_defs(None)).await.unwrap_err());
     unauthorized(within(run.list_executors()).await.unwrap_err());
+    // The Files tab is a person's, each method of it (RP1): a run's token reads no tree, not
+    // even its own worktree.
+    let me = live.run.clone();
+    unauthorized(
+        within(run.fs_list(reno_proto::FsListParams {
+            run_id: me.clone(),
+            dir: String::new(),
+            cursor: None,
+            limit: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.fs_read(reno_proto::FsReadParams {
+            run_id: me.clone(),
+            path: "README.md".into(),
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.fs_read_image(reno_proto::FsReadImageParams {
+            run_id: me.clone(),
+            path: "a.png".into(),
+            offset: 0,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.fs_search_files(reno_proto::FsSearchFilesParams {
+            run_id: me.clone(),
+            query: "a".into(),
+            limit: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.fs_search_content(reno_proto::FsSearchContentParams {
+            run_id: me.clone(),
+            query: "a".into(),
+            regex: false,
+            ignore_case: false,
+            limit: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(within(run.git_status(me.clone())).await.unwrap_err());
+    unauthorized(
+        within(run.watch_fs(me.clone()))
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    );
     unauthorized(
         within(run.run_task(TaskRunParams {
             thread_id: None,
