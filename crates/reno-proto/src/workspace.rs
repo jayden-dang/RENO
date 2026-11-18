@@ -187,6 +187,10 @@ pub struct CleanItem {
     /// Why it was kept, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The terminals that were open in a removed worktree and were closed with it. Needs feature
+    /// `terminals`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_terminals: Vec<crate::ids::TermId>,
 }
 
 /// Result of `workspace.clean`.

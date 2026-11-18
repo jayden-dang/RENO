@@ -34,7 +34,7 @@ fn the_names_and_the_feature() {
     assert_eq!(ThreadClose::NAME, "thread.close");
     // Appended: nothing earlier moved (later features follow it).
     let at = FEATURES.iter().position(|f| *f == FEATURE_THREADS).unwrap();
-    assert_eq!(at, FEATURES.len() - 2);
+    assert_eq!(at, FEATURES.len() - 3);
     const { assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT) };
 }
 
@@ -199,6 +199,7 @@ fn closing_says_what_became_of_the_worktree() {
             thread: thread_info,
             workspace: Some(CleanOutcome::Kept),
             reason: Some("1 commit(s) not merged; use --force to remove it anyway".into()),
+            closed_terminals: Vec::new(),
         },
         json!({
             "thread": {"threadId": "thr_a1", "status": "closed", "workspace": "kept",

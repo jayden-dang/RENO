@@ -164,4 +164,8 @@ pub struct ThreadCloseResult {
     /// Why the worktree was kept, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The terminals that were open in the worktree and were closed with it (it was removed).
+    /// Needs feature `terminals`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_terminals: Vec<crate::ids::TermId>,
 }

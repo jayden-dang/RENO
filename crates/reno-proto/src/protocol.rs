@@ -190,6 +190,7 @@ pub const FEATURES: &[&str] = &[
     crate::usage::FEATURE_EXECUTOR_USAGE,
     FEATURE_THREADS,
     crate::files::FEATURE_FILES,
+    crate::term::FEATURE_TERMINALS,
 ];
 
 /// A request with a single reply.
@@ -1120,6 +1121,41 @@ subscription!(
     /// `sub.gap`, and subscribes again and rescans. Person-only. Needs feature `files`.
     FsWatch, "fs.watch", FsWatchParams => FsChange
 );
+method!(
+    /// `term.open`: starts a shell in a run's worktree. Person-only. Needs feature `terminals`.
+    TermOpen, "term.open", crate::term::TermOpenParams => crate::term::TermOpened
+);
+method!(
+    /// `term.write`: input for a terminal's shell, queued in order. Person-only. Needs feature
+    /// `terminals`.
+    TermWrite, "term.write", crate::term::TermWriteParams => crate::term::TermDone
+);
+method!(
+    /// `term.resize`: the terminal's size, in the same order as its writes. Person-only. Needs
+    /// feature `terminals`.
+    TermResize, "term.resize", crate::term::TermResizeParams => crate::term::TermDone
+);
+method!(
+    /// `term.close`: ends the shell and forgets the terminal. Person-only. Needs feature
+    /// `terminals`.
+    TermClose, "term.close", crate::term::TermRef => crate::term::TermDone
+);
+method!(
+    /// `term.status`: whether closing the terminal would end a program, whether its shell
+    /// exited, and whether it is sandboxed. Person-only. Needs feature `terminals`.
+    TermStatus, "term.status", crate::term::TermRef => crate::term::TermStatusResult
+);
+method!(
+    /// `term.list`: the terminals in a run's worktree. Person-only. Needs feature `terminals`.
+    TermList, "term.list", crate::term::TermListParams => crate::term::TermListResult
+);
+
+subscription!(
+    /// `term.attach`: a terminal's output from a sequence number, replayed from a bounded
+    /// window and then live, ending after the shell's exit. Detaching leaves the shell running.
+    /// Person-only. Needs feature `terminals`.
+    TermAttach, "term.attach", crate::term::TermAttachParams => crate::term::TermEvent
+);
 subscription!(
     /// `executors.watch`: every executor and its last health, replaced on every change. Needs
     /// feature `executors`.
@@ -1211,6 +1247,12 @@ pub fn protocol_schema() -> Value {
             method_entry::<FsSearchFiles>(),
             method_entry::<FsSearchContent>(),
             method_entry::<GitStatus>(),
+            method_entry::<TermOpen>(),
+            method_entry::<TermWrite>(),
+            method_entry::<TermResize>(),
+            method_entry::<TermClose>(),
+            method_entry::<TermStatus>(),
+            method_entry::<TermList>(),
             method_entry::<SecretList>(),
             method_entry::<SecretSet>(),
             method_entry::<SecretDelete>(),
@@ -1248,6 +1290,7 @@ pub fn protocol_schema() -> Value {
             subscription_entry::<TriggersWatch>(),
             subscription_entry::<ExecutorsWatch>(),
             subscription_entry::<FsWatch>(),
+            subscription_entry::<TermAttach>(),
         ],
     })
 }

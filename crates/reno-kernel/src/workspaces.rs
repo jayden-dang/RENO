@@ -354,6 +354,7 @@ pub(crate) async fn clean(
                     run_id: info.run_id,
                     outcome: CleanOutcome::Kept,
                     reason: Some(format!("already {:?}", info.status).to_lowercase()),
+                    closed_terminals: Vec::new(),
                 });
             }
             continue;
@@ -371,12 +372,14 @@ pub(crate) async fn clean(
                     run_id: info.run_id,
                     outcome: CleanOutcome::Removed,
                     reason: None,
+                    closed_terminals: Vec::new(),
                 });
             }
             Ok(Released::Kept(changes)) => items.push(CleanItem {
                 run_id: info.run_id,
                 outcome: CleanOutcome::Kept,
                 reason: Some(describe(changes, policy)),
+                closed_terminals: Vec::new(),
             }),
             Ok(Released::GoneBranchKept(changes)) => items.push(CleanItem {
                 run_id: info.run_id,
@@ -385,12 +388,14 @@ pub(crate) async fn clean(
                     "the directory was gone; branch {} kept with {} commit(s)",
                     info.branch, changes.commits
                 )),
+                closed_terminals: Vec::new(),
             }),
             Err(error) if single => return Err(error.into()),
             Err(error) => items.push(CleanItem {
                 run_id: info.run_id,
                 outcome: CleanOutcome::Kept,
                 reason: Some(error.to_string()),
+                closed_terminals: Vec::new(),
             }),
         }
     }
