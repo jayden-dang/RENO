@@ -189,6 +189,15 @@ fn project_instructions(cwd: &Path) -> Option<String> {
         if !meta.is_file() {
             continue;
         }
+        // A symlinked directory (`.claude -> ~/.ssh`) would lead out as well: what is read
+        // must resolve to somewhere under the working directory.
+        let inside = match (path.canonicalize(), cwd.canonicalize()) {
+            (Ok(real), Ok(root)) => real.starts_with(root),
+            _ => false,
+        };
+        if !inside {
+            continue;
+        }
         let mut bytes = Vec::new();
         let read = std::fs::File::open(&path).and_then(|f| {
             f.take(MAX_PROJECT_INSTRUCTIONS as u64)
@@ -1817,6 +1826,16 @@ mod tests {
         std::fs::remove_file(dir.path().join(".claude/CLAUDE.md")).unwrap();
         let args = ClaudeExecutor::launch_args(&s);
         assert_eq!(flag(&args, "--append-system-prompt"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_md_behind_a_symlinked_directory_is_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("CLAUDE.md"), "TOP SECRET").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".claude")).unwrap();
+        assert_eq!(project_instructions(dir.path()), None);
     }
 
     #[cfg(unix)]

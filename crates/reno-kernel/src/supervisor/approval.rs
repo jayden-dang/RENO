@@ -31,7 +31,10 @@
 //!    journaled first and then refused, like any other.
 //! 7. **Full access.** A run launched with `AccessMode::FullAccess` is never asked: what steps 1 to
 //!    3 did not refuse is allowed at once, decided by `builtin:full-access`, stored and journaled
-//!    like any other automatic answer. So a policy deny, a standing deny and a repeat denial hold
+//!    like any other automatic answer. It applies where the run's sandbox is unrestricted (a
+//!    request to leave a narrower one is asked of a person, ARCH-15) or the request is an MCP
+//!    tool call, and never to an approval the run asked for itself (`request_approval`), which
+//!    is always a question for a person. So a policy deny, a standing deny and a repeat denial hold
 //!    in every access mode, and the audit trail has the same rows in all of them.
 //! 8. **Ask.** A pending record is stored with a deadline, the run waits in `waiting_approval`,
 //!    and the pending list is published. A human's `decide` answers it; if none comes by the
@@ -99,7 +102,8 @@ use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, RuleRef, evaluate
 use reno_proto::{
     AccessMode, ActionClass, ApprovalId, ApprovalOutcome, ApprovalSubject, ExecEvent,
     MCP_SERVER_NAME, MCP_TOOLS, Remember, RememberScope, ResolvedBy, RuleId, RuleMatcher,
-    RunStatus, StandingEffect, StandingRule, StandingScope, StopDetail, standing_rule_name,
+    RunStatus, SandboxLevel, StandingEffect, StandingRule, StandingScope, StopDetail,
+    standing_rule_name,
 };
 use reno_store::{ExpireScope, NewApproval, NewRule, StoreError};
 use tokio::sync::oneshot;
@@ -235,7 +239,9 @@ impl Supervisor {
         else {
             return;
         };
-        match self.judge(subject).await {
+        // A run's own `request_approval` is always a question for a person, whatever its mode.
+        let by_mode = !self.agent_waiters.contains_key(request_id);
+        match self.judge(subject, by_mode).await {
             Ok(Verdict::Ask { ttl }) => {
                 // State before visibility: the run reads `waiting_approval` before the pending
                 // approval can be listed, and both before the journal shows the request.
@@ -268,6 +274,7 @@ impl Supervisor {
     async fn judge(
         &mut self,
         subject: &ApprovalSubject,
+        by_mode: bool,
     ) -> std::result::Result<Verdict, StoreError> {
         let current = self.shared.current_defs();
         let fallback = PolicyDef::default();
@@ -348,7 +355,11 @@ impl Supervisor {
         }
         // 7. Full access asks nobody: what steps 1-3 did not refuse is allowed, on record as
         // decided by the access mode.
-        if self.info.access == AccessMode::FullAccess {
+        if by_mode
+            && self.info.access == AccessMode::FullAccess
+            && (self.info.sandbox == SandboxLevel::Unrestricted
+                || subject.action == ActionClass::McpTool)
+        {
             return Ok(auto(
                 ApprovalOutcome::Approved,
                 ResolvedBy::Rule {

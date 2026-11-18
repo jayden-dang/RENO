@@ -49,7 +49,12 @@ impl Rig {
     async fn with_policy(steps: Vec<MockStep>, cfg: KernelConfig, policy: Option<&str>) -> Self {
         let mock = mock(steps);
         let link = Arc::new(FakeRunLink::new());
-        let mut files = vec![bot("keeper"), bot("scout")];
+        let full = file(
+            DefKind::Bot,
+            "fullbot",
+            "name = \"fullbot\"\ninstructions = \"work\"\nexecutors = [\"mock\"]\naccess = \"full_access\"\n",
+        );
+        let mut files = vec![bot("keeper"), bot("scout"), full];
         if let Some(text) = policy {
             files.push(file(DefKind::Policy, "policy", text));
         }
@@ -919,4 +924,24 @@ match = { action = "mcp_tool", tool = "mcp__reno__board_write" }
             name: "no reno board".into()
         }
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_access_run_is_still_asked_of_a_person_for_its_own_request_approval() {
+    let rig = Rig::new(hold(), config(1)).await;
+    let (run, session) = rig.live(Some("fullbot")).await;
+    let waiting = ask(&rig, &session, approval("npm publish"));
+    let held = pending(&rig).await;
+    assert_eq!(held.run_id, run);
+    assert!(
+        !waiting.is_finished(),
+        "full access does not answer for the run"
+    );
+    rig.fx
+        .kernel
+        .decide(&held.id, ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    let answer = waiting.await.unwrap().unwrap();
+    assert_eq!(answer.by, ResolvedBy::Human);
 }

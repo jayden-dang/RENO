@@ -711,7 +711,7 @@ impl Executor for AcpExecutor {
             steering,
             cancel,
             answers,
-            access: routed_access(spec.access, &self.access_modes),
+            access: routed_access(spec.access, self.spec.access_modes),
             spec,
             harness: self.spec.id,
             agent_name: self.spec.display_name,

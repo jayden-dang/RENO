@@ -100,6 +100,10 @@ pub(crate) struct RunInfo {
     /// The access mode the run launched with. Under `FullAccess` a request the policy and the
     /// run's history do not refuse is allowed at once and never held for a person.
     pub(crate) access: reno_proto::AccessMode,
+    /// The sandbox level the run launched with. Full access allows by its mode only where the
+    /// sandbox is unrestricted (or for an MCP tool call, which leaves no sandbox): a request to
+    /// leave a narrower sandbox is never allowed unseen (ARCH-15).
+    pub(crate) sandbox: reno_proto::SandboxLevel,
     /// The run's worktree, which policy paths are judged against.
     pub(crate) cwd: PathBuf,
     /// The bot the run is pinned to, which policy rules are scoped by.
