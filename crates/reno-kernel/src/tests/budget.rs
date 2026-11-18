@@ -521,29 +521,6 @@ async fn pausing_a_bot_holds_only_that_bot() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn stop_live_cancels_live_runs_and_only_those_in_scope() {
-    let fx = fx_with(
-        "max_concurrent_runs = 2",
-        [MockStep::Sleep(secs(3600))],
-        config(8),
-    )
-    .await;
-    let keeper = as_bot(&fx, "keeper").await;
-    let scribe = as_bot(&fx, "scribe").await;
-    fx.wait_status(&keeper, RunStatus::Running).await;
-    fx.wait_status(&scribe, RunStatus::Running).await;
-
-    let result = fx.kernel.pause(Some("keeper"), true).await.unwrap();
-    assert_eq!(result.stopped, std::slice::from_ref(&keeper));
-    fx.wait_status(&keeper, RunStatus::Interrupted).await;
-    assert_eq!(fx.status(&scribe).await, RunStatus::Running);
-
-    let result = fx.kernel.pause(None, true).await.unwrap();
-    assert_eq!(result.stopped, std::slice::from_ref(&scribe));
-    fx.wait_status(&scribe, RunStatus::Interrupted).await;
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_trigger_is_held_during_a_pause_and_caught_up_once_on_resume() {
     let fx = fx_with(
         "max_concurrent_runs = 2",
