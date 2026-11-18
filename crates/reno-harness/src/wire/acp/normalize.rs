@@ -297,7 +297,71 @@ const KNOWN_UPDATES: &[&str] = &[
 ];
 
 /// Notification methods other than `session/update` the driver handles by name.
-const KNOWN_METHODS: &[&str] = &["_x.ai/session/prompt_complete"];
+const KNOWN_METHODS: &[&str] = &[
+    "_x.ai/session/prompt_complete",
+    "_x.ai/session_notification",
+    "_x.ai/models/update",
+];
+
+/// The events of Grok's extension notifications (verified live, grok 1.0.88), which carry what
+/// `usage_update` would: a `response_completed` on `_x.ai/session_notification` ends each model
+/// call with its usage, whose input plus cache counts are what the call read — the context's
+/// occupancy (a `turn_completed`'s totals sum several calls and are not); `_x.ai/models/update`
+/// gives the current model's `totalContextTokens`, the window. Nothing for any other method or
+/// another session's call.
+pub(crate) fn extension_events(method: &str, params: &Value, session_id: &str) -> Vec<ExecEvent> {
+    match method {
+        "_x.ai/session_notification" => {
+            if params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id != session_id)
+            {
+                return Vec::new();
+            }
+            let Some(update) = params.get("update") else {
+                return Vec::new();
+            };
+            if str_field(update, "sessionUpdate") != "response_completed" {
+                return Vec::new();
+            }
+            let Some(usage) = update.get("usage") else {
+                return Vec::new();
+            };
+            let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+            let Some(input) = count("input_tokens") else {
+                return Vec::new();
+            };
+            let tokens = input
+                + count("cache_read_input_tokens").unwrap_or(0)
+                + count("cache_creation_input_tokens").unwrap_or(0);
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(tokens),
+                window: None,
+            }]
+        }
+        "_x.ai/models/update" => {
+            let current = params.get("currentModelId").and_then(Value::as_str);
+            let window = params
+                .get("availableModels")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|m| m.get("modelId").and_then(Value::as_str) == current)
+                .and_then(|m| m.pointer("/_meta/totalContextTokens"))
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0);
+            window
+                .map(|window| ExecEvent::ContextUsage {
+                    tokens: None,
+                    window: Some(window),
+                })
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// What a notification is called in the unrecognised-frame counters, when the driver has no name
 /// for it: `method:<method>` for a notification other than `session/update`, `update:<kind>`
@@ -617,6 +681,62 @@ mod tests {
                 window: Some(256_000)
             }]
         );
+    }
+
+    #[test]
+    fn grok_reports_context_on_its_extension_channel() {
+        // Verified live against grok 1.0.88: no `usage_update`; each model call ends with a
+        // `response_completed` on `_x.ai/session_notification` (input + cache = what the call
+        // read), and `_x.ai/models/update` names the current model's window.
+        let call = json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "response_completed",
+                "usage": {
+                    "input_tokens": 24_162, "output_tokens": 27,
+                    "cache_read_input_tokens": 2_176, "cache_creation_input_tokens": 0,
+                    "reasoning_tokens": 25
+                },
+                "signature": "opaque"
+            }
+        });
+        assert_eq!(
+            extension_events("_x.ai/session_notification", &call, "s"),
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(26_338),
+                window: None
+            }]
+        );
+        assert!(
+            extension_events("_x.ai/session_notification", &call, "other").is_empty(),
+            "another session's call"
+        );
+        let turn = json!({
+            "sessionId": "s",
+            "update": { "sessionUpdate": "turn_completed", "usage": { "inputTokens": 26_338 } }
+        });
+        assert!(
+            extension_events("_x.ai/session_notification", &turn, "s").is_empty(),
+            "a turn's totals are not the context"
+        );
+        let models = json!({
+            "currentModelId": "grok-4.7",
+            "availableModels": [
+                { "modelId": "grok-4.6", "_meta": { "totalContextTokens": 500_000 } },
+                { "modelId": "grok-4.7", "_meta": { "totalContextTokens": 256_000 } }
+            ]
+        });
+        assert_eq!(
+            extension_events("_x.ai/models/update", &models, "s"),
+            vec![ExecEvent::ContextUsage {
+                tokens: None,
+                window: Some(256_000)
+            }]
+        );
+        assert!(extension_events("_x.ai/models/update", &json!({}), "s").is_empty());
+        for method in ["_x.ai/session_notification", "_x.ai/models/update"] {
+            assert_eq!(unknown_kind(method, &call, "s"), None, "{method} is known");
+        }
     }
 
     #[test]

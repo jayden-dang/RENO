@@ -911,9 +911,15 @@ impl Pump {
         if let Some(kind) = normalize::unknown_kind(method, params, &self.session_id) {
             self.unknown.note(&kind);
         }
-        normalize::session_update(method, params, &self.session_id)
+        let mut events = normalize::session_update(method, params, &self.session_id)
             .map(|update| self.normalizer.update(update))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        events.extend(normalize::extension_events(
+            method,
+            params,
+            &self.session_id,
+        ));
+        events
     }
 
     /// Serve one server request. A permission is answered here when the run's access mode covers
