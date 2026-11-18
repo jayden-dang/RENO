@@ -50,6 +50,12 @@ pub enum ErrorCode {
     Internal,
     /// -32009: a budget refuses the request: the bot has used its token ceiling for the day.
     BudgetExceeded,
+    /// -32010: the executor already has an install or update job.
+    JobRunning,
+    /// -32011: the executor has nothing to install or update.
+    NothingToDo,
+    /// -32012: the executor has no updater to run.
+    NoUpdater,
     /// A code this version does not know. Never produced by this crate's own servers.
     Other(i32),
 }
@@ -72,6 +78,9 @@ impl ErrorCode {
             Self::Unavailable => -32007,
             Self::Internal => -32008,
             Self::BudgetExceeded => -32009,
+            Self::JobRunning => -32010,
+            Self::NothingToDo => -32011,
+            Self::NoUpdater => -32012,
             Self::Other(code) => code,
         }
     }
@@ -93,6 +102,9 @@ impl ErrorCode {
             -32007 => Self::Unavailable,
             -32008 => Self::Internal,
             -32009 => Self::BudgetExceeded,
+            -32010 => Self::JobRunning,
+            -32011 => Self::NothingToDo,
+            -32012 => Self::NoUpdater,
             other => Self::Other(other),
         }
     }
@@ -164,6 +176,9 @@ mod tests {
         (ErrorCode::Unavailable, -32007),
         (ErrorCode::Internal, -32008),
         (ErrorCode::BudgetExceeded, -32009),
+        (ErrorCode::JobRunning, -32010),
+        (ErrorCode::NothingToDo, -32011),
+        (ErrorCode::NoUpdater, -32012),
     ];
 
     #[test]

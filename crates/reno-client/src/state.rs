@@ -889,6 +889,8 @@ mod tests {
                 },
             },
             health: None,
+            maintenance: None,
+            job: None,
         };
         let mut s = State::new();
         assert_eq!(s.feed(Feed::Executors), FeedState::Loading);

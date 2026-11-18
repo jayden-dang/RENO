@@ -581,7 +581,16 @@ async fn executors_are_listed_refreshed_and_watched() {
     let ids: Vec<&str> = listed.iter().map(|e| e.descriptor.id.as_str()).collect();
     assert_eq!(
         ids,
-        ["claude-code", "codex", "acp.grok", "acp.hermes", "mock"]
+        [
+            "claude-code",
+            "codex",
+            "acp.grok",
+            "acp.hermes",
+            "acp.antigravity",
+            "acp.devin",
+            "acp.fx",
+            "mock"
+        ]
     );
     let codex = listed
         .iter()

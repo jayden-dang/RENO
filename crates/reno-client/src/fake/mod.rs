@@ -39,6 +39,7 @@
 
 pub mod data;
 mod extras;
+mod jobs;
 mod script;
 mod world;
 
@@ -82,6 +83,8 @@ pub struct FakeConfig {
     pub without_features: Vec<String>,
     /// Start with no runs, approvals, triggers, definitions or history. Default false.
     pub empty: bool,
+    /// How long a simulated executor install or update takes, on tokio time. Default 3 s.
+    pub job_duration: Duration,
 }
 
 impl Default for FakeConfig {
@@ -93,6 +96,7 @@ impl Default for FakeConfig {
             protocol_version: PROTOCOL_VERSION,
             without_features: Vec::new(),
             empty: false,
+            job_duration: Duration::from_secs(3),
         }
     }
 }
@@ -280,6 +284,25 @@ impl FakeDaemon {
         self.shared.with(|w| w.defs = defs);
     }
 
+    /// The next executor job to start ends `failed` with `failure` and `detail`, once its
+    /// steps have run.
+    pub fn fail_next_job(&self, failure: reno_proto::JobFailure, detail: &str) {
+        self.shared.with(|w| {
+            w.jobs.fail_next = Some((failure, detail.to_owned()));
+        });
+    }
+
+    /// Sets how many runs `id` has in flight. An update waits (`queued`) while it is above zero,
+    /// unless forced, and starts when it drops to zero. The demo has one run on `codex`.
+    pub fn set_active_runs(&self, id: &reno_proto::ExecutorId, runs: u32) {
+        let plan = self
+            .shared
+            .with(|w| w.set_active_runs(id, runs, &self.shared.cancel));
+        if let Some(plan) = plan {
+            jobs::spawn(&self.shared, plan, self.shared.config.job_duration);
+        }
+    }
+
     /// Makes every call of `method` (for example `trigger.fire`) answer with `error`, until
     /// [`FakeDaemon::clear_failures`].
     pub fn fail(&self, method: &str, error: ErrorObject) {
@@ -350,6 +373,17 @@ fn injected(shared: &Shared, method: &str) -> Result<(), ErrorObject> {
         Some(error) => Err(error.clone()),
         None => Ok(()),
     }
+}
+
+/// The executor `id` as it is now, as the answer to an `executor.job.*` call.
+fn executor_result(
+    shared: &Shared,
+    id: &reno_proto::ExecutorId,
+) -> Result<reno_proto::ExecutorJobResult, ErrorObject> {
+    shared
+        .read(|w| w.executors.iter().find(|e| &e.descriptor.id == id).cloned())
+        .map(|executor| reno_proto::ExecutorJobResult { executor })
+        .ok_or_else(|| not_found("executor"))
 }
 
 fn not_found(what: &str) -> ErrorObject {
@@ -948,6 +982,59 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let executor_job_start = move |p: reno_proto::ExecutorJobStartParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.job.start")?;
+            let plan = s.with(|w| w.start_job(&p.id, p.kind, p.force, &s.cancel))?;
+            if let Some(plan) = plan {
+                jobs::spawn(&s, plan, s.config.job_duration);
+            }
+            executor_result(&s, &p.id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executor_job_cancel = move |p: reno_proto::ExecutorJobParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.job.cancel")?;
+            s.with(|w| w.cancel_job(&p.id))?;
+            executor_result(&s, &p.id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executor_job_dismiss = move |p: reno_proto::ExecutorJobParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.job.dismiss")?;
+            s.with(|w| w.dismiss_job(&p.id))?;
+            executor_result(&s, &p.id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executor_job_log = move |p: reno_proto::ExecutorJobParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.job.log")?;
+            let (lines, truncated) = s.read(|w| w.job_log(&p.id))?;
+            Ok(reno_proto::ExecutorJobLogResult { lines, truncated })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let executor_auto_update_set = move |p: reno_proto::ExecutorAutoUpdateSetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.auto_update.set")?;
+            s.with(|w| w.set_auto_update(&p.id, p.on, p.verified_only))?;
+            executor_result(&s, &p.id)
+        }
+    };
+
+    let s = Arc::clone(shared);
     let executors_watch = move |_: reno_proto::ExecutorsWatchParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -1037,6 +1124,11 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::ExecutorList, _, _>(executor_list)
         .method::<reno_proto::ExecutorRefresh, _, _>(executor_refresh)
         .method::<reno_proto::ExecutorInstall, _, _>(executor_install)
+        .method::<reno_proto::ExecutorJobStart, _, _>(executor_job_start)
+        .method::<reno_proto::ExecutorJobCancel, _, _>(executor_job_cancel)
+        .method::<reno_proto::ExecutorJobDismiss, _, _>(executor_job_dismiss)
+        .method::<reno_proto::ExecutorJobLog, _, _>(executor_job_log)
+        .method::<reno_proto::ExecutorAutoUpdateSet, _, _>(executor_auto_update_set)
         .method::<reno_proto::ExecutorFrames, _, _>(executor_frames)
         .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
         .method::<reno_proto::DefList, _, _>(def_list)

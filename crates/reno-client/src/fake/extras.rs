@@ -10,6 +10,9 @@ use reno_proto::{
     NotInstalledReason, ResolvedBy, RunId, SandboxLevel, SignedIn, Steering, TriggerInfo,
     TriggerStatus, VersionGate, VersionRange,
 };
+use reno_proto::{
+    AutoUpdate, Maintenance, PersonStep, SetupRecipe, SetupStep, StepRunner, UpdaterInfo,
+};
 use serde_json::{Value, json};
 
 use super::data::{self, NOW_MS};
@@ -325,7 +328,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 access: &[AccessMode],
                 sandbox: &[SandboxLevel],
                 range: (&str, &str),
-                health: ExecutorHealth|
+                health: ExecutorHealth,
+                maintenance: Option<Maintenance>|
      -> Result<ExecutorInfo, IdError> {
         Ok(ExecutorInfo {
             descriptor: ExecutorDescriptor {
@@ -353,6 +357,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 },
             },
             health: Some(health),
+            maintenance,
+            job: None,
         })
     };
     // The efforts each demo model takes, as its CLI would report them: Claude's big models go to
@@ -383,6 +389,42 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
         path: path.into(),
         version: Some(version.to_owned()),
     };
+    let auto = AutoUpdate {
+        on: true,
+        verified_only: false,
+    };
+    let person = |label: &str, command: &str| PersonStep {
+        label: label.to_owned(),
+        command: command.to_owned(),
+    };
+    let updater =
+        |command: &str, self_updating: bool, can_pin: bool, latest: Option<&str>| UpdaterInfo {
+            command: command.to_owned(),
+            self_updating,
+            can_pin,
+            latest: latest.map(str::to_owned),
+            checked_at_ms: None,
+        };
+    let step = |label: &str, command: &str, runner: StepRunner| SetupStep {
+        label: label.to_owned(),
+        command: command.to_owned(),
+        runner,
+    };
+    let recipe = |source: &str, steps: Vec<SetupStep>| SetupRecipe {
+        source: source.to_owned(),
+        steps,
+    };
+    let not_found = |hint: &str| ExecutorHealth {
+        installed: InstallStatus::NotInstalled {
+            why: NotInstalledReason::NotFound {
+                hint: hint.to_owned(),
+            },
+        },
+        version_gate: VersionGate::Unchecked,
+        signed_in: SignedIn::Unknown,
+        models: ModelCatalog::curated(vec![]),
+        checked_at_ms: NOW_MS - 5 * MINUTE,
+    };
     let all = [
         AccessMode::Supervised,
         AccessMode::AutoAcceptEdits,
@@ -410,6 +452,13 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 ])),
                 checked_at_ms: at,
             },
+            Some(Maintenance {
+                setup: None,
+                sign_in: Some(person("Sign in", "claude auth login")),
+                updater: Some(updater("claude update", true, true, None)),
+                managed: false,
+                auto_update: auto,
+            }),
         )?,
         info(
             "codex",
@@ -422,7 +471,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             ],
             ("0.146.0", "0.169.0"),
             ExecutorHealth {
-                installed: installed("/opt/homebrew/bin/codex", "0.171.0"),
+                installed: installed("/opt/homebrew/bin/codex", "0.170.0"),
                 version_gate: VersionGate::Untested {
                     verified: "0.169.0".to_owned(),
                 },
@@ -432,6 +481,13 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 models: ModelCatalog::live(models(&[("gpt-6-astra", "GPT-6-Astra")])),
                 checked_at_ms: at,
             },
+            Some(Maintenance {
+                setup: None,
+                sign_in: Some(person("Sign in", "codex login")),
+                updater: Some(updater("codex update", false, false, Some("0.171.0"))),
+                managed: false,
+                auto_update: auto,
+            }),
         )?,
         info(
             "acp.grok",
@@ -450,6 +506,13 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 models: ModelCatalog::curated(models(&[("grok-4", "Grok 4")])),
                 checked_at_ms: at,
             },
+            Some(Maintenance {
+                setup: None,
+                sign_in: Some(person("Sign in", "grok login")),
+                updater: Some(updater("grok update", true, true, Some("1.0.92"))),
+                managed: false,
+                auto_update: auto,
+            }),
         )?,
         info(
             "acp.hermes",
@@ -468,6 +531,96 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 models: ModelCatalog::curated(vec![]),
                 checked_at_ms: at,
             },
+            Some(Maintenance {
+                setup: Some(recipe(
+                    "hermes-agent.nousresearch.com official script",
+                    vec![
+                        step(
+                            "Install",
+                            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+                            StepRunner::Reno,
+                        ),
+                        step(
+                            "Add the ACP server",
+                            "cd ~/.hermes/hermes-agent && uv pip install -e '.[acp]'",
+                            StepRunner::Reno,
+                        ),
+                    ],
+                )),
+                sign_in: None,
+                updater: None,
+                managed: false,
+                auto_update: auto,
+            }),
+        )?,
+        info(
+            "acp.antigravity",
+            "Antigravity",
+            &all,
+            &unrestricted,
+            ("0", "unverified"),
+            ExecutorHealth {
+                installed: installed("/fake/adapters/acp.antigravity/bin", "1.0.0"),
+                version_gate: VersionGate::Untested {
+                    verified: "unverified".to_owned(),
+                },
+                signed_in: SignedIn::Unknown,
+                models: ModelCatalog::curated(vec![]),
+                checked_at_ms: at,
+            },
+            Some(Maintenance {
+                setup: None,
+                sign_in: None,
+                updater: None,
+                managed: true,
+                auto_update: auto,
+            }),
+        )?,
+        info(
+            "acp.devin",
+            "Devin",
+            &all,
+            &unrestricted,
+            ("0", "unverified"),
+            not_found("install it with `brew install --cask devin-cli`"),
+            Some(Maintenance {
+                setup: Some(recipe(
+                    "Homebrew cask devin-cli",
+                    vec![
+                        step("Install", "brew install --cask devin-cli", StepRunner::Reno),
+                        step("Sign in", "devin auth login", StepRunner::Person),
+                    ],
+                )),
+                sign_in: None,
+                updater: None,
+                managed: false,
+                auto_update: auto,
+            }),
+        )?,
+        info(
+            "acp.fx",
+            "Fx",
+            &all,
+            &unrestricted,
+            ("0", "unverified"),
+            not_found("install it with the script at https://fx.sh/setup.sh"),
+            Some(Maintenance {
+                setup: Some(recipe(
+                    "fx.sh official script",
+                    vec![
+                        step(
+                            "Install",
+                            "curl -fsSL https://fx.sh/setup.sh | bash",
+                            StepRunner::Reno,
+                        ),
+                        step("Pick a provider", "fx", StepRunner::Person),
+                    ],
+                )),
+                sign_in: None,
+                updater: None,
+                managed: false,
+                auto_update: auto,
+            }),
         )?,
         info(
             "mock",
@@ -482,6 +635,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 models: ModelCatalog::curated(models(&[("mock-1", "Mock 1")])),
                 checked_at_ms: at,
             },
+            None,
         )?,
     ])
 }

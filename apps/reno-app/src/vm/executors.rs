@@ -402,6 +402,8 @@ mod tests {
                 },
             },
             health,
+            maintenance: None,
+            job: None,
         }
     }
 

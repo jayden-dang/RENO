@@ -169,7 +169,12 @@ impl Shared {
                 {
                     descriptor.caps.models.clone_from(&found.models.models);
                 }
-                Some(ExecutorInfo { descriptor, health })
+                Some(ExecutorInfo {
+                    descriptor,
+                    health,
+                    maintenance: None,
+                    job: None,
+                })
             })
             .collect();
         self.health.tx.send_replace(Arc::new(list));

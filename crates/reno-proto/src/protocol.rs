@@ -28,8 +28,10 @@ use crate::defs::{
 use crate::exec::SessionRef;
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
 use crate::health::{
-    ExecutorFramesParams, ExecutorFramesResult, ExecutorInstallParams, ExecutorInstallResult,
-    ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatchParams,
+    ExecutorAutoUpdateSetParams, ExecutorFramesParams, ExecutorFramesResult, ExecutorInstallParams,
+    ExecutorInstallResult, ExecutorJobLogResult, ExecutorJobParams, ExecutorJobResult,
+    ExecutorJobStartParams, ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot,
+    ExecutorsWatchParams,
 };
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
@@ -99,6 +101,10 @@ pub const FEATURE_RUN_EFFORT: &str = "run.effort";
 pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `executor.install` exists.
 pub const FEATURE_EXECUTOR_INSTALL: &str = "executor.install";
+/// Feature: `executor.job.start`, `executor.job.cancel`, `executor.job.dismiss`,
+/// `executor.job.log` and `executor.auto_update.set` exist, and `ExecutorInfo` may carry
+/// `maintenance` and `job`.
+pub const FEATURE_EXECUTOR_MAINTAIN: &str = "executor.maintain";
 /// Feature: `approval.decide` takes a `message` with a denial, which reaches the harness and is
 /// journalled and shown in `approval.history`.
 pub const FEATURE_APPROVAL_MESSAGE: &str = "approval.message";
@@ -154,6 +160,7 @@ pub const FEATURES: &[&str] = &[
     crate::rules::FEATURE_PROJECT_RULES,
     FEATURE_RUN_MODEL,
     FEATURE_RUN_EFFORT,
+    FEATURE_EXECUTOR_MAINTAIN,
 ];
 
 /// A request with a single reply.
@@ -900,6 +907,34 @@ method!(
     ExecutorInstall, "executor.install", ExecutorInstallParams => ExecutorInstallResult
 );
 method!(
+    /// `executor.job.start`: installs (a not-found executor) or updates (an installed one) as a
+    /// job, and answers once the job is queued or started, not when it ends. An update of an
+    /// executor with runs in flight is queued unless `force`. Fails with `JobRunning` when the
+    /// executor has a job, `NothingToDo` when there is nothing to install or update, and
+    /// `NoUpdater` for an update the executor has no updater for. Needs feature
+    /// `executor.maintain`.
+    ExecutorJobStart, "executor.job.start", ExecutorJobStartParams => ExecutorJobResult
+);
+method!(
+    /// `executor.job.cancel`: stops the executor's job, which ends `cancelled`. Needs feature
+    /// `executor.maintain`.
+    ExecutorJobCancel, "executor.job.cancel", ExecutorJobParams => ExecutorJobResult
+);
+method!(
+    /// `executor.job.dismiss`: clears a failed job. Needs feature `executor.maintain`.
+    ExecutorJobDismiss, "executor.job.dismiss", ExecutorJobParams => ExecutorJobResult
+);
+method!(
+    /// `executor.job.log`: the last 500 lines of output of the executor's current or last job.
+    /// Needs feature `executor.maintain`.
+    ExecutorJobLog, "executor.job.log", ExecutorJobParams => ExecutorJobLogResult
+);
+method!(
+    /// `executor.auto_update.set`: stores the executor's auto-update setting. Needs feature
+    /// `executor.maintain`.
+    ExecutorAutoUpdateSet, "executor.auto_update.set", ExecutorAutoUpdateSetParams => ExecutorJobResult
+);
+method!(
     /// `executor.frames`: the frames each executor's wire layer did not recognise, by kind, since
     /// the daemon started, and the CLI version they were first seen under. A rising number is
     /// the early sign that a harness CLI moved. Needs feature `executor.frames`.
@@ -1026,6 +1061,11 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorList>(),
             method_entry::<ExecutorRefresh>(),
             method_entry::<ExecutorInstall>(),
+            method_entry::<ExecutorJobStart>(),
+            method_entry::<ExecutorJobCancel>(),
+            method_entry::<ExecutorJobDismiss>(),
+            method_entry::<ExecutorJobLog>(),
+            method_entry::<ExecutorAutoUpdateSet>(),
             method_entry::<ExecutorFrames>(),
             method_entry::<crate::agent::AgentAuth>(),
             method_entry::<crate::agent::AgentReport>(),

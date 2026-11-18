@@ -73,6 +73,8 @@ pub(super) struct World {
     paused_bots: std::collections::BTreeSet<String>,
     /// The names of the secrets that are set. The fake never keeps a value: nothing reads one.
     secrets: std::collections::BTreeSet<String>,
+    /// Executor jobs.
+    pub(super) jobs: super::jobs::Jobs,
 }
 
 /// Why the fake daemon refuses an install.
@@ -113,7 +115,14 @@ impl World {
             paused: false,
             paused_bots: std::collections::BTreeSet::new(),
             secrets: std::collections::BTreeSet::new(),
+            jobs: super::jobs::Jobs::default(),
         };
+        // Codex has a run waiting for approval, as on the machine the demo mirrors.
+        if let Ok(codex) = "codex".parse::<ExecutorId>()
+            && world.executors.iter().any(|e| e.descriptor.id == codex)
+        {
+            world.jobs.active_runs.insert(codex, 1);
+        }
         for at in 0..world.runs.len() {
             let routing = world.seed_routing(at);
             world.runs[at].routing = Some(routing);
@@ -213,7 +222,7 @@ impl World {
         Ok(())
     }
 
-    fn tick(&mut self) -> u64 {
+    pub(super) fn tick(&mut self) -> u64 {
         self.now_ms += TICK_MS;
         self.now_ms
     }

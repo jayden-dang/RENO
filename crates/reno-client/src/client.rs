@@ -433,6 +433,90 @@ impl Client {
             .executor)
     }
 
+    /// `executor.job.start`: installs (when `id` is not found) or updates it as a job and
+    /// returns the executor once the job is queued or started, not when it ends. An update of an
+    /// executor with runs in flight is queued unless `force`. Progress arrives through
+    /// [`Client::watch_executors`]. Needs feature `executor.maintain`.
+    pub async fn start_executor_job(
+        &self,
+        id: &reno_proto::ExecutorId,
+        kind: reno_proto::JobKind,
+        force: bool,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_MAINTAIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorJobStart>(reno_proto::ExecutorJobStartParams {
+                id: id.clone(),
+                kind,
+                force,
+            })
+            .await?
+            .executor)
+    }
+
+    /// `executor.job.cancel`: stops the executor's job, which ends `cancelled`. Needs feature
+    /// `executor.maintain`.
+    pub async fn cancel_executor_job(
+        &self,
+        id: &reno_proto::ExecutorId,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_MAINTAIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorJobCancel>(reno_proto::ExecutorJobParams { id: id.clone() })
+            .await?
+            .executor)
+    }
+
+    /// `executor.job.dismiss`: clears a failed job. Needs feature `executor.maintain`.
+    pub async fn dismiss_executor_job(
+        &self,
+        id: &reno_proto::ExecutorId,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_MAINTAIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorJobDismiss>(reno_proto::ExecutorJobParams {
+                id: id.clone(),
+            })
+            .await?
+            .executor)
+    }
+
+    /// `executor.job.log`: the last lines of output of the executor's current or last job, and
+    /// whether older ones were dropped. Needs feature `executor.maintain`.
+    pub async fn executor_job_log(
+        &self,
+        id: &reno_proto::ExecutorId,
+    ) -> Result<reno_proto::ExecutorJobLogResult, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_MAINTAIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorJobLog>(reno_proto::ExecutorJobParams { id: id.clone() })
+            .await?)
+    }
+
+    /// `executor.auto_update.set`: stores the auto-update setting of `id`. Needs feature
+    /// `executor.maintain`.
+    pub async fn set_executor_auto_update(
+        &self,
+        id: &reno_proto::ExecutorId,
+        on: bool,
+        verified_only: bool,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_MAINTAIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorAutoUpdateSet>(reno_proto::ExecutorAutoUpdateSetParams {
+                id: id.clone(),
+                on,
+                verified_only,
+            })
+            .await?
+            .executor)
+    }
+
     /// `executors.watch`: every executor and its health, then a new full list on every change.
     /// Latest-value, like [`Client::watch_runs`]. Needs feature `executors`.
     pub async fn watch_executors(

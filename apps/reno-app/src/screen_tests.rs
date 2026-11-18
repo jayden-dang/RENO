@@ -337,10 +337,19 @@ fn executors_lead_with_what_needs_you_and_check_again_probes(cx: &mut TestAppCon
     let order: Vec<&str> = view.rows.rows().iter().map(|r| r.id.as_str()).collect();
     assert_eq!(
         order,
-        ["codex", "acp.grok", "acp.hermes", "claude-code", "mock"],
-        "signed out, too old, needs install, then the ready ones"
+        [
+            "codex",
+            "acp.grok",
+            "acp.hermes",
+            "acp.devin",
+            "acp.fx",
+            "acp.antigravity",
+            "claude-code",
+            "mock"
+        ],
+        "signed out, too old, needs install or not found, then the ready ones"
     );
-    assert_eq!(view.lede, "3 executors need you");
+    assert_eq!(view.lede, "5 executors need you");
     assert!(
         painted(vcx, "install-acp.hermes"),
         "only one can be installed"
@@ -384,7 +393,7 @@ fn installing_an_executor_fetches_its_adapter_and_it_leaves_the_needs_list(
     click(vcx, "install-acp.hermes");
     wait_drawn(vcx, |vcx| {
         let view = executor_view(vcx, &root);
-        view.needing == 2 && !painted(vcx, "install-acp.hermes")
+        view.needing == 4 && !painted(vcx, "install-acp.hermes")
     });
     let view = executor_view(vcx, &root);
     let hermes = view
@@ -414,7 +423,7 @@ fn a_failed_install_keeps_the_screen_and_its_button_usable(cx: &mut TestAppConte
     });
     assert_eq!(
         executor_view(vcx, &root).needing,
-        3,
+        5,
         "nothing was installed"
     );
     assert!(painted(vcx, "install-acp.hermes"));

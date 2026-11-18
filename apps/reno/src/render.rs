@@ -859,6 +859,8 @@ mod tests {
             }))
             .unwrap(),
             health,
+            maintenance: None,
+            job: None,
         }
     }
 

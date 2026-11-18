@@ -321,6 +321,241 @@ pub struct ExecutorInfo {
     /// The last probe. Absent until the first probe of this executor has finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<ExecutorHealth>,
+    /// How this executor is installed, updated and signed in to. Absent from a daemon without
+    /// feature `executor.maintain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<Maintenance>,
+    /// The install or update running on this executor, or the last one that failed. Absent when
+    /// there is none (a job that succeeded leaves no trace: the fresh health shows the result).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<ExecutorJob>,
+}
+
+/// What a person and Reno can do to install, update and sign in to one executor (feature
+/// `executor.maintain`). The commands are compiled into the daemon per adapter: they are shown,
+/// never sent back by a client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Maintenance {
+    /// For an executor that is not found: how Reno installs it. Absent when the adapter
+    /// declares no recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupRecipe>,
+    /// The command a person runs to sign in, when the harness has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<PersonStep>,
+    /// The executor's own updater. Absent for executors with no updater (and for managed
+    /// adapters: see `managed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater: Option<UpdaterInfo>,
+    /// A Reno-managed adapter (pinned and checksum-verified): it updates with Reno.
+    pub managed: bool,
+    /// The stored auto-update setting.
+    pub auto_update: AutoUpdate,
+}
+
+/// How Reno installs an executor that is not found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupRecipe {
+    /// Where the install comes from, for a person ("Homebrew cask devin-cli").
+    pub source: String,
+    /// The steps, in order.
+    pub steps: Vec<SetupStep>,
+}
+
+/// One step of a [`SetupRecipe`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupStep {
+    /// What the step does, in a few words ("Install").
+    pub label: String,
+    /// The command line, shown as is.
+    pub command: String,
+    /// Who runs it.
+    pub runner: StepRunner,
+}
+
+/// Who runs a [`SetupStep`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepRunner {
+    /// The daemon, as the user, with no stdin and no sudo.
+    Reno,
+    /// The person, in a terminal: it is interactive or needs a login.
+    Person,
+}
+
+/// A command a person runs themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonStep {
+    /// What it does ("Sign in").
+    pub label: String,
+    /// The command line.
+    pub command: String,
+}
+
+/// An executor's own updater.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterInfo {
+    /// The command that updates it ("codex update"), shown in the UI.
+    pub command: String,
+    /// The CLI updates itself already.
+    pub self_updating: bool,
+    /// The updater can install a given version (so "verified only" can pin).
+    pub can_pin: bool,
+    /// The newest version a check found, when a check could tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+    /// When that check ran, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at_ms: Option<u64>,
+}
+
+/// The stored auto-update setting of one executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoUpdate {
+    /// Update when the executor is idle.
+    pub on: bool,
+    /// Only to the version the adapter was verified on (needs an updater that can pin).
+    pub verified_only: bool,
+}
+
+/// An install or update of one executor. At most one per executor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorJob {
+    /// Opaque.
+    pub id: String,
+    /// What it does.
+    pub kind: JobKind,
+    /// Where it is.
+    pub phase: JobPhase,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub started_at_ms: u64,
+}
+
+/// What a job does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// Install an executor that is not found.
+    Install,
+    /// Update an installed executor with its own updater.
+    Update,
+}
+
+/// Where a job is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum JobPhase {
+    /// An update waiting for the executor's runs to end.
+    Queued {
+        /// How many runs it waits for.
+        waiting_runs: u32,
+    },
+    /// Running.
+    Running {
+        /// The step that runs, from 1.
+        step: u32,
+        /// How many steps there are.
+        steps: u32,
+        /// The last line of output, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_line: Option<String>,
+        /// Milliseconds since the Unix epoch of the last output, once the job has been quiet for
+        /// a while. The job keeps running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quiet_since_ms: Option<u64>,
+    },
+    /// Ended without success. Stays until the next start on this executor or a dismiss.
+    Failed {
+        /// Why, as a kind.
+        failure: JobFailure,
+        /// What happened, for a person.
+        detail: String,
+        /// When it ended, in milliseconds since the Unix epoch.
+        finished_at_ms: u64,
+    },
+}
+
+/// Why a job failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobFailure {
+    /// A step exited with a failure status.
+    ExitCode,
+    /// A step asked for a password. Reno never supplies one.
+    NeedsPassword,
+    /// The job ran longer than the ceiling and was killed.
+    TimedOut,
+    /// The job made no progress.
+    Stalled,
+    /// A person cancelled it.
+    Cancelled,
+    /// The steps finished but the probe after them did not find the executor.
+    Probe,
+    /// The job could not run at all (the shell would not start, the recipe is unusable).
+    Broken,
+}
+
+/// Params of `executor.job.start`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorJobStartParams {
+    /// The executor to install or update.
+    pub id: ExecutorId,
+    /// What to do.
+    pub kind: JobKind,
+    /// Start an update now even when the executor has runs in flight.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+}
+
+/// Params of `executor.job.cancel`, `executor.job.dismiss` and `executor.job.log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorJobParams {
+    /// The executor whose job it is.
+    pub id: ExecutorId,
+}
+
+/// Result of `executor.job.start`, `executor.job.cancel`, `executor.job.dismiss` and
+/// `executor.auto_update.set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorJobResult {
+    /// The executor after the call.
+    pub executor: ExecutorInfo,
+}
+
+/// Result of `executor.job.log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorJobLogResult {
+    /// The last lines of output of the current or last job, oldest first (at most 500).
+    pub lines: Vec<String>,
+    /// Older lines were dropped.
+    pub truncated: bool,
+}
+
+/// Params of `executor.auto_update.set`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutorAutoUpdateSetParams {
+    /// The executor.
+    pub id: ExecutorId,
+    /// Update when idle.
+    pub on: bool,
+    /// Only to the verified version.
+    pub verified_only: bool,
 }
 
 /// Compares `version` with the range an adapter was verified on.
