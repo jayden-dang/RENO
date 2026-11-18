@@ -1,6 +1,5 @@
 ---
 source: crates/reno-proto/tests/schema.rs
-assertion_line: 14
 expression: protocol_schema()
 ---
 {
@@ -5107,7 +5106,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools; or `builtin:full-access` for a\nrequest a full-access run's policy and history did not refuse (allowed by the access mode).",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -9437,7 +9436,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools; or `builtin:full-access` for a\nrequest a full-access run's policy and history did not refuse (allowed by the access mode).",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
@@ -10273,7 +10272,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools.",
+                "description": "A rule decided it, with no question asked. `name` is a policy rule's `note`, or when it\nhas none a label for a person, such as \"policy rule 8 (command `git push*`)\" (its number\nfrom 1, then what it matches); `default` when no rule matched and the policy's default\neffect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or\n`builtin:reno-mcp` for a call to one of Reno's own MCP tools; or `builtin:full-access` for a\nrequest a full-access run's policy and history did not refuse (allowed by the access mode).",
                 "properties": {
                   "name": {
                     "description": "The rule's name.",
