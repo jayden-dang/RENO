@@ -1,0 +1,10 @@
+{
+ "commandId": "01a1ee99-9cf3-7e7a-9fc8-53b626a712fd",
+ "status": "accepted",
+ "applyOutcome": "noop",
+ "effectiveMode": {
+  "mode": "promptUnmatched",
+  "source": "startup",
+  "lastCommandId": null
+ }
+}

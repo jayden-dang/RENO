@@ -4,4 +4,5 @@
 pub(crate) mod acp;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod muse;
 pub(crate) mod pi;

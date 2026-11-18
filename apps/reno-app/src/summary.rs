@@ -341,6 +341,7 @@ pub(crate) fn executor_name(id: &str) -> String {
     match id {
         "claude-code" => "Claude Code".to_owned(),
         "codex" => "Codex".to_owned(),
+        "muse" => "Muse Code".to_owned(),
         "opencode" => "OpenCode".to_owned(),
         other => {
             let tail = other.strip_prefix("acp.").unwrap_or(other);
@@ -1126,6 +1127,7 @@ mod tests {
         assert_eq!(executor_name("claude-code"), "Claude Code");
         assert_eq!(executor_name("codex"), "Codex");
         assert_eq!(executor_name("pi"), "Pi");
+        assert_eq!(executor_name("muse"), "Muse Code");
         assert_eq!(executor_name("acp.grok"), "Grok");
         assert_eq!(executor_name("acp.own.mine"), "Mine");
         assert_eq!(executor_name("acp.gemini-cli"), "Gemini Cli");

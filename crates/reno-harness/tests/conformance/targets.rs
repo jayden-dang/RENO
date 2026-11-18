@@ -13,7 +13,9 @@ use reno_harness::conformance::{
     UserConfigPlan,
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
-use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, PiExecutor, RegistryAgent};
+use reno_harness::{
+    AcpExecutor, ClaudeExecutor, CodexExecutor, MuseExecutor, PiExecutor, RegistryAgent,
+};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorId,
     HealthProbe, McpServerSpec, Question, StopReason, ToolCall,
@@ -670,6 +672,84 @@ pub(crate) fn pi_target() -> Target {
     };
     Target::new(
         "pi",
+        Arc::new(executor),
+        Profile::driver(),
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(plan)
+}
+
+// -- Muse Code ----------------------------------------------------------------------------------
+
+/// Muse over its fake `muse serve`. It claims full access only (no Muse mode is known to ask
+/// about every edit and command), so the suite skips the approval cases (`tests/muse.rs` plays
+/// them); it does not claim to isolate the owner's tools, so user-config is skipped too.
+pub(crate) fn muse_target() -> Target {
+    let executor = MuseExecutor::new().with_executable(fixture("fake-muse.py"));
+    let plan = Plan {
+        lifecycle: Some(
+            Scenario::new("scenario:conf-happy")
+                .expect(Expect::TextContains("conf-hello".into()))
+                .expect(Expect::ResultContains("conf-hello".into()))
+                .expect(Expect::Tool {
+                    name: "bash".into(),
+                    class: ActionClass::Command,
+                })
+                .expect(Expect::Tool {
+                    name: "edit".into(),
+                    class: ActionClass::Edit,
+                }),
+        ),
+        approval: None,
+        input: Some(
+            Scenario::new("scenario:conf-question")
+                .expect(Expect::ResultContains("answered:Changed".into())),
+        ),
+        steer: Some(
+            Scenario::new("scenario:steer").expect(Expect::TextContains("steered:".into())),
+        ),
+        cancel: Some(Scenario::new("scenario:interrupt")),
+        crash: Some(Scenario::new("scenario:conf-crash")),
+        resume: Some(
+            Scenario::new("scenario:resumed")
+                .resume("01a1ee73-5121-74d0-b05d-e674c72aeaf4")
+                .expect(Expect::SessionIs(
+                    "01a1ee73-5121-74d0-b05d-e674c72aeaf4".into(),
+                ))
+                .expect(Expect::TextContains("back again".into())),
+        ),
+        mcp: Some(
+            Scenario::new("scenario:mcp-config")
+                .mcp(vec![
+                    McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/reno".into(),
+                        args: vec!["mcp".into()],
+                        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+                    },
+                    McpServerSpec {
+                        name: "plugin-focus".into(),
+                        command: "/opt/focus/server".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                ])
+                .expect(Expect::TextContains(
+                    "mcp configured:reno,plugin-focus".into(),
+                )),
+        ),
+        output_schema: None,
+        mode_runs: Vec::new(),
+        unknown_frames: Some(UnknownFramePlan {
+            scenario: Scenario::new("scenario:conf-unknown")
+                .expect(Expect::ResultContains("unknown-done".into())),
+            keys: vec!["method:turn/teleported".into(), "item:hologram".into()],
+        }),
+        user_config: None,
+    };
+    Target::new(
+        "muse",
         Arc::new(executor),
         Profile::driver(),
         cwd(),

@@ -568,6 +568,34 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             }),
         )?,
         info(
+            "muse",
+            "Muse Code",
+            // No Muse mode is known to ask about every edit and command: full access only.
+            &[AccessMode::FullAccess],
+            &unrestricted,
+            ("1.4.23", "1.4.23"),
+            ExecutorHealth {
+                installed: installed("/Users/demo/.local/bin/muse", "1.4.23"),
+                version_gate: VersionGate::Ok,
+                signed_in: SignedIn::Yes { account: None },
+                models: ModelCatalog::live(models(&[
+                    ("muse-spark-1.2", "Muse Spark"),
+                    ("muse-spark-1.3", "Muse Spark 1.3"),
+                ])),
+                checked_at_ms: at,
+                plan_usage: None,
+            },
+            // Muse's launcher script updates the install itself: no updater is declared (see
+            // `reno_harness::exec::maintenance`). `muse login` is a person's step.
+            Some(Maintenance {
+                setup: None,
+                sign_in: Some(person("Sign in", "muse login")),
+                updater: None,
+                managed: false,
+                auto_update: auto,
+            }),
+        )?,
+        info(
             "acp.grok",
             "Grok",
             &all,

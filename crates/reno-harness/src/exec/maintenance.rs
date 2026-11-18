@@ -348,6 +348,33 @@ pub fn declaration(id: &HarnessId) -> Option<MaintenanceDecl> {
             }),
             ..none
         },
+        // Muse Code installs with Meta's curl installer, which leaves `~/.local/bin/muse`: a bash
+        // launcher script (not a symlink) next to the real binary `muse-bin-<version>`, and that
+        // launcher updates the install itself in the background, hourly, on any start. The
+        // install recipe is UNVERIFIED (it was not run; the installer's own URL and the launcher
+        // script were read). NO updater is declared: the daemon's live auto-update would run it,
+        // and the only thing that updates this install is the launcher itself (`MUSE_SYNC_UPDATE=1
+        // muse` and `MUSE_LAUNCHER_INSTALL=1 muse` are its switches; neither was run, both write
+        // `~/.local/bin`, and an updater would apply to every install `updater_for` cannot tell
+        // from this one). Reno turns the launcher's own update off for every process it starts for
+        // Muse, so a person's interactive `muse` is what keeps it current. `muse login --help` reads
+        // "Log in with your Meta account: approve a code in your browser": a person's step.
+        HarnessId::Muse => MaintenanceDecl {
+            // UNVERIFIED recipe.
+            setup: Some(SetupRecipe {
+                source: "dev.meta.ai install.sh".to_owned(),
+                steps: vec![
+                    step(
+                        "Install",
+                        "curl -fsSL https://dev.meta.ai/install.sh | sh",
+                        StepRunner::Reno,
+                    ),
+                    step("Sign in", "muse login", StepRunner::Person),
+                ],
+            }),
+            sign_in: Some(person("Sign in", "muse login")),
+            ..none
+        },
         HarnessId::Registry(_) => return None,
     })
 }
@@ -486,6 +513,24 @@ mod tests {
         assert_eq!(setup.steps[0].runner, StepRunner::Reno);
         assert_eq!(setup.steps[1].runner, StepRunner::Person);
         assert!(pi.sign_in.is_none());
+    }
+
+    #[test]
+    fn muse_declares_no_updater_because_its_launcher_updates_the_install_itself() {
+        let muse = declaration(&HarnessId::Muse).unwrap();
+        assert!(muse.updaters.is_empty());
+        for path in ["/Users/x/.local/bin/muse", "/opt/homebrew/bin/muse"] {
+            assert!(muse.updater_for(Some(Path::new(path))).is_none(), "{path}");
+        }
+        let setup = muse.setup.unwrap();
+        assert_eq!(
+            setup.steps[0].command,
+            "curl -fsSL https://dev.meta.ai/install.sh | sh"
+        );
+        assert_eq!(setup.steps[0].runner, StepRunner::Reno);
+        assert_eq!(setup.steps[1].runner, StepRunner::Person);
+        assert_eq!(muse.sign_in.unwrap().command, "muse login");
+        assert!(!muse.managed);
     }
 
     #[test]

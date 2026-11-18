@@ -38,7 +38,7 @@ mod agent_id;
 pub mod child_env;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
-pub use drivers::{acp, claude, codex, pi};
+pub use drivers::{acp, claude, codex, muse, pi};
 #[cfg(all(feature = "conformance", unix))]
 pub mod conformance;
 pub mod exec;
@@ -254,8 +254,18 @@ pub(crate) fn redact_secrets(text: &str) -> String {
         .iter()
         .filter_map(|marker| {
             lower[offset..]
-                .find(marker)
-                .map(|at| (offset + at, *marker))
+                .match_indices(marker)
+                .map(|(at, _)| offset + at)
+                // A key-like prefix starts a word: `sk-` inside `ask-me` is not one.
+                .find(|&at| {
+                    marker.ends_with(' ')
+                        || marker.ends_with('=')
+                        || !text[..at]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_ascii_alphanumeric())
+                })
+                .map(|at| (at, *marker))
         })
         .min_by_key(|(at, _)| *at)
     {
@@ -280,6 +290,30 @@ pub(crate) fn redact_secrets(text: &str) -> String {
     }
     result.push_str(&text[offset..]);
     result
+}
+
+#[cfg(test)]
+#[test]
+fn a_key_like_prefix_inside_a_word_is_not_a_key() {
+    // `:ask-me` is Muse's permission profile; `ask-me` contains `sk-`.
+    assert_eq!(redact_secrets("profile :ask-me"), "profile :ask-me");
+    assert_eq!(redact_secrets("task-runner failed"), "task-runner failed");
+    assert_eq!(redact_secrets("flask-session"), "flask-session");
+    // Real keys, at a word start or after punctuation, are still masked.
+    for text in [
+        "sk-abcdef0123456789",
+        "key=sk-ant-api03-abcdefghijklmnop",
+        "token: sk-proj-abcdef",
+        "(sk-abcdef0123)",
+        "\"sk-abcdef0123\"",
+        "env OPENAI_API_KEY=sk-abcdef0123456789",
+    ] {
+        let clean = redact_secrets(text);
+        assert!(
+            clean.contains("[REDACTED]") && !clean.contains("abcdef"),
+            "{text} -> {clean}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +359,7 @@ pub(crate) fn crash_message(
 pub use acp::AcpExecutor;
 pub use claude::ClaudeExecutor;
 pub use codex::CodexExecutor;
+pub use muse::MuseExecutor;
 pub use pi::PiExecutor;
 
 // ---------------------------------------------------------------------------

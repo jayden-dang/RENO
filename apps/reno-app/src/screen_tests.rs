@@ -339,7 +339,10 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
     let view = executor_view(vcx, &root);
     let ids = |g: Group| -> Vec<String> { view.group(g).iter().map(|r| r.id.clone()).collect() };
     assert_eq!(ids(Group::NeedsYou), ["codex", "acp.grok"]);
-    assert_eq!(ids(Group::Ready), ["acp.antigravity", "claude-code", "pi"]);
+    assert_eq!(
+        ids(Group::Ready),
+        ["acp.antigravity", "claude-code", "muse", "pi"]
+    );
     assert_eq!(
         ids(Group::NotInstalled),
         ["acp.devin", "acp.fx", "acp.hermes"]
@@ -362,6 +365,10 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
     assert!(
         !painted(vcx, "auto-pi"),
         "no updater is declared for Pi: no switch"
+    );
+    assert!(
+        !painted(vcx, "auto-muse"),
+        "no updater is declared for Muse: no switch"
     );
     assert!(!painted(vcx, "update-codex"), "auto-update is on");
 

@@ -50,6 +50,7 @@ open, and the logins you already have.
 | Claude Code | `claude` CLI, stream-json with its control channel |
 | Codex | `codex app-server`, JSON-RPC |
 | Pi | `pi --mode rpc`, JSONL |
+| Muse Code | `muse serve`, Muse Session Protocol (JSON-RPC) |
 | Grok, Devin, Hermes, Antigravity and other ACP agents | Agent Client Protocol |
 | opencode | Planned |
 
