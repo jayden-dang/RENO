@@ -241,13 +241,20 @@ fn the_home_lists_its_rows_with_letters_and_opens_one_with_its_key(cx: &mut Test
     assert_eq!(active(vcx, &screen), Surface::Files);
     assert!(painted(vcx, "panel-tab-files"));
 
-    // A row that is not built opens a placeholder that says so.
+    // H opens the commit history.
     click(vcx, "panel-new-tab");
     vcx.simulate_keystrokes("h");
     draw(vcx);
-    assert_eq!(active(vcx, &screen), Surface::Planned(HomeKind::History));
-    assert!(painted(vcx, "panel-planned-history"));
-    assert!(painted(vcx, "panel-tab-planned-history"));
+    assert_eq!(active(vcx, &screen), Surface::History);
+    assert!(painted(vcx, "panel-tab-history"));
+
+    // A row that is not built opens a placeholder that says so.
+    click(vcx, "panel-new-tab");
+    vcx.simulate_keystrokes("s");
+    draw(vcx);
+    assert_eq!(active(vcx, &screen), Surface::Planned(HomeKind::SideChat));
+    assert!(painted(vcx, "panel-planned-side-chat"));
+    assert!(painted(vcx, "panel-tab-planned-side-chat"));
 
     // A letter with no row is passed on, so the home stays.
     click(vcx, "panel-new-tab");

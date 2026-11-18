@@ -3,10 +3,13 @@
 //!
 //! Everything here draws what `vm::changes` decided; the daemon's answers are in the store.
 
+use std::collections::{HashMap, HashSet};
+
 use gpui::{
     AnyElement, App, Context, FontWeight, Hsla, ListAlignment, ListState, SharedString, Stateful,
-    div, list, prelude::*, px,
+    StyledText, Window, div, list, prelude::*, px,
 };
+use reno_syntax::HighlightSpan;
 
 use super::RunScreen;
 use super::output::copy;
@@ -14,11 +17,13 @@ use crate::panel::surface::Surface;
 use crate::panel::view::{Prefs, finding_text};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::markdown_view;
 use crate::ui::theme::Theme;
 use crate::vm::changes::{
     self as facts, DiffRow, FileRow, KindTone, Loaded, Overview, Pane, PatchPane, ReviewScope,
     RowKind,
 };
+use crate::vm::diff_syntax::FileSyntax;
 use crate::vm::review::{Note, ReviewRow, review_rows};
 
 /// A name for each state of the pane, the selector tests find it by.
@@ -45,9 +50,9 @@ const OPEN_FIRST: usize = 3;
 /// A virtualised list of Review rows with the files they index. Review has one; each File tab has
 /// one for its single file.
 pub(super) struct Flat {
-    list: ListState,
-    files: Vec<FileRow>,
-    rows: Vec<ReviewRow>,
+    pub(super) list: ListState,
+    pub(super) files: Vec<FileRow>,
+    pub(super) rows: Vec<ReviewRow>,
 }
 
 impl Flat {
@@ -61,7 +66,7 @@ impl Flat {
 
     /// Takes the new rows and tells the list from which one on they differ, so scrolling and the
     /// rows measured above that point stay. Rows are indices: what they draw is read live.
-    fn sync(&mut self, files: Vec<FileRow>, rows: Vec<ReviewRow>) {
+    pub(super) fn sync(&mut self, files: Vec<FileRow>, rows: Vec<ReviewRow>) {
         self.files = files;
         if self.rows == rows {
             return;
@@ -85,7 +90,7 @@ impl Flat {
     }
 
     /// The file whose bar the top of the list is under, when that bar has scrolled out of view.
-    fn sticky(&self) -> Option<&FileRow> {
+    pub(super) fn sticky(&self) -> Option<&FileRow> {
         let top = self.list.logical_scroll_top().item_ix;
         match self.rows.get(top)? {
             ReviewRow::Header { .. } => None,
@@ -96,9 +101,11 @@ impl Flat {
 
 /// Which list a row belongs to.
 #[derive(Clone)]
-enum Scope {
+pub(super) enum Scope {
     Review,
     File(String),
+    /// A Commit tab's list, by commit.
+    Commit(String),
 }
 
 #[cfg(test)]
@@ -122,13 +129,18 @@ impl RunScreen {
         self.pane_in(ReviewScope::Thread, cx)
     }
 
-    /// The scope Review compares: always the thread's on a daemon without threads.
+    /// The scope Review compares: the thread's when the daemon cannot answer the chosen one.
     pub(super) fn effective_scope(&self, cx: &App) -> ReviewScope {
-        if self.store.read(cx).supports_threads() {
+        if self.store.read(cx).supports_scope(self.scope) {
             self.scope
         } else {
             ReviewScope::Thread
         }
+    }
+
+    /// The syntax cache's name for what Review compares now.
+    pub(super) fn review_origin(&self, cx: &App) -> String {
+        format!("review:{:?}", self.effective_scope(cx))
     }
 
     /// The pane for what Review compares now.
@@ -181,6 +193,8 @@ impl RunScreen {
         // The Files tab starts or stops its watch with the same events.
         self.sync_files(cx);
         self.sync_terminals(cx);
+        // The History and Commit tabs read what they show, once they show.
+        self.sync_history(cx);
         let review = self.review_is_showing(cx);
         let file_tab = self.file_tab_showing(cx);
         if !review && file_tab.is_none() {
@@ -190,6 +204,8 @@ impl RunScreen {
             return;
         };
         let scope = self.effective_scope(cx);
+        let origin = self.review_origin(cx);
+        let split = Prefs::get(cx).split;
         if review && !self.review_default_applied {
             self.review_default_applied = true;
             if overview.rows.len() > OPEN_ALL_UP_TO {
@@ -205,10 +221,16 @@ impl RunScreen {
         self.patch_panes
             .retain(|path, _| overview.rows.iter().any(|r| &r.path == path));
         let run = self.run.clone();
-        for row in overview.rows.iter().filter(|r| {
-            (review && !self.review_folded.contains(&r.path))
-                || file_tab.as_deref() == Some(r.path.as_str())
-        }) {
+        let wanted: Vec<&FileRow> = overview
+            .rows
+            .iter()
+            .filter(|r| {
+                (review && !self.review_folded.contains(&r.path))
+                    || file_tab.as_deref() == Some(r.path.as_str())
+            })
+            .collect();
+        let mut coloured = Vec::new();
+        for row in wanted {
             if !row.binary {
                 self.store.update(cx, |store, cx| {
                     store.load_patch_in(&run, scope, &row.path, cx)
@@ -223,16 +245,32 @@ impl RunScreen {
                 .unwrap_or(facts::Loaded::Loading);
             if self.patch_panes.get(&row.path).map(|(l, _)| l) != Some(&loaded) {
                 let pane = facts::patch_pane(row, &loaded);
-                self.patch_panes.insert(row.path.clone(), (loaded, pane));
+                self.patch_panes
+                    .insert(row.path.clone(), (loaded.clone(), pane));
+            }
+            // The colours of the file, once its patch is in.
+            if let facts::Loaded::Ready(patch) = &loaded
+                && !row.binary
+            {
+                coloured.push((row.path.clone(), patch.checksum.clone()));
             }
         }
+        for (path, checksum) in coloured {
+            self.ensure_syntax(&origin, scope.diff_scope(), &path, &checksum, cx);
+        }
         let pane_of = |path: &str| self.patch_panes.get(path).map(|(_, pane)| pane);
-        let review_flat = review
-            .then(|| review_rows(&overview.rows, |p| self.review_folded.contains(p), pane_of));
+        let review_flat = review.then(|| {
+            review_rows(
+                &overview.rows,
+                |p| self.review_folded.contains(p),
+                pane_of,
+                split,
+            )
+        });
         let file_flat = file_tab.as_ref().and_then(|path| {
             let row = overview.rows.iter().find(|r| &r.path == path)?;
             let files = vec![row.clone()];
-            let rows = review_rows(&files, |_| false, pane_of);
+            let rows = review_rows(&files, |_| false, pane_of, split);
             Some((path.clone(), files, rows))
         });
         if let Some(rows) = review_flat {
@@ -268,6 +306,16 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn review_row_count(&self) -> usize {
         self.review.rows.len()
+    }
+
+    /// How many of Review's rows are side-by-side pairs.
+    #[cfg(test)]
+    pub(crate) fn review_pair_rows(&self) -> usize {
+        self.review
+            .rows
+            .iter()
+            .filter(|r| matches!(r, ReviewRow::Pair { .. }))
+            .count()
     }
 
     #[cfg(test)]
@@ -309,7 +357,7 @@ impl RunScreen {
             // The thread's changes are what the Session tab, the tab counts and the result line
             // say; Review's own scope is read as well while it is the run's.
             store.load_changes(&run, cx);
-            if scope == ReviewScope::Run {
+            if scope != ReviewScope::Thread {
                 store.load_changes_in(&run, scope, cx);
             }
         });
@@ -317,7 +365,7 @@ impl RunScreen {
 
     /// Review compares `scope` from now on (a person's choice in the sticky bar).
     pub(crate) fn set_scope(&mut self, scope: ReviewScope, cx: &mut Context<Self>) {
-        if self.scope == scope || !self.store.read(cx).supports_threads() {
+        if self.scope == scope || !self.store.read(cx).supports_scope(scope) {
             return;
         }
         self.scope = scope;
@@ -336,11 +384,54 @@ impl RunScreen {
         self.scope
     }
 
-    /// "This run | This thread": the segmented control of Review's bar.
+    /// "This run | This thread | Uncommitted": the segmented control of Review's bar. A scope
+    /// the daemon cannot answer stays, dimmed, with its reason as the tooltip.
     fn scope_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let current = self.effective_scope(cx);
         let one = |scope: ReviewScope, id: &'static str| {
             let on = scope == current;
+            let usable = self.store.read(cx).supports_scope(scope);
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .h(px(24.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .when(usable, |d| d.cursor_pointer())
+                .when(!usable, |d| d.cursor_default().opacity(0.45))
+                .when(on, |d| {
+                    d.bg(theme.raised)
+                        .text_color(theme.text)
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!on, |d| d.text_color(theme.muted))
+                .when(!usable, |d| d.tooltip(kit::tip(scope.needs_words())))
+                .child(scope.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
+        };
+        div()
+            .id("review-scope")
+            .debug_selector(|| "review-scope".to_owned())
+            .flex_none()
+            .p(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .bg(theme.text.opacity(0.06))
+            .child(one(ReviewScope::Run, "scope-run"))
+            .child(one(ReviewScope::Thread, "scope-thread"))
+            .child(one(ReviewScope::WorkingTree, "scope-working-tree"))
+            .into_any_element()
+    }
+
+    /// "Unified | Split": how the diffs draw. Kept with the panel's layout.
+    pub(super) fn mode_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let split = Prefs::get(cx).split;
+        let one = |on: bool, label: &'static str, id: &'static str, to: bool| {
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -357,12 +448,12 @@ impl RunScreen {
                         .font_weight(FontWeight::MEDIUM)
                 })
                 .when(!on, |d| d.text_color(theme.muted))
-                .child(scope.label())
-                .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_split(to, cx)))
         };
         div()
-            .id("review-scope")
-            .debug_selector(|| "review-scope".to_owned())
+            .id("diff-mode")
+            .debug_selector(|| "diff-mode".to_owned())
             .flex_none()
             .p(px(2.0))
             .flex()
@@ -370,23 +461,52 @@ impl RunScreen {
             .gap(px(2.0))
             .rounded(px(8.0))
             .bg(theme.text.opacity(0.06))
-            .child(one(ReviewScope::Run, "scope-run"))
-            .child(one(ReviewScope::Thread, "scope-thread"))
+            .child(one(!split, "Unified", "mode-unified", false))
+            .child(one(split, "Split", "mode-split", true))
             .into_any_element()
     }
 
-    /// The slim bar under the branch bar that holds the switch.
-    fn scope_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// Draws diffs side by side (or not) from now on, and keeps the choice with the layout.
+    pub(crate) fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
+        let prefs = Prefs::get(cx);
+        if prefs.split == split {
+            return;
+        }
+        Prefs { split, ..prefs }.set(cx);
+        self.resync_commits(cx);
+        self.ensure_patches(cx);
+        cx.notify();
+    }
+
+    /// The slim bar under the branch bar: the scope switch when Review offers it, and the
+    /// unified / split choice.
+    pub(super) fn controls_bar(
+        &self,
+        theme: &Theme,
+        with_scope: bool,
+        with_mode: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
+            .id("review-controls")
+            .debug_selector(|| "review-controls".to_owned())
             .flex_none()
             .h(px(36.0))
             .px(px(16.0))
             .flex()
             .items_center()
+            .gap(px(10.0))
             .border_b_1()
             .border_color(theme.hairline)
-            .child(self.scope_switch(theme, cx))
+            .when(with_scope, |d| d.child(self.scope_switch(theme, cx)))
+            .child(div().flex_1())
+            .when(with_mode, |d| d.child(self.mode_switch(theme, cx)))
             .into_any_element()
+    }
+
+    /// The bar that holds only the switch, for a scope that shows no files.
+    fn scope_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        self.controls_bar(theme, true, false, cx)
     }
 
     /// Whether Review offers the scope switch: the daemon has threads and a workspace to compare.
@@ -542,9 +662,17 @@ impl RunScreen {
                 theme.muted,
             )
             .into_any_element(),
-            Pane::Empty { .. } => {
-                note("This run made no changes.".to_owned(), theme.muted).into_any_element()
-            }
+            Pane::Empty { .. } => note(
+                match self.effective_scope(cx) {
+                    ReviewScope::WorkingTree => {
+                        "Nothing is uncommitted: the worktree matches its latest commit."
+                    }
+                    _ => "This run made no changes.",
+                }
+                .to_owned(),
+                theme.muted,
+            )
+            .into_any_element(),
             Pane::Files(_) => div().into_any_element(),
         }
     }
@@ -562,8 +690,8 @@ impl RunScreen {
                 match self.file_views.get(path) {
                     Some(flat) => list(flat.list.clone(), {
                         let path = path.to_owned();
-                        cx.processor(move |this, ix, _, cx| {
-                            this.flat_row(&Scope::File(path.clone()), ix, cx)
+                        cx.processor(move |this, ix, window, cx| {
+                            this.flat_row(&Scope::File(path.clone()), ix, window, cx)
                         })
                     })
                     .size_full()
@@ -643,7 +771,17 @@ impl RunScreen {
                 .right_0()
                 .px(px(12.0))
                 .bg(theme.canvas)
-                .child(self.file_header(theme, &file, true, true, "sticky-", cx))
+                .child(self.file_header(
+                    theme,
+                    &file,
+                    Header::Fold {
+                        scope: Scope::Review,
+                        open: true,
+                        tabs: true,
+                    },
+                    "sticky-",
+                    cx,
+                ))
         });
         div()
             .flex_1()
@@ -651,9 +789,7 @@ impl RunScreen {
             .flex()
             .flex_col()
             .child(bar)
-            .when(self.offers_scope(cx), |d| {
-                d.child(self.scope_bar(theme, cx))
-            })
+            .child(self.controls_bar(theme, self.offers_scope(cx), true, cx))
             .child(
                 div()
                     .id("review-files")
@@ -663,7 +799,9 @@ impl RunScreen {
                     .child(
                         list(
                             self.review.list.clone(),
-                            cx.processor(|this, ix, _, cx| this.flat_row(&Scope::Review, ix, cx)),
+                            cx.processor(|this, ix, window, cx| {
+                                this.flat_row(&Scope::Review, ix, window, cx)
+                            }),
                         )
                         .size_full(),
                     )
@@ -672,18 +810,66 @@ impl RunScreen {
             .into_any_element()
     }
 
+    /// What the list of `scope` draws from.
+    fn source(&self, scope: &Scope, cx: &App) -> Option<Source<'_>> {
+        Some(match scope {
+            Scope::Review => Source {
+                flat: &self.review,
+                panes: &self.patch_panes,
+                folded: Some(&self.review_folded),
+                origin: self.review_origin(cx),
+                header: HeaderKind::Fold { tabs: true },
+            },
+            Scope::File(path) => Source {
+                flat: self.file_views.get(path)?,
+                panes: &self.patch_panes,
+                folded: None,
+                origin: self.review_origin(cx),
+                header: HeaderKind::Fixed,
+            },
+            Scope::Commit(sha) => {
+                let tab = self.commits.get(sha)?;
+                Source {
+                    flat: &tab.flat,
+                    panes: &tab.panes,
+                    folded: Some(&tab.folded),
+                    origin: format!("commit:{sha}"),
+                    header: HeaderKind::Fold { tabs: false },
+                }
+            }
+        })
+    }
+
+    /// The colours of a file's lines, once they have arrived for the patch shown.
+    pub(super) fn file_syntax(
+        &self,
+        origin: &str,
+        path: &str,
+        loaded: &facts::Loaded<facts::Patch>,
+    ) -> Option<std::sync::Arc<FileSyntax>> {
+        match loaded {
+            facts::Loaded::Ready(patch) => {
+                self.syntax.ready(origin, path, &patch.checksum).cloned()
+            }
+            _ => None,
+        }
+    }
+
     /// Row `ix` of a list, drawn from the rows and the parsed patches as they are now.
-    fn flat_row(&self, scope: &Scope, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn flat_row(
+        &self,
+        scope: &Scope,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         #[cfg(test)]
         ROWS_BUILT.with(|n| n.set(n.get() + 1));
         let theme = crate::ui::theme::current(cx);
-        let flat = match scope {
-            Scope::Review => &self.review,
-            Scope::File(path) => match self.file_views.get(path) {
-                Some(flat) => flat,
-                None => return div().into_any_element(),
-            },
+        let Some(src) = self.source(scope, cx) else {
+            return div().into_any_element();
         };
+        let flat = src.flat;
         let Some(row) = flat.rows.get(ix).copied() else {
             return div().into_any_element();
         };
@@ -712,26 +898,30 @@ impl RunScreen {
         };
         match row {
             ReviewRow::Header { .. } => {
-                let (foldable, open) = match scope {
-                    Scope::Review => (true, !self.review_folded.contains(&file.path)),
-                    Scope::File(_) => (false, true),
+                let kind = match (&src.header, src.folded) {
+                    (HeaderKind::Fold { tabs }, Some(folded)) => Header::Fold {
+                        scope: scope.clone(),
+                        open: !folded.contains(&file.path),
+                        tabs: *tabs,
+                    },
+                    _ => Header::Fixed,
                 };
-                let top = if matches!(scope, Scope::Review) {
-                    12.0
-                } else {
+                let top = if matches!(kind, Header::Fixed) {
                     0.0
+                } else {
+                    12.0
                 };
                 div()
                     .px(px(12.0))
                     .pt(px(top))
-                    .child(self.file_header(&theme, &file, foldable, open, "", cx))
+                    .child(self.file_header(&theme, &file, kind, "", cx))
                     .into_any_element()
             }
             ReviewRow::Note { note: kind, .. } => {
                 let (text, tone) = match kind {
                     Note::Loading => ("Reading the patch\u{2026}".to_owned(), theme.faint),
                     Note::Failed => {
-                        let why = match self.patch_panes.get(&file.path) {
+                        let why = match src.panes.get(&file.path) {
                             Some((_, PatchPane::Failed(why))) => why.clone(),
                             _ => String::new(),
                         };
@@ -746,15 +936,47 @@ impl RunScreen {
                 tag(note(&text, tone), &file.path)
             }
             ReviewRow::Line { line, digits, .. } => {
-                let Some((_, PatchPane::Rows { rows, .. })) = self.patch_panes.get(&file.path)
-                else {
+                let Some((loaded, PatchPane::Rows { rows, .. })) = src.panes.get(&file.path) else {
                     return div().into_any_element();
                 };
                 let Some(row) = rows.get(line) else {
                     return div().into_any_element();
                 };
+                let syntax = self.file_syntax(&src.origin, &file.path, loaded);
+                let spans = syntax.as_ref().and_then(|s| s.spans(row));
                 tag(
-                    div().px(px(12.0)).child(diff_line(&theme, row, digits)),
+                    div().px(px(12.0)).child(diff_line(
+                        &theme,
+                        row,
+                        digits,
+                        spans,
+                        &window.text_style(),
+                    )),
+                    &file.path,
+                )
+            }
+            ReviewRow::Pair {
+                left,
+                right,
+                digits,
+                ..
+            } => {
+                let Some((loaded, PatchPane::Rows { rows, .. })) = src.panes.get(&file.path) else {
+                    return div().into_any_element();
+                };
+                let syntax = self.file_syntax(&src.origin, &file.path, loaded);
+                let side = |ix: Option<usize>| {
+                    ix.and_then(|i| rows.get(i))
+                        .map(|row| (row, syntax.as_ref().and_then(|s| s.spans(row))))
+                };
+                tag(
+                    div().px(px(12.0)).child(diff_pair(
+                        &theme,
+                        side(left),
+                        side(right),
+                        digits,
+                        &window.text_style(),
+                    )),
                     &file.path,
                 )
             }
@@ -771,21 +993,49 @@ impl RunScreen {
         }
     }
 
-    /// A file's bar: status letter, path, counts and ↗, which opens the file in its own tab.
-    /// Review's bars fold; the File tab's own bar does not. `prefix` tells the sticky copy's
-    /// selectors from the real bar's.
-    fn file_header(
+    /// Folds or opens a file of a list, whichever tab it is in.
+    fn toggle_in(&mut self, scope: &Scope, path: String, cx: &mut Context<Self>) {
+        match scope {
+            Scope::Review => self.toggle_file(path, cx),
+            Scope::Commit(sha) => self.toggle_commit_file(&sha.clone(), path, cx),
+            Scope::File(_) => {}
+        }
+    }
+
+    /// A file's bar: status letter, path, counts, copy path and, in Review, the buttons that open
+    /// the file in its tabs. Review's and a Commit's bars fold; the File tab's own bar does not.
+    /// `prefix` tells the sticky copy's selectors from the real bar's.
+    pub(super) fn file_header(
         &self,
         theme: &Theme,
         row: &FileRow,
-        foldable: bool,
-        open: bool,
+        kind: Header,
         prefix: &str,
         cx: &mut Context<Self>,
     ) -> Stateful<gpui::Div> {
         let path = row.path.clone();
         let selector = format!("{prefix}change-file-{}", row.path);
         let stats = facts::stat_labels(row);
+        let fold = match &kind {
+            Header::Fold { scope, open, tabs } => Some((scope.clone(), *open, *tabs)),
+            Header::Fixed => None,
+        };
+        let tabs = fold.as_ref().is_some_and(|(_, _, tabs)| *tabs);
+        let icon_button = |id: String, glyph: Icon| {
+            let hover = theme.text.opacity(0.06);
+            div()
+                .id(SharedString::from(id.clone()))
+                .debug_selector(move || id.clone())
+                .flex_none()
+                .size(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(icon(glyph, 13.0, theme.muted))
+        };
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector.clone())
@@ -797,17 +1047,17 @@ impl RunScreen {
             .gap(px(8.0))
             .rounded_t(px(8.0))
             .bg(theme.text.opacity(0.05))
-            .when(foldable, |d| {
+            .when_some(fold, |d, (scope, open, _)| {
                 let path = path.clone();
                 d.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_file(path.clone(), cx)))
-            })
-            .when(foldable, |d| {
-                d.child(icon(
-                    if open { Icon::ChevDown } else { Icon::Fwd },
-                    13.0,
-                    theme.muted,
-                ))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_in(&scope, path.clone(), cx)),
+                    )
+                    .child(icon(
+                        if open { Icon::ChevDown } else { Icon::Fwd },
+                        13.0,
+                        theme.muted,
+                    ))
             })
             .child(
                 div()
@@ -851,60 +1101,128 @@ impl RunScreen {
                     .text_color(theme.faint)
                     .child("binary"),
             })
-            .when(foldable, |d| {
+            .child({
+                // The path, to paste. The bar's own click would fold the file.
+                let path = path.clone();
+                icon_button(format!("{prefix}change-copy-{}", row.path), Icon::Clip)
+                    .tooltip(kit::tip("Copy path"))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy(cx, path.clone(), "Path copied");
+                    })
+            })
+            .when(tabs, |d| {
                 // The file itself, in the Files tab, beside the diff's own tab.
-                let selector = format!("{prefix}change-files-{}", row.path);
-                let hover = theme.text.opacity(0.06);
                 let path = path.clone();
                 d.child(
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .flex_none()
-                        .size(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover))
+                    icon_button(format!("{prefix}change-files-{}", row.path), Icon::Folder)
+                        .tooltip(kit::tip("Show in Files"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.open_file_at(&path, None, window, cx);
-                        }))
-                        .child(icon(Icon::Folder, 13.0, theme.muted)),
+                        })),
                 )
             })
-            .when(foldable, |d| {
-                let selector = format!("{prefix}change-open-{}", row.path);
-                let hover = theme.text.opacity(0.06);
+            .when(tabs, |d| {
                 let path = path.clone();
                 d.child(
-                    div()
-                        .id(SharedString::from(selector.clone()))
-                        .debug_selector(move || selector.clone())
-                        .flex_none()
-                        .size(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover))
+                    icon_button(format!("{prefix}change-open-{}", row.path), Icon::Link)
+                        .tooltip(kit::tip("Open in its own tab"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             // The bar's own click would fold the file.
                             cx.stop_propagation();
                             this.open_surface(Surface::File(path.clone()), window, cx);
-                        }))
-                        .child(icon(Icon::Link, 13.0, theme.muted)),
+                        })),
                 )
             })
     }
 }
 
+/// What a list's file bars do.
+enum HeaderKind {
+    /// Fold on a click; `tabs` adds the buttons that open the file in its own tabs.
+    Fold { tabs: bool },
+    /// The File tab's one bar.
+    Fixed,
+}
+
+/// One file bar, as drawn.
+pub(super) enum Header {
+    Fold {
+        scope: Scope,
+        open: bool,
+        tabs: bool,
+    },
+    Fixed,
+}
+
+/// What a list draws its rows from.
+struct Source<'a> {
+    flat: &'a Flat,
+    panes: &'a HashMap<String, (facts::Loaded<facts::Patch>, PatchPane)>,
+    folded: Option<&'a HashSet<String>>,
+    /// The syntax cache's name for these files.
+    origin: String,
+    header: HeaderKind,
+}
+
+/// A diff line's wash, its text ink, its sign and the sign's ink.
+fn line_look(theme: &Theme, kind: RowKind) -> (Option<Hsla>, Hsla, &'static str, Hsla) {
+    match kind {
+        RowKind::Add => (
+            Some(theme.success.opacity(0.12)),
+            theme.text,
+            "+",
+            theme.success,
+        ),
+        RowKind::Del => (
+            Some(theme.danger.opacity(0.12)),
+            theme.text,
+            "\u{2212}",
+            theme.danger,
+        ),
+        RowKind::Context => (None, theme.text, " ", theme.faint),
+        RowKind::Hunk => (None, theme.muted, "", theme.faint),
+        RowKind::NoNewline | RowKind::Binary => (None, theme.faint, "", theme.faint),
+    }
+}
+
+/// The text of a line: coloured by its syntax spans when it has them, plain otherwise. A line
+/// with tabs is drawn plain with the tabs spread, since the spans count bytes of the raw text.
+fn line_text(
+    theme: &Theme,
+    row: &DiffRow,
+    ink: Hsla,
+    spans: Option<&[HighlightSpan]>,
+    base: &gpui::TextStyle,
+) -> AnyElement {
+    match spans {
+        Some(spans) if !row.text.is_empty() && !row.text.contains('\t') => {
+            StyledText::new(SharedString::from(row.text.clone()))
+                .with_runs(markdown_view::line_runs(&row.text, spans, theme, base))
+                .into_any_element()
+        }
+        _ => div()
+            .text_color(ink)
+            .when(row.kind == RowKind::NoNewline, |d| d.italic())
+            .child(SharedString::from(row.text.replace('\t', "    ")))
+            .into_any_element(),
+    }
+}
+
+fn gutter_of(digits: usize) -> gpui::Pixels {
+    px(digits as f32 * 7.4 + 14.0)
+}
+
 /// One line of a patch: the two line numbers, the sign and the text, tinted for what it is.
-fn diff_line(theme: &Theme, row: &DiffRow, digits: usize) -> AnyElement {
-    let gutter = px(digits as f32 * 7.4 + 14.0);
+fn diff_line(
+    theme: &Theme,
+    row: &DiffRow,
+    digits: usize,
+    spans: Option<&[HighlightSpan]>,
+    base: &gpui::TextStyle,
+) -> AnyElement {
+    let gutter = gutter_of(digits);
     let number = |n: Option<u32>| {
         div()
             .flex_none()
@@ -915,14 +1233,7 @@ fn diff_line(theme: &Theme, row: &DiffRow, digits: usize) -> AnyElement {
             .text_color(theme.faint)
             .child(n.map(|n| n.to_string()).unwrap_or_default())
     };
-    let (wash, ink, sign) = match row.kind {
-        RowKind::Add => (Some(theme.success.opacity(0.12)), theme.text, "+"),
-        RowKind::Del => (Some(theme.danger.opacity(0.12)), theme.text, "\u{2212}"),
-        RowKind::Context => (None, theme.text, " "),
-        RowKind::Hunk => (None, theme.muted, ""),
-        RowKind::NoNewline | RowKind::Binary => (None, theme.faint, ""),
-    };
-    let text = row.text.replace('\t', "    ");
+    let (wash, ink, sign, sign_ink) = line_look(theme, row.kind);
     div()
         .flex()
         .flex_none()
@@ -939,11 +1250,7 @@ fn diff_line(theme: &Theme, row: &DiffRow, digits: usize) -> AnyElement {
             div()
                 .flex_none()
                 .w(px(14.0))
-                .text_color(match row.kind {
-                    RowKind::Add => theme.success,
-                    RowKind::Del => theme.danger,
-                    _ => theme.faint,
-                })
+                .text_color(sign_ink)
                 .child(sign),
         )
         .child(
@@ -951,9 +1258,72 @@ fn diff_line(theme: &Theme, row: &DiffRow, digits: usize) -> AnyElement {
                 .flex_none()
                 .whitespace_nowrap()
                 .pr(px(18.0))
-                .text_color(ink)
-                .when(row.kind == RowKind::NoNewline, |d| d.italic())
-                .child(SharedString::from(text)),
+                .child(line_text(theme, row, ink, spans, base)),
         )
+        .into_any_element()
+}
+
+type Side<'a> = Option<(&'a DiffRow, Option<&'a [HighlightSpan]>)>;
+
+/// One row of the split view: the old line on the left, the new on the right. A side with no
+/// line is a quiet blank.
+fn diff_pair(
+    theme: &Theme,
+    left: Side<'_>,
+    right: Side<'_>,
+    digits: usize,
+    base: &gpui::TextStyle,
+) -> AnyElement {
+    let gutter = gutter_of(digits);
+    let half = |side: Side<'_>, old: bool| -> AnyElement {
+        let Some((row, spans)) = side else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(theme.text.opacity(0.03))
+                .into_any_element();
+        };
+        let (wash, ink, _, _) = line_look(theme, row.kind);
+        let number = if old { row.old } else { row.new };
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .when_some(wash, |d, wash| d.bg(wash))
+            .child(
+                div()
+                    .flex_none()
+                    .w(gutter)
+                    .pr(px(8.0))
+                    .flex()
+                    .justify_end()
+                    .text_color(theme.faint)
+                    .child(number.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .whitespace_nowrap()
+                    .pr(px(8.0))
+                    .child(line_text(theme, row, ink, spans, base)),
+            )
+            .into_any_element()
+    };
+    div()
+        .flex()
+        .flex_none()
+        .w_full()
+        .overflow_hidden()
+        .h(px(LINE))
+        .items_center()
+        .font_family(MONO)
+        .text_size(px(12.0))
+        .child(half(left, true))
+        .child(div().flex_none().w(px(1.0)).h_full().bg(theme.hairline))
+        .child(half(right, false))
         .into_any_element()
 }

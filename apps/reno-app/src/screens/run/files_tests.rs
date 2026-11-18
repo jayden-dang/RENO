@@ -40,6 +40,7 @@ fn open_run<'a>(cx: &'a mut TestAppContext, name: &str, width: f32) -> Fixture<'
         Prefs {
             open: Some(true),
             width: Some(width),
+            ..Prefs::default()
         }
         .set_without_saving(cx);
     });

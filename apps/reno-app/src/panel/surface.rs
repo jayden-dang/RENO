@@ -67,6 +67,7 @@ impl Surface {
         match kind {
             HomeKind::Changes => Self::Review,
             HomeKind::Files => Self::Files,
+            HomeKind::History => Self::History,
             other => Self::Planned(other),
         }
     }
@@ -241,9 +242,10 @@ mod tests {
         // The diff tab of a path called "files" is still a File.
         assert_eq!(Surface::File("files".into()).descriptor().kind, Kind::File);
         assert_eq!(Surface::for_row(HomeKind::Files), Surface::Files);
+        assert_eq!(Surface::for_row(HomeKind::History), Surface::History);
         assert_eq!(
-            Surface::for_row(HomeKind::History),
-            Surface::Planned(HomeKind::History)
+            Surface::for_row(HomeKind::SideChat),
+            Surface::Planned(HomeKind::SideChat)
         );
     }
 
