@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use reno_harness::HarnessError;
-use reno_harness::exec::Executor;
 use reno_harness::exec::maintenance::{MaintenanceDecl, UpdaterDecl, is_newer};
+use reno_harness::exec::{Executor, ProbeDepth};
 use reno_harness::proc::maintain::{LogTail, Outcome, Progress, run_capture, run_steps};
 use reno_harness::proc::self_update::SelfUpdateSwitch;
 use reno_proto::{
@@ -653,7 +653,10 @@ async fn start(
         .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))?;
     let mut health = shared.any_health(id);
     if health.is_none() {
-        shared.probe_executor(id, Probing::Shared).await?;
+        // Jobs also start from the daily auto-update, which no person asked for: quiet.
+        shared
+            .probe_executor(id, Probing::Shared, ProbeDepth::Quiet)
+            .await?;
         health = shared.any_health(id);
     }
     let health = health.ok_or_else(|| KernelError::NothingToDo {
@@ -922,7 +925,11 @@ async fn finish(
     }
     shared.publish_executors();
     // Whatever happened, the health shown is what the executor is now.
-    if let Err(error) = shared.probe_executor(id, Probing::Fresh).await {
+    // Auto-update ends here too, so the probe is quiet; a person's Check again is the full one.
+    if let Err(error) = shared
+        .probe_executor(id, Probing::Fresh, ProbeDepth::Quiet)
+        .await
+    {
         tracing::debug!(executor = %id, %error, "the probe after a job ended early");
     }
     {

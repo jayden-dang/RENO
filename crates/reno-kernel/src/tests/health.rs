@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
+use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep, ProbeDepth};
 use reno_proto::{
     ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, InstallStatus, ModelCatalog, ModelSource,
     NotInstalledReason, RunStatus, SignedIn, StopReason, VersionGate,
@@ -54,6 +54,11 @@ pub(super) struct Probed {
     overlapped: Arc<AtomicBool>,
     refuse_start: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
+    /// Behaves as a registry agent does: a quiet probe starts nothing and says sign-in is
+    /// unknown (`probes` counts only the probes that "start the agent").
+    registry_like: Arc<AtomicBool>,
+    /// The depth of every `probe_at` the kernel made.
+    depths: Arc<Mutex<Vec<ProbeDepth>>>,
     /// What the wire layer says it has not recognised.
     frames: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
 }
@@ -73,6 +78,8 @@ impl Probed {
             overlapped: Arc::default(),
             refuse_start: Arc::default(),
             hang: Arc::default(),
+            registry_like: Arc::default(),
+            depths: Arc::default(),
             frames: Arc::default(),
         }
     }
@@ -112,6 +119,17 @@ impl Executor for Probed {
 
     async fn plan_usage(&self) -> Option<reno_harness::usage::UsageReading> {
         self.inner.plan_usage().await
+    }
+
+    async fn probe_at(&self, depth: ProbeDepth) -> HealthProbe {
+        self.depths.lock().unwrap().push(depth);
+        if depth == ProbeDepth::Quiet && self.registry_like.load(Ordering::SeqCst) {
+            let mut says = self.says.lock().unwrap().clone();
+            says.signed_in = SignedIn::Unknown;
+            says.models = ModelCatalog::curated(vec![]);
+            return says;
+        }
+        self.probe().await
     }
 
     async fn probe(&self) -> HealthProbe {
@@ -526,4 +544,120 @@ async fn frames_of_an_unknown_executor_are_not_found() {
         matches!(error, KernelError::ExecutorNotFound(_)),
         "{error:?}"
     );
+}
+
+fn registry_like(says: HealthProbe) -> Probed {
+    let probed = Probed::new(says);
+    probed.registry_like.store(true, Ordering::SeqCst);
+    probed
+}
+
+fn signed_in_as_ada() -> HealthProbe {
+    installed(
+        SignedIn::Yes {
+            account: Some("ada@example.com".into()),
+        },
+        VersionGate::Ok,
+    )
+}
+
+/// Runs the start-up probe and waits until it has been made and published.
+async fn start_up(fx: &Fx) {
+    // A probe made now is stamped later than anything stored, so it is told from it.
+    fx.clock.advance(1_000);
+    let stamped_after = START_MS as u64;
+    fx.kernel.probe_executors_in_background();
+    until(async || {
+        let health = fx.kernel.executors()[0].health.clone()?;
+        (health.checked_at_ms > stamped_after).then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn nothing_in_the_background_starts_a_registry_agent_and_a_refresh_does() {
+    let probed = registry_like(signed_in());
+    probed.refuse_start.store(true, Ordering::SeqCst);
+    let fx = Fx::new(config(1), probed.registry()).await;
+
+    // Start-up.
+    start_up(&fx).await;
+    // A background re-probe: the run the agent refused as signed out asks for one.
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    until(async || (probed.depths.lock().unwrap().len() >= 2).then_some(())).await;
+    assert_eq!(probed.probes(), 0, "no background probe started the agent");
+    assert!(
+        probed
+            .depths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|depth| *depth == ProbeDepth::Quiet)
+    );
+
+    // A person's Check again.
+    fx.kernel.refresh_executors(None).await.unwrap();
+    assert_eq!(probed.probes(), 1, "the refresh starts it");
+    assert_eq!(
+        probed.depths.lock().unwrap().last(),
+        Some(&ProbeDepth::Full)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_keeps_what_a_full_probe_found_while_the_version_is_the_same() {
+    let before = registry_like(signed_in_as_ada());
+    let fx = Fx::new(config(1), before.registry()).await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let (dir, store) = fx.into_store();
+
+    let after = registry_like(signed_in_as_ada());
+    let fx = Fx::over(dir, store, config(1), after.registry()).await;
+    start_up(&fx).await;
+    assert_eq!(after.probes(), 0, "the restart started nothing");
+    let health = fx.kernel.executors()[0].health.clone().unwrap();
+    assert_eq!(
+        health.signed_in,
+        SignedIn::Yes {
+            account: Some("ada@example.com".into())
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_version_after_a_restart_is_unknown_until_a_full_probe() {
+    let before = registry_like(signed_in_as_ada());
+    let fx = Fx::new(config(1), before.registry()).await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+    let (dir, store) = fx.into_store();
+
+    let mut newer = signed_in_as_ada();
+    newer.installed = InstallStatus::Installed {
+        path: "/bin/mock".into(),
+        version: Some("2.0.0".into()),
+    };
+    let after = registry_like(newer);
+    let fx = Fx::over(dir, store, config(1), after.registry()).await;
+    start_up(&fx).await;
+    let health = fx.kernel.executors()[0].health.clone().unwrap();
+    assert_eq!(health.signed_in, SignedIn::Unknown);
+    assert_eq!(after.probes(), 0);
+
+    // Nothing stored at all: unknown too, and still nothing started.
+    let fresh = registry_like(signed_in_as_ada());
+    let fx = Fx::new(config(1), fresh.registry()).await;
+    start_up(&fx).await;
+    assert_eq!(
+        fx.kernel.executors()[0].health.as_ref().unwrap().signed_in,
+        SignedIn::Unknown
+    );
+    assert_eq!(fresh.probes(), 0);
+
+    // The Check again control runs the full probe and learns it.
+    fx.kernel.refresh_executors(None).await.unwrap();
+    assert!(matches!(
+        fx.kernel.executors()[0].health.as_ref().unwrap().signed_in,
+        SignedIn::Yes { .. }
+    ));
 }

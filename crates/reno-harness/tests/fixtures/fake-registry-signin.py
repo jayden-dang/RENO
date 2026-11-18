@@ -54,9 +54,15 @@ mode = os.environ.get("FAKE_SIGNIN", "droid")
 code = None
 state = os.environ.get("FAKE_STATE", "")
 if state:
+    # One line per start, so a test can count how often the agent was spawned.
+    with open(os.path.join(state, "spawns"), "a") as spawn_log:
+        spawn_log.write(str(os.getpid()) + "\n")
     # So a test can tell whether this process outlived its owner.
     with open(os.path.join(state, "pid"), "w") as pid_file:
         pid_file.write(str(os.getpid()))
+if mode == "quiet-probe":
+    # The signed-in-email shape, in a record of its own for the test that counts spawns.
+    mode = "signed-in-email"
 if mode == "droid-hang":
     # The droid shape, in a record of its own for the test that abandons its sign-in.
     mode = "droid"
