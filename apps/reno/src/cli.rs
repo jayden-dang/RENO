@@ -368,6 +368,22 @@ pub(crate) enum ExecutorCommand {
     /// Show or change an added agent's own environment (an API key or two). Values are hidden
     /// unless `--reveal`; they live in Reno's own agents folder, owner-only.
     Env(ExecutorEnv),
+    /// Sign an added agent in, with the agent's own login. Prints the page to open (this command
+    /// opens nothing: open it in the browser on the device you are at) and any code to type
+    /// there, follows the sign-in to its end and checks the agent again. Exits non-zero when it
+    /// fails, and says why; an agent that signs in only in a terminal gets its command printed.
+    /// Ctrl-C cancels the sign-in.
+    Signin(ExecutorSignin),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorSignin {
+    /// The executor, as `reno executor list` shows it (`acp.gemini`).
+    pub(crate) id: ExecutorId,
+    /// The sign-in method, an id from the agent's `authMethods` (`reno executor list --json`);
+    /// the agent's own first method when absent.
+    #[arg(long, value_name = "ID")]
+    pub(crate) method: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -990,6 +990,7 @@ mod tests {
             maintenance: None,
             job: None,
             source: Default::default(),
+            auth_methods: Vec::new(),
         }
     }
 
@@ -1497,6 +1498,7 @@ mod roster_tests {
             maintenance,
             job,
             source: Default::default(),
+            auth_methods: Vec::new(),
         }
     }
 

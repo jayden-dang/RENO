@@ -719,6 +719,7 @@ expression: protocol_schema()
     "run.configure",
     "executor.maintain",
     "executor.registry",
+    "executor.signin",
     "run.changes",
     "executor.usage",
     "threads",
@@ -10156,6 +10157,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -10418,6 +10497,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -11409,6 +11495,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -11671,6 +11835,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -12654,6 +12825,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -12916,6 +13165,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -13920,6 +14176,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -14182,6 +14516,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -15162,6 +15503,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -15424,6 +15843,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -16404,6 +16830,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -16666,6 +17170,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -17703,6 +18214,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -17965,6 +18554,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -18901,6 +19497,45 @@ expression: protocol_schema()
       }
     },
     {
+      "name": "executor.signin.cancel",
+      "params": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.signin.cancel`.",
+        "properties": {
+          "executor": {
+            "$ref": "#/$defs/ExecutorId",
+            "description": "The executor whose sign-in to end."
+          }
+        },
+        "required": [
+          "executor"
+        ],
+        "title": "SigninCancelParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.signin.cancel`.",
+        "properties": {
+          "cancelled": {
+            "description": "A sign-in was running and was told to stop; its subscription ends with `done`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cancelled"
+        ],
+        "title": "SigninCancelResult",
+        "type": "object"
+      }
+    },
+    {
       "name": "executor.frames",
       "params": {
         "$defs": {
@@ -19308,6 +19943,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -19570,6 +20283,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -20593,6 +21313,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -20855,6 +21653,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -24752,6 +25557,84 @@ expression: protocol_schema()
               }
             ]
           },
+          "AuthMethod": {
+            "description": "One way an agent offers to sign in, from its `initialize` answer.",
+            "properties": {
+              "command": {
+                "description": "For a `terminal` method: the exact command to run in a terminal.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "description": "What the agent says about it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "What `executor.signin.start`'s `method` takes.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/AuthMethodKind",
+                "description": "How it signs in."
+              },
+              "link": {
+                "description": "Where to get the key, when the agent says (an https address).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The agent's name for it (\"Log in with Google\").",
+                "type": "string"
+              },
+              "unusable": {
+                "description": "Why Reno cannot use this method, when it cannot.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vars": {
+                "description": "The environment variables an `env_var` method reads.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "AuthMethodKind": {
+            "description": "How an agent signs in with one of its methods.",
+            "oneOf": [
+              {
+                "const": "agent",
+                "description": "The agent signs in itself, usually in the browser: `executor.signin.start` does it.",
+                "type": "string"
+              },
+              {
+                "const": "terminal",
+                "description": "A command run in a terminal on this device. `executor.signin.start` tries it headless and\nends with [`SigninEvent::NeedsTerminal`] when it needs typed input.",
+                "type": "string"
+              },
+              {
+                "const": "env_var",
+                "description": "A key the agent reads from its environment (`vars`): it is set in the agent's own\nenvironment (`executor.registry.env_set`), not signed in to.",
+                "type": "string"
+              }
+            ]
+          },
           "AutoUpdate": {
             "description": "The stored auto-update setting of one executor.",
             "properties": {
@@ -25014,6 +25897,13 @@ expression: protocol_schema()
           "ExecutorInfo": {
             "description": "One executor as `executor.list` shows it.",
             "properties": {
+              "authMethods": {
+                "description": "How the agent offers to sign in, from its last full probe (feature `executor.signin`).\nEmpty until a full probe has seen the agent's handshake, and for a built-in executor. The\ndaemon never starts the agent to find out.",
+                "items": {
+                  "$ref": "#/$defs/AuthMethod"
+                },
+                "type": "array"
+              },
               "descriptor": {
                 "$ref": "#/$defs/ExecutorDescriptor",
                 "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
@@ -25956,6 +26846,123 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of the `executors.watch` subscription.",
         "title": "ExecutorsWatchParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of the `executor.signin.start` subscription. The last one is always `done`.",
+        "oneOf": [
+          {
+            "description": "A page for the person to open (the client opens it), where a device code may be typed.",
+            "properties": {
+              "type": {
+                "const": "page",
+                "type": "string"
+              },
+              "url": {
+                "description": "The address, https or http.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "url"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A line the sign-in printed (a device code shows here), with secrets removed.",
+            "properties": {
+              "line": {
+                "description": "The line.",
+                "type": "string"
+              },
+              "type": {
+                "const": "output",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "line"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The agent signs in only in a terminal: run this command in one. Followed by `done`.",
+            "properties": {
+              "command": {
+                "description": "The exact command, shell-quoted.",
+                "type": "string"
+              },
+              "type": {
+                "const": "needs_terminal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The sign-in ended.",
+            "properties": {
+              "message": {
+                "description": "In words: why it failed, or what is left to do. Absent on success.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "signedIn": {
+                "description": "The executor is signed in (the full probe at the end said so).",
+                "type": "boolean"
+              },
+              "type": {
+                "const": "done",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "signedIn"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "SigninEvent"
+      },
+      "name": "executor.signin.start",
+      "params": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `executor.signin.start` subscription.",
+        "properties": {
+          "executor": {
+            "$ref": "#/$defs/ExecutorId",
+            "description": "The executor to sign in (`acp.gemini`)."
+          },
+          "method": {
+            "description": "The method to use (an `authMethods` id); the agent's own first one when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "executor"
+        ],
+        "title": "SigninStartParams",
         "type": "object"
       }
     },

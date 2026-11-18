@@ -63,6 +63,7 @@ pub(crate) async fn executor(env: &Env, command: ExecutorCommand) -> anyhow::Res
         ExecutorCommand::Add(args) => executor_add(env, args).await,
         ExecutorCommand::Remove(args) => executor_remove(env, args).await,
         ExecutorCommand::Env(args) => executor_env(env, args).await,
+        ExecutorCommand::Signin(args) => executor_signin(env, args).await,
     }
 }
 
@@ -127,6 +128,33 @@ async fn executor_remove(env: &Env, args: crate::cli::ExecutorRemove) -> anyhow:
     } else {
         print_line(format_args!("removed {executor}"))?;
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_signin(env: &Env, args: crate::cli::ExecutorSignin) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    // Progress goes to stderr in `--json` mode, where stdout is one event per line.
+    let json = env.json;
+    crate::registry::signin(
+        &client,
+        args.id,
+        args.method,
+        json,
+        |line| {
+            if json {
+                let _ = writeln!(std::io::stderr(), "{line}");
+            } else {
+                let _ = print_line(line);
+            }
+        },
+        |value| {
+            let _ = print_json(&value);
+        },
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        },
+    )
+    .await?;
     Ok(ExitCode::SUCCESS)
 }
 

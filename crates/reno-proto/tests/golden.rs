@@ -313,7 +313,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "executor.registry", "run.changes", "executor.usage", "threads", "files", "terminals", "history"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "executor.registry", "executor.signin", "run.changes", "executor.usage", "threads", "files", "terminals", "history"],
                "pid": 4242}),
     );
 }
@@ -1998,4 +1998,106 @@ fn terminal_wire_shapes() {
     );
     assert_eq!(ErrorCode::TerminalLimit.code(), -32015);
     assert_eq!(ErrorCode::SandboxUnavailable.code(), -32016);
+}
+
+#[test]
+fn signin_wire_shapes() {
+    golden(
+        &SigninStartParams {
+            executor: "acp.gemini".parse().unwrap(),
+            method: Some("oauth-personal".into()),
+        },
+        json!({"executor": "acp.gemini", "method": "oauth-personal"}),
+    );
+    // No method: the agent's own first one.
+    golden(
+        &SigninStartParams {
+            executor: "acp.gemini".parse().unwrap(),
+            method: None,
+        },
+        json!({"executor": "acp.gemini"}),
+    );
+    golden(
+        &SigninCancelParams {
+            executor: "acp.gemini".parse().unwrap(),
+        },
+        json!({"executor": "acp.gemini"}),
+    );
+    golden(
+        &SigninCancelResult { cancelled: true },
+        json!({"cancelled": true}),
+    );
+    let cases: Vec<(SigninEvent, Value)> = vec![
+        (
+            SigninEvent::Page {
+                url: "https://auth.example.com/device?user_code=WXYZ-9876".into(),
+            },
+            json!({"type": "page", "url": "https://auth.example.com/device?user_code=WXYZ-9876"}),
+        ),
+        (
+            SigninEvent::Output {
+                line: "Your code: WXYZ-9876".into(),
+            },
+            json!({"type": "output", "line": "Your code: WXYZ-9876"}),
+        ),
+        (
+            SigninEvent::NeedsTerminal {
+                command: "/agents/kimi/kimi login".into(),
+            },
+            json!({"type": "needs_terminal", "command": "/agents/kimi/kimi login"}),
+        ),
+        (
+            SigninEvent::Done {
+                signed_in: true,
+                message: None,
+            },
+            json!({"type": "done", "signedIn": true}),
+        ),
+        (
+            SigninEvent::Done {
+                signed_in: false,
+                message: Some("the sign-in was cancelled".into()),
+            },
+            json!({"type": "done", "signedIn": false, "message": "the sign-in was cancelled"}),
+        ),
+    ];
+    for (event, wire) in cases {
+        golden(&event, wire);
+    }
+    golden(
+        &AuthMethod {
+            id: "login".into(),
+            name: "Log in".into(),
+            description: None,
+            kind: AuthMethodKind::Terminal,
+            vars: vec![],
+            link: None,
+            command: Some("/agents/kimi/kimi login".into()),
+            unusable: None,
+        },
+        json!({"id": "login", "name": "Log in", "kind": "terminal", "command": "/agents/kimi/kimi login"}),
+    );
+    golden(
+        &AuthMethod {
+            id: "api-key".into(),
+            name: "API key".into(),
+            description: Some("Set a key".into()),
+            kind: AuthMethodKind::EnvVar,
+            vars: vec!["FACTORY_API_KEY".into()],
+            link: Some("https://example.com/keys".into()),
+            command: None,
+            unusable: None,
+        },
+        json!({"id": "api-key", "name": "API key", "description": "Set a key", "kind": "env_var",
+               "vars": ["FACTORY_API_KEY"], "link": "https://example.com/keys"}),
+    );
+    assert_eq!(
+        <ExecutorSigninStart as Subscription>::NAME,
+        "executor.signin.start"
+    );
+    assert_eq!(
+        <ExecutorSigninCancel as Method>::NAME,
+        "executor.signin.cancel"
+    );
+    assert!(FEATURES.contains(&FEATURE_EXECUTOR_SIGNIN));
 }

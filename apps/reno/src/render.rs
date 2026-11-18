@@ -1009,6 +1009,7 @@ mod tests {
             maintenance: None,
             job: None,
             source: Default::default(),
+            auth_methods: Vec::new(),
         }
     }
 

@@ -970,6 +970,7 @@ mod tests {
             maintenance: None,
             job: None,
             source: Default::default(),
+            auth_methods: Vec::new(),
         };
         let mut s = State::new();
         assert_eq!(s.feed(Feed::Executors), FeedState::Loading);

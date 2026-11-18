@@ -48,6 +48,11 @@ daemon_test! {
             if *feature == reno_proto::FEATURE_EXECUTOR_REGISTRY {
                 continue;
             }
+            // Likewise for signing in an added agent: it needs the registry and the means to
+            // install (`executor_signin`).
+            if *feature == reno_proto::FEATURE_EXECUTOR_SIGNIN {
+                continue;
+            }
             // Likewise for a daemon given a PTY spawner (`terminals`).
             if *feature == reno_proto::FEATURE_TERMINALS {
                 continue;

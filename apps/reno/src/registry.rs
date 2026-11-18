@@ -225,6 +225,71 @@ async fn follow(
     anyhow::bail!("the daemon stopped telling about {id}")
 }
 
+/// `reno executor signin <id> [--method m]`: starts the sign-in, says what the person is to do
+/// (open this page, type this code, run this command) and follows it to its end. `interrupt`
+/// resolving (Ctrl-C) cancels the sign-in, which then ends as any other that failed. Nothing is
+/// opened here: the page is printed for the person to open on the device they are at. With
+/// `as_json` every event is also given to `emit`, as the daemon sent it. Fails, with the
+/// daemon's words, unless the agent ends signed in.
+pub(crate) async fn signin(
+    client: &Client,
+    id: ExecutorId,
+    method: Option<String>,
+    as_json: bool,
+    mut say: impl FnMut(String),
+    mut emit: impl FnMut(serde_json::Value),
+    interrupt: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
+    use reno_proto::SigninEvent;
+
+    let mut events = client
+        .signin_executor(id.clone(), method)
+        .await
+        .map_err(fail)?;
+    let mut interrupt = std::pin::pin!(interrupt);
+    let mut interrupted = false;
+    let mut ended: Option<(bool, Option<String>)> = None;
+    loop {
+        let event = tokio::select! {
+            event = events.next() => event,
+            () = &mut interrupt, if !interrupted => {
+                interrupted = true;
+                say("cancelling the sign-in".to_owned());
+                client.cancel_signin(&id).await.map_err(fail)?;
+                continue;
+            }
+        };
+        let Some(event) = event else { break };
+        let event = event.map_err(fail)?;
+        if as_json {
+            emit(serde_json::to_value(&event)?);
+        }
+        match event {
+            SigninEvent::Page { url } => say(format!("Open this page to sign in: {url}")),
+            SigninEvent::Output { line } => say(format!("  {line}")),
+            SigninEvent::NeedsTerminal { command } => {
+                say(format!("{id} signs in in a terminal. Run this there:"));
+                say(format!("  {command}"));
+                say(format!(
+                    "then check it again with: reno executor refresh {id}"
+                ));
+            }
+            SigninEvent::Done { signed_in, message } => ended = Some((signed_in, message)),
+        }
+    }
+    match ended {
+        Some((true, _)) => {
+            say(format!("{id} is signed in"));
+            Ok(())
+        }
+        Some((false, message)) => anyhow::bail!(
+            "{id} is not signed in: {}",
+            message.as_deref().unwrap_or("the sign-in did not finish")
+        ),
+        None => anyhow::bail!("the daemon stopped telling about the sign-in of {id}"),
+    }
+}
+
 /// `reno executor remove <id>`.
 pub(crate) async fn remove(client: &Client, id: &str) -> anyhow::Result<ExecutorId> {
     client.registry_remove(id).await.map_err(fail)
@@ -299,6 +364,103 @@ mod tests {
             Output::Lines(lines) => lines,
             Output::Json(value) => panic!("lines expected, got {value}"),
         }
+    }
+
+    async fn run_signin(
+        client: &Client,
+        id: &str,
+        method: Option<&str>,
+    ) -> (anyhow::Result<()>, Vec<String>, Vec<serde_json::Value>) {
+        let (mut said, mut emitted) = (Vec::new(), Vec::new());
+        let outcome = signin(
+            client,
+            id.parse().unwrap(),
+            method.map(str::to_owned),
+            true,
+            |line| said.push(line),
+            |value| emitted.push(value),
+            std::future::pending(),
+        )
+        .await;
+        (outcome, said, emitted)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sign_in_prints_the_page_and_the_code_and_ends_signed_in() {
+        let (_daemon, client) = daemon().await;
+        let (outcome, said, emitted) = run_signin(&client, "acp.cline", None).await;
+        outcome.unwrap();
+        assert_eq!(
+            said,
+            [
+                "Open this page to sign in: https://auth.example.com/device?user_code=FAKE-1234",
+                "  Your code: FAKE-1234",
+                "acp.cline is signed in",
+            ]
+        );
+        // With --json every event is one value, as the daemon sent it.
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[0]["type"], "page");
+        assert_eq!(
+            emitted[2],
+            serde_json::json!({"type": "done", "signedIn": true})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_agent_prints_its_command_and_exits_non_zero() {
+        let (_daemon, client) = daemon().await;
+        let (outcome, said, _) = run_signin(&client, "acp.old-agent", None).await;
+        let error = outcome.unwrap_err().to_string();
+        assert!(error.contains("signs in in a terminal"), "{error}");
+        assert!(
+            said.iter()
+                .any(|l| l == "  /fake/agents/old-agent/bin login"),
+            "{said:?}"
+        );
+        assert!(
+            said.last()
+                .unwrap()
+                .contains("reno executor refresh acp.old-agent")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_key_method_and_an_unknown_executor_fail_with_words() {
+        let (_daemon, client) = daemon().await;
+        let (outcome, _, _) = run_signin(&client, "acp.cline", Some("key")).await;
+        assert!(
+            outcome
+                .unwrap_err()
+                .to_string()
+                .contains("needs a key: set CLINE_API_KEY"),
+        );
+        let (outcome, _, _) = run_signin(&client, "acp.nope", None).await;
+        assert!(
+            outcome
+                .unwrap_err()
+                .to_string()
+                .contains("no such executor")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_cancels_the_sign_in_and_it_fails() {
+        let (daemon, client) = daemon().await;
+        daemon.script_signin(&"acp.cline".parse().unwrap(), vec![]);
+        let mut said = Vec::new();
+        let outcome = signin(
+            &client,
+            "acp.cline".parse().unwrap(),
+            None,
+            false,
+            |line| said.push(line),
+            |_| {},
+            std::future::ready(()),
+        )
+        .await;
+        assert!(outcome.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(said[0], "cancelling the sign-in");
     }
 
     #[tokio::test(start_paused = true)]
