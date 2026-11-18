@@ -353,6 +353,68 @@ pub(crate) enum ExecutorCommand {
     /// by kind, and when each kind was first seen. A rising number is the early sign that a
     /// harness CLI moved: see docs/KEEPING-UP.md.
     Frames(ExecutorFrames),
+    /// List the agents of the ACP registry (agentclientprotocol.com) that can be added: what each
+    /// is, how it installs on this Mac (binary, npx or uvx), whether the download is checked, and
+    /// whether it is added already, has an update, or needs Node.js or uv first. Agents Reno drives
+    /// itself (Claude Code, Codex, ...) are left out unless `--all`.
+    Registry(ExecutorRegistry),
+    /// Add an agent of the ACP registry: install it, register it live and probe it, showing the
+    /// install as it goes. An agent already added at an older version is updated. With
+    /// `--own NAME -- COMMAND...` the agent is one of your own (not in the registry): Reno runs
+    /// that command and never installs or updates it.
+    Add(ExecutorAdd),
+    /// Remove an added agent and delete its install. Refused while a run on it is queued or live.
+    Remove(ExecutorRemove),
+    /// Show or change an added agent's own environment (an API key or two). Values are hidden
+    /// unless `--reveal`; they live in Reno's own agents folder, owner-only.
+    Env(ExecutorEnv),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorRegistry {
+    /// Include the agents Reno drives itself.
+    #[arg(long)]
+    pub(crate) all: bool,
+    /// Fetch the index now, even if the cached copy (kept five minutes) is fresh.
+    #[arg(long)]
+    pub(crate) refresh: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorAdd {
+    /// The registry's id, as `reno executor registry` shows it.
+    #[arg(required_unless_present = "own", conflicts_with = "own")]
+    pub(crate) id: Option<String>,
+    /// Add an agent of your own under this name; the command follows `--`.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) own: Option<String>,
+    /// For `--own`: an environment variable of the agent, `KEY=VALUE` (repeatable).
+    #[arg(long = "env", value_name = "KEY=VALUE", requires = "own")]
+    pub(crate) env: Vec<String>,
+    /// For `--own`: the program and its arguments.
+    #[arg(last = true, requires = "own")]
+    pub(crate) command: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorRemove {
+    /// The registry's id (`own.<name>` for one of your own).
+    pub(crate) id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ExecutorEnv {
+    /// The registry's id (`own.<name>` for one of your own).
+    pub(crate) id: String,
+    /// Set a variable, `KEY=VALUE` (repeatable); the others stay.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub(crate) set: Vec<String>,
+    /// Remove a variable (repeatable).
+    #[arg(long = "unset", value_name = "KEY")]
+    pub(crate) unset: Vec<String>,
+    /// Show the values.
+    #[arg(long)]
+    pub(crate) reveal: bool,
 }
 
 #[derive(Debug, Args)]

@@ -58,7 +58,90 @@ pub(crate) async fn executor(env: &Env, command: ExecutorCommand) -> anyhow::Res
         ExecutorCommand::Refresh(args) => executor_refresh(env, args).await,
         ExecutorCommand::Install(args) => executor_install(env, args).await,
         ExecutorCommand::Frames(args) => executor_frames(env, args).await,
+        ExecutorCommand::Registry(args) => executor_registry(env, args).await,
+        ExecutorCommand::Add(args) => executor_add(env, args).await,
+        ExecutorCommand::Remove(args) => executor_remove(env, args).await,
+        ExecutorCommand::Env(args) => executor_env(env, args).await,
     }
+}
+
+fn print_output(output: crate::registry::Output) -> anyhow::Result<ExitCode> {
+    match output {
+        crate::registry::Output::Json(value) => print_json(&value)?,
+        crate::registry::Output::Lines(lines) => {
+            for line in lines {
+                print_line(line)?;
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_registry(
+    env: &Env,
+    args: crate::cli::ExecutorRegistry,
+) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    print_output(crate::registry::list(&client, args.all, args.refresh, env.json).await?)
+}
+
+async fn executor_add(env: &Env, args: crate::cli::ExecutorAdd) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let executor = match (&args.own, &args.id) {
+        (Some(name), _) => {
+            if args.command.is_empty() {
+                anyhow::bail!(
+                    "name the agent's command after `--`: reno executor add --own NAME -- COMMAND..."
+                );
+            }
+            crate::registry::add_own(&client, name, &args.command, &args.env).await?
+        }
+        (None, Some(id)) => {
+            // The install's progress goes to stderr in `--json` mode, so stdout stays one value.
+            let json = env.json;
+            crate::registry::add(&client, id, |line| {
+                if json {
+                    eprintln!("{line}");
+                } else {
+                    let _ = print_line(line);
+                }
+            })
+            .await?
+        }
+        (None, None) => anyhow::bail!("name an agent: reno executor add <id>"),
+    };
+    if env.json {
+        print_json(&reno_proto::ExecutorJobResult { executor })?;
+    } else {
+        print_line(render::executor_line(&executor))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_remove(env: &Env, args: crate::cli::ExecutorRemove) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let executor = crate::registry::remove(&client, &args.id).await?;
+    if env.json {
+        print_json(&reno_proto::ExecutorRegistryRemoveResult { executor })?;
+    } else {
+        print_line(format_args!("removed {executor}"))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn executor_env(env: &Env, args: crate::cli::ExecutorEnv) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    print_output(
+        crate::registry::env(
+            &client,
+            &args.id,
+            &args.set,
+            &args.unset,
+            args.reveal,
+            env.json,
+        )
+        .await?,
+    )
 }
 
 pub(crate) async fn workspace(env: &Env, command: WorkspaceCommand) -> anyhow::Result<ExitCode> {

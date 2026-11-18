@@ -17,6 +17,7 @@ mod follow;
 mod history;
 mod mcp;
 mod policy;
+mod registry;
 mod render;
 mod rule;
 mod secret;
