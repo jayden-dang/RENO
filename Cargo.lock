@@ -5121,6 +5121,7 @@ dependencies = [
  "mimalloc",
  "reno-client",
  "reno-markdown",
+ "reno-notify",
  "reno-proto",
  "reno-syntax",
  "serde",
@@ -5200,6 +5201,10 @@ version = "0.0.0"
 dependencies = [
  "pulldown-cmark",
 ]
+
+[[package]]
+name = "reno-notify"
+version = "0.0.0"
 
 [[package]]
 name = "reno-proto"
