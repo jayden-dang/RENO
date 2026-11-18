@@ -15,7 +15,12 @@ fn an_own_agent_is_added_from_a_command_with_its_env_and_removed() {
     // SAFETY: this file's only test; nothing else reads the environment.
     unsafe { std::env::set_var("RENO_AGENTS_DIR", root.path()) };
 
-    let record = reg::add_own("My Agent", "/bin/sh -c 'exec cat'", "TOKEN=abc\nMODE=fast\n").unwrap();
+    let record = reg::add_own(
+        "My Agent",
+        "/bin/sh -c 'exec cat'",
+        "TOKEN=abc\nMODE=fast\n",
+    )
+    .unwrap();
     assert_eq!(record.id, "own.my-agent");
     assert_eq!(record.kind, reg::Kind::Own);
     assert_eq!(record.args, ["-c", "exec cat"]);
@@ -30,13 +35,20 @@ fn an_own_agent_is_added_from_a_command_with_its_env_and_removed() {
 
     // The environment is owner-only and replaced whole.
     let file = root.path().join("own.my-agent/env");
-    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     reg::set_user_env(agent, "ONLY=1\n").unwrap();
     assert_eq!(reg::env_text(&reg::user_env(agent)), "ONLY=1\n");
     // A bad line is refused without repeating it.
     let error = reg::set_user_env(agent, "TOKEN=secret-value\nnot a pair").unwrap_err();
     assert!(!error.to_string().contains("secret-value"), "{error}");
-    assert_eq!(reg::env_text(&reg::user_env(agent)), "ONLY=1\n", "left as it was");
+    assert_eq!(
+        reg::env_text(&reg::user_env(agent)),
+        "ONLY=1\n",
+        "left as it was"
+    );
 
     // It is listed as one of your own, and a second with the same name is refused.
     let view = reg::record_view(&reg::record(agent).unwrap()).unwrap();

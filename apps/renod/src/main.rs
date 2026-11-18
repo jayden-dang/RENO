@@ -159,6 +159,18 @@ async fn serve(
     };
     config.secrets = Some(Arc::new(secrets::KeychainSecrets::new(keychain)));
     config.reno_bin = reno_bin;
+    if harnesses {
+        // Each engine keeps the agents added from the registry in its own data directory, and
+        // asks the registry's own address (a staging daemon may point `RENO_ACP_REGISTRY_INDEX`
+        // elsewhere; it must still be https).
+        reno_harness::acp_registry::set_agents_root(config.paths.data_dir.join("agents"));
+        config.registry_index_url = Some(
+            std::env::var("RENO_ACP_REGISTRY_INDEX")
+                .ok()
+                .filter(|url| !url.is_empty())
+                .unwrap_or_else(|| reno_harness::acp_registry::INDEX_URL.to_owned()),
+        );
+    }
     if let Some(limit) = max_concurrent {
         config.kernel.max_concurrent = limit;
     }

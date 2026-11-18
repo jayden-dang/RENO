@@ -44,6 +44,7 @@ pub mod lock;
 pub mod logging;
 pub mod paths;
 pub mod power;
+mod registry;
 pub mod secrets;
 pub mod terminals;
 pub mod watcher;

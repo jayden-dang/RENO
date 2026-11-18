@@ -1444,6 +1444,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// with its ETag; when the fetch fails the cached copy is served and marked `offline`; with no
 /// cached copy a failed fetch is an error. Nothing here polls: it runs when a client asks.
 pub async fn load_index(url: &str, refresh: bool, ttl: Duration) -> Result<LoadedIndex, String> {
+    if !safe_url(url) {
+        return Err("the registry index address is not https".to_owned());
+    }
     let dir = index_dir().ok_or("no data directory for the registry cache")?;
     let (file, etag_file) = (dir.join("index.json"), dir.join("etag"));
     let cached = std::fs::read(&file).ok().and_then(|bytes| {
@@ -1512,7 +1515,9 @@ pub async fn load_index(url: &str, refresh: bool, ttl: Duration) -> Result<Loade
             offline: true,
             error: Some(failure),
         }),
-        None => Err(format!("the registry index could not be fetched: {failure}")),
+        None => Err(format!(
+            "the registry index could not be fetched: {failure}"
+        )),
     }
 }
 
@@ -1524,7 +1529,10 @@ pub async fn icon_of(entry: &Entry) -> Option<String> {
     let dir = index_dir()?.join("icons");
     let key = format!("{:x}", Sha256::digest(url.as_bytes()));
     let name = format!("{}-{}", safe_component(&entry.id), &key[..12]);
-    let (hit, miss) = (dir.join(format!("{name}.svg")), dir.join(format!("{name}.none")));
+    let (hit, miss) = (
+        dir.join(format!("{name}.svg")),
+        dir.join(format!("{name}.none")),
+    );
     if let Ok(svg) = std::fs::read_to_string(&hit) {
         return clean_svg(&svg);
     }
@@ -1560,6 +1568,14 @@ pub fn readiness_for(entry: &Entry, platform: Option<&str>, node: bool, uv: bool
         Some(Choice::Uvx(_)) if uv => Readiness::Ready,
         Some(Choice::Uvx(_)) => Readiness::NeedsUv,
     }
+}
+
+/// Whether this device has Node.js (npm) and uv, which npm and Python packages need.
+pub fn tools() -> (bool, bool) {
+    (
+        crate::adapter_install::find_npm().is_some(),
+        find_uv().is_some(),
+    )
 }
 
 /// What the person does about a readiness other than ready.
@@ -1627,8 +1643,7 @@ pub fn entry_view(
             Some(Choice::Binary(t)) => Some(t.sha256.is_some()),
             _ => None,
         },
-        built_in: built_in(&entry.id)
-            .and_then(|slug| built_in_executor(slug).parse().ok()),
+        built_in: built_in(&entry.id).and_then(|slug| built_in_executor(slug).parse().ok()),
         added: record.map(|r| RegistryAdded {
             version: r.version.clone(),
             update_available: r.version != entry.version,
@@ -1689,7 +1704,9 @@ pub fn add_own(name: &str, command: &str, env: &str) -> Result<Record, HarnessEr
     } else {
         crate::executable::find_on_paths(program, Vec::new())
     }
-    .ok_or_else(|| HarnessError::NotInstalled(format!("{program} isn't a program on this device")))?;
+    .ok_or_else(|| {
+        HarnessError::NotInstalled(format!("{program} isn't a program on this device"))
+    })?;
     let agent = RegistryAgent::new(&id)
         .ok_or_else(|| HarnessError::Install(format!("{id:?} isn't usable as an id")))?;
     parse_env(env).map_err(HarnessError::Install)?;
@@ -2145,11 +2162,26 @@ mod tests {
             }
             entry_with(serde_json::json!({ "binary": { "darwin-aarch64": target } }))
         };
-        let view =
-            entry_view(&binary(Some(&sha)), None, None, Some("darwin-aarch64"), true, true).unwrap();
+        let view = entry_view(
+            &binary(Some(&sha)),
+            None,
+            None,
+            Some("darwin-aarch64"),
+            true,
+            true,
+        )
+        .unwrap();
         assert_eq!(view.host.as_deref(), Some("downloads.example.com"));
         assert_eq!(view.checksum, Some(true));
-        let view = entry_view(&binary(None), None, None, Some("darwin-aarch64"), true, true).unwrap();
+        let view = entry_view(
+            &binary(None),
+            None,
+            None,
+            Some("darwin-aarch64"),
+            true,
+            true,
+        )
+        .unwrap();
         assert_eq!(view.checksum, Some(false));
     }
 

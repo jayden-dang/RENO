@@ -122,6 +122,10 @@ pub struct DaemonConfig {
     /// The environment a terminal's shell starts from (minus `RENO_*`). The binary passes its
     /// own; the default is empty, so a test's shell inherits nothing of the test runner's.
     pub terminal_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Where the ACP registry's index is fetched from. `None` (the default, and what every test
+    /// gets): the daemon has no registry, offers no `executor.registry` and never reaches a
+    /// network for one. The binary passes the registry's own address.
+    pub registry_index_url: Option<String>,
 }
 
 impl DaemonConfig {
@@ -143,7 +147,15 @@ impl DaemonConfig {
             pty: None,
             terminal_timing: terminals::Timing::default(),
             terminal_env: Vec::new(),
+            registry_index_url: None,
         }
+    }
+
+    /// The same, with the ACP registry's index at `url`.
+    #[must_use]
+    pub fn with_registry_index(mut self, url: impl Into<String>) -> Self {
+        self.registry_index_url = Some(url.into());
+        self
     }
 
     /// The same, installing and updating executors through `ports`.
@@ -259,6 +271,7 @@ impl Daemon {
             pty,
             terminal_timing,
             terminal_env,
+            registry_index_url,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -283,6 +296,7 @@ impl Daemon {
             harnesses,
         } = executors;
         let stop = CancellationToken::new();
+        let live_registry = registry.clone();
         let installer = Installer::new(&registry, stop.clone());
         let installs = installer.tasks();
         let mut ids: Vec<ExecutorId> = registry.ids();
@@ -373,6 +387,15 @@ impl Daemon {
             fs_defs.shutdown().await;
             return Err(error.into());
         }
+        // The registry needs the jobs: an add is an install job. Without them there is none.
+        let registry = crate::registry::Registry::new(registry_index_url.filter(|_| can_maintain));
+        if registry.configured()
+            && let Err(error) = kernel.attach_registry(Arc::new(registry.clone()))
+        {
+            kernel.shutdown().await;
+            fs_defs.shutdown().await;
+            return Err(error.into());
+        }
         // The daemon's start is a definite signal to find out what each executor can do. The
         // probes run on the kernel's own tasks; what they find reaches clients as it lands.
         kernel.probe_executors_in_background();
@@ -393,7 +416,7 @@ impl Daemon {
             kernel: kernel.clone(),
             installer,
             started: Instant::now(),
-            executors: ids,
+            registry,
             default_cwd: scratch,
             stop: stop.clone(),
             secrets,
@@ -443,6 +466,7 @@ impl Daemon {
             terminals,
             power,
             harnesses,
+            live_registry,
             installs,
             socket: paths.socket,
             lock,
@@ -493,6 +517,8 @@ struct Shutdown {
     terminals: terminals::Terminals,
     power: Option<PowerWatch>,
     harnesses: Vec<Arc<dyn Executor>>,
+    /// The executor set as it is at the end: agents added while the daemon ran are in it too.
+    live_registry: reno_kernel::ExecutorRegistry,
     installs: TaskTracker,
     socket: PathBuf,
     lock: DataDirLock,
@@ -519,6 +545,14 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     s.fs_watch.shutdown().await;
     for harness in &s.harnesses {
         harness.shutdown().await;
+    }
+    // Agents added while the daemon ran were never in `harnesses`.
+    for id in s.live_registry.ids() {
+        if let Some(executor) = s.live_registry.get(&id)
+            && !s.harnesses.iter().any(|h| Arc::ptr_eq(h, &executor))
+        {
+            executor.shutdown().await;
+        }
     }
 
     // 3. Connections get a moment to finish what they are owed, then are cancelled; the server
@@ -556,9 +590,11 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
         server,
         kernel,
         harnesses,
+        live_registry,
         lock,
         ..
     } = s;
+    drop(live_registry);
     drop(server);
     drop(kernel);
     drop(harnesses);

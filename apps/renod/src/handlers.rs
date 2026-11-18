@@ -100,7 +100,12 @@ use reno_proto::{
 use reno_proto::{
     ExecutorAutoUpdateSet, ExecutorAutoUpdateSetParams, ExecutorJobCancel, ExecutorJobDismiss,
     ExecutorJobLog, ExecutorJobLogResult, ExecutorJobParams, ExecutorJobResult, ExecutorJobStart,
-    ExecutorJobStartParams, FEATURE_EXECUTOR_MAINTAIN,
+    ExecutorJobStartParams, ExecutorRegistryAdd, ExecutorRegistryAddOwn,
+    ExecutorRegistryAddOwnParams, ExecutorRegistryEnvGet, ExecutorRegistryEnvResult,
+    ExecutorRegistryEnvSet, ExecutorRegistryEnvSetParams, ExecutorRegistryList,
+    ExecutorRegistryListParams, ExecutorRegistryListResult, ExecutorRegistryParams,
+    ExecutorRegistryRemove, ExecutorRegistryRemoveResult, FEATURE_EXECUTOR_MAINTAIN,
+    FEATURE_EXECUTOR_REGISTRY,
 };
 use reno_proto::{
     ExecutorFrames, ExecutorFramesParams, ExecutorFramesResult, ExecutorInfo, ExecutorInstall,
@@ -158,8 +163,8 @@ pub(crate) struct Ctx {
     /// Installs the executors that need one.
     pub(crate) installer: Installer,
     pub(crate) started: Instant,
-    /// The executors a `task.run` may name, sorted.
-    pub(crate) executors: Vec<ExecutorId>,
+    /// The ACP registry: its index and the agents added from it.
+    pub(crate) registry: crate::registry::Registry,
     /// Where a task with no `cwd` runs.
     pub(crate) default_cwd: PathBuf,
     /// Cancelled to ask the daemon to shut down.
@@ -239,6 +244,12 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
         .method::<ExecutorFrames, _, _>(bind(ctx, executor_frames))
+        .method::<ExecutorRegistryList, _, _>(bind(ctx, executor_registry_list))
+        .method::<ExecutorRegistryAdd, _, _>(bind(ctx, executor_registry_add))
+        .method::<ExecutorRegistryRemove, _, _>(bind(ctx, executor_registry_remove))
+        .method::<ExecutorRegistryAddOwn, _, _>(bind(ctx, executor_registry_add_own))
+        .method::<ExecutorRegistryEnvGet, _, _>(bind(ctx, executor_registry_env_get))
+        .method::<ExecutorRegistryEnvSet, _, _>(bind(ctx, executor_registry_env_set))
         .method::<ExecutorJobStart, _, _>(bind(ctx, executor_job_start))
         .method::<ExecutorJobCancel, _, _>(bind(ctx, executor_job_cancel))
         .method::<ExecutorJobDismiss, _, _>(bind(ctx, executor_job_dismiss))
@@ -429,6 +440,7 @@ async fn hello(ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
             // Offered only when the daemon can do it: a client that sees the feature shows
             // Update and Install buttons.
             .filter(|feature| ctx.maintenance || **feature != FEATURE_EXECUTOR_MAINTAIN)
+            .filter(|feature| ctx.registry.configured() || **feature != FEATURE_EXECUTOR_REGISTRY)
             // The same for terminals: a daemon started without a PTY spawner has none.
             .filter(|feature| ctx.terminals.enabled() || **feature != FEATURE_TERMINALS)
             .map(|feature| (*feature).to_owned())
@@ -484,17 +496,25 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
     if p.prompt.trim().is_empty() {
         return Err(invalid("the prompt is empty"));
     }
-    if let Some(executor) = &p.executor
-        && !ctx.executors.contains(executor)
-    {
-        let known: Vec<_> = ctx.executors.iter().map(ExecutorId::as_str).collect();
-        return Err(ErrorObject::new(
-            ErrorCode::NotFound,
-            format!(
-                "no executor `{executor}` on this daemon (available: {})",
-                known.join(", ")
-            ),
-        ));
+    if let Some(executor) = &p.executor {
+        // The live set: an agent added (or removed) since the daemon started counts.
+        let mut known: Vec<ExecutorId> = ctx
+            .kernel
+            .executors()
+            .into_iter()
+            .map(|info| info.descriptor.id)
+            .collect();
+        if !known.contains(executor) {
+            known.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            let known: Vec<_> = known.iter().map(ExecutorId::as_str).collect();
+            return Err(ErrorObject::new(
+                ErrorCode::NotFound,
+                format!(
+                    "no executor `{executor}` on this daemon (available: {})",
+                    known.join(", ")
+                ),
+            ));
+        }
     }
     let cwd = match &p.cwd {
         Some(cwd) => {
@@ -858,6 +878,50 @@ async fn executor_install(ctx: Arc<Ctx>, p: ExecutorInstallParams) -> Reply<Exec
         .await
         .map_err(|e| install_error(&e))?;
     Ok(ExecutorInstallResult { executor })
+}
+
+// The ACP registry: browse, add, remove, your own agents, and an agent's own environment. An add is
+// the person's install job (outside the policy engine, as the others: they pressed Add).
+async fn executor_registry_list(
+    ctx: Arc<Ctx>,
+    p: ExecutorRegistryListParams,
+) -> Reply<ExecutorRegistryListResult> {
+    crate::registry::list(&ctx.registry, &ctx.kernel, p).await
+}
+
+async fn executor_registry_add(
+    ctx: Arc<Ctx>,
+    p: ExecutorRegistryParams,
+) -> Reply<ExecutorJobResult> {
+    crate::registry::add(&ctx.registry, &ctx.kernel, p).await
+}
+
+async fn executor_registry_remove(
+    ctx: Arc<Ctx>,
+    p: ExecutorRegistryParams,
+) -> Reply<ExecutorRegistryRemoveResult> {
+    crate::registry::remove(&ctx.kernel, p).await
+}
+
+async fn executor_registry_add_own(
+    ctx: Arc<Ctx>,
+    p: ExecutorRegistryAddOwnParams,
+) -> Reply<ExecutorJobResult> {
+    crate::registry::add_own(&ctx.kernel, p).await
+}
+
+async fn executor_registry_env_get(
+    _: Arc<Ctx>,
+    p: ExecutorRegistryParams,
+) -> Reply<ExecutorRegistryEnvResult> {
+    crate::registry::env_get(p).await
+}
+
+async fn executor_registry_env_set(
+    _: Arc<Ctx>,
+    p: ExecutorRegistryEnvSetParams,
+) -> Reply<ExecutorRegistryEnvResult> {
+    crate::registry::env_set(p).await
 }
 
 // Installs and updates of executors. These run OUTSIDE the policy engine, on purpose: they are

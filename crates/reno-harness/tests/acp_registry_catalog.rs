@@ -77,9 +77,17 @@ async fn serve() -> Registry {
                     index_requests.fetch_add(1, Ordering::SeqCst);
                     if request.contains(&format!("if-none-match: {}", ETAG.to_ascii_lowercase())) {
                         conditional.fetch_add(1, Ordering::SeqCst);
-                        ("304 Not Modified", format!("etag: {ETAG}\r\n"), String::new())
+                        (
+                            "304 Not Modified",
+                            format!("etag: {ETAG}\r\n"),
+                            String::new(),
+                        )
                     } else {
-                        ("200 OK", format!("etag: {ETAG}\r\n"), index(&base).to_string())
+                        (
+                            "200 OK",
+                            format!("etag: {ETAG}\r\n"),
+                            index(&base).to_string(),
+                        )
                     }
                 };
                 let reply = format!(
