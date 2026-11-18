@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod layout;
+mod persist;
 pub(crate) mod surface;
 
 use serde::{Deserialize, Serialize};
