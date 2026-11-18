@@ -133,6 +133,20 @@ pub(super) async fn run_resumed(shared: Arc<Shared>, run: RunId) {
         && script.succeed("The resumed task is complete.").await;
 }
 
+/// The window a fake run has: its `contextWindow` choice, else the default of its model
+/// (Opus 5.5 runs 1M; every other model 200K).
+fn context_window(run: &reno_proto::RunSummary) -> u64 {
+    let choice = run
+        .model_options
+        .get(reno_proto::MODEL_OPTION_CONTEXT_WINDOW)
+        .map(String::as_str)
+        .unwrap_or(match run.model.as_deref() {
+            Some("claude-opus-5-5" | "opus-5.5") | None => "1m",
+            _ => "200k",
+        });
+    if choice == "1m" { 1_000_000 } else { 200_000 }
+}
+
 async fn work(script: &Script, prompt: &str) -> bool {
     let scenario = Scenario::of(prompt);
     if scenario == Scenario::Refused {
@@ -191,6 +205,15 @@ async fn work(script: &Script, prompt: &str) -> bool {
                         output_tokens: 340,
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
+                    },
+                );
+                // How full the context is now (not billing): the window the run launched with.
+                let window = w.run(run).map_or(200_000, |r| context_window(&r.summary));
+                w.push(
+                    run,
+                    ExecEvent::ContextUsage {
+                        tokens: Some(84_213),
+                        window: Some(window),
                     },
                 );
                 true

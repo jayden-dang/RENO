@@ -517,6 +517,9 @@ fn router(shared: &Arc<Shared>) -> Router {
             let mut p = p;
             p.prompt
                 .push_str(&reno_proto::Attachment::prompt_suffix(&p.attachments));
+            if let Some(why) = s.read(|w| w.refuse_model_options(&p)) {
+                return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
+            }
             let routing = s.read(|w| w.route(&p));
             let Some(executor) = routing.chosen.clone().or_else(|| p.executor.clone()) else {
                 return Err(ErrorObject::new(
