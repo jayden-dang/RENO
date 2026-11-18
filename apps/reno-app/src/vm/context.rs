@@ -117,6 +117,22 @@ pub(crate) fn live_words(usage: ContextUsage) -> Option<String> {
 
 // ---- the window choice -------------------------------------------------------------------------
 
+/// The size a window choice names, in tokens: "200k" is 200,000, "1m" 1,000,000, "256K"
+/// 256,000; a bare number is taken as is. `None` for a choice that names no size.
+pub(crate) fn choice_tokens(id: &str) -> Option<u64> {
+    let id = id.trim().to_ascii_lowercase();
+    let (number, scale) = if let Some(n) = id.strip_suffix('m') {
+        (n, 1_000_000.0)
+    } else if let Some(n) = id.strip_suffix('k') {
+        (n, 1_000.0)
+    } else {
+        (id.as_str(), 1.0)
+    };
+    let value: f64 = number.parse().ok()?;
+    let tokens = (value * scale).round();
+    (tokens.is_finite() && tokens >= 1.0).then_some(tokens as u64)
+}
+
 /// The context-window option of a model, when it offers a choice of more than one size.
 pub(crate) fn window_option(model: &ModelChoice) -> Option<&ModelOption> {
     model
@@ -386,6 +402,18 @@ mod tests {
             window_line(&UsageWindow::new("Week", 0.21, None), now, &zone),
             "Week 21%"
         );
+    }
+
+    #[test]
+    fn a_window_choice_names_its_size_in_tokens() {
+        assert_eq!(choice_tokens("200k"), Some(200_000));
+        assert_eq!(choice_tokens("1m"), Some(1_000_000));
+        assert_eq!(choice_tokens("256K"), Some(256_000));
+        assert_eq!(choice_tokens("1.5m"), Some(1_500_000));
+        assert_eq!(choice_tokens("500000"), Some(500_000));
+        assert_eq!(choice_tokens("default"), None);
+        assert_eq!(choice_tokens("0k"), None);
+        assert_eq!(choice_tokens(""), None);
     }
 
     #[test]

@@ -216,11 +216,41 @@ pub(crate) fn resolve(
     None
 }
 
-/// How full the run's context is: the latest the harness reported.
+/// How full the run's context is: the latest the harness reported. Until the harness reports a
+/// window (Claude Code does so only when its first turn ends) the window is the size the run
+/// runs with: the one its reported model implies (`[1m]`), else the one it asked for, else its
+/// model's default — so the ring shows from the first tokens. A reported window always wins.
 pub(crate) fn context_usage(state: &State, run: &RunId) -> reno_proto::ContextUsage {
-    state.transcript(run).map_or_else(Default::default, |t| {
+    let mut usage = state.transcript(run).map_or_else(Default::default, |t| {
         reno_proto::ContextUsage::latest(t.events.iter().map(|(_, event)| event))
-    })
+    });
+    if usage.window.is_none() {
+        usage.window = expected_window(state, run);
+    }
+    usage
+}
+
+/// The window size a run runs with, from its model's context-window option, when it has one.
+fn expected_window(state: &State, run: &RunId) -> Option<u64> {
+    let summary = state.run(run)?;
+    let reported = in_use(state, run)?;
+    let (model, implied) = resolve(state, &summary.executor, &reported)?;
+    let option = model
+        .options
+        .iter()
+        .find(|o| o.id == MODEL_OPTION_CONTEXT_WINDOW)?;
+    let listed = |choice: &&String| option.choices.iter().any(|c| &c.id == *choice);
+    let choice = implied
+        .get(MODEL_OPTION_CONTEXT_WINDOW)
+        .filter(listed)
+        .or_else(|| {
+            summary
+                .model_options
+                .get(MODEL_OPTION_CONTEXT_WINDOW)
+                .filter(listed)
+        })
+        .unwrap_or(&option.default_choice);
+    super::context::choice_tokens(choice)
 }
 
 /// One model of a harness, when the harness lists it.
@@ -338,6 +368,103 @@ mod tests {
             },
         ));
         assert_eq!(in_use(&state, &run).as_deref(), Some("claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn until_the_harness_reports_a_window_the_ring_uses_the_size_the_run_asked_for() {
+        use reno_proto::{ContextUsage, RunStatus, RunSummary, SessionRef, TaskId};
+        let mut state = state();
+        let summary = |suffix: &str, model: &str, window: Option<&str>| RunSummary {
+            model_options: window
+                .map(|w| [(MODEL_OPTION_CONTEXT_WINDOW.to_owned(), w.to_owned())].into())
+                .unwrap_or_default(),
+            effort: None,
+            run_id: RunId::from_suffix(suffix).unwrap(),
+            task_id: TaskId::from_suffix(suffix).unwrap(),
+            executor: "claude-code".parse().unwrap(),
+            status: RunStatus::Running,
+            attempt: 1,
+            title: "t".into(),
+            prompt: None,
+            model: Some(model.into()),
+            stop_reason: None,
+            stop: None,
+            not_resumed: None,
+            session: None,
+            bot: None,
+            cwd: None,
+            report: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let tokens_only = |state: &mut State, run: &RunId, model: &str| {
+            for (seq, event) in [
+                ExecEvent::Started {
+                    session: SessionRef("s".into()),
+                    model: model.into(),
+                },
+                ExecEvent::ContextUsage {
+                    tokens: Some(33_591),
+                    window: None,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                state.apply(reno_client::Update::RunEvent {
+                    run: run.clone(),
+                    seq: reno_proto::Seq(seq as u64),
+                    event,
+                });
+            }
+        };
+
+        // Asked for 200K on Opus 5.5 (its default is 1M): 200K until the harness says.
+        let asked = RunId::from_suffix("p").unwrap();
+        state.apply(reno_client::Update::RunUpserted(summary(
+            "p",
+            "claude-opus-5-5",
+            Some("200k"),
+        )));
+        tokens_only(&mut state, &asked, "claude-opus-5-5");
+        assert_eq!(
+            context_usage(&state, &asked),
+            ContextUsage {
+                tokens: Some(33_591),
+                window: Some(200_000)
+            }
+        );
+
+        // Nothing asked: the model's default size; the reported `[1m]` spelling implies 1M too.
+        let default = RunId::from_suffix("q").unwrap();
+        state.apply(reno_client::Update::RunUpserted(summary(
+            "q",
+            "claude-opus-5-5",
+            None,
+        )));
+        tokens_only(&mut state, &default, "claude-opus-5-5[1m]");
+        assert_eq!(context_usage(&state, &default).window, Some(1_000_000));
+
+        // What the harness reports wins.
+        state.apply(reno_client::Update::RunEvent {
+            run: asked.clone(),
+            seq: reno_proto::Seq(2),
+            event: ExecEvent::ContextUsage {
+                tokens: None,
+                window: Some(180_000),
+            },
+        });
+        assert_eq!(context_usage(&state, &asked).window, Some(180_000));
+
+        // A model with no size to go by stays unknown: no ring.
+        let haiku = RunId::from_suffix("r").unwrap();
+        state.apply(reno_client::Update::RunUpserted(summary(
+            "r",
+            "claude-haiku-5-5",
+            None,
+        )));
+        tokens_only(&mut state, &haiku, "claude-haiku-5-5");
+        assert_eq!(context_usage(&state, &haiku).window, None);
     }
 
     #[test]
