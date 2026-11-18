@@ -20,6 +20,7 @@ use std::process::{Command, ExitCode};
 use serde::Deserialize;
 
 mod bench;
+mod bundle;
 mod conformance;
 mod live;
 mod schema_diff;
@@ -49,8 +50,16 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ("reno", &["reno-proto", "reno-client"]),
     (
         "reno-app",
-        &["reno-proto", "reno-client", "reno-markdown", "reno-syntax"],
+        &[
+            "reno-proto",
+            "reno-client",
+            "reno-markdown",
+            "reno-syntax",
+            "reno-notify",
+        ],
     ),
+    // The native macOS banner and Dock badge layer; names no workspace crate.
+    ("reno-notify", &[]),
     ("reno-markdown", &[]),
     ("reno-syntax", &[]),
 ];
@@ -74,6 +83,9 @@ const OWNERS: &[(&str, &[&str])] = &[
     ("gpui*", &["reno-app"]),
     ("notify", &["renod", "reno"]),
     ("security-framework", &["renod"]),
+    // The Objective-C bridge (and its framework bindings) is reno-notify's alone: AppKit calls
+    // for banners and the Dock badge stay behind its safe API.
+    ("objc2*", &["reno-notify"]),
     // Only the CLI speaks MCP (ARCH-4).
     ("rmcp", &["reno"]),
 ];
@@ -161,12 +173,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("check") => check(),
+        Some("bundle") => bundle::run(&args[1..]),
         Some("bench") => bench::run(&args[1..]),
         Some("conformance-live") => live::run(&args[1..]),
         Some("codex-schema-diff") => schema_diff::run(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo xtask check | {}\n       {}\n       {}",
+                "usage: cargo xtask check | {}\n       {}\n       {}\n       {}",
+                &bundle::USAGE["usage: ".len()..],
                 &bench::USAGE["usage: ".len()..],
                 &live::USAGE["usage: ".len()..],
                 &schema_diff::USAGE["usage: ".len()..]
