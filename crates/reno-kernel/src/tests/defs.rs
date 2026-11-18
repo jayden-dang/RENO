@@ -59,6 +59,15 @@ impl FakePort {
         let _ = tx.try_send(());
     }
 
+    pub(super) fn snapshot_files(&self) -> Vec<DefFile> {
+        self.state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.files.clone())
+            .unwrap_or_default()
+    }
+
     fn reads(&self) -> usize {
         self.snapshots.load(Ordering::SeqCst)
     }

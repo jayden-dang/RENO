@@ -205,10 +205,15 @@ impl Kernel {
         let wake = definitions.as_ref().and_then(|setup| setup.wake.clone());
         let secrets = definitions.as_ref().and_then(|setup| setup.secrets.clone());
         let has_definitions = definitions.is_some();
-        let context = match &definitions {
+        // Validation asks the live executor set, so an agent added or removed while the daemon
+        // runs counts at once.
+        let mut context = match &definitions {
             Some(setup) => setup.context.clone(),
             None => ValidationContext::with_builtin(executors.ids()),
         };
+        if context.live.is_none() {
+            context = context.with_live(Arc::new(executors.clone()));
+        }
         let mut shared = Shared::new(
             Db::new(store, clock),
             executors,

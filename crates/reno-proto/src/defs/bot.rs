@@ -260,7 +260,17 @@ impl BotDef {
             if !seen.insert(executor) {
                 sink.err(path, format!("duplicate executor {:?}", executor.as_str()));
             } else if !cx.ctx.knows(executor) {
-                sink.err(path, format!("unknown executor {:?}", executor.as_str()));
+                let said = format!("unknown executor {:?}", executor.as_str());
+                if cx.ctx.was_removed(executor) {
+                    sink.err(
+                        path,
+                        format!(
+                            "{said}: the agent was removed from this device; add it again to make this bot valid"
+                        ),
+                    );
+                } else {
+                    sink.err(path, said);
+                }
             }
         }
     }

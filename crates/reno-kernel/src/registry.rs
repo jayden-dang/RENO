@@ -6,9 +6,9 @@
 //! removed executor stays alive for whoever already holds it (a run in flight keeps its
 //! executor; nothing is orphaned by the map forgetting it).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use reno_harness::exec::Executor;
 use reno_proto::ExecutorId;
@@ -17,6 +17,12 @@ use reno_proto::ExecutorId;
 #[derive(Clone, Default)]
 pub struct ExecutorRegistry {
     executors: Arc<RwLock<HashMap<ExecutorId, Arc<dyn Executor>>>>,
+    /// Ids that were registered and then removed, until registered again: what lets a message
+    /// tell a removed agent from one that never was.
+    removed: Arc<Mutex<HashSet<ExecutorId>>>,
+    /// Woken (one permit, never a queue) whenever the set changes, so what depends on it (the
+    /// definitions, which name executors) can look again.
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl fmt::Debug for ExecutorRegistry {
@@ -57,25 +63,52 @@ impl ExecutorRegistry {
     /// Register `executor` under `id`, replacing any earlier one. (The daemon's start-up and the
     /// tests; an executor added while the daemon runs goes through [`Self::insert_new`].)
     pub fn insert(&self, id: ExecutorId, executor: Arc<dyn Executor>) {
+        self.unremember(&id);
         self.write().insert(id, executor);
+        self.changed.notify_one();
+    }
+
+    fn unremember(&self, id: &ExecutorId) {
+        self.removed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+    }
+
+    /// Resolves when the set has changed since the last time it did (or since it was made).
+    pub async fn changed(&self) {
+        self.changed.notified().await;
     }
 
     /// Register `executor` under `id` only if nothing is: the check and the insert are one step.
     /// `false` (and nothing changed) when `id` is taken, so an added agent never replaces an
     /// executor that is registered, whichever came first.
     pub fn insert_new(&self, id: ExecutorId, executor: Arc<dyn Executor>) -> bool {
-        match self.write().entry(id) {
+        let inserted = match self.write().entry(id.clone()) {
             std::collections::hash_map::Entry::Occupied(_) => false,
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(executor);
                 true
             }
+        };
+        if inserted {
+            self.unremember(&id);
+            self.changed.notify_one();
         }
+        inserted
     }
 
     /// Forget `id`, returning its executor. Runs that already hold it keep it.
     pub fn remove(&self, id: &ExecutorId) -> Option<Arc<dyn Executor>> {
-        self.write().remove(id)
+        let removed = self.write().remove(id);
+        if removed.is_some() {
+            self.removed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id.clone());
+            self.changed.notify_one();
+        }
+        removed
     }
 
     /// The executor named `id`.
@@ -86,6 +119,19 @@ impl ExecutorRegistry {
     /// The registered ids, in no particular order.
     pub fn ids(&self) -> Vec<ExecutorId> {
         self.read().keys().cloned().collect()
+    }
+}
+
+impl reno_proto::defs::LiveExecutors for ExecutorRegistry {
+    fn has(&self, id: &ExecutorId) -> bool {
+        self.read().contains_key(id)
+    }
+
+    fn was_removed(&self, id: &ExecutorId) -> bool {
+        self.removed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(id)
     }
 }
 

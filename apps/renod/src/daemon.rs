@@ -303,7 +303,14 @@ impl Daemon {
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
         // Everything Reno can build is a name a definition may use, installed or not.
-        let context = ValidationContext::with_builtin(ids.iter().cloned());
+        // The names Reno builds are fixed; the added agents (`acp.*`) are asked of the live set
+        // each time, so one added or removed later counts without a restart.
+        let context = ValidationContext::with_builtin(
+            ids.iter()
+                .filter(|id| !id.as_str().starts_with("acp."))
+                .cloned(),
+        )
+        .with_live(Arc::new(live_registry.clone()));
         let defs_error = |source| DaemonError::Definitions {
             path: paths.defs_dir.clone(),
             source,

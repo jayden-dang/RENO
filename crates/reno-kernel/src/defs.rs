@@ -229,6 +229,11 @@ pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> 
         wake: _,
         secrets: _,
     } = setup;
+    let context = if context.live.is_none() {
+        context.with_live(Arc::new(shared.executors.clone()))
+    } else {
+        context
+    };
     let stored = shared.db.current_definitions().await?;
     let known = versions_of(&stored);
 
@@ -272,9 +277,9 @@ pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> 
         known,
     };
     loader.reload().await;
-    if let Some(changes) = changes {
-        shared.spawn(loader.run(changes));
-    }
+    // Always followed: an executor added or removed changes what is valid even when the files
+    // are not being watched.
+    shared.spawn(loader.run(changes));
     Ok(())
 }
 
@@ -287,18 +292,30 @@ fn in_set(set: &DefSet, kind: DefKind, name: &str) -> bool {
 }
 
 impl Loader {
-    async fn run(mut self, mut changes: mpsc::Receiver<()>) {
+    async fn run(mut self, mut changes: Option<mpsc::Receiver<()>>) {
         loop {
             tokio::select! {
                 biased;
                 () = self.shared.root.cancelled() => break,
-                signal = changes.recv() => {
-                    if signal.is_none() {
-                        tracing::warn!("the definitions watch ended; edits need a restart");
-                        break;
+                // An agent was added or removed: bots that name it are valid or not now.
+                () = self.shared.executors.changed() => {
+                    self.reload().await;
+                }
+                signal = async {
+                    match changes.as_mut() {
+                        Some(changes) => changes.recv().await,
+                        None => std::future::pending().await,
                     }
+                } => {
+                    let Some(()) = signal else {
+                        tracing::warn!("the definitions watch ended; edits need a restart");
+                        changes = None;
+                        continue;
+                    };
                     // A burst is one reload: the snapshot read next sees all of it.
-                    while changes.try_recv().is_ok() {}
+                    if let Some(changes) = changes.as_mut() {
+                        while changes.try_recv().is_ok() {}
+                    }
                     self.reload().await;
                 }
             }

@@ -19,6 +19,8 @@ use reno_proto::{
     VersionGate,
 };
 
+mod defs_live;
+
 use super::{Fx, config, id, until};
 use crate::{ExecutorRegistry, InstallWork, KernelError, Limits, MaintenancePorts, RegistryPort};
 
@@ -201,12 +203,30 @@ struct World {
 
 impl World {
     async fn new(concurrent: usize, built_in: Vec<Agent>) -> Self {
+        Self::build(concurrent, built_in, None).await
+    }
+
+    /// A world whose kernel loads definitions through `port`.
+    async fn with_defs(port: &Arc<super::defs::FakePort>) -> Self {
+        Self::build(2, vec![], Some(port)).await
+    }
+
+    async fn build(
+        concurrent: usize,
+        built_in: Vec<Agent>,
+        defs: Option<&Arc<super::defs::FakePort>>,
+    ) -> Self {
         let disk = Disk::default();
         let mut registry = ExecutorRegistry::new();
         for agent in built_in {
             registry = registry.with(Arc::new(agent));
         }
-        let fx = Fx::new(config(concurrent), registry).await;
+        let fx = match defs {
+            Some(port) => {
+                Fx::with_definitions(config(concurrent), registry, super::defs::setup(port)).await
+            }
+            None => Fx::new(config(concurrent), registry).await,
+        };
         fx.kernel
             .attach_maintenance(MaintenancePorts {
                 runner: Arc::new(ScriptedRunner::default()),

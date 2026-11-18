@@ -265,6 +265,37 @@ impl fmt::Display for DefError {
     }
 }
 
+/// The executors a daemon has right now, asked at each validation: agents are added and removed
+/// while it runs, so a set taken at start-up would go stale.
+pub trait LiveExecutors: Send + Sync {
+    /// Whether an executor with this id is registered now.
+    fn has(&self, id: &ExecutorId) -> bool;
+
+    /// Whether `id` was registered and has since been removed, so a message can say so.
+    fn was_removed(&self, id: &ExecutorId) -> bool {
+        let _ = id;
+        false
+    }
+}
+
+/// A shared handle on the live executor set, comparable by identity.
+#[derive(Clone)]
+pub struct LiveSet(std::sync::Arc<dyn LiveExecutors>);
+
+impl fmt::Debug for LiveSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LiveSet")
+    }
+}
+
+impl PartialEq for LiveSet {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LiveSet {}
+
 /// What validation needs to know about the world outside the files.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValidationContext {
@@ -273,6 +304,9 @@ pub struct ValidationContext {
     /// Whether any `acp.<registry id>` also counts. A daemon knows which registry agents this
     /// device has added; a check with no daemon cannot, so it takes the whole namespace.
     pub any_acp: bool,
+    /// The daemon's executors as they are now: an id registered there counts too, whether or not
+    /// it was when the context was made.
+    pub live: Option<LiveSet>,
 }
 
 impl ValidationContext {
@@ -281,7 +315,20 @@ impl ValidationContext {
         Self {
             executors: executors.into_iter().collect(),
             any_acp: false,
+            live: None,
         }
+    }
+
+    /// The same, also knowing whatever `live` has registered when asked.
+    #[must_use]
+    pub fn with_live(mut self, live: std::sync::Arc<dyn LiveExecutors>) -> Self {
+        self.live = Some(LiveSet(live));
+        self
+    }
+
+    /// Whether `id` was an agent here and has been removed.
+    pub fn was_removed(&self, id: &ExecutorId) -> bool {
+        self.live.as_ref().is_some_and(|l| l.0.was_removed(id))
     }
 
     /// [`Self::with_builtin`] for a check that has no daemon to ask: every `acp.<registry id>`
@@ -295,7 +342,9 @@ impl ValidationContext {
 
     /// Whether a bot may list `id`.
     pub fn knows(&self, id: &ExecutorId) -> bool {
-        self.executors.contains(id) || (self.any_acp && id.as_str().starts_with(ACP_NAMESPACE))
+        self.executors.contains(id)
+            || (self.any_acp && id.as_str().starts_with(ACP_NAMESPACE))
+            || self.live.as_ref().is_some_and(|l| l.0.has(id))
     }
 
     /// A context that knows [`BUILTIN_EXECUTORS`] and `extra`.
