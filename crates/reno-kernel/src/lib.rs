@@ -28,6 +28,8 @@
 //! - `wake`: the wake port: the daemon tells the scheduler that the system woke.
 //! - `workspace`, `workspaces`: the `Workspace` port (git worktrees for write runs), its fake, and
 //!   what the kernel does with it: placement, release at a run's end, clean, start-up sweep.
+//! - `threads`: threads, the conversations that own a worktree: listing, closing, and the
+//!   idle-limit timer.
 //! - `secrets`: the `Secrets` port (Keychain-backed named secrets), its fake, and `SecretValue`.
 //!   The dispatcher resolves a bot's `secrets` into the run's environment and refuses a run whose
 //!   secret is not set; the supervisor redacts the values from everything the run produces.
@@ -89,6 +91,7 @@ mod scheduler;
 mod secrets;
 mod shared;
 mod supervisor;
+mod threads;
 mod wake;
 mod watch;
 mod workspace;
@@ -96,7 +99,7 @@ mod workspaces;
 
 pub use agent::AgentSession;
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::KernelConfig;
+pub use config::{DEFAULT_THREAD_IDLE_TTL, KernelConfig};
 pub use defs::{CurrentDefs, DefSnapshot, Definitions, DefsSetup, StoredVersion};
 pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport, TaskRequest};

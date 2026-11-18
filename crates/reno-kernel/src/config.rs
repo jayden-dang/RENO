@@ -71,7 +71,15 @@ pub struct KernelConfig {
     /// token. Input, output and cache writes always count in full. Past 1000 it is taken as
     /// 1000 (a full weight). Applied when usage is read, so changing it re-prices the whole day.
     pub cache_read_weight_permille: u32,
+    /// How long a thread may sit idle (no run queued or live) before it is closed and its
+    /// worktree released, under the same keep-or-remove rule as a person closing it. A
+    /// deadline, not a poll (ARCH-10): the kernel arms one timer, for the thread that has been
+    /// idle the longest.
+    pub thread_idle_ttl: Duration,
 }
+
+/// The default of [`KernelConfig::thread_idle_ttl`]: seven days.
+pub const DEFAULT_THREAD_IDLE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 impl Default for KernelConfig {
     fn default() -> Self {
@@ -97,6 +105,7 @@ impl Default for KernelConfig {
             default_wall_time: Duration::from_secs(4 * 60 * 60),
             max_attempts: 3,
             cache_read_weight_permille: reno_store::DEFAULT_CACHE_READ_PERMILLE,
+            thread_idle_ttl: DEFAULT_THREAD_IDLE_TTL,
         }
     }
 }

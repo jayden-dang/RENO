@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use crate::db::Store;
 use crate::error::{DbResult, Result, StoreError, is_unique_violation};
 use crate::events;
-use crate::runs::{NewTask, parse_status, tx_create_task, tx_enqueue_run};
+use crate::runs::{NewRun, NewTask, parse_status, tx_create_task, tx_enqueue_run};
 use crate::writer::Durability;
 
 /// The nonce of one occurrence: `<kind>:<trigger>:<scheduled_at>`, with `scheduled_at` in
@@ -310,11 +310,14 @@ fn tx_fire(conn: &Connection, fire: &NewFiring, now: i64) -> Result<FireResult> 
             tx_create_task(conn, &fire.run.task, now)?;
             tx_enqueue_run(
                 conn,
-                &fire.run.task.id,
-                &fire.run.run,
-                &fire.run.executor,
-                Some(&fire.run.bot),
-                fire.run.routing.as_ref(),
+                &NewRun {
+                    task: &fire.run.task.id,
+                    run: &fire.run.run,
+                    executor: &fire.run.executor,
+                    bot: Some(&fire.run.bot),
+                    routing: fire.run.routing.as_ref(),
+                    thread: None,
+                },
                 now,
             )?;
             (FiringOutcome::Fired, fire.run.run.clone())

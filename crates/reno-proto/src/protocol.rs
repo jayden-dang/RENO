@@ -44,6 +44,10 @@ use crate::run::{NotResumed, RunStatus, StopDetail, StopReason};
 use crate::secrets::{
     SecretDeleteParams, SecretDeleteResult, SecretListResult, SecretSetParams, SecretSetResult,
 };
+use crate::thread::{
+    ThreadCloseParams, ThreadCloseResult, ThreadGetParams, ThreadInfo, ThreadListParams,
+    ThreadListResult,
+};
 use crate::triggers::{
     TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
 };
@@ -85,6 +89,10 @@ pub const FEATURE_TRIGGERS: &str = "triggers";
 
 /// Feature: `workspace.list`, `workspace.get` and `workspace.clean` exist.
 pub const FEATURE_WORKSPACES: &str = "workspaces";
+
+/// Feature: threads. `thread.list`, `thread.get` and `thread.close` exist, `task.run` takes
+/// `threadId`, `workspace.diff` takes a `scope`, and `workspace.clean` takes a `thread` target.
+pub const FEATURE_THREADS: &str = "threads";
 
 /// Feature: `workspace.diff` exists, and `ExecEvent::ToolResult` may carry `output`.
 pub const FEATURE_RUN_CHANGES: &str = "run.changes";
@@ -155,6 +163,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_DEFS,
     FEATURE_TRIGGERS,
     FEATURE_WORKSPACES,
+    FEATURE_THREADS,
     FEATURE_EXECUTORS,
     FEATURE_EXECUTOR_INSTALL,
     FEATURE_APPROVAL_MESSAGE,
@@ -385,6 +394,12 @@ pub struct TaskRunParams {
     /// `attachments`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Continue this thread: the run works in the thread's worktree on its branch, so it sees
+    /// what the thread's earlier runs committed, and its `cwd` is the thread's. Refused
+    /// (`Conflict`) while a run of the thread is live (send to it instead, which steers), and for
+    /// a thread whose worktree was removed. Absent: a new thread. Needs feature `threads`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<crate::ThreadId>,
 }
 
 /// A file attached to a task: a path on the daemon's machine, with the name to show for it.
@@ -433,6 +448,10 @@ pub struct TaskRunResult {
     /// Where the router sent it and why. Absent from daemons that predate routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingDecision>,
+    /// The thread the run belongs to: the one it continues, or the new one. Absent from
+    /// daemons that predate threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<crate::ThreadId>,
 }
 
 /// Params of `run.get`.
@@ -831,6 +850,21 @@ method!(
     TaskRun, "task.run", TaskRunParams => TaskRunResult
 );
 method!(
+    /// `thread.list`: the conversations, each with its worktree and its runs. Needs feature
+    /// `threads`.
+    ThreadList, "thread.list", ThreadListParams => ThreadListResult
+);
+method!(
+    /// `thread.get`: one thread. Needs feature `threads`.
+    ThreadGet, "thread.get", ThreadGetParams => ThreadInfo
+);
+method!(
+    /// `thread.close`: closes a thread and releases its worktree (kept when it holds unmerged
+    /// work, unless `force`). Refused (`Conflict`) while one of its runs is live. A person's
+    /// call: a run's own token cannot make it. Needs feature `threads`.
+    ThreadClose, "thread.close", ThreadCloseParams => ThreadCloseResult
+);
+method!(
     /// `run.get`: one run's summary.
     RunGet, "run.get", RunGetParams => RunSummary
 );
@@ -1103,6 +1137,9 @@ pub fn protocol_schema() -> Value {
             method_entry::<DaemonStatus>(),
             method_entry::<DaemonShutdown>(),
             method_entry::<TaskRun>(),
+            method_entry::<ThreadList>(),
+            method_entry::<ThreadGet>(),
+            method_entry::<ThreadClose>(),
             method_entry::<RunGet>(),
             method_entry::<RunRouting>(),
             method_entry::<RoutePreview>(),
@@ -1124,6 +1161,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<TriggerFire>(),
             method_entry::<WorkspaceList>(),
             method_entry::<WorkspaceGet>(),
+            method_entry::<WorkspaceDiff>(),
             method_entry::<WorkspaceClean>(),
             method_entry::<SecretList>(),
             method_entry::<SecretSet>(),

@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use reno_proto::defs::{BotPin, DefKind};
+use reno_proto::defs::DefKind;
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule, TaskId,
-    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule,
+    ThreadId, ThreadInfo, ThreadStatus, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,
@@ -106,16 +106,54 @@ impl Db {
 
     pub(crate) async fn enqueue_routed_run(
         &self,
-        task: &TaskId,
-        run: &RunId,
-        executor: &ExecutorId,
-        bot: Option<&BotPin>,
-        decision: &RoutingDecision,
-    ) -> Result<()> {
+        new: reno_store::RoutedRun,
+    ) -> std::result::Result<(), StoreError> {
         self.wrote();
-        self.store
-            .enqueue_routed_run(task, run, executor, bot, decision, self.now_ms())
-            .await
+        self.store.enqueue_routed(new, self.now_ms()).await
+    }
+
+    pub(crate) async fn get_thread(&self, thread: &ThreadId) -> Result<Option<ThreadInfo>> {
+        Ok(self.store.get_thread(thread).await?)
+    }
+
+    pub(crate) async fn list_threads(&self, statuses: &[ThreadStatus]) -> Result<Vec<ThreadInfo>> {
+        Ok(self.store.list_threads(statuses).await?)
+    }
+
+    pub(crate) async fn close_thread(
+        &self,
+        thread: &ThreadId,
+    ) -> std::result::Result<ThreadInfo, StoreError> {
+        self.wrote();
+        self.store.close_thread(thread, self.now_ms()).await
+    }
+
+    pub(crate) async fn thread_went_idle(&self, run: &RunId) -> Result<()> {
+        self.wrote();
+        Ok(self.store.thread_went_idle(run, self.now_ms()).await?)
+    }
+
+    pub(crate) async fn oldest_idle_since(&self) -> Result<Option<i64>> {
+        Ok(self.store.oldest_idle_since().await?)
+    }
+
+    pub(crate) async fn idle_threads_since(&self, cutoff: i64) -> Result<Vec<ThreadId>> {
+        Ok(self.store.idle_threads_since(cutoff).await?)
+    }
+
+    pub(crate) async fn record_start_sha(&self, run: &RunId, fence: u64, sha: &str) -> Result<()> {
+        self.wrote();
+        Ok(self
+            .store
+            .record_start_sha(run, fence, sha, self.now_ms())
+            .await?)
+    }
+
+    pub(crate) async fn get_thread_workspace(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Option<WorkspaceInfo>> {
+        Ok(self.store.get_thread_workspace(thread).await?)
     }
 
     pub(crate) async fn reroute_run(

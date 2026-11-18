@@ -133,10 +133,15 @@ pub struct WorkspaceGetParams {
     rename_all_fields = "camelCase"
 )]
 pub enum CleanTarget {
-    /// One run's workspace.
+    /// One run's workspace: the worktree of the run's thread.
     Run {
         /// The run.
         run_id: RunId,
+    },
+    /// One thread's workspace. Needs feature `threads`.
+    Thread {
+        /// The thread.
+        thread_id: crate::ids::ThreadId,
     },
     /// Workspaces whose branch is merged into their repository's current `HEAD`.
     Merged,
@@ -187,15 +192,40 @@ pub struct WorkspaceCleanResult {
     pub items: Vec<CleanItem>,
 }
 
+/// What `workspace.diff` compares.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DiffScope {
+    /// Everything the thread holds against its base commit: committed, staged, unstaged and
+    /// untracked. What the method did before threads, and the default.
+    #[default]
+    Thread,
+    /// What the run changed: the worktree against the commit the branch stood at when the run
+    /// started (`start_sha`). Needs feature `threads`.
+    Run,
+    /// One commit of the thread's branch against its parent. Needs feature `threads`.
+    Commit {
+        /// The commit (a hexadecimal object name, at least 7 characters).
+        sha: String,
+    },
+}
+
 /// Params of `workspace.diff`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDiffParams {
-    /// The run whose workspace to compare with its base commit.
+    /// The run whose workspace (the worktree of its thread) to compare.
     pub run_id: RunId,
     /// One file (repository-relative) whose patch to return too; none: the list only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// What to compare; the thread against its base commit when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<DiffScope>,
 }
 
 /// How a file differs from the base commit.

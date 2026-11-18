@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
-use reno_proto::{ChangedFile, RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
+use reno_proto::{
+    ChangedFile, RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+};
 
 /// Why a workspace could not be prepared, inspected or released. Typed, so the run's diagnostic
 /// and the wire error say which rule applied.
@@ -132,10 +134,29 @@ pub enum Released {
 /// The `Workspace` port: git worktrees for write runs.
 #[async_trait]
 pub trait Workspace: Send + Sync + fmt::Debug {
-    /// Where the worktree for `run` would be, for a task targeting `dir`: repository, key,
-    /// path, branch, base commit and the relative subdirectory. Read-only. `Ok(None)` means
-    /// `dir` is not in a git repository. The returned status is `Preparing`.
-    async fn plan(&self, run: &RunId, dir: &Path) -> Result<Option<WorkspaceInfo>, WorkspaceError>;
+    /// Where the worktree of `thread` would be, for its first run `run` targeting `dir`:
+    /// repository, key, path, branch `reno/<thread>`, base commit and the relative
+    /// subdirectory. Read-only. `Ok(None)` means `dir` is not in a git repository. The returned
+    /// status is `Preparing`, and its `run_id` is `run`, the run that makes the worktree.
+    async fn plan(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        dir: &Path,
+    ) -> Result<Option<WorkspaceInfo>, WorkspaceError>;
+
+    /// The commit the worktree's branch stands at now (its `HEAD`): where a run starts from.
+    async fn head(&self, workspace: &WorkspaceInfo) -> Result<String, WorkspaceError>;
+
+    /// What one commit of the worktree's branch changed against its parent, and the patch of
+    /// `path` in it. The commit must be on the branch beyond its base commit, else
+    /// [`WorkspaceError::Unsafe`]. Read-only, like [`Workspace::changes_since_base`].
+    async fn commit_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+        sha: &str,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError>;
 
     /// Whether `dir` exists and is a directory. The kernel touches no disk itself.
     async fn dir_exists(&self, dir: &Path) -> bool;
@@ -264,6 +285,13 @@ struct FakeState {
     reverted: Vec<(RunId, Vec<String>)>,
     /// What a run's worktree holds against its base, as a test says an agent left it.
     diffs: BTreeMap<RunId, RunChanges>,
+    /// Where a worktree's branch stands, as a test moved it; the base commit when unset.
+    heads: BTreeMap<RunId, String>,
+    /// What a commit of a worktree's branch changed, by worktree and commit.
+    commits: BTreeMap<(RunId, String), RunChanges>,
+    /// The base each `changes_since_base` and `protected_changes` call was made against, which
+    /// shows what the kernel judged a run by.
+    bases: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -334,6 +362,24 @@ impl FakeWorkspace {
         self.lock().diffs.insert(run.clone(), changes);
     }
 
+    /// Says where `run`'s worktree branch stands (`run` is the one that made the worktree).
+    pub fn set_head(&self, run: &RunId, sha: &str) {
+        self.lock().heads.insert(run.clone(), sha.to_owned());
+    }
+
+    /// Says what commit `sha` of `run`'s worktree changed.
+    pub fn set_commit(&self, run: &RunId, sha: &str, changes: RunChanges) {
+        self.lock()
+            .commits
+            .insert((run.clone(), sha.to_owned()), changes);
+    }
+
+    /// The base commit of every diff and protected-path look so far, as
+    /// `("diff" | "protected" | "revert", base)`, in order.
+    pub fn bases_seen(&self) -> Vec<(String, String)> {
+        self.lock().bases.clone()
+    }
+
     /// Marks `run`'s branch as merged into its repository's `HEAD`.
     pub fn set_merged(&self, run: &RunId) {
         self.lock().merged.insert(run.clone());
@@ -364,7 +410,12 @@ impl FakeWorkspace {
 
 #[async_trait]
 impl Workspace for FakeWorkspace {
-    async fn plan(&self, run: &RunId, dir: &Path) -> Result<Option<WorkspaceInfo>, WorkspaceError> {
+    async fn plan(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        dir: &Path,
+    ) -> Result<Option<WorkspaceInfo>, WorkspaceError> {
         let mut state = self.lock();
         state.calls.push(format!("plan {run}"));
         let Some(repo) = state
@@ -386,17 +437,47 @@ impl Workspace for FakeWorkspace {
         );
         Ok(Some(WorkspaceInfo {
             run_id: run.clone(),
-            path: Path::new(FAKE_WORKTREES).join(&key).join(run.as_str()),
+            path: Path::new(FAKE_WORKTREES).join(&key).join(thread.as_str()),
             repo,
             repo_key: key,
             subdir,
-            branch: format!("reno/{run}"),
+            branch: format!("reno/{thread}"),
             base_sha: "0".repeat(40),
             status: WorkspaceStatus::Preparing,
             changes: None,
             created_at_ms: 0,
             updated_at_ms: 0,
         }))
+    }
+
+    async fn head(&self, workspace: &WorkspaceInfo) -> Result<String, WorkspaceError> {
+        let state = self.lock();
+        Ok(state
+            .heads
+            .get(&workspace.run_id)
+            .cloned()
+            .unwrap_or_else(|| workspace.base_sha.clone()))
+    }
+
+    async fn commit_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+        sha: &str,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError> {
+        let mut state = self.lock();
+        state.calls.push(format!("commit {} {sha}", workspace.run_id));
+        let Some(found) = state.commits.get(&(workspace.run_id.clone(), sha.to_owned())) else {
+            return Err(WorkspaceError::Unsafe(format!(
+                "{sha} is not a commit of this thread"
+            )));
+        };
+        let mut changes = found.clone();
+        if path.is_none() {
+            changes.patch = None;
+            changes.patch_truncated = false;
+        }
+        Ok(changes)
     }
 
     async fn dir_exists(&self, dir: &Path) -> bool {
@@ -496,6 +577,9 @@ impl Workspace for FakeWorkspace {
         &self,
         workspace: &WorkspaceInfo,
     ) -> Result<Vec<String>, WorkspaceError> {
+        self.lock()
+            .bases
+            .push(("protected".to_owned(), workspace.base_sha.clone()));
         Ok(self.protected_left(&workspace.run_id))
     }
 
@@ -506,6 +590,9 @@ impl Workspace for FakeWorkspace {
     ) -> Result<RunChanges, WorkspaceError> {
         let mut state = self.lock();
         state.calls.push(format!("diff {}", workspace.run_id));
+        state
+            .bases
+            .push(("diff".to_owned(), workspace.base_sha.clone()));
         let mut changes = state
             .diffs
             .get(&workspace.run_id)
@@ -524,6 +611,9 @@ impl Workspace for FakeWorkspace {
         paths: &[String],
     ) -> Result<(), WorkspaceError> {
         let mut state = self.lock();
+        state
+            .bases
+            .push(("revert".to_owned(), workspace.base_sha.clone()));
         state
             .reverted
             .push((workspace.run_id.clone(), paths.to_vec()));

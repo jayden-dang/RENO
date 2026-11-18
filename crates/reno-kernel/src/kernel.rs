@@ -28,9 +28,10 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
-    CleanTarget, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
-    RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, TriggerFireResult,
-    TriggerInfo, WorkspaceDiffResult, WorkspaceInfo, WorkspaceStatus,
+    CleanTarget, DiffScope, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
+    RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, ThreadCloseResult,
+    ThreadId, ThreadInfo, ThreadStatus, TriggerFireResult, TriggerInfo, WorkspaceDiffResult,
+    WorkspaceInfo, WorkspaceStatus,
 };
 use reno_proto::{
     ActionClass, CommandPattern, RULE_ADD_COMMAND_MAX_CHARS, RULE_ADD_DEFAULT_TOOL, RuleMatcher,
@@ -59,7 +60,7 @@ use crate::resume;
 use crate::router::{self, BotPreference, Candidate, RouteRequest};
 use crate::scheduler::{self, SchedCmd};
 use crate::shared::{Shared, SupCmd};
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceError};
 use crate::workspaces;
 
 /// How often `submit` mints a new id after the store says the last one exists.
@@ -67,6 +68,11 @@ const MINT_ATTEMPTS: usize = 8;
 
 /// The most ended runs the one-time report backfill looks at, newest first.
 const BACKFILL_MAX_RUNS: usize = 20_000;
+
+/// Whether `name` could be a git object name: 7 to 64 hexadecimal characters.
+fn is_object_name(name: &str) -> bool {
+    (7..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// What `shutdown` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +222,7 @@ impl Kernel {
         shared.refresh_runs().await?;
         shared.spawn(dispatcher::run(Arc::clone(&shared)));
         shared.spawn(runs_hub(Arc::clone(&shared)));
+        shared.spawn(crate::threads::reaper(Arc::clone(&shared)));
         shared.wake.notify_one();
         // Reports of runs that ended before the column existed: filled in the background, once,
         // after the daemon is up, so a large store does not slow the start.
@@ -302,8 +309,16 @@ impl Kernel {
             request.effort,
             &request.model_options,
         )?;
-        let cwd = request
-            .cwd
+        // A follow-up works where its thread does: the thread's folder, not whatever the caller
+        // sent.
+        let thread = match &request.thread {
+            Some(id) => Some(crate::threads::get(&self.shared, id).await?),
+            None => None,
+        };
+        let thread_cwd = thread.as_ref().and_then(|t| t.cwd.clone());
+        let cwd = thread_cwd
+            .as_deref()
+            .unwrap_or(&request.cwd)
             .to_str()
             .ok_or_else(|| KernelError::Invalid("the working directory is not UTF-8".into()))?
             .to_owned();
@@ -345,13 +360,14 @@ impl Kernel {
         for _ in 0..MINT_ATTEMPTS {
             let run = mint(&self.shared, RunId::from_suffix)?;
             let enqueued = db
-                .enqueue_routed_run(
-                    &task,
-                    &run,
-                    &planned.executor,
-                    planned.pin.as_ref(),
-                    &planned.decision,
-                )
+                .enqueue_routed_run(reno_store::RoutedRun {
+                    task: task.clone(),
+                    run: run.clone(),
+                    executor: planned.executor.clone(),
+                    bot: planned.pin.clone(),
+                    decision: planned.decision.clone(),
+                    thread: request.thread.clone(),
+                })
                 .await;
             match enqueued {
                 Ok(()) => {
@@ -360,7 +376,12 @@ impl Kernel {
                     return Ok((run, planned.decision));
                 }
                 Err(StoreError::AlreadyExists { .. }) => {}
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    return Err(match &request.thread {
+                        Some(thread) => KernelError::of_thread(error, thread),
+                        None => error.into(),
+                    });
+                }
             }
         }
         Err(KernelError::Invalid("no free run id".into()))
@@ -596,7 +617,7 @@ impl Kernel {
                         .await
                     {
                         Ok(()) => {
-                            workspaces::release_after_run(&self.shared, run).await;
+                            workspaces::run_ended(&self.shared, run);
                             self.shared.notify_status_changed();
                             self.shared.mark_runs_dirty();
                             return Ok(RunStatus::Cancelled);
@@ -640,24 +661,65 @@ impl Kernel {
     /// What `run` changed in its workspace against the base commit, and the patch of `path`.
     /// A workspace that was removed or lost, or a kernel with no `Workspace` port, has no
     /// changes to show: the files are empty, the branch and base are the recorded ones. No
-    /// workspace for the run: [`KernelError::WorkspaceNotFound`].
+    /// workspace for the run: [`KernelError::WorkspaceNotFound`]. The thread's changes: see
+    /// [`Kernel::workspace_diff_scoped`].
     pub async fn workspace_diff(
         &self,
         run: &RunId,
         path: Option<&str>,
     ) -> Result<WorkspaceDiffResult> {
+        self.workspace_diff_scoped(run, path, &DiffScope::Thread)
+            .await
+    }
+
+    /// Like [`Kernel::workspace_diff`], for what `scope` compares:
+    ///
+    /// - [`DiffScope::Thread`]: the thread's worktree against the thread's base commit;
+    /// - [`DiffScope::Run`]: the worktree against the commit the branch stood at when `run`
+    ///   started (the thread's base for a run that recorded none), so a follow-up shows what it
+    ///   changed, not what the runs before it did;
+    /// - [`DiffScope::Commit`]: one commit of the thread's branch against its parent. A name
+    ///   that is not a hexadecimal object name, or not a commit of this thread, is
+    ///   [`KernelError::Invalid`].
+    pub async fn workspace_diff_scoped(
+        &self,
+        run: &RunId,
+        path: Option<&str>,
+        scope: &DiffScope,
+    ) -> Result<WorkspaceDiffResult> {
         let info = self.workspace(run).await?;
-        let changes = match (&self.shared.workspace, info.status) {
-            (
-                Some(port),
-                WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept,
-            ) => port.changes_since_base(&info, path).await?,
+        let row = self.shared.run_record(run).await?;
+        let mut shown = info.clone();
+        if *scope == DiffScope::Run
+            && let Some(start) = row.start_sha.as_ref()
+        {
+            shown.base_sha.clone_from(start);
+        }
+        if let DiffScope::Commit { sha } = scope
+            && !is_object_name(sha)
+        {
+            return Err(KernelError::Invalid(
+                "a commit is named by 7 to 64 hexadecimal characters".into(),
+            ));
+        }
+        let live = matches!(
+            info.status,
+            WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept
+        );
+        let changes = match (&self.shared.workspace, live, scope) {
+            (Some(port), true, DiffScope::Commit { sha }) => {
+                port.commit_changes(&shown, sha, path).await.map_err(|error| match error {
+                    WorkspaceError::Unsafe(why) => KernelError::Invalid(why),
+                    other => other.into(),
+                })?
+            }
+            (Some(port), true, _) => port.changes_since_base(&shown, path).await?,
             _ => crate::workspace::RunChanges::default(),
         };
         let mut result = WorkspaceDiffResult {
-            run_id: info.run_id,
-            branch: info.branch,
-            base_sha: info.base_sha,
+            run_id: run.clone(),
+            branch: shown.branch,
+            base_sha: shown.base_sha,
             commits: changes.commits,
             files: changes.files,
             patch: changes.patch,
@@ -668,7 +730,6 @@ impl Kernel {
         }
         // A file may hold a secret of the run: what is shown has the values redacted like the
         // journal. When the values cannot be read, the patch is withheld (the paths stay).
-        let row = self.shared.run_record(run).await?;
         match dispatcher::redactor_for(&self.shared, &row).await {
             Ok(None) => {}
             Ok(Some(redactor)) => {
@@ -719,6 +780,33 @@ impl Kernel {
             return Err(KernelError::ShuttingDown);
         }
         workspaces::clean(&self.shared, target, force).await
+    }
+
+    /// The thread `run` belongs to.
+    pub async fn run_thread(&self, run: &RunId) -> Result<ThreadId> {
+        Ok(self.shared.run_record(run).await?.thread_id)
+    }
+
+    /// One thread, with its runs and its worktree. [`KernelError::ThreadNotFound`] when there is
+    /// none.
+    pub async fn thread(&self, thread: &ThreadId) -> Result<ThreadInfo> {
+        crate::threads::get(&self.shared, thread).await
+    }
+
+    /// Threads in one of `status` (all when `None` or empty), most recently changed first.
+    pub async fn threads(&self, status: Option<&[ThreadStatus]>) -> Result<Vec<ThreadInfo>> {
+        crate::threads::list(&self.shared, status.unwrap_or_default()).await
+    }
+
+    /// Closes a thread and releases its worktree: removed when it holds nothing unmerged, kept
+    /// when it does (a branch with unmerged commits is deleted only with `force`).
+    /// [`KernelError::ThreadBusy`] while one of its runs is queued or live. A thread already
+    /// closed is closed again, which lets `force` remove a worktree that was kept.
+    pub async fn close_thread(&self, thread: &ThreadId, force: bool) -> Result<ThreadCloseResult> {
+        if self.shared.root.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
+        crate::threads::close(&self.shared, thread, force).await
     }
 
     /// One run.
@@ -1273,6 +1361,10 @@ pub struct TaskRequest {
     /// Allow a write run in `cwd` when it is not a git repository, as a bot's `in_place_writes`
     /// does. A git repository is never written in place.
     pub in_place: bool,
+    /// Continue this thread: the run works in its worktree, on its branch, in its folder.
+    /// Refused while a run of the thread is live ([`KernelError::ThreadBusy`]) and for a thread
+    /// whose worktree was removed ([`KernelError::ThreadClosed`]).
+    pub thread: Option<ThreadId>,
 }
 
 impl TaskRequest {
@@ -1287,6 +1379,7 @@ impl TaskRequest {
             effort: None,
             model_options: BTreeMap::new(),
             in_place: false,
+            thread: None,
         }
     }
 
@@ -1322,6 +1415,13 @@ impl TaskRequest {
     #[must_use]
     pub fn model(mut self, model: Option<String>) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Continues `thread`.
+    #[must_use]
+    pub fn thread(mut self, thread: Option<ThreadId>) -> Self {
+        self.thread = thread;
         self
     }
 

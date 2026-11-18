@@ -1054,11 +1054,12 @@ async fn a_cron_trigger_with_a_cwd_runs_in_a_worktree_of_that_repository() {
     let made = runs(&fx).await;
     assert_eq!(made.len(), 1);
     let cwd = m.log().specs[0].cwd.clone();
+    let thread = fx.kernel.run_thread(&made[0].id).await.unwrap();
     assert_eq!(
         cwd,
         std::path::PathBuf::from(crate::FAKE_WORKTREES)
             .join("app-000000000000")
-            .join(made[0].id.as_str()),
+            .join(thread.as_str()),
         "the run works in a worktree, never in the repository itself"
     );
     assert_ne!(cwd, std::path::PathBuf::from("/repos/app"));

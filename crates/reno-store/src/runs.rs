@@ -21,7 +21,7 @@
 use reno_proto::defs::{BotPin, DefKind};
 use reno_proto::{
     ExecutorId, NotResumed, RoutingDecision, RunId, RunReport, RunStatus, SessionRef, StopDetail,
-    TaskId,
+    TaskId, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -102,6 +102,13 @@ pub struct RunRecord {
     pub resume_prompt: Option<String>,
     /// The last report the run's agent made, until the run is queued or resumed again.
     pub report: Option<RunReport>,
+    /// The thread the run belongs to: the conversation whose worktree it works in.
+    pub thread_id: ThreadId,
+    /// The run it follows: the thread's previous run, when this one is a follow-up.
+    pub parent_run: Option<RunId>,
+    /// The commit the thread's branch stood at when the run first started; `None` for a run
+    /// with no worktree and for one not yet started.
+    pub start_sha: Option<String>,
     /// When it was enqueued.
     pub created_at: i64,
     /// When it first ran.
@@ -172,7 +179,8 @@ const RUN_COLS: &str = "id, task_id, executor, model, status, lease_owner, lease
      (SELECT spec FROM tasks WHERE tasks.id = runs.task_id), \
      COALESCE((SELECT MAX(ts) FROM events \
                WHERE subject_type = 'run' AND subject_id = runs.id), runs.created_at), \
-     bot_name, bot_version, stop, not_resumed, resume_prompt, report";
+     bot_name, bot_version, stop, not_resumed, resume_prompt, report, \
+     thread_id, parent_run, start_sha";
 
 fn json_col<T: serde::de::DeserializeOwned>(text: Option<String>, what: &str) -> Result<Option<T>> {
     text.map(|text| {
@@ -207,6 +215,9 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
     let not_resumed: Option<String> = row.get(22)?;
     let resume_prompt = row.get(23)?;
     let report: Option<String> = row.get(24)?;
+    let thread_id: Option<String> = row.get(25)?;
+    let parent_run: Option<String> = row.get(26)?;
+    let start_sha = row.get(27)?;
     Ok((|| {
         let id_u32 = |v: Option<i64>| {
             v.map(|v| u32::try_from(v).map_err(|_| StoreError::Corrupt(format!("bad pid {v}"))))
@@ -246,6 +257,12 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
             not_resumed: json_col(not_resumed, "not_resumed")?,
             resume_prompt,
             report: json_col(report, "report")?,
+            thread_id: match thread_id {
+                Some(thread) => parse_id(&thread, "thread id")?,
+                None => return Err(StoreError::Corrupt(format!("run {id} has no thread"))),
+            },
+            parent_run: parent_run.map(|run| parse_id(&run, "parent run id")).transpose()?,
+            start_sha,
             created_at,
             started_at,
             ended_at,
@@ -305,15 +322,26 @@ pub(crate) fn tx_create_task(conn: &Connection, task: &NewTask, now: i64) -> Res
     )
 }
 
-pub(crate) fn tx_enqueue_run(
-    conn: &Connection,
-    task: &TaskId,
-    run: &RunId,
-    executor: &ExecutorId,
-    bot: Option<&BotPin>,
-    routing: Option<&RoutingDecision>,
-    now: i64,
-) -> Result<()> {
+/// A run to queue.
+pub(crate) struct NewRun<'a> {
+    pub(crate) task: &'a TaskId,
+    pub(crate) run: &'a RunId,
+    pub(crate) executor: &'a ExecutorId,
+    pub(crate) bot: Option<&'a BotPin>,
+    pub(crate) routing: Option<&'a RoutingDecision>,
+    /// The thread to continue; `None` starts a thread of its own, `thr_` plus the run's suffix.
+    pub(crate) thread: Option<&'a ThreadId>,
+}
+
+pub(crate) fn tx_enqueue_run(conn: &Connection, new: &NewRun<'_>, now: i64) -> Result<()> {
+    let NewRun {
+        task,
+        run,
+        executor,
+        bot,
+        routing,
+        thread,
+    } = *new;
     let task_exists = conn
         .prepare_cached("SELECT 1 FROM tasks WHERE id = ?1")
         .db()?
@@ -333,9 +361,11 @@ pub(crate) fn tx_enqueue_run(
             id: format!("bot/{} version {}", bot.name, bot.version),
         });
     }
+    let (thread_id, parent) = crate::threads::tx_attach(conn, task, run, thread, now)?;
     conn.prepare_cached(
-        "INSERT INTO runs (id, task_id, executor, status, created_at, bot_name, bot_version)
-         VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6)",
+        "INSERT INTO runs (id, task_id, executor, status, created_at, bot_name, bot_version,
+                           thread_id, parent_run)
+         VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8)",
     )
     .db()?
     .execute(params![
@@ -344,7 +374,9 @@ pub(crate) fn tx_enqueue_run(
         executor.as_str(),
         now,
         bot.map(|b| b.name.as_str()),
-        bot.map(|b| b.version)
+        bot.map(|b| b.version),
+        thread_id.as_str(),
+        parent.as_ref().map(RunId::as_str),
     ])
     .map_err(|e| {
         if is_unique_violation(&e) {
@@ -362,7 +394,7 @@ pub(crate) fn tx_enqueue_run(
         "run.enqueued",
         ("run", run.as_str()),
         None,
-        &json!({ "task": task, "executor": executor, "bot": bot }),
+        &json!({ "task": task, "executor": executor, "bot": bot, "thread": thread_id, "parent": parent }),
     )?;
     match routing {
         Some(decision) => crate::routing::tx_put_routing(conn, run, executor, decision, now),
@@ -744,7 +776,18 @@ impl Store {
     ) -> Result<()> {
         let (task, run, executor) = (task.clone(), run.clone(), executor.clone());
         self.write(Durability::Normal, move |c| {
-            tx_enqueue_run(c, &task, &run, &executor, None, None, now)
+            tx_enqueue_run(
+                c,
+                &NewRun {
+                    task: &task,
+                    run: &run,
+                    executor: &executor,
+                    bot: None,
+                    routing: None,
+                    thread: None,
+                },
+                now,
+            )
         })
         .await
     }
@@ -762,7 +805,18 @@ impl Store {
     ) -> Result<()> {
         let (task, run, executor, bot) = (task.clone(), run.clone(), executor.clone(), bot.clone());
         self.write(Durability::Normal, move |c| {
-            tx_enqueue_run(c, &task, &run, &executor, Some(&bot), None, now)
+            tx_enqueue_run(
+                c,
+                &NewRun {
+                    task: &task,
+                    run: &run,
+                    executor: &executor,
+                    bot: Some(&bot),
+                    routing: None,
+                    thread: None,
+                },
+                now,
+            )
         })
         .await
     }

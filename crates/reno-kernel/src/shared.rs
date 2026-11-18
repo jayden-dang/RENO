@@ -224,6 +224,8 @@ pub(crate) struct Shared {
     pub(crate) wake: Notify,
     /// Wakes the runs hub: some run changed.
     pub(crate) runs_dirty: Notify,
+    /// Wakes the thread reaper: a thread went idle or closed, so its next deadline may differ.
+    pub(crate) thread_idle: Notify,
     live: Mutex<HashMap<RunId, LiveRun>>,
     /// Bumped whenever a run enters or leaves `live`, for subscribers waiting for a queued run.
     pub(crate) live_changed: watch::Sender<u64>,
@@ -304,6 +306,7 @@ impl Shared {
             tracker: TaskTracker::new(),
             wake: Notify::new(),
             runs_dirty: Notify::new(),
+            thread_idle: Notify::new(),
             live: Mutex::new(HashMap::new()),
             live_changed: watch::channel(0).0,
             approvals: Approvals::new(),

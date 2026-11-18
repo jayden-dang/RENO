@@ -129,7 +129,9 @@ impl Supervisor {
         }
     }
 
-    /// The run's worktree, when it has an open one; `None` for a run that works in place.
+    /// The run's worktree, when it has an open one; `None` for a run that works in place. Its
+    /// base is where the run's branch stood when the run started, not the thread's base commit:
+    /// a run is judged on its own writes, not on what the runs before it left behind.
     async fn workspace_of_run(&mut self) -> Option<WorkspaceInfo> {
         self.shared.workspace.as_ref()?;
         if self.workspace.is_none() {
@@ -139,6 +141,22 @@ impl Supervisor {
                     tracing::warn!(run = %self.run, %error, "could not read the run's workspace");
                     return None;
                 }
+            };
+            let found = match found {
+                Some(mut info) => {
+                    match self.shared.run_record(&self.run).await {
+                        Ok(row) => {
+                            if let Some(start) = row.start_sha {
+                                info.base_sha = start;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(run = %self.run, %error, "could not read where the run started");
+                        }
+                    }
+                    Some(info)
+                }
+                None => None,
             };
             self.workspace = Some(found);
         }
