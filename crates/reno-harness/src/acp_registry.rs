@@ -424,6 +424,17 @@ pub fn agents_root() -> Option<PathBuf> {
     crate::adapter_install::adapters_root().and_then(|root| root.parent().map(|p| p.join("agents")))
 }
 
+/// An empty folder of Reno's own, where a sign-in or status client starts an agent and has it open
+/// its session: not the home directory, which some agents refuse as a workspace (Autohand
+/// answers "Unsafe workspace"). Falls back to the system's temporary folder.
+pub(crate) fn probe_dir() -> PathBuf {
+    let dir = agents_root()
+        .map(|root| root.join(".probe"))
+        .unwrap_or_else(|| std::env::temp_dir().join("reno-acp-probe"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn agent_dir(agent: RegistryAgent) -> Option<PathBuf> {
     agents_root().map(|root| root.join(agent.registry_id()))
 }

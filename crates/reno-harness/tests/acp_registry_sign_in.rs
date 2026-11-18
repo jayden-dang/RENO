@@ -45,7 +45,7 @@ fn agents() -> &'static Path {
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let root = tempfile::tempdir().unwrap();
-        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini"] {
+        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini", "home-averse"] {
             let dir = root.path().join(format!("fake-{mode}"));
             std::fs::create_dir_all(&dir).unwrap();
             let state = dir.join("state");
@@ -283,6 +283,17 @@ async fn an_agent_signed_in_already_says_so_and_signs_out_by_its_logout() {
     agent.sign_out_registry().await.expect("signed out");
     let state = agent.registry_sign_in_state().await.expect("it says");
     assert!(!state.signed_in, "{state:?}");
+}
+
+/// Autohand won't start in the home directory, so the sign-in client's process and its session
+/// run in a folder of Reno's own.
+#[tokio::test]
+async fn an_agent_that_refuses_the_home_directory_is_asked_elsewhere() {
+    let state = harness("home-averse")
+        .registry_sign_in_state()
+        .await
+        .expect("it starts and says");
+    assert!(state.signed_in, "{state:?}");
 }
 
 #[tokio::test]

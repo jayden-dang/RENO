@@ -446,9 +446,7 @@ impl AcpExecutor {
             let mut cmd = Command::new(&exe);
             cmd.args(&args).args(extra);
             crate::compose_child_path(&mut cmd, &exe);
-            if let Some(home) = std::env::var_os("HOME") {
-                cmd.current_dir(home);
-            }
+            cmd.current_dir(crate::acp_registry::probe_dir());
             self.launcher().registry_environment(&mut cmd);
             if let Some(browser) = &browser {
                 cmd.env("BROWSER", browser);
@@ -575,7 +573,7 @@ impl AcpExecutor {
                 // Some agents start their sign-in there (Factory Droid mints
                 // its device code in that answer, and its `authenticate`
                 // then opens the page and waits for the pairing).
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let cwd = crate::acp_registry::probe_dir();
                 let can_log_out = initialized
                     .pointer("/agentCapabilities/auth/logout")
                     .is_some();
@@ -591,7 +589,7 @@ impl AcpExecutor {
                             &mut incoming,
                             AccessMode::FullAccess,
                             "session/new",
-                            json!({ "cwd": home, "mcpServers": [] }),
+                            json!({ "cwd": cwd, "mcpServers": [] }),
                             Some(on_page),
                         ),
                     )
@@ -634,7 +632,7 @@ impl AcpExecutor {
                                 &mut incoming,
                                 AccessMode::FullAccess,
                                 "session/new",
-                                json!({ "cwd": home, "mcpServers": [] }),
+                                json!({ "cwd": cwd, "mcpServers": [] }),
                                 Some(on_page),
                             );
                             match tokio::time::timeout(self.probe_timeout * 3, probe).await {
@@ -709,7 +707,7 @@ impl AcpExecutor {
     /// sign in. Errs when it can't tell (it didn't start, it timed out).
     pub async fn registry_sign_in_state(&self) -> Result<RegistrySignIn, HarnessError> {
         let (mut child, client, mut incoming, initialized) = self.start_registry().await?;
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let cwd = crate::acp_registry::probe_dir();
         let session = tokio::time::timeout(
             self.probe_timeout * 3,
             request_draining(
@@ -717,7 +715,7 @@ impl AcpExecutor {
                 &mut incoming,
                 AccessMode::FullAccess,
                 "session/new",
-                json!({ "cwd": home, "mcpServers": [] }),
+                json!({ "cwd": cwd, "mcpServers": [] }),
             ),
         )
         .await;
@@ -792,9 +790,7 @@ impl AcpExecutor {
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         crate::compose_child_path(&mut cmd, &exe);
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.current_dir(home);
-        }
+        cmd.current_dir(crate::acp_registry::probe_dir());
         self.launcher().registry_environment(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -867,9 +863,7 @@ impl AcpExecutor {
                 let mut replaced = Command::new(&resolved);
                 replaced.args(&extra);
                 crate::compose_child_path(&mut replaced, &resolved);
-                if let Some(home) = std::env::var_os("HOME") {
-                    replaced.current_dir(home);
-                }
+                replaced.current_dir(crate::acp_registry::probe_dir());
                 // (The environment the agent's own launch gets, kept.)
                 self.launcher().registry_environment(&mut replaced);
                 for (key, value) in cmd.as_std().get_envs() {
