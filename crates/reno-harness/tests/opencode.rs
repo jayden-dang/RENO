@@ -1023,10 +1023,7 @@ async fn cancel_aborts_the_session_ends_interrupted_and_takes_the_server_down() 
             1,
             "{version}"
         );
-        assert!(
-            until_gone(i32::try_from(record.pid).unwrap()).await,
-            "the server outlived the run"
-        );
+        assert!(until_gone(record.pid).await, "the server outlived the run");
     }
 }
 
