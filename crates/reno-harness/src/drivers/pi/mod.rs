@@ -8,8 +8,11 @@
 //! agent directory with `--no-session`, sent only `get_state`, `get_commands`,
 //! `get_available_models` and `get_available_thinking_levels` (never a prompt, so no model was
 //! asked anything), and had Reno's MCP bridge loaded through `--extension` against a stub MCP
-//! server. A whole run (prompt, settle, steer, abort) has not been driven against a real Pi: the
-//! live test (`tests/pi_live.rs`, `--ignored`, a local mock provider) does that.
+//! server. Seeded with an extension command, a prompt template and an `mcp.json` server, that Pi
+//! listed all three without the isolation flags and none with them (the MCP server was not even
+//! started); with no provider key in a clean environment it listed 0 models, with one key 17. A
+//! whole run (prompt, settle, steer, abort) has not been driven against a real Pi: the live test
+//! (`tests/pi.rs`, `--ignored`, `RENO_PI_LIVE=1`, Pi's own mock provider) does that.
 //!
 //! - `wire::pi` is sans-IO: frames become [`ExecEvent`]s there, dialogs become questions, a model
 //!   catalog becomes `ModelInfo`s. This module only does the I/O.
@@ -746,15 +749,6 @@ impl Run {
                 Err(_) => Startup::Failed("Pi startup timed out".into()),
             },
         };
-        // Everything Pi started goes with it, whichever way this ends: traced before anything
-        // can reparent it.
-        #[cfg(unix)]
-        let tree = match self.pi.child.id() {
-            Some(pid) => crate::process::descendants(pid).await,
-            None => Vec::new(),
-        };
-        #[cfg(not(unix))]
-        let tree = Vec::new();
         let (stop, result, diagnostic) = match startup {
             Startup::Ready(state, backlog) => {
                 let mut player = Player::new(&mut self, state);
@@ -763,7 +757,7 @@ impl Run {
             Startup::Failed(why) => (StopReason::Error, None, Some(why)),
             Startup::Cancelled => (StopReason::Interrupted, None, None),
             Startup::ConsumerGone => {
-                self.teardown(tree).await;
+                self.teardown().await;
                 return;
             }
         };
@@ -774,7 +768,7 @@ impl Run {
             reason: None,
         };
         let _ = self.event_tx.send(done).await;
-        self.teardown(tree).await;
+        self.teardown().await;
     }
 
     /// Ask Pi for its model and thinking level and its state; say what the run starts as.
@@ -874,9 +868,17 @@ impl Run {
         }
     }
 
-    /// End Pi and everything it started: close its stdin (its own orderly shutdown), give it a
-    /// moment, then SIGTERM and SIGKILL to the process group and the descendants traced earlier.
-    async fn teardown(&mut self, tree: Vec<crate::process::Tracked>) {
+    /// End Pi and everything it started: trace its descendants while it still parents them,
+    /// close its stdin (its own orderly shutdown), give it a moment, then SIGTERM and SIGKILL to
+    /// the process group and the descendants traced.
+    async fn teardown(&mut self) {
+        #[cfg(unix)]
+        let tree = match self.pi.child.id() {
+            Some(pid) => crate::process::descendants(pid).await,
+            None => Vec::new(),
+        };
+        #[cfg(not(unix))]
+        let tree = Vec::new();
         self.pi.transport.close_input();
         let _ = tokio::time::timeout(
             self.kill_grace.min(Duration::from_secs(1)),

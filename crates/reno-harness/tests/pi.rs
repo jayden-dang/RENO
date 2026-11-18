@@ -333,6 +333,19 @@ async fn the_pi_a_run_spawns_is_reported_and_gone_when_the_run_ends() {
     assert!(until_gone(record.pid as i32).await, "pi was left running");
 }
 
+#[tokio::test]
+async fn what_a_tool_started_goes_with_the_run() {
+    let bench = Bench::new();
+    let events = run(&bench, "scenario:child").await;
+    assert_eq!(done(&events).0, StopReason::Completed);
+    let child = bench
+        .logged()
+        .iter()
+        .find_map(|entry| entry["child"].as_i64())
+        .unwrap() as i32;
+    assert!(until_gone(child).await, "a tool's process was left running");
+}
+
 // ---------------------------------------------------------------------------------------------
 // What is sent to Pi: never a write to its settings
 // ---------------------------------------------------------------------------------------------

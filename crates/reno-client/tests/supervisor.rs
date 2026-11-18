@@ -72,7 +72,7 @@ async fn the_mirror_loads_every_feed() {
     assert_eq!(state.connection(), ConnectionStatus::Connected);
     assert!(state.offline().is_none());
     assert_eq!(state.triggers().len(), 4);
-    assert_eq!(state.executors().len(), 8);
+    assert_eq!(state.executors().len(), 9);
     assert_eq!(state.defs().defs.len(), 10);
     for feed in [
         Feed::Runs,

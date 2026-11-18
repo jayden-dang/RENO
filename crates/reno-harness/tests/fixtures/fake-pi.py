@@ -9,6 +9,7 @@ Never talks to a model, a network or a Pi settings directory.
 """
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -311,6 +312,13 @@ def play(cmd):
     elif prompt == "scenario:which-model":
         start(cmd)
         assistant("%s/%s/%s" % (state["model"]["provider"], state["model"]["id"], state["thinking"]))
+        settle()
+    elif prompt == "scenario:child":
+        # A tool's subprocess: it outlives Pi unless the run is torn down with its group.
+        child = subprocess.Popen(["sleep", "300"])
+        log({"child": child.pid})
+        start(cmd)
+        assistant("spawned")
         settle()
     elif prompt == "scenario:env":
         start(cmd)
