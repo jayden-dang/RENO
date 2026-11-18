@@ -515,7 +515,10 @@ async fn audit_one(id: &str, index: &Path, dir: &Path) -> Value {
     // Reno's own five are refused by install (they have native drivers): record that, then
     // install under an alias to see what the registry's build does. Off Reno's built-in path.
     if reg::built_in(id).is_some() {
-        let refused = reg::install(&entry, None).await.err().map(|e| e.to_string());
+        let refused = reg::install(&entry, None)
+            .await
+            .err()
+            .map(|e| e.to_string());
         row["install_refusal"] = json!(refused);
         entry.id = format!("audit-{id}");
         row["installed_as"] = json!(entry.id);

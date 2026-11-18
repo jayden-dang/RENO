@@ -49,6 +49,8 @@ const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const UV_TIMEOUT: Duration = Duration::from_secs(600);
 const MARKER: &str = ".reno-install-ok";
+/// What Reno calls itself to a download host: some turn a client with no name away.
+const USER_AGENT: &str = concat!("reno/", env!("CARGO_PKG_VERSION"));
 
 /// One agent of the index, as published.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -937,6 +939,7 @@ async fn download_checked(
         return Err(failed("not an https address".into()));
     }
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| failed(e.to_string()))?;
@@ -1237,6 +1240,7 @@ pub async fn fetch_index(
     etag: Option<&str>,
 ) -> Result<(Option<Vec<u8>>, Option<String>), String> {
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1267,6 +1271,7 @@ pub async fn fetch_icon(url: &str) -> Option<String> {
         return None;
     }
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
