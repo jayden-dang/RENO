@@ -231,7 +231,11 @@ pub fn declaration(id: &HarnessId) -> Option<MaintenanceDecl> {
                     steps: &["brew upgrade --cask codex"],
                     pinned: None,
                     check: Some(CheckDecl {
-                        command: "brew outdated --cask --json=v2 codex",
+                        // `brew outdated` exits 1 exactly when something IS outdated (seen on the
+                        // owner's Mac, 2026-11-18), and the check counts only exit 0 as an answer.
+                        // `|| true` keeps the answer; a real failure prints no JSON, so the parser
+                        // still says nothing.
+                        command: "brew outdated --cask --json=v2 codex || true",
                         parse: CheckParse::BrewOutdatedJson,
                     }),
                     self_updating: false,
@@ -378,6 +382,20 @@ mod tests {
                 .latest(outdated, Some("0.170.0"))
                 .as_deref(),
             Some("0.171.0")
+        );
+        // Homebrew's real answer on the owner's Mac (pretty-printed, exit 1 under `|| true`).
+        let real = "{\n  \"formulae\": [],\n  \"casks\": [\n    {\n      \"name\": \"codex\",\n      \"installed_versions\": [\n        \"0.169.0\"\n      ],\n      \"current_version\": \"0.170.0\",\n      \"pinned\": false,\n      \"pinned_version\": null\n    }\n  ]\n}\n";
+        assert_eq!(
+            CheckParse::BrewOutdatedJson
+                .latest(real, Some("0.169.0"))
+                .as_deref(),
+            Some("0.170.0")
+        );
+        // A brew that failed (and was let through by `|| true`) prints no JSON: no answer.
+        assert_eq!(
+            CheckParse::BrewOutdatedJson
+                .latest("Error: Cask 'codex' is not installed.\n", Some("0.169.0")),
+            None
         );
         // Homebrew lists nothing when the cask is current: the newest is what is installed.
         assert_eq!(
