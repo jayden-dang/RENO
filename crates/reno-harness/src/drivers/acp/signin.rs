@@ -100,6 +100,10 @@ pub struct RegistrySignIn {
     /// It offers ACP's `logout`.
     pub can_sign_out: bool,
     pub methods: Vec<AuthMethodInfo>,
+    /// Set when the agent is not set up rather than signed out (a missing configuration), with
+    /// what to do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_setup: Option<String>,
 }
 
 /// One way an agent offers to sign in (`initialize`'s `authMethods`).
@@ -387,6 +391,33 @@ pub(super) fn still_signed_out(error: &HarnessError) -> bool {
         || text.contains("authentication required")
         || text.contains("not logged in")
         || text.contains("please log in")
+}
+
+/// An agent whose configuration is missing (goose: -32603 "Configuration value not found:
+/// GOOSE_PROVIDER") is not set up: the hint names the environment variables to set, which the
+/// agent's own per-agent environment holds. `None` for any other error.
+pub(super) fn needs_setup(error: &HarnessError) -> Option<String> {
+    let text = error.to_string();
+    let lower = text.to_ascii_lowercase();
+    let at = lower.find("configuration value not found")?;
+    let mut vars: Vec<String> = text[at..]
+        .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .filter(|w| w.len() >= 4 && w.contains('_') && w.starts_with(|c: char| c.is_ascii_uppercase()))
+        .map(str::to_owned)
+        .take(1)
+        .collect();
+    // goose names the first missing one; it needs the pair.
+    if vars.iter().any(|v| v == "GOOSE_PROVIDER" || v == "GOOSE_MODEL") {
+        vars = vec!["GOOSE_PROVIDER".into(), "GOOSE_MODEL".into()];
+    }
+    Some(if vars.is_empty() {
+        "needs setup: the agent says its configuration is missing".to_owned()
+    } else {
+        format!(
+            "needs setup: set {} (and the provider's key) in the agent's environment",
+            vars.join(" and ")
+        )
+    })
 }
 
 /// Each line `stream` prints, reported (and any page in it opened).
@@ -755,6 +786,17 @@ impl AcpExecutor {
         let signed_in = match session {
             Ok(Ok(started)) => Some(started),
             Ok(Err(error)) if still_signed_out(&error) => None,
+            Ok(Err(error)) if needs_setup(&error).is_some() => {
+                return Ok(RegistrySignIn {
+                    signed_in: false,
+                    account: None,
+                    can_sign_out: initialized
+                        .pointer("/agentCapabilities/auth/logout")
+                        .is_some(),
+                    methods: auth_methods(&initialized),
+                    needs_setup: needs_setup(&error),
+                });
+            }
             Ok(Err(error)) => return Err(error),
             Err(_) => {
                 return Err(HarnessError::Protocol(format!(
@@ -774,6 +816,7 @@ impl AcpExecutor {
                 .pointer("/agentCapabilities/auth/logout")
                 .is_some(),
             methods: auth_methods(&initialized),
+            needs_setup: None,
         })
     }
 

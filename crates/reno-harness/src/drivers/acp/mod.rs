@@ -481,6 +481,9 @@ impl AcpExecutor {
             Ok(Ok(state)) if state.signed_in => SignedIn::Yes {
                 account: state.account,
             },
+            Ok(Ok(state)) if state.needs_setup.is_some() => SignedIn::No {
+                hint: state.needs_setup.unwrap_or_default(),
+            },
             Ok(Ok(_)) => SignedIn::No {
                 hint: format!(
                     "{} is signed out; sign in with the agent's own login",

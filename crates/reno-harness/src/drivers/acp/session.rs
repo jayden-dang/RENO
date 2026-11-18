@@ -341,6 +341,36 @@ pub(super) async fn request_draining_with(
     params: Value,
     on_page: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<Value, HarnessError> {
+    let first = request_once(client, incoming, access, method, params.clone(), on_page).await;
+    // Harn (and nothing in ACP) refuses a session that does not state an `environmentPolicy`.
+    // Asked again only when the agent says that is what is missing, with the policy its own
+    // command line defaults to: `inherited`, the environment Reno composed for it (its
+    // allowlisted one plus the agent's own), which Harn hands commands without any provider
+    // credential. Any other agent is never sent the field.
+    if method == "session/new"
+        && params.get("environmentPolicy").is_none()
+        && matches!(&first, Err(error) if environment_policy_missing(error))
+    {
+        let mut params = params;
+        params["environmentPolicy"] = json!({ "kind": "inherited" });
+        return request_once(client, incoming, access, method, params, on_page).await;
+    }
+    first
+}
+
+/// The agent refused `session/new` for want of an `environmentPolicy` (Harn's stable error code).
+fn environment_policy_missing(error: &HarnessError) -> bool {
+    matches!(error, HarnessError::Protocol(message) if message.contains("environment_policy.missing"))
+}
+
+async fn request_once(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    access: AccessMode,
+    method: &'static str,
+    params: Value,
+    on_page: Option<&(dyn Fn(String) + Send + Sync)>,
+) -> Result<Value, HarnessError> {
     let loading_session = matches!(method, "session/new" | "session/load" | "session/resume");
     let requested_session = params
         .get("sessionId")

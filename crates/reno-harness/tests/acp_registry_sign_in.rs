@@ -45,7 +45,7 @@ fn agents() -> &'static Path {
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let root = tempfile::tempdir().unwrap();
-        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "quiet-probe", "elicit", "kimi", "gemini", "home-averse"] {
+        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "quiet-probe", "elicit", "kimi", "gemini", "home-averse", "harn", "goose", "qoder"] {
             let dir = root.path().join(format!("fake-{mode}"));
             std::fs::create_dir_all(&dir).unwrap();
             let state = dir.join("state");
@@ -421,4 +421,50 @@ async fn a_quiet_probe_of_a_registry_agent_spawns_nothing_and_a_full_one_asks_it
         }
     );
     assert!(spawns("quiet-probe") >= 1, "a full probe starts the agent");
+}
+
+/// Harn refuses a session with no `environmentPolicy` (its own extension, not ACP's). Sent when
+/// an agent says it is missing, and only then: every other fixture refuses a session that has it.
+#[tokio::test]
+async fn an_agent_that_demands_an_environment_policy_is_given_one_and_others_never_are() {
+    let state = harness("harn")
+        .registry_sign_in_state()
+        .await
+        .expect("it starts and says");
+    assert!(state.signed_in, "{state:?}");
+    let state = harness("home-averse")
+        .registry_sign_in_state()
+        .await
+        .expect("an ordinary agent is asked as before");
+    assert!(state.signed_in, "{state:?}");
+}
+
+/// goose answers a session with -32603 "Configuration value not found: GOOSE_PROVIDER": it is
+/// not set up, which reads as that, with the variables to set.
+#[tokio::test]
+async fn a_missing_configuration_reads_as_needs_setup_with_the_variables() {
+    use reno_harness::exec::Executor;
+    use reno_proto::SignedIn;
+    let health = harness("goose").probe().await;
+    match health.signed_in {
+        SignedIn::No { hint } => {
+            assert!(hint.contains("needs setup"), "{hint}");
+            assert!(hint.contains("GOOSE_PROVIDER") && hint.contains("GOOSE_MODEL"), "{hint}");
+        }
+        other => panic!("needs setup, not {other:?}"),
+    }
+}
+
+/// qoder's `_meta` form names `node login`; the standard form runs the agent's own login.
+#[tokio::test]
+async fn a_wrong_legacy_command_is_not_run_when_the_standard_form_is_there() {
+    let (run, _) = sign_in("qoder", |_, _| {}).await;
+    run.outcome.expect("the standard form's login signs in");
+    assert!(
+        run.progress.iter().any(
+            |p| matches!(p, SignInProgress::OpenBrowser(u) if u.contains("user_code=ABCD-1234"))
+        ),
+        "{:?}",
+        run.progress
+    );
 }

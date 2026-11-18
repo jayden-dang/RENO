@@ -24,6 +24,14 @@
           accepted.
   home-averse  signed in, but refuses to run in the home directory (Autohand:
           "Unsafe workspace"): as its process's directory and as a session's.
+  harn    signed in, but `session/new` is refused (-32602, data code
+          `environment_policy.missing`) unless it carries `environmentPolicy`
+          (a Harn extension); every other mode refuses a session that carries it.
+  goose   `session/new` fails with -32603 "Configuration value not found:
+          GOOSE_PROVIDER", not an auth_required.
+  qoder   one terminal method in both forms: the standard (`type: terminal`,
+          `args: ["login"]`) and a wrong legacy `_meta["terminal-auth"]`
+          (`command: reno-no-such-node`).
   gemini  `authenticate` opens its page with the system's `open` (never
           $BROWSER) and waits for its loopback callback; a request that
           isn't the callback ends the sign-in.
@@ -76,7 +84,7 @@ home = os.path.realpath(os.environ.get("HOME", "/nonexistent"))
 if mode == "home-averse" and os.path.realpath(os.getcwd()) == home:
     sys.stderr.write("[ACP] Error: Unsafe workspace - This is your home directory.\n")
     sys.exit(1)
-if len(sys.argv) > 1 and sys.argv[1] == "login":
+if "login" in sys.argv[1:]:
     print("Please visit the following URL to finish authorization.", flush=True)
     print("Verification URL: https://auth.example.com/device?user_code=ABCD-1234", flush=True)
     sys.exit(0)
@@ -106,6 +114,9 @@ for line in sys.stdin:
             caps["auth"] = {"logout": {}}
             methods = [{"id": "device-pairing", "name": "Login"}, {"id": "api-key", "name": "API key",
                         "description": "Authenticate using a Factory API key set in the FACTORY_API_KEY environment variable."}]
+        elif mode == "qoder":
+            methods = [{"id": "qodercli-login-terminal", "name": "Login", "type": "terminal", "args": ["login"],
+                        "_meta": {"terminal-auth": {"command": "reno-no-such-node", "args": ["login"], "type": "terminal"}}}]
         elif mode == "kimi":
             methods = [{"id": "login", "name": "Login with Kimi account", "_meta": {"terminal-auth": {
                 "command": os.path.abspath(sys.argv[0]), "args": ["login"], "label": "Login", "env": {}, "type": "terminal"}}}]
@@ -146,6 +157,20 @@ for line in sys.stdin:
         else:
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
     elif method == "session/new":
+        has_policy = "environmentPolicy" in (message.get("params") or {})
+        if mode == "harn" and not has_policy:
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "[environment_policy.missing] runnable session admission requires `environmentPolicy`",
+                  "data": {"accepted": ["inherited", "isolated", "granted"], "code": "environment_policy.missing", "field": "environmentPolicy"}}})
+            continue
+        if mode != "harn" and has_policy:
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "Invalid params: unknown field `environmentPolicy`"}})
+            continue
+        if mode == "harn" and (message["params"]["environmentPolicy"] or {}).get("kind") != "inherited":
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unexpected policy kind"}})
+            continue
+        if mode == "goose":
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": "Internal error: Failed to resolve provider and model: Configuration value not found: GOOSE_PROVIDER"}})
+            continue
         if mode == "home-averse" and os.path.realpath((message.get("params") or {}).get("cwd", "")) == home:
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "Unsafe workspace: your home directory"}})
             continue
