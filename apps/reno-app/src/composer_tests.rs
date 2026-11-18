@@ -1175,3 +1175,36 @@ fn grok_lists_its_levels_on_home_and_its_window_is_read_only(cx: &mut TestAppCon
         "a read-only window has no sizes to pick"
     );
 }
+
+#[gpui::test]
+fn a_live_opus_runs_effort_changes_too(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-opus-5-5"));
+    click(vcx, "pick-model-claude-opus-5-5");
+    let keeper = crate::tests::run_id("keeper1");
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .and_then(|r| r.model.clone())
+                .as_deref()
+                == Some("claude-opus-5-5")
+        })
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-max"));
+    click(vcx, "effort-cell-max");
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state().run(&keeper).and_then(|r| r.effort) == Some(reno_proto::Effort::Max)
+        })
+    });
+}
