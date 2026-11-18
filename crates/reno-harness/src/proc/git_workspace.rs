@@ -23,7 +23,8 @@
 //! `status` there (`status` can refresh the index). `status` runs only inside a Reno worktree.
 //! (Inside a run's own worktree, never the user's checkout, `protected_changes` and
 //! `revert_protected` also run `diff`, `ls-files`, `ls-tree`, `checkout`, `rm --cached`, `clean`
-//! and `commit`, to undo a write to a protected path.)
+//! and `commit`, to undo a write to a protected path; `changes_since_base` runs only read-only
+//! `diff`, `ls-files` and `rev-list` there, never `add`, and never follows a symlink.)
 //! The branch is cut from a commit sha resolved first, so the user's branch never moves. Git hooks
 //! are disabled for the commands Reno runs, so a user's `post-checkout` hook does not fire in a
 //! worktree an agent will work in.
