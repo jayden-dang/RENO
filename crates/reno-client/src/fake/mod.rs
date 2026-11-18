@@ -41,6 +41,7 @@ mod changes;
 pub mod data;
 mod extras;
 pub mod files;
+mod history;
 mod jobs;
 mod script;
 pub mod terminals;
@@ -1234,7 +1235,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::DefValidate, _, _>(def_validate)
         .subscription::<reno_proto::DefsWatch, _, _, _>(defs_watch)
         .notification::<SubGap, _, _>(|_: SubGapParams, _| async {});
-    terminals::add(files::add(router, shared), shared)
+    history::add(terminals::add(files::add(router, shared), shared), shared)
 }
 
 /// A simplified `def.validate`: the body must be an object named like the file, and a bot needs

@@ -17,7 +17,7 @@
 
 mod browse;
 pub mod error;
-mod git;
+pub(crate) mod git;
 pub(crate) mod sandbox;
 mod search;
 mod watch;

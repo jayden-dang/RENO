@@ -722,7 +722,8 @@ expression: protocol_schema()
     "executor.usage",
     "threads",
     "files",
-    "terminals"
+    "terminals",
+    "history"
   ],
   "methods": [
     {
@@ -7323,6 +7324,19 @@ expression: protocol_schema()
                   "sha"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "Only what is not committed: the worktree against `HEAD`, staged, unstaged and untracked\nfiles, no commits (`base_sha` is `HEAD`). Needs feature `history`.",
+                "properties": {
+                  "type": {
+                    "const": "working_tree",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -7447,6 +7461,10 @@ expression: protocol_schema()
           },
           "branch": {
             "description": "The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that\nrun's own branch name).",
+            "type": "string"
+          },
+          "checksum": {
+            "description": "A digest of `files`, `patch` and `patch_truncated` as sent: it changes when the diff\ndoes, so a client can tell that the diff it shows went stale (`workspace.file_sources`\ntakes it back). Empty from a daemon without feature `history`.",
             "type": "string"
           },
           "commits": {
@@ -8357,6 +8375,589 @@ expression: protocol_schema()
           "files"
         ],
         "title": "GitStatusResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "git.log",
+      "params": {
+        "$defs": {
+          "GitLogRev": {
+            "description": "Which commits a log lists. Never a free-form revision: a name a client typed is not handed\nto git.",
+            "oneOf": [
+              {
+                "const": "branch",
+                "description": "Everything reachable from the worktree's `HEAD` (the thread's branch): the history the\nbranch was cut from too. The default.",
+                "type": "string"
+              },
+              {
+                "const": "thread",
+                "description": "Only the thread's own commits: those after its base commit (`base..HEAD`). Needs a\nworktree.",
+                "type": "string"
+              },
+              {
+                "const": "run",
+                "description": "Only the commits made since the run started (`start..HEAD`; the thread's base for a run\nthat recorded no start). Needs a worktree.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `git.log`.",
+        "properties": {
+          "cursor": {
+            "description": "The previous page's `nextCursor`; the first page when absent.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "At most this many ([`GIT_LOG_DEFAULT_LIMIT`] when absent; cut to [`GIT_LOG_MAX_LIMIT`]).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rev": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/GitLogRev"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which commits; the whole branch when absent."
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose tree to read."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "GitLogParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "GitCommit": {
+            "description": "One commit of a log.",
+            "properties": {
+              "authorKey": {
+                "description": "A stable key for the author, to pick an avatar or a color by: a SHA-256 of the lower-cased\nemail. The email itself never crosses the wire.",
+                "type": "string"
+              },
+              "authorName": {
+                "description": "The author's name.",
+                "type": "string"
+              },
+              "parents": {
+                "description": "Its parents, first parent first; none for a root commit. A parent may be absent from the\npage (and from a shallow repository): a lane graph treats that as a line that leaves.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "refs": {
+                "description": "The branches, tags and remote branches that point at it (and `HEAD`).",
+                "items": {
+                  "$ref": "#/$defs/GitRef"
+                },
+                "type": "array"
+              },
+              "sha": {
+                "description": "The full object name.",
+                "type": "string"
+              },
+              "subject": {
+                "description": "The first line of the message, redacted like the journal.",
+                "type": "string"
+              },
+              "timeMs": {
+                "description": "When it was authored, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha",
+              "parents",
+              "subject",
+              "authorName",
+              "authorKey",
+              "timeMs"
+            ],
+            "type": "object"
+          },
+          "GitRef": {
+            "description": "A ref that points at a commit.",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/GitRefKind",
+                "description": "What it is."
+              },
+              "name": {
+                "description": "The short name: `main`, `v1.0`, `origin/main`, or `HEAD`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "GitRefKind": {
+            "description": "What a ref is.",
+            "oneOf": [
+              {
+                "const": "branch",
+                "description": "A local branch.",
+                "type": "string"
+              },
+              {
+                "const": "tag",
+                "description": "A tag (an annotated tag is shown on the commit it points at).",
+                "type": "string"
+              },
+              {
+                "const": "head",
+                "description": "The commit `HEAD` is on; its `name` is `HEAD`.",
+                "type": "string"
+              },
+              {
+                "const": "remote",
+                "description": "A remote-tracking branch, such as `origin/main`.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `git.log`: newest first, in topological order (a commit before all its parents), so\na client can lay the lanes out from `parents` alone.",
+        "properties": {
+          "commits": {
+            "description": "One page of commits.",
+            "items": {
+              "$ref": "#/$defs/GitCommit"
+            },
+            "type": "array"
+          },
+          "head": {
+            "description": "The commit `HEAD` is on now; absent in a repository with no commits, or none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "description": "Pass it as `cursor` for the next page; absent on the last page. It pins the commit the\nlisting started from, so a commit made while a person scrolls does not shift the pages.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "description": "The tree is in a repository. False for a folder that is none (no commits, no error).",
+            "type": "boolean"
+          },
+          "shallow": {
+            "description": "The repository is shallow: history stops short of its root.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commits",
+          "repo"
+        ],
+        "title": "GitLogResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "git.log_search",
+      "params": {
+        "$defs": {
+          "GitLogRev": {
+            "description": "Which commits a log lists. Never a free-form revision: a name a client typed is not handed\nto git.",
+            "oneOf": [
+              {
+                "const": "branch",
+                "description": "Everything reachable from the worktree's `HEAD` (the thread's branch): the history the\nbranch was cut from too. The default.",
+                "type": "string"
+              },
+              {
+                "const": "thread",
+                "description": "Only the thread's own commits: those after its base commit (`base..HEAD`). Needs a\nworktree.",
+                "type": "string"
+              },
+              {
+                "const": "run",
+                "description": "Only the commits made since the run started (`start..HEAD`; the thread's base for a run\nthat recorded no start). Needs a worktree.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `git.log_search`.",
+        "properties": {
+          "limit": {
+            "description": "At most this many ([`GIT_LOG_DEFAULT_LIMIT`] when absent; cut to [`GIT_LOG_MAX_LIMIT`]).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "A text to find, as typed, not a pattern: in the message (any case), in an author's name\nor email, or the start of a commit's name (4 to 40 hexadecimal characters). At most\n[`GIT_LOG_QUERY_MAX_BYTES`] bytes.",
+            "type": "string"
+          },
+          "rev": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/GitLogRev"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which commits to search; the whole branch when absent."
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose tree to read."
+          }
+        },
+        "required": [
+          "runId",
+          "query"
+        ],
+        "title": "GitLogSearchParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "GitCommit": {
+            "description": "One commit of a log.",
+            "properties": {
+              "authorKey": {
+                "description": "A stable key for the author, to pick an avatar or a color by: a SHA-256 of the lower-cased\nemail. The email itself never crosses the wire.",
+                "type": "string"
+              },
+              "authorName": {
+                "description": "The author's name.",
+                "type": "string"
+              },
+              "parents": {
+                "description": "Its parents, first parent first; none for a root commit. A parent may be absent from the\npage (and from a shallow repository): a lane graph treats that as a line that leaves.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "refs": {
+                "description": "The branches, tags and remote branches that point at it (and `HEAD`).",
+                "items": {
+                  "$ref": "#/$defs/GitRef"
+                },
+                "type": "array"
+              },
+              "sha": {
+                "description": "The full object name.",
+                "type": "string"
+              },
+              "subject": {
+                "description": "The first line of the message, redacted like the journal.",
+                "type": "string"
+              },
+              "timeMs": {
+                "description": "When it was authored, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha",
+              "parents",
+              "subject",
+              "authorName",
+              "authorKey",
+              "timeMs"
+            ],
+            "type": "object"
+          },
+          "GitRef": {
+            "description": "A ref that points at a commit.",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/GitRefKind",
+                "description": "What it is."
+              },
+              "name": {
+                "description": "The short name: `main`, `v1.0`, `origin/main`, or `HEAD`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "GitRefKind": {
+            "description": "What a ref is.",
+            "oneOf": [
+              {
+                "const": "branch",
+                "description": "A local branch.",
+                "type": "string"
+              },
+              {
+                "const": "tag",
+                "description": "A tag (an annotated tag is shown on the commit it points at).",
+                "type": "string"
+              },
+              {
+                "const": "head",
+                "description": "The commit `HEAD` is on; its `name` is `HEAD`.",
+                "type": "string"
+              },
+              {
+                "const": "remote",
+                "description": "A remote-tracking branch, such as `origin/main`.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `git.log_search`: the newest match (by author time) first.",
+        "properties": {
+          "commits": {
+            "description": "The matches.",
+            "items": {
+              "$ref": "#/$defs/GitCommit"
+            },
+            "type": "array"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "The tree is in a repository.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "More commits matched than `limit` allowed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commits",
+          "truncated",
+          "repo"
+        ],
+        "title": "GitLogSearchResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "workspace.file_sources",
+      "params": {
+        "$defs": {
+          "DiffScope": {
+            "description": "What `workspace.diff` compares.",
+            "oneOf": [
+              {
+                "description": "Everything the thread holds against its base commit: committed, staged, unstaged and\nuntracked. What the method did before threads, and the default.",
+                "properties": {
+                  "type": {
+                    "const": "thread",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "What the run changed: the worktree against the commit the branch stood at when the run\nstarted (`start_sha`). Needs feature `threads`.",
+                "properties": {
+                  "type": {
+                    "const": "run",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "One commit of the thread's branch against its parent. Needs feature `threads`.",
+                "properties": {
+                  "sha": {
+                    "description": "The commit (a hexadecimal object name, at least 7 characters).",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "commit",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "sha"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Only what is not committed: the worktree against `HEAD`, staged, unstaged and untracked\nfiles, no commits (`base_sha` is `HEAD`). Needs feature `history`.",
+                "properties": {
+                  "type": {
+                    "const": "working_tree",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `workspace.file_sources`.",
+        "properties": {
+          "checksum": {
+            "description": "The `checksum` of the `workspace.diff` that named this same `path` and `scope`, which\nthe client is showing; the result says `stale` when the diff has moved on.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "A changed file of that diff (repository-relative); a path the diff does not list is\nrefused.",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose workspace to read."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DiffScope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the diff compares; the thread against its base commit when absent."
+          }
+        },
+        "required": [
+          "runId",
+          "path"
+        ],
+        "title": "FileSourcesParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `workspace.file_sources`: both sides of one changed file, whole, so a client can\nhighlight the full file and not only the lines of the patch.",
+        "properties": {
+          "binary": {
+            "description": "Git treats the file as binary (or it is not UTF-8): no text.",
+            "type": "boolean"
+          },
+          "checksum": {
+            "description": "The `checksum` of the diff as it is now: pass it back on the next call.",
+            "type": "string"
+          },
+          "newHash": {
+            "description": "SHA-256 of the new side's bytes (as read, before redaction); absent when there is none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "newText": {
+            "description": "The new side's text; absent for a deleted file or a binary one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oldHash": {
+            "description": "SHA-256 of the old side's bytes (as read, before redaction); absent when there is none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oldPath": {
+            "description": "Where the old side reads from, when the file was renamed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oldText": {
+            "description": "The old side's text; absent for an added file or a binary one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "The file (the new path of a rename).",
+            "type": "string"
+          },
+          "stale": {
+            "description": "The `checksum` the client sent is not the diff's now; the text is the current one.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "A side is longer than [`FILE_SOURCE_MAX_BYTES`] and its text was cut.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "checksum"
+        ],
+        "title": "FileSourcesResult",
         "type": "object"
       }
     },

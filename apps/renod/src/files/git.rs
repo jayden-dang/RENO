@@ -20,7 +20,7 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_OUTPUT: u64 = 64 * 1024 * 1024;
 
 /// A git command in `dir`, read-only and quiet.
-fn command(dir: &Path) -> Command {
+pub(crate) fn command(dir: &Path) -> Command {
     let mut git = Command::new("git");
     // The same hygiene as `reno_harness::proc::git_workspace` (no hooks, no fsmonitor daemon, no
     // lock, no prompt, nothing that redirects git), plus the settings the parsers below depend

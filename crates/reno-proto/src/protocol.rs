@@ -38,6 +38,10 @@ use crate::health::{
     ExecutorJobStartParams, ExecutorListResult, ExecutorRefreshParams, ExecutorsSnapshot,
     ExecutorsWatchParams,
 };
+use crate::history::{
+    FileSourcesParams, FileSourcesResult, GitLogParams, GitLogResult, GitLogSearchParams,
+    GitLogSearchResult,
+};
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
 use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
@@ -191,6 +195,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_THREADS,
     crate::files::FEATURE_FILES,
     crate::term::FEATURE_TERMINALS,
+    crate::history::FEATURE_HISTORY,
 ];
 
 /// A request with a single reply.
@@ -1004,6 +1009,21 @@ method!(
     GitStatus, "git.status", GitStatusParams => GitStatusResult
 );
 method!(
+    /// `git.log`: one page of the commit history of a run's tree, newest first, topologically
+    /// ordered, with parents and refs. Person-only. Needs feature `history`.
+    GitLog, "git.log", GitLogParams => GitLogResult
+);
+method!(
+    /// `git.log_search`: the commits whose message, author or name match a text. Person-only.
+    /// Needs feature `history`.
+    GitLogSearch, "git.log_search", GitLogSearchParams => GitLogSearchResult
+);
+method!(
+    /// `workspace.file_sources`: both sides of one changed file, whole, for highlighting, and
+    /// whether the diff the client holds went stale. Person-only. Needs feature `history`.
+    WorkspaceFileSources, "workspace.file_sources", FileSourcesParams => FileSourcesResult
+);
+method!(
     /// `secret.list`: the names of the secrets in the Keychain and of those bots ask for, and
     /// whether each is set. Never a value. Needs feature `secrets`.
     SecretList, "secret.list", NoParams => SecretListResult
@@ -1247,6 +1267,9 @@ pub fn protocol_schema() -> Value {
             method_entry::<FsSearchFiles>(),
             method_entry::<FsSearchContent>(),
             method_entry::<GitStatus>(),
+            method_entry::<GitLog>(),
+            method_entry::<GitLogSearch>(),
+            method_entry::<WorkspaceFileSources>(),
             method_entry::<TermOpen>(),
             method_entry::<TermWrite>(),
             method_entry::<TermResize>(),

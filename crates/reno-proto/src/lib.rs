@@ -25,6 +25,8 @@
 //!   secret's name.
 //! - [`agent`]: the `agent.*` methods a run's own `reno mcp` process calls, and the run token digest.
 //! - [`files`]: the read-only Files tab (`fs.*`, `git.status`, `fs.watch`).
+//! - [`history`]: History and the Review upgrade (`git.log`, `git.log_search`,
+//!   `workspace.file_sources`).
 //! - [`error`]: stable wire error codes.
 //!
 //! # Serde conventions
@@ -60,6 +62,7 @@ pub mod error;
 pub mod exec;
 pub mod files;
 pub mod health;
+pub mod history;
 pub mod ids;
 pub mod protocol;
 pub mod routing;
@@ -78,6 +81,7 @@ pub use error::*;
 pub use exec::*;
 pub use files::*;
 pub use health::*;
+pub use history::*;
 pub use ids::*;
 pub use protocol::*;
 pub use routing::*;

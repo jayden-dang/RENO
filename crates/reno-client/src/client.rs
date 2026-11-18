@@ -633,6 +633,9 @@ impl Client {
         scope: reno_proto::DiffScope,
     ) -> Result<reno_proto::WorkspaceDiffResult, ClientError> {
         self.require(reno_proto::FEATURE_THREADS)?;
+        if scope == reno_proto::DiffScope::WorkingTree {
+            self.require(reno_proto::FEATURE_HISTORY)?;
+        }
         Ok(self
             .rpc
             .call::<reno_proto::WorkspaceDiff>(reno_proto::WorkspaceDiffParams {
@@ -1188,6 +1191,8 @@ impl EventsState {
 
 #[path = "files.rs"]
 mod files;
+#[path = "history.rs"]
+mod history;
 #[path = "terminals.rs"]
 mod terminals;
 

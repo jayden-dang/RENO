@@ -448,7 +448,7 @@ pub(crate) struct WorkspaceDiffArgs {
     #[arg(long, value_name = "FILE")]
     pub(crate) path: Option<String>,
     /// What to compare: `thread` (everything the thread holds against its base, the default),
-    /// `run` (what this run changed since it started), or a commit of the thread's branch.
+    /// `run` (what this run changed since it started), `working_tree` (only what is not committed), or a commit of the thread's branch.
     #[arg(long, value_name = "SCOPE", default_value = "thread", value_parser = parse_diff_scope)]
     pub(crate) scope: reno_proto::DiffScope,
 }
@@ -457,12 +457,13 @@ fn parse_diff_scope(text: &str) -> Result<reno_proto::DiffScope, String> {
     match text {
         "thread" => Ok(reno_proto::DiffScope::Thread),
         "run" => Ok(reno_proto::DiffScope::Run),
+        "working_tree" => Ok(reno_proto::DiffScope::WorkingTree),
         sha if (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit()) => {
             Ok(reno_proto::DiffScope::Commit {
                 sha: sha.to_owned(),
             })
         }
-        _ => Err("expected `thread`, `run`, or a commit (7 to 64 hexadecimal characters)".into()),
+        _ => Err("expected `thread`, `run`, `working_tree`, or a commit (7 to 64 hexadecimal characters)".into()),
     }
 }
 
