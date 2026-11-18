@@ -28,11 +28,17 @@
 //!   some waits for it (a short grace for that turn to start), and a cancel stops it all.
 //! - Steering is `turn/start` with `ifBusy: "steer"`: one atomic command that steers the running
 //!   turn or starts one when idle. It lands at the turn's next model step.
-//! - EVERY APPROVAL GOES TO RENO'S KERNEL, in both access modes: the session runs with the
-//!   `promptUnmatched` approval mode and the `:ask-me` permission profile (`allowAll` and
-//!   `:unrestricted` would take decisions, protected paths included, away from the kernel), and
-//!   the posture is read back from the host and refused when it differs. An allow is the
-//!   single-use choice the host offered; a choice that grants more or saves a rule is never taken.
+//! - EVERY APPROVAL MUSE RAISES GOES TO RENO'S KERNEL, in both access modes: the session runs
+//!   with the `promptUnmatched` approval mode and the `:ask-me` permission profile (`allowAll`
+//!   and `:unrestricted` would take the decision away from the kernel), and the posture is read
+//!   back from the host and refused when it differs. What `:ask-me` asks about is Muse's own
+//!   call (its own words: "requires approval for protected writes, new network targets, and
+//!   other restricted actions"; it edits the workspace and runs sandboxed commands without
+//!   asking), so a supervised run is asked about those and not about every edit: the kernel's
+//!   after-the-fact protected-path detector (`supervisor/protect.rs`, which looks at every run's
+//!   tool calls and worktree) covers what Muse does not ask. An allow is the single-use choice
+//!   the host offered; a choice that grants more or saves a rule is never taken, and a subject
+//!   of a kind Reno does not read is never allowed.
 //! - NEVER A CONFIG WRITE. `muse serve` has 133 methods; the one writer ([`rpc::Client`]) sends
 //!   an allowlist of eleven and refuses the rest, among them everything that writes Muse's
 //!   settings, credentials, trust, plugins or skills. Nothing needs a file: the instructions ride
@@ -861,7 +867,7 @@ impl Run {
             );
             match self.host.call("session/resume", params, backlog).await {
                 Ok(Ok(result)) => {
-                    posture.confirmed_by(&result["session"])?;
+                    posture.confirmed_profile(&result["session"])?;
                     // A resumed session keeps the approval mode it last had: set this run's.
                     let mode = frames::set_approval_mode(
                         &wanted.0,
@@ -919,7 +925,7 @@ impl Run {
                 if result["session"]["sessionId"] != id.as_str() {
                     return Err("Muse started a different session than it was asked to".into());
                 }
-                posture.confirmed_by(&result["session"])?;
+                posture.confirmed_start(&result["session"])?;
                 (id, result)
             }
         };
@@ -1202,7 +1208,8 @@ impl<'a> Player<'a> {
         self.active = Some(turn);
         self.joined.clear();
         self.wake_until = None;
-        self.last = None;
+        // `last` stays: if this turn never begins (a refused steer) the run still ends as the
+        // turn before it did; the turn's own completion replaces it.
         self.norm.next_turn();
     }
 
@@ -1211,6 +1218,18 @@ impl<'a> Player<'a> {
         let request_id = answer.request_id.clone();
         match self.requests.resolve(answer) {
             Resolved::Decision(requirement, decision, message) => {
+                // What Reno cannot read is never allowed: an unknown kind of subject is refused
+                // whatever the kernel decided.
+                let (decision, message) = if decision == Decision::Allow && !requirement.known {
+                    (
+                        Decision::Deny,
+                        Some(
+                            "Reno does not approve a kind of request it does not know.".to_owned(),
+                        ),
+                    )
+                } else {
+                    (decision, message)
+                };
                 let choice = match decision {
                     Decision::Allow => requirement.allow().or_else(|| requirement.deny()),
                     Decision::Deny => requirement.deny(),
@@ -1252,6 +1271,20 @@ impl<'a> Player<'a> {
             Resolved::WrongKind | Resolved::Unknown => {
                 tracing::debug!(target: "reno_harness::muse", "answer for {request_id} matches no open request");
             }
+        }
+    }
+
+    /// Tell Muse no to `requirement`, with `why`, if it offers a refusal that saves nothing.
+    fn refuse(&mut self, requirement: &Requirement, why: &str) {
+        if let Some(choice) = requirement.deny() {
+            let params = approval::decide(
+                &self.opened.session,
+                &rpc::command_id(),
+                requirement,
+                choice,
+                Some(why),
+            );
+            self.send_other("approval/decide", params);
         }
     }
 
@@ -1547,10 +1580,12 @@ impl<'a> Player<'a> {
         let Some(requirement) = approval::requirement(params) else {
             return Ok(());
         };
-        if self.interrupted
-            || self.requests.len() >= MAX_OPEN_REQUESTS
-            || !self.raised.insert(requirement.request_id.clone())
-        {
+        if !self.raised.insert(requirement.request_id.clone()) {
+            return Ok(());
+        }
+        if self.interrupted || self.requests.len() >= MAX_OPEN_REQUESTS {
+            // Nobody is asked: Muse is told no, instead of waiting on it for ever.
+            self.refuse(&requirement, "Too many approvals were open at once.");
             return Ok(());
         }
         let ask = ExecEvent::NeedsApproval {

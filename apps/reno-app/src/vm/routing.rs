@@ -554,6 +554,14 @@ mod tests {
     }
 
     #[test]
+    fn muse_is_named_like_any_executor() {
+        let mut d = decision(None);
+        d.rejected = vec![signed_out("muse", "run `muse login` in a terminal")];
+        let v = view(&d);
+        assert_eq!(v.because.as_deref(), Some("Muse Code was signed out"));
+    }
+
+    #[test]
     fn every_reject_reason_reads_as_a_sentence() {
         let cases = [
             (

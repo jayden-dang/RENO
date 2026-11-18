@@ -52,10 +52,11 @@ pub(crate) fn serve_args(mode: Mode, provider: &str) -> Vec<String> {
 /// The approval mode and permission profile a run asks of Muse, and what must come back.
 ///
 /// Every approval Muse raises goes to Reno, whatever the access mode: `promptUnmatched` with the
-/// `:ask-me` profile asks for what the profile does not already allow, which includes protected
-/// writes and new network targets. The kernel then decides (a policy rule, a person, or for a
-/// full-access run the access mode, after the built-in protected paths). `allowAll` and
-/// `:unrestricted` would take the decision away from it.
+/// `:ask-me` profile asks for what the profile does not already allow (the profile's own
+/// description: protected writes, new network targets and other restricted actions; ordinary
+/// workspace edits and sandboxed commands are allowed without asking). The kernel then decides (a
+/// policy rule, a person, or for a full-access run the access mode, after the built-in protected
+/// paths). `allowAll` and `:unrestricted` would take the decision away from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Posture {
     /// The `ApprovalMode` (`promptUnmatched`).
@@ -71,26 +72,31 @@ impl Posture {
         profile: ":ask-me",
     };
 
-    /// Whether a `session/start` or `session/resume` result says the session has this posture.
-    /// `Err` names what differs: a run does not go on under a posture it did not ask for.
-    pub(crate) fn confirmed_by(&self, session: &Value) -> Result<(), String> {
+    /// Whether a `session/start` result says the session has this posture: the profile and the
+    /// mode must both be there and be the ones asked for. `Err` names what differs: a run does
+    /// not go on under a posture it did not ask for.
+    pub(crate) fn confirmed_start(&self, session: &Value) -> Result<(), String> {
+        self.confirmed_profile(session)?;
+        match session["approvalMode"]["mode"].as_str() {
+            Some(mode) if mode == self.approval_mode => Ok(()),
+            other => Err(format!(
+                "Muse opened the session with approval mode {} instead of {}",
+                other.unwrap_or("(none)"),
+                self.approval_mode
+            )),
+        }
+    }
+
+    /// Whether a `session/resume` result says the session has this permission profile. A resumed
+    /// session reports the approval mode it last had, which `session/setApprovalMode` replaces
+    /// ([`Self::mode_applied`] reads that back).
+    pub(crate) fn confirmed_profile(&self, session: &Value) -> Result<(), String> {
         let profile = session["permissionState"]["profileId"].as_str();
         if profile != Some(self.profile) {
             return Err(format!(
                 "Muse opened the session with permission profile {} instead of {}",
                 profile.unwrap_or("(none)"),
                 self.profile
-            ));
-        }
-        // A resumed session reports the mode it last had, which `session/setApprovalMode`
-        // replaces; only a start reports the mode it was given.
-        if let Some(mode) = session["approvalMode"]["mode"].as_str()
-            && mode != self.approval_mode
-            && session["approvalMode"]["source"] == "startup"
-        {
-            return Err(format!(
-                "Muse opened the session with approval mode {mode} instead of {}",
-                self.approval_mode
             ));
         }
         Ok(())
@@ -200,29 +206,43 @@ mod tests {
             "approvalMode": {"mode": "promptUnmatched", "source": "startup"},
             "permissionState": {"profileId": ":ask-me"}
         });
-        assert!(ask.confirmed_by(&started).is_ok());
-        let wrong_profile = json!({"permissionState": {"profileId": ":unrestricted"}});
+        assert!(ask.confirmed_start(&started).is_ok());
+        let wrong_profile = json!({
+            "approvalMode": {"mode": "promptUnmatched", "source": "startup"},
+            "permissionState": {"profileId": ":unrestricted"}
+        });
         assert!(
-            ask.confirmed_by(&wrong_profile)
+            ask.confirmed_start(&wrong_profile)
                 .unwrap_err()
                 .contains(":unrestricted")
         );
-        assert!(ask.confirmed_by(&json!({})).is_err());
+        assert!(ask.confirmed_start(&json!({})).is_err());
         let wrong_mode = json!({
             "approvalMode": {"mode": "allowAll", "source": "startup"},
             "permissionState": {"profileId": ":ask-me"}
         });
         assert!(
-            ask.confirmed_by(&wrong_mode)
+            ask.confirmed_start(&wrong_mode)
                 .unwrap_err()
                 .contains("allowAll")
         );
+        // A start that does not say which mode it has is not believed, whatever its source.
+        for missing in [
+            json!({"permissionState": {"profileId": ":ask-me"}}),
+            json!({"approvalMode": {"source": "startup"}, "permissionState": {"profileId": ":ask-me"}}),
+            json!({"approvalMode": {"mode": "allowAll", "source": "replay"},
+                   "permissionState": {"profileId": ":ask-me"}}),
+        ] {
+            assert!(ask.confirmed_start(&missing).is_err(), "{missing}");
+        }
         // A resumed session shows the mode it last had; setApprovalMode is what decides.
         let resumed = json!({
             "approvalMode": {"mode": "allowAll", "source": "replay"},
             "permissionState": {"profileId": ":ask-me"}
         });
-        assert!(ask.confirmed_by(&resumed).is_ok());
+        assert!(ask.confirmed_profile(&resumed).is_ok());
+        assert!(ask.confirmed_profile(&wrong_profile).is_err());
+        assert!(ask.confirmed_profile(&json!({})).is_err());
         assert!(
             ask.mode_applied(&json!({"effectiveMode": {"mode": "promptUnmatched"}}))
                 .is_ok()
@@ -244,12 +264,12 @@ mod tests {
             "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
                 "axes": {"filesystem": "sandboxed", "network": "off", "approval": "onRequest",
                          "reviewer": "human"}, "reviewerAttached": true}});
-        assert!(Posture::ASK.confirmed_by(&started).is_ok());
+        assert!(Posture::ASK.confirmed_start(&started).is_ok());
         let resumed = json!({"sessionId": "s", "modelId": "echo",
             "approvalMode": {"mode": "allowAll", "source": "replay", "lastCommandId": null},
             "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
                 "reviewerAttached": true}});
-        assert!(Posture::ASK.confirmed_by(&resumed).is_ok());
+        assert!(Posture::ASK.confirmed_profile(&resumed).is_ok());
         let applied = json!({"commandId": "c", "status": "accepted", "applyOutcome": "completed",
             "effectiveMode": {"mode": "promptUnmatched", "source": "approvalReconfigure",
                               "lastCommandId": "c"}});

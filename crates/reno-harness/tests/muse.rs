@@ -865,19 +865,31 @@ async fn every_approval_goes_to_the_kernel_with_its_class_and_gets_a_single_use_
     assert_eq!(asked[0].1.command.as_deref(), Some("git status"));
     assert_eq!(asked[1].1.paths, [PathBuf::from("src/lib.rs")]);
     assert!(asked[0].0.ends_with("#0"));
+    // The kernel allowed all six; a kind of request Reno does not read is refused whatever it
+    // decided.
     assert_eq!(
         text(&events),
-        "bash=allow edit=allow mcp=allow net=allow read=allow other=allow"
+        "bash=allow edit=allow mcp=allow net=allow read=allow \
+         other=deny:Reno does not approve a kind of request it does not know."
     );
     assert_eq!(done(&events).0, StopReason::Completed);
-    // Only the single-use allow was ever chosen, never the broader ones the host offered.
+    // Only the single-use choices were ever chosen, never the broader ones the host offered.
     let chosen: Vec<_> = bench
         .params("approval/decide")
         .iter()
         .map(|p| p["choiceId"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(chosen.len(), 6);
-    assert!(chosen.iter().all(|c| c == "allow_once"), "{chosen:?}");
+    assert_eq!(
+        chosen,
+        [
+            "allow_once",
+            "allow_once",
+            "allow_once",
+            "allow_once",
+            "allow_once",
+            "abort"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -947,6 +959,46 @@ async fn an_approval_with_only_broad_grants_on_offer_is_never_allowed_and_ends_t
         bench.params("approval/decide").is_empty(),
         "nothing broader than once was chosen"
     );
+}
+
+#[tokio::test]
+async fn approvals_past_the_open_limit_are_refused_not_left_waiting() {
+    let bench = Bench::new();
+    let mut live = start(&executor(), bench.spec("scenario:flood")).await;
+    let mut events = Vec::new();
+    let mut open = Vec::new();
+    let mut said = String::new();
+    let run = async {
+        while let Some(event) = live.stream.next().await {
+            match &event {
+                ExecEvent::NeedsApproval { request_id, .. } => open.push(request_id.clone()),
+                ExecEvent::Text { text } => {
+                    said.push_str(text);
+                    // Nothing is answered until Muse has been told no to what did not fit.
+                    if said.contains("flood-over:2") {
+                        for id in open.drain(..) {
+                            live.handle.decide(id, Decision::Allow).await.unwrap();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            events.push(event);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), run)
+        .await
+        .expect("the run ends");
+    assert_eq!(
+        approvals(&events).len(),
+        16,
+        "sixteen were put to the kernel"
+    );
+    assert!(
+        text(&events).ends_with("allowed:16 refused:abort,abort"),
+        "{events:?}"
+    );
+    assert_eq!(done(&events).0, StopReason::Completed);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1028,6 +1080,26 @@ async fn a_steer_that_meets_an_idle_muse_starts_a_turn_the_run_waits_for() {
     })
     .await;
     assert!(text(&events).ends_with("steered:late"), "{events:?}");
+    assert_eq!(done(&events).0, StopReason::Completed);
+}
+
+#[tokio::test]
+async fn a_steer_muse_refuses_does_not_hang_a_run_that_was_otherwise_over() {
+    let bench = Bench::new();
+    let mut live = start(&executor(), bench.spec("scenario:steer-refused")).await;
+    let handle = live.handle.clone();
+    let mut sent = false;
+    let events = drive_with(&mut live, &Answers::default(), |event| {
+        if matches!(event, ExecEvent::Text { .. }) && !sent {
+            sent = true;
+            handle.try_steer("too late").unwrap();
+        }
+    })
+    .await;
+    assert!(
+        text(&events).contains("[Muse did not take the steering message"),
+        "{events:?}"
+    );
     assert_eq!(done(&events).0, StopReason::Completed);
 }
 
@@ -1417,12 +1489,20 @@ async fn a_real_muse_plays_a_run_over_its_echo_provider() {
     // Muse wrote its sessions and logs under its own data directory, and no settings or
     // credentials file into the config directory.
     assert!(data.join("muse").exists());
-    let written: Vec<_> = std::fs::read_dir(&config)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
+    fn files_under(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files_under(&path, found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    let mut written = Vec::new();
+    files_under(&config, &mut written);
     assert!(
         written.is_empty(),
-        "Muse wrote into its config dir: {written:?}"
+        "Muse wrote a file into its config dir: {written:?}"
     );
 }

@@ -524,6 +524,42 @@ def scenario_idle_steer(turn, prompt):
               result={"summary": "done"})
 
 
+def scenario_steer_refused(turn, prompt):
+    """The turn ends with a subagent still running, so the run is open; the steering message that
+    meets the idle host is refused, and the run must still end once the subagent does."""
+    begin_turn(turn, prompt)
+    sub = uid()
+    emit_item("started", "subagent", sub, turn, 1, "inProgress", objective="x", subagentId="s1")
+    say(turn, "turn done")
+    finish(turn)
+    frame = wait_for("turn/start")
+    fail(frame, "commandRejected", "turn/start refused by the fake", -32030)
+    time.sleep(0.2)
+    emit_item("completed", "subagent", sub, turn, 2, "completed", objective="x", subagentId="s1",
+              result={"summary": "done"})
+
+
+def scenario_flood(turn, prompt):
+    """Eighteen approvals at once, none answered until two have been refused: the driver holds
+    sixteen open and tells Muse no to the rest."""
+    begin_turn(turn, prompt)
+    for _ in range(18):
+        approval = uid()
+        payload = {"approvalId": approval, "turnId": turn, "toolName": "bash",
+                   "subject": shell_subject("git status"),
+                   "currentRequirementId": requirement(approval, 0),
+                   "availableChoices": CHOICES}
+        note("approval/requested", **payload)
+    refused = []
+    for _ in range(2):
+        refused.append(wait_for("approval/decide")["params"]["choiceId"])
+    say(turn, "flood-over:%d" % len(refused))
+    answered = [wait_for("approval/decide")["params"]["choiceId"] for _ in range(16)]
+    say(turn, " allowed:%d refused:%s" % (len([c for c in answered if c == "allow_once"]),
+                                          ",".join(refused)))
+    finish(turn)
+
+
 def scenario_interrupt(turn, prompt):
     begin_turn(turn, prompt)
     say(turn, "waiting")
@@ -638,6 +674,8 @@ SCENARIOS = {
     "question": scenario_question,
     "steer": scenario_steer,
     "idle-steer": scenario_idle_steer,
+    "steer-refused": scenario_steer_refused,
+    "flood": scenario_flood,
     "interrupt": scenario_interrupt,
     "conf-crash": scenario_crash,
     "failed": scenario_failed,

@@ -71,6 +71,9 @@ pub(crate) struct Requirement {
     pub(crate) subject: ApprovalSubject,
     /// What the host takes as an answer.
     pub(crate) choices: Vec<Choice>,
+    /// Whether Reno reads this kind of subject (a shell command, a file, the network, a tool). An
+    /// unknown kind is shown generically and never allowed.
+    pub(crate) known: bool,
 }
 
 impl Requirement {
@@ -130,6 +133,10 @@ pub(crate) fn requirement(params: &Value) -> Option<Requirement> {
         request_id: format!("{approval}#{index}"),
         subject: subject(params, stage),
         choices,
+        known: matches!(
+            string(&params["subject"], "kind"),
+            "shell" | "fileAccess" | "network" | "tool"
+        ),
     })
 }
 
@@ -487,6 +494,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(strange.subject.action, ActionClass::Other);
+        assert!(!strange.known, "never allowed");
+        assert!(file.known && read.known && net.known && mcp.known);
     }
 
     fn asked() -> Value {
