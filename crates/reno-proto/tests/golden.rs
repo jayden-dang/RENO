@@ -313,9 +313,66 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes", "executor.usage", "threads"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes", "executor.usage", "threads", "files"],
                "pid": 4242}),
     );
+}
+
+#[test]
+fn files_wire_shapes() {
+    let run = run_id();
+    golden(
+        &FsListParams {
+            run_id: run.clone(),
+            dir: "src".into(),
+            cursor: None,
+            limit: Some(2),
+        },
+        json!({"runId": "run_01HZX9", "dir": "src", "limit": 2}),
+    );
+    golden(
+        &FsListResult {
+            entries: vec![FsEntry {
+                name: "lib.rs".into(),
+                path: "src/lib.rs".into(),
+                kind: FsEntryKind::File,
+                size: Some(10),
+                mtime_ms: Some(5),
+            }],
+            next_cursor: Some("1:lib.rs".into()),
+            in_place: true,
+        },
+        json!({"entries": [{"name": "lib.rs", "path": "src/lib.rs", "kind": "file",
+                            "size": 10, "mtimeMs": 5}],
+               "nextCursor": "1:lib.rs", "inPlace": true}),
+    );
+    golden(
+        &GitStatusResult {
+            branch: Some("reno/th_a".into()),
+            repo: true,
+            files: vec![GitFileStatus {
+                path: "b.rs".into(),
+                old_path: Some("a.rs".into()),
+                index: GitChange::Renamed,
+                worktree: GitChange::Modified,
+            }],
+            in_place: false,
+        },
+        json!({"branch": "reno/th_a", "repo": true,
+               "files": [{"path": "b.rs", "oldPath": "a.rs", "index": "renamed",
+                          "worktree": "modified"}]}),
+    );
+    golden(
+        &FsChange {
+            dirs: vec![String::new(), "src".into()],
+            git: true,
+            overflow: false,
+            degraded: false,
+        },
+        json!({"dirs": ["", "src"], "git": true, "overflow": false, "degraded": false}),
+    );
+    assert_eq!(ErrorCode::WorkspaceUnavailable.code(), -32013);
+    assert_eq!(ErrorCode::PathRejected.code(), -32014);
 }
 
 #[test]
