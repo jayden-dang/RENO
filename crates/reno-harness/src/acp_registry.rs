@@ -349,14 +349,12 @@ pub enum Readiness {
 }
 
 pub fn readiness(entry: &Entry) -> Readiness {
-    match choose(entry) {
-        None => Readiness::NoBuild,
-        Some(Choice::Binary(_)) => Readiness::Ready,
-        Some(Choice::Npx(_)) if crate::adapter_install::find_npm().is_some() => Readiness::Ready,
-        Some(Choice::Npx(_)) => Readiness::NeedsNode,
-        Some(Choice::Uvx(_)) if find_uv().is_some() => Readiness::Ready,
-        Some(Choice::Uvx(_)) => Readiness::NeedsUv,
-    }
+    readiness_for(
+        entry,
+        platform(),
+        crate::adapter_install::find_npm().is_some(),
+        find_uv().is_some(),
+    )
 }
 
 fn find_uv() -> Option<PathBuf> {
@@ -1408,6 +1406,319 @@ async fn read_capped(response: reqwest::Response, max: usize) -> Result<Vec<u8>,
     Ok(out)
 }
 
+// ---- the catalog: the index with a cache, and what a client is shown of it
+
+/// How long a fetched index is used as it is (the CDN's own max-age).
+pub const INDEX_TTL: Duration = Duration::from_secs(5 * 60);
+/// How long an icon that could not be fetched is not asked for again.
+const ICON_RETRY: Duration = Duration::from_secs(60 * 60);
+
+/// The index as loaded: its agents and where they came from.
+#[derive(Debug, Clone)]
+pub struct LoadedIndex {
+    pub entries: Vec<Entry>,
+    /// When it was fetched (ms since the Unix epoch).
+    pub fetched_at_ms: u64,
+    /// This is the cached copy because the fetch failed; `error` says why.
+    pub offline: bool,
+    pub error: Option<String>,
+}
+
+fn index_dir() -> Option<PathBuf> {
+    agents_root().map(|root| root.join(".index"))
+}
+
+fn ms_of(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The index from `url` (normally [`INDEX_URL`]), through a cache in `<agents root>/.index`:
+/// a copy younger than `ttl` is used as it is (unless `refresh`); an older one is revalidated
+/// with its ETag; when the fetch fails the cached copy is served and marked `offline`; with no
+/// cached copy a failed fetch is an error. Nothing here polls: it runs when a client asks.
+pub async fn load_index(url: &str, refresh: bool, ttl: Duration) -> Result<LoadedIndex, String> {
+    let dir = index_dir().ok_or("no data directory for the registry cache")?;
+    let (file, etag_file) = (dir.join("index.json"), dir.join("etag"));
+    let cached = std::fs::read(&file).ok().and_then(|bytes| {
+        let at = std::fs::metadata(&file).and_then(|m| m.modified()).ok()?;
+        parse_index(&bytes).ok().map(|entries| (entries, bytes, at))
+    });
+    if let Some((entries, _, at)) = &cached
+        && !refresh
+        && std::time::SystemTime::now()
+            .duration_since(*at)
+            .is_ok_and(|age| age < ttl)
+    {
+        return Ok(LoadedIndex {
+            entries: entries.clone(),
+            fetched_at_ms: ms_of(*at),
+            offline: false,
+            error: None,
+        });
+    }
+    let etag = cached
+        .as_ref()
+        .and_then(|_| std::fs::read_to_string(&etag_file).ok());
+    let fetched = fetch_index(url, etag.as_deref().map(str::trim)).await;
+    let now = std::time::SystemTime::now();
+    let _ = std::fs::create_dir_all(&dir);
+    let failure = match fetched {
+        Ok((Some(bytes), new_etag)) => match parse_index(&bytes) {
+            Ok(entries) => {
+                let _ = write_private(&file, &bytes);
+                match new_etag {
+                    Some(etag) => {
+                        let _ = write_private(&etag_file, etag.as_bytes());
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(&etag_file);
+                    }
+                }
+                return Ok(LoadedIndex {
+                    entries,
+                    fetched_at_ms: ms_of(now),
+                    offline: false,
+                    error: None,
+                });
+            }
+            Err(e) => e,
+        },
+        // Unchanged: the cached copy is current as of now.
+        Ok((None, _)) => match &cached {
+            Some((entries, bytes, _)) => {
+                let _ = write_private(&file, bytes);
+                return Ok(LoadedIndex {
+                    entries: entries.clone(),
+                    fetched_at_ms: ms_of(now),
+                    offline: false,
+                    error: None,
+                });
+            }
+            None => "the registry said nothing changed, with nothing cached".to_owned(),
+        },
+        Err(e) => e,
+    };
+    match cached {
+        Some((entries, _, at)) => Ok(LoadedIndex {
+            entries,
+            fetched_at_ms: ms_of(at),
+            offline: true,
+            error: Some(failure),
+        }),
+        None => Err(format!("the registry index could not be fetched: {failure}")),
+    }
+}
+
+/// The cleaned SVG icon of `entry`, from the cache beside the index or fetched once (only from
+/// the registry's own CDN). `None` when it has none or it could not be fetched; a failure is not
+/// retried for an hour.
+pub async fn icon_of(entry: &Entry) -> Option<String> {
+    let url = entry.icon.as_deref()?;
+    let dir = index_dir()?.join("icons");
+    let key = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let name = format!("{}-{}", safe_component(&entry.id), &key[..12]);
+    let (hit, miss) = (dir.join(format!("{name}.svg")), dir.join(format!("{name}.none")));
+    if let Ok(svg) = std::fs::read_to_string(&hit) {
+        return clean_svg(&svg);
+    }
+    if std::fs::metadata(&miss)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())
+        .is_some_and(|age| age < ICON_RETRY)
+    {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    match fetch_icon(url).await {
+        Some(svg) => {
+            let _ = write_private(&hit, svg.as_bytes());
+            Some(svg)
+        }
+        None => {
+            let _ = write_private(&miss, b"");
+            None
+        }
+    }
+}
+
+/// The device's answer to "what would adding this need": the readiness for a platform, with Node.js
+/// and uv present or not (a pure function: [`readiness`] asks the machine).
+pub fn readiness_for(entry: &Entry, platform: Option<&str>, node: bool, uv: bool) -> Readiness {
+    match choose_for(entry, platform) {
+        None => Readiness::NoBuild,
+        Some(Choice::Binary(_)) => Readiness::Ready,
+        Some(Choice::Npx(_)) if node => Readiness::Ready,
+        Some(Choice::Npx(_)) => Readiness::NeedsNode,
+        Some(Choice::Uvx(_)) if uv => Readiness::Ready,
+        Some(Choice::Uvx(_)) => Readiness::NeedsUv,
+    }
+}
+
+/// What the person does about a readiness other than ready.
+pub fn fix_for(readiness: Readiness) -> Option<&'static str> {
+    match readiness {
+        Readiness::Ready => None,
+        Readiness::NeedsNode => Some("brew install node"),
+        Readiness::NeedsUv => Some("brew install uv"),
+        Readiness::NoBuild => None,
+    }
+}
+
+/// The built-in executor id of a harness slug `BUILT_IN` names: the three that Reno runs through
+/// its ACP driver carry the `acp.` prefix.
+pub fn built_in_executor(harness: &str) -> String {
+    match harness {
+        "devin" | "grok" | "antigravity" => format!("acp.{harness}"),
+        other => other.to_owned(),
+    }
+}
+
+/// An entry as clients are shown it, for a platform and what the device has. `record` is what is
+/// added of it here, `icon` its cleaned SVG.
+pub fn entry_view(
+    entry: &Entry,
+    record: Option<&Record>,
+    icon: Option<String>,
+    platform: Option<&str>,
+    node: bool,
+    uv: bool,
+) -> Option<reno_proto::RegistryEntry> {
+    use reno_proto::{RegistryAdded, RegistryDistribution, RegistryReadiness};
+    let choice = choose_for(entry, platform);
+    let readiness = readiness_for(entry, platform, node, uv);
+    Some(reno_proto::RegistryEntry {
+        id: entry.id.clone(),
+        executor: format!("acp.{}", entry.id).parse().ok()?,
+        name: entry.name.clone(),
+        version: entry.version.clone(),
+        description: entry.description.clone(),
+        authors: entry.authors.clone(),
+        license: entry.license.clone(),
+        website: entry.website.clone(),
+        repository: entry.repository.clone(),
+        icon,
+        kind: choice.as_ref().map(|c| match c {
+            Choice::Binary(_) => RegistryDistribution::Binary,
+            Choice::Npx(_) => RegistryDistribution::Npx,
+            Choice::Uvx(_) => RegistryDistribution::Uvx,
+        }),
+        readiness: match readiness {
+            Readiness::Ready => RegistryReadiness::Ready,
+            Readiness::NeedsNode => RegistryReadiness::NeedsNode,
+            Readiness::NeedsUv => RegistryReadiness::NeedsUv,
+            Readiness::NoBuild => RegistryReadiness::NoBuild,
+        },
+        fix: fix_for(readiness).map(str::to_owned),
+        host: match &choice {
+            Some(Choice::Binary(t)) => reqwest::Url::parse(&t.archive)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned)),
+            _ => None,
+        },
+        checksum: match &choice {
+            Some(Choice::Binary(t)) => Some(t.sha256.is_some()),
+            _ => None,
+        },
+        built_in: built_in(&entry.id)
+            .and_then(|slug| built_in_executor(slug).parse().ok()),
+        added: record.map(|r| RegistryAdded {
+            version: r.version.clone(),
+            update_available: r.version != entry.version,
+        }),
+        adding: false,
+        delisted: false,
+        own: false,
+    })
+}
+
+/// An agent added here that the index does not list (delisted), or one of your own.
+pub fn record_view(record: &Record) -> Option<reno_proto::RegistryEntry> {
+    use reno_proto::{RegistryAdded, RegistryDistribution, RegistryReadiness};
+    let own = record.kind == Kind::Own;
+    Some(reno_proto::RegistryEntry {
+        id: record.id.clone(),
+        executor: format!("acp.{}", record.id).parse().ok()?,
+        name: record.name.clone(),
+        version: record.version.clone(),
+        description: record.description.clone(),
+        authors: record.authors.clone(),
+        license: None,
+        website: None,
+        repository: None,
+        icon: record.icon_svg.clone(),
+        kind: match record.kind {
+            Kind::Binary => Some(RegistryDistribution::Binary),
+            Kind::Npx => Some(RegistryDistribution::Npx),
+            Kind::Uvx => Some(RegistryDistribution::Uvx),
+            Kind::Own => None,
+        },
+        readiness: RegistryReadiness::Ready,
+        fix: None,
+        host: None,
+        checksum: None,
+        built_in: None,
+        added: Some(RegistryAdded {
+            version: record.version.clone(),
+            update_available: false,
+        }),
+        adding: false,
+        delisted: !own,
+        own,
+    })
+}
+
+/// Adds an agent of your own: its `command` (a program and its arguments) as `own.<slug of name>`,
+/// with `env` (`KEY=VALUE` lines). The program must exist (on PATH or by its path); Reno never
+/// installs or updates it.
+pub fn add_own(name: &str, command: &str, env: &str) -> Result<Record, HarnessError> {
+    let id = own_id(name)
+        .ok_or_else(|| HarnessError::Install("name the agent with letters or digits".into()))?;
+    let words = split_command(command).map_err(HarnessError::Install)?;
+    let program = &words[0];
+    let path = PathBuf::from(program);
+    let resolved = if path.is_absolute() || program.contains('/') {
+        path.is_file().then_some(path)
+    } else {
+        crate::executable::find_on_paths(program, Vec::new())
+    }
+    .ok_or_else(|| HarnessError::NotInstalled(format!("{program} isn't a program on this device")))?;
+    let agent = RegistryAgent::new(&id)
+        .ok_or_else(|| HarnessError::Install(format!("{id:?} isn't usable as an id")))?;
+    parse_env(env).map_err(HarnessError::Install)?;
+    let dir = agent_dir(agent)
+        .ok_or_else(|| HarnessError::Install("no data directory for agents".into()))?;
+    if record_in(&dir).is_some() {
+        return Err(HarnessError::Install(format!(
+            "an agent named {name} is already added"
+        )));
+    }
+    std::fs::create_dir_all(&dir)?;
+    let record = Record {
+        id,
+        name: name.trim().to_owned(),
+        version: "0.0.0".into(),
+        kind: Kind::Own,
+        description: String::new(),
+        authors: Vec::new(),
+        program: resolved,
+        args: words[1..].to_vec(),
+        env: BTreeMap::new(),
+        icon_svg: None,
+        verified: false,
+    };
+    write_record(&dir, &record)?;
+    set_user_env(agent, env)?;
+    Ok(record)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1787,5 +2098,108 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+    }
+
+    fn entry_with(distribution: serde_json::Value) -> Entry {
+        let index = serde_json::json!({ "agents": [{
+            "id": "demo", "name": "Demo", "version": "2.0.0", "description": "d",
+            "distribution": distribution
+        }] });
+        parse_index(&serde_json::to_vec(&index).unwrap())
+            .unwrap()
+            .remove(0)
+    }
+
+    #[test]
+    fn the_view_says_what_the_device_lacks_and_how_to_fix_it() {
+        use reno_proto::{RegistryDistribution, RegistryReadiness};
+        let uv = entry_with(serde_json::json!({ "uvx": { "package": "demo==2.0.0" } }));
+        let view = entry_view(&uv, None, None, Some("darwin-aarch64"), true, false).unwrap();
+        assert_eq!(view.kind, Some(RegistryDistribution::Uvx));
+        assert_eq!(view.readiness, RegistryReadiness::NeedsUv);
+        assert_eq!(view.fix.as_deref(), Some("brew install uv"));
+        assert_eq!((view.checksum, view.host.clone()), (None, None));
+        let ready = entry_view(&uv, None, None, Some("darwin-aarch64"), false, true).unwrap();
+        assert_eq!(ready.readiness, RegistryReadiness::Ready);
+
+        let npx = entry_with(serde_json::json!({ "npx": { "package": "demo@2.0.0" } }));
+        let view = entry_view(&npx, None, None, None, false, true).unwrap();
+        assert_eq!(view.readiness, RegistryReadiness::NeedsNode);
+        assert_eq!(view.fix.as_deref(), Some("brew install node"));
+
+        let other = entry_with(serde_json::json!({ "binary": { "linux-x86_64": {
+            "archive": "https://example.com/a.tar.gz", "cmd": "./demo" } } }));
+        let view = entry_view(&other, None, None, Some("darwin-aarch64"), true, true).unwrap();
+        assert_eq!(view.readiness, RegistryReadiness::NoBuild);
+        assert_eq!(view.kind, None);
+    }
+
+    #[test]
+    fn a_binary_says_where_it_downloads_from_and_whether_a_checksum_is_published() {
+        let sha = "a".repeat(64);
+        let binary = |sha256: Option<&str>| {
+            let mut target = serde_json::json!({
+                "archive": "https://downloads.example.com/demo.tar.gz", "cmd": "./demo" });
+            if let Some(sha) = sha256 {
+                target["sha256"] = sha.into();
+            }
+            entry_with(serde_json::json!({ "binary": { "darwin-aarch64": target } }))
+        };
+        let view =
+            entry_view(&binary(Some(&sha)), None, None, Some("darwin-aarch64"), true, true).unwrap();
+        assert_eq!(view.host.as_deref(), Some("downloads.example.com"));
+        assert_eq!(view.checksum, Some(true));
+        let view = entry_view(&binary(None), None, None, Some("darwin-aarch64"), true, true).unwrap();
+        assert_eq!(view.checksum, Some(false));
+    }
+
+    #[test]
+    fn added_says_which_version_and_whether_the_index_differs() {
+        let entry = entry_with(serde_json::json!({ "npx": { "package": "demo@2.0.0" } }));
+        let record = |version: &str| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "id": "demo", "name": "Demo", "version": version, "kind": "npx", "program": "/x"
+            }))
+            .unwrap()
+        };
+        let view = entry_view(&entry, Some(&record("1.0.0")), None, None, true, true).unwrap();
+        let added = view.added.unwrap();
+        assert_eq!(added.version, "1.0.0");
+        assert!(added.update_available);
+        let view = entry_view(&entry, Some(&record("2.0.0")), None, None, true, true).unwrap();
+        assert!(!view.added.unwrap().update_available);
+    }
+
+    #[test]
+    fn an_agent_reno_drives_itself_is_listed_with_its_executor() {
+        let make = |id: &str| {
+            let index = serde_json::json!({ "agents": [{
+                "id": id, "name": id, "version": "1.0.0",
+                "distribution": { "npx": { "package": "x@1.0.0" } }
+            }] });
+            parse_index(&serde_json::to_vec(&index).unwrap())
+                .unwrap()
+                .remove(0)
+        };
+        let view = |id: &str| entry_view(&make(id), None, None, None, true, true).unwrap();
+        assert_eq!(view("claude-acp").built_in.unwrap().as_str(), "claude-code");
+        assert_eq!(view("devin").built_in.unwrap().as_str(), "acp.devin");
+        assert_eq!(view("opencode-v2").built_in.unwrap().as_str(), "opencode");
+        assert_eq!(view("goose").built_in, None);
+    }
+
+    #[test]
+    fn a_record_the_index_lacks_is_delisted_and_one_of_your_own_is_not() {
+        let record = |id: &str, kind: &str| -> Record {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "version": "1.0.0", "kind": kind, "program": "/x"
+            }))
+            .unwrap()
+        };
+        let gone = record_view(&record("gone", "binary")).unwrap();
+        assert!(gone.delisted && !gone.own);
+        let mine = record_view(&record("own.mine", "own")).unwrap();
+        assert!(mine.own && !mine.delisted);
+        assert_eq!(mine.kind, None);
     }
 }
