@@ -22,6 +22,8 @@
           `elicitation/create`, `url` mode) when the client said it can
           (clientCapabilities.elicitation.url), and is signed in once that's
           accepted.
+  home-averse  signed in, but refuses to run in the home directory (Autohand:
+          "Unsafe workspace"): as its process's directory and as a session's.
   gemini  `authenticate` opens its page with the system's `open` (never
           $BROWSER) and waits for its loopback callback; a request that
           isn't the callback ends the sign-in.
@@ -70,6 +72,10 @@ signed_out_file = os.path.join(state, "signed-out") if state else None
 signed_in = mode == "signed-in-email" or (
     mode == "droid-signed-in" and not (signed_out_file and os.path.exists(signed_out_file)))
 stale = mode == "droid-stale"
+home = os.path.realpath(os.environ.get("HOME", "/nonexistent"))
+if mode == "home-averse" and os.path.realpath(os.getcwd()) == home:
+    sys.stderr.write("[ACP] Error: Unsafe workspace - This is your home directory.\n")
+    sys.exit(1)
 if len(sys.argv) > 1 and sys.argv[1] == "login":
     print("Please visit the following URL to finish authorization.", flush=True)
     print("Verification URL: https://auth.example.com/device?user_code=ABCD-1234", flush=True)
@@ -140,6 +146,9 @@ for line in sys.stdin:
         else:
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
     elif method == "session/new":
+        if mode == "home-averse" and os.path.realpath((message.get("params") or {}).get("cwd", "")) == home:
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "Unsafe workspace: your home directory"}})
+            continue
         if mode == "droid-stale" and stale:
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Authentication required: Authentication failed. Please log in using /login or set a valid FACTORY_API_KEY environment variable."}})
         elif mode in ("droid", "droid-stale", "droid-signed-in") and not signed_in:

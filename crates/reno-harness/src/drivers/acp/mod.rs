@@ -98,6 +98,8 @@
 //! agent advertise (Grok's and Antigravity's); any model a session advertises can be asked for.
 
 mod antigravity_paths;
+#[cfg(test)]
+mod audit;
 mod config;
 mod install;
 mod launch;

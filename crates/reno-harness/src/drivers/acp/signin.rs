@@ -27,6 +27,15 @@ use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Command, Stdio};
 use crate::shutdown_child;
 
+/// A registry agent started and initialized: its process, its client, what
+/// it sends unasked, and its `initialize` answer.
+pub(super) type Started = (
+    crate::process::owned::Child,
+    RpcClient,
+    mpsc::Receiver<Incoming>,
+    Value,
+);
+
 /// Builds the sign-in command from the program's arguments and its extra environment.
 type CommandBuilder<'a> = dyn Fn(&[String], &[(String, String)]) -> Command + Sync + 'a;
 
@@ -115,7 +124,7 @@ pub struct AuthMethodInfo {
 /// The methods `initialize` offers, each with its kind. (A method without a
 /// `type` is the agent's own; one with `_meta["terminal-auth"]` a terminal
 /// one.)
-fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
+pub(super) fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
     initialized
         .get("authMethods")
         .and_then(Value::as_array)
@@ -347,7 +356,7 @@ impl Drop for AbortOnDrop {
 
 /// Whether an ACP error says the agent isn't signed in: the protocol's
 /// `auth_required` (-32000), or its words.
-fn still_signed_out(error: &HarnessError) -> bool {
+pub(super) fn still_signed_out(error: &HarnessError) -> bool {
     let text = error.to_string().to_ascii_lowercase();
     text.contains("-32000")
         || text.contains("auth_required")
@@ -437,9 +446,7 @@ impl AcpExecutor {
             let mut cmd = Command::new(&exe);
             cmd.args(&args).args(extra);
             crate::compose_child_path(&mut cmd, &exe);
-            if let Some(home) = std::env::var_os("HOME") {
-                cmd.current_dir(home);
-            }
+            cmd.current_dir(crate::acp_registry::probe_dir());
             self.launcher().registry_environment(&mut cmd);
             if let Some(browser) = &browser {
                 cmd.env("BROWSER", browser);
@@ -566,7 +573,7 @@ impl AcpExecutor {
                 // Some agents start their sign-in there (Factory Droid mints
                 // its device code in that answer, and its `authenticate`
                 // then opens the page and waits for the pairing).
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let cwd = crate::acp_registry::probe_dir();
                 let can_log_out = initialized
                     .pointer("/agentCapabilities/auth/logout")
                     .is_some();
@@ -582,7 +589,7 @@ impl AcpExecutor {
                             &mut incoming,
                             AccessMode::FullAccess,
                             "session/new",
-                            json!({ "cwd": home, "mcpServers": [] }),
+                            json!({ "cwd": cwd, "mcpServers": [] }),
                             Some(on_page),
                         ),
                     )
@@ -625,7 +632,7 @@ impl AcpExecutor {
                                 &mut incoming,
                                 AccessMode::FullAccess,
                                 "session/new",
-                                json!({ "cwd": home, "mcpServers": [] }),
+                                json!({ "cwd": cwd, "mcpServers": [] }),
                                 Some(on_page),
                             );
                             match tokio::time::timeout(self.probe_timeout * 3, probe).await {
@@ -700,7 +707,7 @@ impl AcpExecutor {
     /// sign in. Errs when it can't tell (it didn't start, it timed out).
     pub async fn registry_sign_in_state(&self) -> Result<RegistrySignIn, HarnessError> {
         let (mut child, client, mut incoming, initialized) = self.start_registry().await?;
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let cwd = crate::acp_registry::probe_dir();
         let session = tokio::time::timeout(
             self.probe_timeout * 3,
             request_draining(
@@ -708,7 +715,7 @@ impl AcpExecutor {
                 &mut incoming,
                 AccessMode::FullAccess,
                 "session/new",
-                json!({ "cwd": home, "mcpServers": [] }),
+                json!({ "cwd": cwd, "mcpServers": [] }),
             ),
         )
         .await;
@@ -771,29 +778,23 @@ impl AcpExecutor {
 
     /// A registry agent started and initialized as a sign-in client
     /// (terminal sign-ins offered), its output discarded.
-    async fn start_registry(
-        &self,
-    ) -> Result<
-        (
-            crate::process::owned::Child,
-            RpcClient,
-            mpsc::Receiver<Incoming>,
-            Value,
-        ),
-        HarnessError,
-    > {
+    async fn start_registry(&self) -> Result<Started, HarnessError> {
+        self.start_registry_with(Stdio::null()).await
+    }
+
+    /// [`Self::start_registry`] with the agent's stderr going to `stderr`
+    /// (the registry audit keeps it to explain a failed start).
+    pub(super) async fn start_registry_with(&self, stderr: Stdio) -> Result<Started, HarnessError> {
         let display_name = self.spec.display_name;
         let (exe, args) = self.launcher().resolve_program()?;
         let mut cmd = Command::new(&exe);
         cmd.args(&args);
         crate::compose_child_path(&mut cmd, &exe);
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.current_dir(home);
-        }
+        cmd.current_dir(crate::acp_registry::probe_dir());
         self.launcher().registry_environment(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .kill_on_drop(true);
         let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
@@ -862,9 +863,7 @@ impl AcpExecutor {
                 let mut replaced = Command::new(&resolved);
                 replaced.args(&extra);
                 crate::compose_child_path(&mut replaced, &resolved);
-                if let Some(home) = std::env::var_os("HOME") {
-                    replaced.current_dir(home);
-                }
+                replaced.current_dir(crate::acp_registry::probe_dir());
                 // (The environment the agent's own launch gets, kept.)
                 self.launcher().registry_environment(&mut replaced);
                 for (key, value) in cmd.as_std().get_envs() {

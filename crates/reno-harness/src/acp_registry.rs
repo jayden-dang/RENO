@@ -49,6 +49,8 @@ const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const UV_TIMEOUT: Duration = Duration::from_secs(600);
 const MARKER: &str = ".reno-install-ok";
+/// What Reno calls itself to a download host: some turn a client with no name away.
+const USER_AGENT: &str = concat!("reno/", env!("CARGO_PKG_VERSION"));
 
 /// One agent of the index, as published.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,14 +244,15 @@ fn relative_cmd(cmd: &str) -> Option<PathBuf> {
     (out.components().count() > 0 && !cmd.starts_with('/')).then_some(out)
 }
 
-const PLATFORMS: [&str; 6] = [
-    "darwin-aarch64",
-    "darwin-x86_64",
-    "linux-aarch64",
-    "linux-x86_64",
-    "windows-aarch64",
-    "windows-x86_64",
-];
+/// A platform key as the registry writes them (`darwin-aarch64`, `linux-x86_64-musl`): a name,
+/// not a path. Platforms this device doesn't run are valid data, only never chosen.
+fn platform_name(key: &str) -> bool {
+    key.len() <= 40
+        && key.contains('-')
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+}
 
 fn valid(e: &Entry) -> bool {
     let d = &e.distribution;
@@ -267,7 +270,7 @@ fn valid(e: &Entry) -> bool {
             .all(|u| u.as_deref().is_none_or(safe_url))
         && (!d.binary.is_empty() || d.npx.is_some() || d.uvx.is_some())
         && d.binary.iter().all(|(platform, t)| {
-            PLATFORMS.contains(&platform.as_str())
+            platform_name(platform)
                 && safe_url(&t.archive)
                 && relative_cmd(&t.cmd).is_some()
                 && args_ok(&t.args)
@@ -419,6 +422,17 @@ pub fn agents_root() -> Option<PathBuf> {
         return Some(dir.join("agents"));
     }
     crate::adapter_install::adapters_root().and_then(|root| root.parent().map(|p| p.join("agents")))
+}
+
+/// An empty folder of Reno's own, where a sign-in or status client starts an agent and has it open
+/// its session: not the home directory, which some agents refuse as a workspace (Autohand
+/// answers "Unsafe workspace"). Falls back to the system's temporary folder.
+pub(crate) fn probe_dir() -> PathBuf {
+    let dir = agents_root()
+        .map(|root| root.join(".probe"))
+        .unwrap_or_else(|| std::env::temp_dir().join("reno-acp-probe"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 fn agent_dir(agent: RegistryAgent) -> Option<PathBuf> {
@@ -936,6 +950,7 @@ async fn download_checked(
         return Err(failed("not an https address".into()));
     }
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| failed(e.to_string()))?;
@@ -1037,6 +1052,68 @@ fn enclosed(dest: &Path, name: &Path) -> Result<PathBuf, HarnessError> {
     Ok(dest.join(out))
 }
 
+/// Whether `path`'s folder really is under `dest`, however links on the way resolve: a file or
+/// folder never lands outside it through a link an archive made earlier.
+fn inside(dest: &Path, path: &Path) -> Result<(), HarnessError> {
+    folder_inside(dest, path.parent().unwrap_or(path))
+}
+
+/// [`inside`] for a folder itself.
+fn folder_inside(dest: &Path, folder: &Path) -> Result<(), HarnessError> {
+    if folder.canonicalize()?.starts_with(dest.canonicalize()?) {
+        Ok(())
+    } else {
+        Err(HarnessError::Install(format!(
+            "the archive writes outside its folder ({})",
+            folder.display()
+        )))
+    }
+}
+
+/// A link at `output` to `target`, a relative path that goes up (`..`) only before it goes
+/// down, and never above `dest`, counted from where the link really sits.
+#[cfg(unix)]
+fn symlink_inside(dest: &Path, output: &Path, target: &Path) -> Result<(), HarnessError> {
+    use std::path::Component;
+    let refused = || {
+        HarnessError::Install(format!(
+            "the archive has a link that points out ({} -> {})",
+            output.display(),
+            target.display()
+        ))
+    };
+    inside(dest, output)?;
+    let root = dest.canonicalize()?;
+    let folder = output.parent().unwrap_or(output).canonicalize()?;
+    let depth = folder
+        .strip_prefix(&root)
+        .map_err(|_| refused())?
+        .components()
+        .count();
+    let (mut up, mut seen_name) = (0_usize, false);
+    for part in target.components() {
+        match part {
+            Component::ParentDir if !seen_name => up += 1,
+            Component::Normal(_) => seen_name = true,
+            Component::CurDir => {}
+            _ => return Err(refused()),
+        }
+    }
+    if up > depth {
+        return Err(refused());
+    }
+    std::os::unix::fs::symlink(target, output)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn symlink_inside(_: &Path, output: &Path, _: &Path) -> Result<(), HarnessError> {
+    Err(HarnessError::Install(format!(
+        "the archive has a link or special file ({})",
+        output.display()
+    )))
+}
+
 fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessError> {
     let bad = |e: std::io::Error| HarnessError::Install(format!("the archive is damaged: {e}"));
     let mut archive = tar::Archive::new(reader);
@@ -1053,6 +1130,7 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         let kind = entry.header().entry_type();
         if kind.is_dir() {
             std::fs::create_dir_all(&output)?;
+            folder_inside(dest, &output)?;
             continue;
         }
         if kind.is_pax_global_extensions()
@@ -1061,8 +1139,22 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         {
             continue;
         }
+        if kind.is_symlink() {
+            // Builds link among their own files; a link that points out never lands.
+            let target = entry
+                .link_name()
+                .map_err(bad)?
+                .map(std::borrow::Cow::into_owned);
+            if let Some(target) = target
+                && let Some(parent) = output.parent()
+            {
+                std::fs::create_dir_all(parent)?;
+                symlink_inside(dest, &output, &target)?;
+                continue;
+            }
+        }
         if !kind.is_file() {
-            // Links and special files never land (a link could point out).
+            // Hard links and special files never land.
             return Err(HarnessError::Install(format!(
                 "the archive has a link or special file ({})",
                 path.display()
@@ -1077,6 +1169,7 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        inside(dest, &output)?;
         let mut out = std::fs::File::create(&output)?;
         std::io::copy(&mut entry, &mut out)?;
         #[cfg(unix)]
@@ -1161,6 +1254,7 @@ pub async fn fetch_index(
     etag: Option<&str>,
 ) -> Result<(Option<Vec<u8>>, Option<String>), String> {
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -1191,6 +1285,7 @@ pub async fn fetch_icon(url: &str) -> Option<String> {
         return None;
     }
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;
@@ -1308,6 +1403,30 @@ mod tests {
         assert!(version_in_use(dir, None));
     }
 
+    /// The registry publishes musl builds (`linux-x86_64-musl`) beside the glibc ones, and may
+    /// name platforms Reno doesn't run: an entry keeps listing for the platforms it can use.
+    #[test]
+    fn an_entry_with_platforms_this_device_doesnt_know_still_lists() {
+        let entry = |platform: &str| {
+            serde_json::json!({ "agents": [{
+                "id": "multi", "name": "Multi", "version": "1.0.0", "description": "x",
+                "distribution": { "binary": {
+                    "darwin-aarch64": { "archive": "https://x.dev/a.tar.gz", "cmd": "./a" },
+                    platform: { "archive": "https://x.dev/b.tar.gz", "cmd": "./b" },
+                } }
+            }] })
+        };
+        for platform in ["linux-x86_64-musl", "linux-aarch64-musl", "freebsd-x86_64"] {
+            let entries = parse_index(&serde_json::to_vec(&entry(platform)).unwrap()).unwrap();
+            assert_eq!(entries.len(), 1, "{platform} dropped the entry");
+        }
+        // A key that isn't a platform name at all is still bad data.
+        for platform in ["../etc", "Linux X86", ""] {
+            let entries = parse_index(&serde_json::to_vec(&entry(platform)).unwrap()).unwrap();
+            assert!(entries.is_empty(), "{platform:?} was accepted");
+        }
+    }
+
     #[test]
     fn the_index_keeps_every_entry_that_holds_up() {
         let entries = parse_index(&serde_json::to_vec(&index()).unwrap()).unwrap();
@@ -1418,6 +1537,78 @@ mod tests {
         // Too big to be an icon.
         let big = format!("<svg>{}</svg>", " ".repeat(MAX_ICON_BYTES));
         assert!(clean_svg(&big).is_none());
+    }
+
+    fn tar_of(entries: &[(&str, Option<&str>)]) -> Vec<u8> {
+        let mut built = tar::Builder::new(Vec::new());
+        for (name, link) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            if name.ends_with('/') {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_cksum();
+                built.append_data(&mut header, name, &b""[..]).unwrap();
+                continue;
+            }
+            match link {
+                Some(target) => {
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_size(0);
+                    header.set_cksum();
+                    built.append_link(&mut header, name, target).unwrap();
+                }
+                None => {
+                    header.set_size(4);
+                    header.set_cksum();
+                    built.append_data(&mut header, name, &b"#!/x"[..]).unwrap();
+                }
+            }
+        }
+        built.into_inner().unwrap()
+    }
+
+    /// Real builds ship links among their own files (harn's `harn-dap -> harn`, a Python
+    /// framework's `Versions/Current -> 3.12`): those land; one that points out never does.
+    #[test]
+    fn tar_links_that_stay_inside_the_archive_unpack_and_the_rest_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = tar_of(&[
+            // (Archives often start with their own folder.)
+            ("./", None),
+            ("harn", None),
+            ("harn-dap", Some("harn")),
+            ("fw/Versions/3.12/Py", None),
+            ("fw/Versions/Current", Some("3.12")),
+            ("fw/Py", Some("Versions/Current/Py")),
+            ("fw/Versions/3.12/up", Some("../../Versions/Current/Py")),
+        ]);
+        extract_tar(&ok[..], dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("harn-dap")).unwrap(), b"#!/x");
+        assert_eq!(std::fs::read(dir.path().join("fw/Py")).unwrap(), b"#!/x");
+        assert!(dir.path().join("fw/Versions/3.12/up").is_file());
+
+        for (what, bad) in [
+            ("absolute", tar_of(&[("l", Some("/etc/passwd"))])),
+            ("above the root", tar_of(&[("l", Some("../x"))])),
+            ("above the root, deep", tar_of(&[("a/l", Some("../../x"))])),
+            ("a .. after a name", tar_of(&[("l", Some("a/../../x"))])),
+            // `a` is the root itself, so `a/b/l` really sits one level down.
+            (
+                "through a link",
+                tar_of(&[("a", Some(".")), ("a/b/l", Some("../../x"))]),
+            ),
+            (
+                "a file through a link out",
+                tar_of(&[("a", Some("..")), ("a/x", None)]),
+            ),
+        ] {
+            let out = tempfile::tempdir().unwrap();
+            let dest = out.path().join("dest");
+            std::fs::create_dir(&dest).unwrap();
+            assert!(extract_tar(&bad[..], &dest).is_err(), "{what} was accepted");
+            assert!(!out.path().join("x").exists(), "{what} wrote outside");
+        }
     }
 
     #[test]
