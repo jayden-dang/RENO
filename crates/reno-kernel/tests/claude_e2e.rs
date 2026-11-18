@@ -259,3 +259,141 @@ async fn a_run_asking_for_a_sandbox_claude_does_not_declare_is_refused_before_it
     assert_eq!(row.pid, None, "nothing was spawned");
     fx.kernel.shutdown().await;
 }
+
+/// A definitions port that serves fixed files: a full-access Claude bot and a policy.
+#[derive(Debug)]
+struct FixedDefs(Vec<reno_proto::defs::DefFile>);
+
+#[async_trait::async_trait]
+impl reno_kernel::Definitions for FixedDefs {
+    async fn snapshot(&self) -> reno_kernel::Result<reno_kernel::DefSnapshot> {
+        Ok(reno_kernel::DefSnapshot {
+            files: self.0.clone(),
+            problems: Vec::new(),
+        })
+    }
+
+    fn watch(&self) -> reno_kernel::Result<tokio::sync::mpsc::Receiver<()>> {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(rx)
+    }
+}
+
+impl Fx {
+    /// A kernel with a `fullbot` bot (full access, Claude) and `policy` as its policy.
+    async fn full_access(policy: &str) -> Self {
+        use reno_proto::defs::{DefFile, DefKind, ValidationContext};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("reno.db")).unwrap();
+        let registry = ExecutorRegistry::new().with(Arc::new(
+            ClaudeExecutor::new().with_executable(fake_claude()),
+        ));
+        let files = vec![
+            DefFile {
+                kind: DefKind::Bot,
+                name: "fullbot".into(),
+                text: "name = \"fullbot\"\ninstructions = \"work\"\nexecutors = [\"claude-code\"]\naccess = \"full_access\"\n".into(),
+            },
+            DefFile {
+                kind: DefKind::Policy,
+                name: "policy".into(),
+                text: policy.into(),
+            },
+        ];
+        let setup = reno_kernel::DefsSetup::new(
+            Arc::new(FixedDefs(files)),
+            ValidationContext::with_builtin([]),
+        );
+        let kernel = Kernel::start_with_definitions(
+            KernelConfig::default(),
+            store.clone(),
+            registry,
+            Arc::new(ManualClock::new(1_700_000_000_000)),
+            setup,
+        )
+        .await
+        .unwrap();
+        Self {
+            _dir: dir,
+            store,
+            kernel,
+        }
+    }
+
+    async fn submit_full(&self, prompt: &str) -> RunId {
+        self.kernel
+            .submit_for_bot("fullbot", prompt, None, std::env::temp_dir(), None)
+            .await
+            .unwrap()
+    }
+}
+
+fn resolutions(
+    journal: &[ExecEvent],
+) -> Vec<(reno_proto::ApprovalOutcome, reno_proto::ResolvedBy)> {
+    journal
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::ApprovalResolved { decision, by, .. } => Some((*decision, by.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A full-access Claude run still reaches the kernel: a command the policy denies is refused
+/// (the CLI sees a deny) and journaled, with nobody asked.
+#[tokio::test]
+async fn a_full_access_claude_run_has_a_policy_deny_refused_and_journaled() {
+    let fx = Fx::full_access(
+        "default = \"ask\"\n[[rules]]\nnote = \"no rm -rf\"\neffect = \"deny\"\nmatch = { action = \"command\", command = \"rm -rf*\" }\n",
+    )
+    .await;
+    let run = fx.submit_full("scenario:one-approval").await;
+    fx.status(&run, RunStatus::Succeeded).await;
+    let journal = fx.journal(&run).await;
+    assert!(
+        matches!(
+            journal.last(),
+            Some(ExecEvent::Done { result: Some(r), .. }) if r == "refused"
+        ),
+        "{journal:?}"
+    );
+    assert_eq!(
+        resolutions(&journal),
+        [(
+            reno_proto::ApprovalOutcome::Denied,
+            reno_proto::ResolvedBy::Rule {
+                name: "no rm -rf".into()
+            }
+        )]
+    );
+    assert!(fx.kernel.pending_approvals().await.unwrap().is_empty());
+    fx.kernel.shutdown().await;
+}
+
+/// What no rule denies is allowed without a person, and the journal says the mode decided it.
+#[tokio::test]
+async fn a_full_access_claude_run_is_allowed_without_a_person_when_nothing_denies_it() {
+    let fx = Fx::full_access("default = \"ask\"\n").await;
+    let run = fx.submit_full("scenario:one-approval").await;
+    fx.status(&run, RunStatus::Succeeded).await;
+    let journal = fx.journal(&run).await;
+    assert!(
+        matches!(
+            journal.last(),
+            Some(ExecEvent::Done { result: Some(r), .. }) if r == "ran"
+        ),
+        "{journal:?}"
+    );
+    assert_eq!(
+        resolutions(&journal),
+        [(
+            reno_proto::ApprovalOutcome::Approved,
+            reno_proto::ResolvedBy::Rule {
+                name: "builtin:full-access".into()
+            }
+        )]
+    );
+    assert!(fx.kernel.pending_approvals().await.unwrap().is_empty());
+    fx.kernel.shutdown().await;
+}

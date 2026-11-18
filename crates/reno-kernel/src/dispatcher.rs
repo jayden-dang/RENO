@@ -756,6 +756,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     }
     let mut info = RunInfo {
         executor: row.executor.clone(),
+        access: spec.access,
+        sandbox: spec.sandbox,
         cwd: spec.cwd.clone(),
         bot: row.bot.as_ref().map(|pin| pin.name.clone()),
         project,

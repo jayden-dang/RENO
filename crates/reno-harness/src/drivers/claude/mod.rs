@@ -27,21 +27,27 @@
 //! - Resume: `ExecSpec::resume` becomes `--resume=<session>`. A session whose transcript holds
 //!   no conversation, or that the CLI cannot restore, starts a fresh one; the `Started` event
 //!   names whichever session the run really has.
-//! - ISOLATION FROM THE OWNER'S CONFIG (`ExecSpec::inherit_user_config`, off by default): the run
-//!   passes `--setting-sources project,local` and sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and
-//!   `ENABLE_CLAUDEAI_MCP_SERVERS=false` (see [`ISOLATION_ENV`]). Per the Claude Code docs
-//!   (`--setting-sources` in the CLI reference; "What settingSources does not control" in the
-//!   Agent SDK guide):
-//!   - EXCLUDED: user settings (`~/.claude/settings.json`: user hooks, `enabledPlugins`,
-//!     permissions, `outputStyle`, `env`, ...) and `~/.claude/CLAUDE.md` (loaded by the `user`
-//!     source); auto-memory (`~/.claude/projects/<project>/memory/`, which the sources do NOT
-//!     control, hence the first variable); claude.ai MCP connectors (second variable).
-//!   - STILL LOADED: project and local settings, the project's `CLAUDE.md` and `.mcp.json`,
-//!     Reno's injected MCP server and policy (never `--strict-mcp-config`, which would drop the
-//!     project's own servers); managed policy settings (MDM / managed file / server-managed);
-//!     `~/.claude.json` (global config, always read); `sandbox.credentials` deny entries from
-//!     `~/.claude/settings.json`. User-scope MCP servers kept in `~/.claude.json` are not
-//!     documented as following the setting sources, so they may still load.
+//! - ISOLATION FROM THE OWNER'S CONFIG AND THE REPO'S (`ExecSpec::inherit_user_config`, off by
+//!   default): the run passes `--setting-sources ""` (none), `--strict-mcp-config`, and sets
+//!   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `ENABLE_CLAUDEAI_MCP_SERVERS=false` (see
+//!   [`ISOLATION_ENV`]). Per the Claude Code docs (`--setting-sources` in the CLI reference;
+//!   "What settingSources does not control" and "CLAUDE.md load locations" in the Agent SDK guide):
+//!   - EXCLUDED: user settings and `~/.claude/CLAUDE.md` (`user`), project settings
+//!     (`.claude/settings.json`: `permissions.allow`, hooks, `enableAllProjectMcpServers`),
+//!     `.claude/settings.local.json` (`local`), and the project's `.mcp.json` servers
+//!     (`--strict-mcp-config`). A bot with edit rights can write the repo's files for its next
+//!     run, so none of them may grant permissions or start code. Also auto-memory and claude.ai
+//!     connectors (the variables).
+//!   - CLAUDE.md: the CLI loads it only with the `project` source, so the driver reads the
+//!     worktree's `CLAUDE.md` (or `.claude/CLAUDE.md`; a regular file, 32 KiB at most, never a
+//!     symlink) and appends it to the system prompt. Lost with the source: nested `CLAUDE.md`
+//!     files, `.claude/rules`, and the repo's own skills, commands and agents.
+//!   - A run that opts in (`inherit_user_config`) passes `--setting-sources user`: the owner's
+//!     settings, never the repo's. It keeps the CLI's own MCP merge (no strict flag), so a repo's
+//!     `.mcp.json` can still load there; that is the owner's explicit choice.
+//!   - STILL LOADED: Reno's injected MCP server and policy; managed policy settings (MDM /
+//!     managed file / server-managed); `~/.claude.json` (global config, always read);
+//!     `sandbox.credentials` deny entries from `~/.claude/settings.json`.
 //!   - SIGN-IN: credentials are not settings. The docs describe `--setting-sources` as a settings
 //!     filter only and list `~/.claude.json` and the credential environment as read regardless;
 //!     the docs do not state authentication independence in so many words, so the first live
@@ -156,8 +162,57 @@ fn config_root(env: &std::collections::BTreeMap<String, String>) -> PathBuf {
         .unwrap_or_else(|| crate::executable::home_or_current_dir().join(".claude"))
 }
 
-/// The setting sources an isolated run loads: the project's and the local ones, never the user's.
-const ISOLATED_SETTING_SOURCES: &str = "project,local";
+/// The setting sources an isolated run loads: none. The project and local sources are files the
+/// repo (so a bot with edit rights) controls: `permissions.allow` rules and hooks in
+/// `.claude/settings.json` would apply before Reno saw a request, and a bot could write them for
+/// its next run. The CLI accepts the empty list (`--setting-sources ""`).
+const ISOLATED_SETTING_SOURCES: &str = "";
+
+/// The setting sources a run that opted into the owner's config loads: the user's only, never the
+/// repo's.
+const INHERITED_SETTING_SOURCES: &str = "user";
+
+/// The most of a project's `CLAUDE.md` handed to the run.
+const MAX_PROJECT_INSTRUCTIONS: usize = 32 * 1024;
+
+/// The project's `CLAUDE.md` (or `.claude/CLAUDE.md`) in `cwd`, which the CLI no longer loads
+/// itself because that needs the `project` setting source (see [`ISOLATED_SETTING_SOURCES`]).
+/// Only a regular file inside `cwd` is read: a symlink is refused so a repo cannot point it at a
+/// file of the owner's, and what is read is capped. It is text for the model, never settings.
+fn project_instructions(cwd: &Path) -> Option<String> {
+    use std::io::Read as _;
+    for relative in ["CLAUDE.md", ".claude/CLAUDE.md"] {
+        let path = cwd.join(relative);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        // A symlinked directory (`.claude -> ~/.ssh`) would lead out as well: what is read
+        // must resolve to somewhere under the working directory.
+        let inside = match (path.canonicalize(), cwd.canonicalize()) {
+            (Ok(real), Ok(root)) => real.starts_with(root),
+            _ => false,
+        };
+        if !inside {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(&path).and_then(|f| {
+            f.take(MAX_PROJECT_INSTRUCTIONS as u64)
+                .read_to_end(&mut bytes)
+        });
+        if read.is_err() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
 
 /// What the setting sources do not control, switched off for an isolated run: the agent reading
 /// and writing the owner's auto-memory under `~/.claude/projects/`, and the claude.ai MCP
@@ -212,19 +267,20 @@ fn mcp_servers_config_arg(servers: &[McpServerSpec]) -> Option<String> {
 ///
 /// | `AccessMode` | `--permission-mode` | The CLI asks about | This driver answers itself | Reaches Reno as `NeedsApproval` |
 /// |---|---|---|---|---|
-/// | `FullAccess` | `default` | what `default` does not allow (commands, network, edits, MCP tools) | every such request: allow | nothing |
+/// | `FullAccess` | `default` | what `default` does not allow (commands, network, edits, MCP tools) | nothing (the kernel allows each request at once, unless policy or the run's history refuses it) | nothing |
 /// | `AutoAcceptEdits` | `acceptEdits` | what `acceptEdits` does not allow: commands, network, MCP tools, and edits it does not cover | nothing | all of it |
 /// | `Supervised` | `default` | what `default` does not allow (commands, network, edits, MCP tools) | nothing | all of it |
 ///
 /// What the CLI allows by itself in its mode (reading inside the working directory in every
 /// mode, edits inside it in `acceptEdits`) never reaches Reno, and a request that does reach
-/// Reno is never allowed unseen except under `FullAccess`. In particular an edit request under
+/// Reno is never allowed unseen: under `FullAccess` the kernel allows it, on record. In particular an edit request under
 /// `AutoAcceptEdits` is an edit `acceptEdits` did not cover, so it is asked.
 ///
 /// `FullAccess` deliberately does not launch with `bypassPermissions` or a skip-permissions
-/// flag: the CLI refuses those as root outside a sandbox, so the run stays in `default` and this
-/// driver allows each request instead. `ExitPlanMode` is a request like any other:
-/// asked in `AutoAcceptEdits` and `Supervised`, and approving it continues in the permission
+/// flag: the CLI refuses those as root outside a sandbox, so the run stays in `default` and
+/// every request reaches the kernel, which answers a full-access run's at once (policy deny and
+/// repeat denial still refuse; nobody is asked), so the audit trail is the same in every mode.
+/// `ExitPlanMode` is a request like any other: asked in `AutoAcceptEdits` and `Supervised`, and approving it continues in the permission
 /// mode of the table. A request that arrives after the run was cancelled is denied at once.
 /// No mode is ever widened mid-run.
 ///
@@ -368,9 +424,18 @@ impl ClaudeExecutor {
         if let Some(model) = &spec.model {
             args.extend(["--model".into(), model.clone()]);
         }
-        if let Some(instructions) = &spec.instructions {
-            // Appended to Claude Code's own system prompt, so its tool guidance stays.
-            args.extend(["--append-system-prompt".into(), instructions.clone()]);
+        // Appended to Claude Code's own system prompt, so its tool guidance stays. The
+        // project's `CLAUDE.md` rides along: the CLI reads it only with the `project` setting
+        // source, which no run loads.
+        let project = project_instructions(&spec.cwd)
+            .map(|text| format!("# Project instructions (CLAUDE.md)\n\n{text}"));
+        let appended = match (&spec.instructions, project) {
+            (Some(own), Some(project)) => Some(format!("{own}\n\n{project}")),
+            (Some(own), None) => Some(own.clone()),
+            (None, project) => project,
+        };
+        if let Some(appended) = appended {
+            args.extend(["--append-system-prompt".into(), appended]);
         }
         if let Some(effort) = spec.effort {
             args.extend(["--effort".into(), effort.as_str().into()]);
@@ -379,8 +444,17 @@ impl ClaudeExecutor {
             "--permission-mode".into(),
             permission::permission_mode(spec.access).into(),
         ]);
+        // Never the repo's settings, hooks or MCP servers, in either case.
+        let sources = if spec.inherit_user_config {
+            INHERITED_SETTING_SOURCES
+        } else {
+            ISOLATED_SETTING_SOURCES
+        };
+        args.extend(["--setting-sources".into(), sources.into()]);
         if !spec.inherit_user_config {
-            args.extend(["--setting-sources".into(), ISOLATED_SETTING_SOURCES.into()]);
+            // The repo's `.mcp.json` would start a bot-editable server: only Reno's own is
+            // loaded (the owner's opt-in keeps the CLI's merge with the user's servers).
+            args.push("--strict-mcp-config".into());
         }
         args.extend(["--disallowedTools".into(), HEADLESS_DISALLOWED_TOOLS.into()]);
         args
@@ -408,9 +482,8 @@ impl ClaudeExecutor {
         if let Some(resume) = &spec.resume {
             cmd.arg(format!("--resume={}", resume.0));
         }
-        // Reno's own server rides beside the user's configured servers (no
-        // `--strict-mcp-config`): the CLI merges an inline JSON config with settings-sourced
-        // ones.
+        // Reno's own server rides beside the user's configured servers when the run opts into
+        // them; an isolated run has `--strict-mcp-config` (see `launch_args`).
         if let Some(config) = mcp_servers_config_arg(&spec.mcp) {
             cmd.args(["--mcp-config", &config]);
         }
@@ -544,7 +617,7 @@ impl Executor for ClaudeExecutor {
                 // The `set_model` control request, live-verified against 2.1.326: the CLI
                 // switches from its next model call, inside the running turn.
                 model_switch: true,
-                // `--setting-sources project,local` and two environment switches (see
+                // `--setting-sources ""`, `--strict-mcp-config` and two environment switches (see
                 // `isolation_args`), unless the run opts in with `inherit_user_config`.
                 isolates_user_config: true,
                 model_aliases: aliases,
@@ -869,13 +942,12 @@ fn deny_all(requests: &mut Requests, stdin: &mut Stdin) {
 /// Serve one control request from the CLI. The CLI blocks until SOME response arrives, so every
 /// request is answered or recorded as open. Returns false when the consumer is gone.
 ///
-/// What the run's access mode covers is allowed at once (see [`ClaudeExecutor`]); anything else
-/// becomes a `NeedsApproval` and waits for `ExecHandle::decide`. `AskUserQuestion` becomes a
+/// Every permission request becomes a `NeedsApproval` and waits for `ExecHandle::decide`, in
+/// every access mode (see [`ClaudeExecutor`]). `AskUserQuestion` becomes a
 /// `NeedsInput`. A request of any other subtype is answered with an error: one left unanswered
 /// would stall the run.
 async fn serve_control_request(
     frame: ControlRequestFrame,
-    access: AccessMode,
     cancelled: bool,
     requests: &mut Requests,
     stdin: &mut Stdin,
@@ -932,12 +1004,6 @@ async fn serve_control_request(
             .is_ok();
     }
     let exit_plan = tool == permission::EXIT_PLAN_MODE;
-    // Approving the plan leaves plan mode for the run's access mode, not the CLI's `default`.
-    let after_plan = exit_plan.then(|| permission::permission_mode(access));
-    if permission::answered_here(access) {
-        respond(stdin, &request_id, permission::allow(input, after_plan));
-        return true;
-    }
     let subject = permission::subject(&tool, &input, &raw);
     let replaced = requests.open_approval(request_id.clone(), ApprovalPayload { input, exit_plan });
     note_superseded(replaced, &request_id);
@@ -1203,7 +1269,7 @@ async fn run_session(session: Session) {
                         continue;
                     }
                     if let Frame::ControlRequest(request) = frame {
-                        if !serve_control_request(request, access, interrupted, &mut requests, &mut stdin, &event_tx).await {
+                        if !serve_control_request(request, interrupted, &mut requests, &mut stdin, &event_tx).await {
                             break 'main; // consumer gone: reap below
                         }
                         continue;
@@ -1710,9 +1776,10 @@ mod tests {
     }
 
     #[test]
-    fn a_run_loads_only_project_and_local_settings_unless_the_bot_opts_in() {
+    fn a_run_loads_no_repo_settings_and_a_bot_that_opts_in_only_the_users() {
         let (args, env) = args_and_env(&spec(AccessMode::Supervised));
-        assert_eq!(flag(&args, "--setting-sources"), Some("project,local"));
+        assert_eq!(flag(&args, "--setting-sources"), Some(""));
+        assert!(args.contains(&"--strict-mcp-config".to_owned()));
         // What the setting sources do not control: auto-memory and claude.ai connectors.
         assert_eq!(
             env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
@@ -1726,9 +1793,71 @@ mod tests {
         let mut opted = spec(AccessMode::Supervised);
         opted.inherit_user_config = true;
         let (args, env) = args_and_env(&opted);
-        assert_eq!(flag(&args, "--setting-sources"), None);
+        assert_eq!(flag(&args, "--setting-sources"), Some("user"));
+        assert!(!args.contains(&"--strict-mcp-config".to_owned()));
         assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), None);
         assert_eq!(env_value(&env, "ENABLE_CLAUDEAI_MCP_SERVERS"), None);
+    }
+
+    #[test]
+    fn the_projects_claude_md_reaches_the_run_as_prompt_text_not_as_a_setting_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "Use tabs.\n").unwrap();
+        let mut s = spec(AccessMode::Supervised);
+        s.cwd = dir.path().to_path_buf();
+        s.instructions = Some("Be brief.".into());
+        let args = ClaudeExecutor::launch_args(&s);
+        let appended = flag(&args, "--append-system-prompt").unwrap();
+        assert!(appended.starts_with("Be brief."), "{appended}");
+        assert!(appended.contains("Use tabs."), "{appended}");
+        assert_eq!(flag(&args, "--setting-sources"), Some(""));
+
+        // `.claude/CLAUDE.md` is the fallback, and no file means nothing appended.
+        std::fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
+        std::fs::create_dir(dir.path().join(".claude")).unwrap();
+        std::fs::write(dir.path().join(".claude/CLAUDE.md"), "Nested.").unwrap();
+        s.instructions = None;
+        let args = ClaudeExecutor::launch_args(&s);
+        assert!(
+            flag(&args, "--append-system-prompt")
+                .unwrap()
+                .contains("Nested.")
+        );
+        std::fs::remove_file(dir.path().join(".claude/CLAUDE.md")).unwrap();
+        let args = ClaudeExecutor::launch_args(&s);
+        assert_eq!(flag(&args, "--append-system-prompt"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_md_behind_a_symlinked_directory_is_not_read() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("CLAUDE.md"), "TOP SECRET").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".claude")).unwrap();
+        assert_eq!(project_instructions(dir.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_md_symlink_and_an_oversized_one_are_not_followed_whole() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "TOP SECRET").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("CLAUDE.md"))
+            .unwrap();
+        assert_eq!(project_instructions(dir.path()), None);
+
+        std::fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "x".repeat(MAX_PROJECT_INSTRUCTIONS * 2),
+        )
+        .unwrap();
+        assert_eq!(
+            project_instructions(dir.path()).unwrap().len(),
+            MAX_PROJECT_INSTRUCTIONS
+        );
     }
 
     #[test]
@@ -1757,9 +1886,11 @@ mod tests {
             s.mcp = vec![server("reno", "reno")];
             let (args, _) = args_and_env(&s);
             assert!(args.contains(&"--mcp-config".to_owned()), "{args:?}");
-            // Never `--strict-mcp-config`: it would drop the project's own `.mcp.json`.
-            assert!(
-                !args.contains(&"--strict-mcp-config".to_owned()),
+            // Strict when isolated: the repo's `.mcp.json` is bot-editable, so only Reno's own
+            // server loads; an owner's opt-in keeps the CLI's merge.
+            assert_eq!(
+                args.contains(&"--strict-mcp-config".to_owned()),
+                !inherit,
                 "{args:?}"
             );
         }

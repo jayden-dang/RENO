@@ -72,11 +72,23 @@ fn rank(sandbox: SandboxLevel) -> u8 {
 ///
 /// | `AccessMode` | `approvalPolicy` | sandbox before the ceiling |
 /// |---|---|---|
-/// | `FullAccess` | `never` | `danger-full-access` |
+/// | `FullAccess`, sandbox unrestricted | `untrusted` | `danger-full-access` |
+/// | `FullAccess`, a narrower sandbox | `never` | the spec's |
 /// | `AutoAcceptEdits` | `untrusted` | `workspace-write` (network on) |
 /// | `Supervised` | `untrusted` | `read-only` |
+///
+/// Full access under an unrestricted sandbox asks (`untrusted`) so that every command, file
+/// change, permission grant and MCP tool call reaches Reno, whose kernel allows it at once unless
+/// policy, a standing deny or an earlier refusal in the run says no: nobody is asked, and the
+/// audit trail is the same as for a supervised run. Codex's own exec-policy rules and its
+/// known-safe commands can still run without a request. Under a narrower sandbox the run stays
+/// on `never`: a request would be one to leave the sandbox the spec asked for, which nothing
+/// allows unseen (ARCH-15), and the sandbox is what confines it.
 pub(crate) fn policy(access: AccessMode, ceiling: SandboxLevel) -> Policy {
     let (approval_policy, wanted) = match access {
+        AccessMode::FullAccess if rank(ceiling) >= rank(SandboxLevel::Unrestricted) => {
+            ("untrusted", SandboxLevel::Unrestricted)
+        }
         AccessMode::FullAccess => ("never", SandboxLevel::Unrestricted),
         AccessMode::AutoAcceptEdits => ("untrusted", SandboxLevel::WorkspaceWrite),
         AccessMode::Supervised => ("untrusted", SandboxLevel::ReadOnly),
@@ -91,10 +103,13 @@ pub(crate) fn policy(access: AccessMode, ceiling: SandboxLevel) -> Policy {
     }
 }
 
-/// Whether a mode that can ask routes its approvals to the person explicitly: a configured
-/// `approvals_reviewer` could otherwise hand them to an AI reviewer instead.
-pub(crate) fn asks_person(access: AccessMode) -> bool {
-    access != AccessMode::FullAccess
+impl Policy {
+    /// Whether Codex can ask under this policy, so its approvals are routed to Reno explicitly
+    /// (`approvalsReviewer: user`): a configured `approvals_reviewer` could otherwise hand them
+    /// to an AI reviewer instead.
+    pub(crate) fn asks(&self) -> bool {
+        self.approval_policy != "never"
+    }
 }
 
 /// What the driver answers itself, for one run: the access mode, the sandbox the run really has
@@ -102,18 +117,16 @@ pub(crate) fn asks_person(access: AccessMode) -> bool {
 ///
 /// | Request | `FullAccess` | `AutoAcceptEdits` | `Supervised` |
 /// |---|---|---|---|
-/// | command | accepted | asked | asked |
-/// | file change | accepted | accepted when every path is inside the working directory, else asked | asked |
-/// | permission grant | accepted | asked | asked |
-/// | MCP tool call | accepted | asked | asked |
+/// | command | asked | asked | asked |
+/// | file change | asked | accepted when every path is inside the working directory, else asked | asked |
+/// | permission grant | asked | asked | asked |
+/// | MCP tool call | asked | asked | asked |
 ///
-/// "Accepted" for a command, a file change or a permission grant means the run is unconfined:
-/// full access *and* an unrestricted sandbox. Under full access with a narrower sandbox Codex
-/// never asks (`never`), so a request that arrives anyway asks to leave the sandbox the spec
-/// asked for: it is asked, not accepted. A file change inside the working directory needs a
-/// sandbox that can write there, and its paths are compared lexically here (`..` is resolved,
-/// symlinks are not: the driver, which may touch the file system, follows them before it
-/// believes this).
+/// "Asked" means it reaches Reno as a `NeedsApproval`; under full access the kernel answers at
+/// once (a policy deny still refuses), so the driver accepts nothing unseen there. Only
+/// `AutoAcceptEdits` accepts a file change itself: it needs a sandbox that can write inside the
+/// working directory, and its paths are compared lexically here (`..` is resolved, symlinks are
+/// not: the driver, which may touch the file system, follows them before it believes this).
 #[derive(Debug, Clone)]
 pub(crate) struct Authority {
     access: AccessMode,
@@ -130,37 +143,10 @@ impl Authority {
         }
     }
 
-    fn unconfined(&self) -> bool {
-        self.access == AccessMode::FullAccess && self.sandbox == SandboxLevel::Unrestricted
-    }
-
-    pub(crate) fn accepts_command(&self) -> bool {
-        self.unconfined()
-    }
-
-    pub(crate) fn accepts_permissions(&self) -> bool {
-        self.unconfined()
-    }
-
-    pub(crate) fn accepts_mcp_tool(&self) -> bool {
-        self.access == AccessMode::FullAccess
-    }
-
-    /// Whether a file change is accepted by where its paths lead rather than unseen. Those are
-    /// the ones the driver must resolve (symlinks) before it believes the lexical comparison in
-    /// [`Self::accepts_file_change`].
-    pub(crate) fn judges_file_changes_by_path(&self) -> bool {
-        !self.unconfined()
-    }
-
-    /// `grant_root`: the request asks for write access to a whole root, never accepted unseen
-    /// unless the run is unconfined. Paths are compared lexically; a driver that accepts on
-    /// this must also check [`Self::judges_file_changes_by_path`] and resolve the links.
+    /// `grant_root`: the request asks for write access to a whole root, never accepted unseen.
+    /// Paths are compared lexically; a driver that accepts on this must resolve the links too.
     pub(crate) fn accepts_file_change(&self, paths: &[PathBuf], grant_root: bool) -> bool {
-        if self.unconfined() {
-            return true;
-        }
-        self.access != AccessMode::Supervised
+        self.access == AccessMode::AutoAcceptEdits
             && rank(self.sandbox) >= rank(SandboxLevel::WorkspaceWrite)
             && !grant_root
             && !paths.is_empty()
@@ -445,7 +431,11 @@ mod tests {
             let p = super::policy(access, ceiling);
             (p.approval_policy, p.sandbox)
         };
-        assert_eq!(policy(FullAccess, Unrestricted), ("never", Unrestricted));
+        // Unrestricted full access asks, so policy can refuse what it runs.
+        assert_eq!(
+            policy(FullAccess, Unrestricted),
+            ("untrusted", Unrestricted)
+        );
         assert_eq!(
             policy(FullAccess, WorkspaceWrite),
             ("never", WorkspaceWrite)
@@ -463,31 +453,10 @@ mod tests {
         for ceiling in [Unrestricted, WorkspaceWrite, ReadOnly] {
             assert_eq!(policy(Supervised, ceiling), ("untrusted", ReadOnly));
         }
-        assert!(!asks_person(FullAccess));
-        assert!(asks_person(AutoAcceptEdits));
-        assert!(asks_person(Supervised));
-    }
-
-    #[test]
-    fn only_an_unconfined_run_answers_commands_and_permissions_itself() {
-        use AccessMode::*;
-        use SandboxLevel::*;
-        let unconfined = authority(FullAccess, Unrestricted);
-        assert!(unconfined.accepts_command() && unconfined.accepts_permissions());
-        for confined in [
-            authority(FullAccess, WorkspaceWrite),
-            authority(AutoAcceptEdits, Unrestricted),
-            authority(Supervised, Unrestricted),
-        ] {
-            assert!(
-                !confined.accepts_command() && !confined.accepts_permissions(),
-                "{confined:?}"
-            );
-        }
-        // An MCP tool call leaves no sandbox: full access answers it, whatever the sandbox.
-        assert!(authority(FullAccess, ReadOnly).accepts_mcp_tool());
-        assert!(!authority(AutoAcceptEdits, Unrestricted).accepts_mcp_tool());
-        assert!(!authority(Supervised, Unrestricted).accepts_mcp_tool());
+        assert!(super::policy(FullAccess, Unrestricted).asks());
+        assert!(!super::policy(FullAccess, ReadOnly).asks());
+        assert!(super::policy(AutoAcceptEdits, Unrestricted).asks());
+        assert!(super::policy(Supervised, Unrestricted).asks());
     }
 
     #[test]
@@ -513,12 +482,13 @@ mod tests {
             !authority(Supervised, Unrestricted)
                 .accepts_file_change(&paths(&["/work/a.rs"]), false)
         );
-        // Full access: anything when unconfined, the working directory when confined.
-        let full = authority(FullAccess, Unrestricted);
-        assert!(full.accepts_file_change(&paths(&["/anywhere"]), true));
-        let confined = authority(FullAccess, WorkspaceWrite);
-        assert!(confined.accepts_file_change(&paths(&["/work/a.rs"]), false));
-        assert!(!confined.accepts_file_change(&paths(&["/anywhere"]), false));
+        // Full access accepts nothing itself: every change reaches the kernel, so a protected
+        // path rule holds.
+        for ceiling in [Unrestricted, WorkspaceWrite] {
+            let full = authority(FullAccess, ceiling);
+            assert!(!full.accepts_file_change(&paths(&["/work/a.rs"]), false));
+            assert!(!full.accepts_file_change(&paths(&["/anywhere"]), true));
+        }
     }
 
     #[test]

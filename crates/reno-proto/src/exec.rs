@@ -362,7 +362,8 @@ pub enum ResolvedBy {
     /// has none a label for a person, such as "policy rule 8 (command `git push*`)" (its number
     /// from 1, then what it matches); `default` when no rule matched and the policy's default
     /// effect applied; `standing:<rule id>` for a standing rule a person made (`rule.list`); or
-    /// `builtin:reno-mcp` for a call to one of Reno's own MCP tools.
+    /// `builtin:reno-mcp` for a call to one of Reno's own MCP tools; or `builtin:full-access` for a
+    /// request a full-access run's policy and history did not refuse (allowed by the access mode).
     Rule {
         /// The rule's name.
         name: String,

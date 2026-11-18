@@ -693,7 +693,20 @@ async fn questions_closed_unanswered_deny_the_tool() {
 /// `ClaudeExecutor`). The fake CLI reports its flags and how each request was answered.
 #[tokio::test]
 async fn access_modes_decide_what_reaches_reno() {
-    // Full access: nothing is asked; the CLI launches in `default` with no skip flag.
+    // Full access: the CLI launches in `default` with no skip flag, and every request still
+    // reaches Reno so the kernel can hold policy denies (it, not this driver, answers allow).
+    let mut live = start(
+        &executor(),
+        spec_with("scenario:approvals", AccessMode::FullAccess),
+    )
+    .await;
+    let outcome = drive(&mut live, |_| Decision::Allow).await;
+    assert_eq!(
+        result_of(&outcome.events),
+        "default none bash=allow edit=allow plan=allow:default"
+    );
+    assert_eq!(outcome.approvals.len(), 3);
+    // And a refusal from the kernel is honoured in full access too.
     let mut live = start(
         &executor(),
         spec_with("scenario:approvals", AccessMode::FullAccess),
@@ -702,9 +715,8 @@ async fn access_modes_decide_what_reaches_reno() {
     let outcome = drive(&mut live, |_| Decision::Deny).await;
     assert_eq!(
         result_of(&outcome.events),
-        "default none bash=allow edit=allow plan=allow:default"
+        "default none bash=deny edit=deny plan=deny"
     );
-    assert!(outcome.approvals.is_empty());
 
     // Auto-accept edits: the CLI's own acceptEdits mode. Nothing is answered here: an edit
     // request that reaches the driver is one acceptEdits did not cover, so it is asked like
