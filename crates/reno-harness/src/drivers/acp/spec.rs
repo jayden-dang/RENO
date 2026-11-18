@@ -391,7 +391,7 @@ pub(super) fn antigravity() -> AcpAgentSpec {
 /// ```
 ///
 /// One model per `*` or `-` line under "Available models:", the default first. A model routed
-/// through a provider the person added (`provider/id`) says so in its description.
+/// through a provider the person added (`provider/id`) says so in its name and description.
 pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
     let mut listed = false;
     let mut models: Vec<ModelInfo> = Vec::new();
@@ -425,7 +425,11 @@ pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
             default_effort: None,
             efforts: vec![],
             id: id.to_owned(),
-            display_name: Some(grok_name(bare)),
+            // The chip shows only the name: a provider's copy must not read as Grok's own.
+            display_name: Some(match provider {
+                Some(provider) => format!("{} \u{b7} {provider}", grok_name(bare)),
+                None => grok_name(bare),
+            }),
             description: match (default, provider) {
                 (_, Some(provider)) => Some(format!("Through {provider}")),
                 (true, None) => Some("Grok's default".to_owned()),
@@ -486,7 +490,10 @@ mod grok_models_tests {
             Some("Grok 4.7 Build Fast")
         );
         assert_eq!(models[1].description, None);
-        assert_eq!(models[6].display_name.as_deref(), Some("Grok 4.7"));
+        assert_eq!(
+            models[6].display_name.as_deref(),
+            Some("Grok 4.7 \u{b7} zroute")
+        );
         assert_eq!(models[6].description.as_deref(), Some("Through zroute"));
     }
 
