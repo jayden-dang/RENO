@@ -38,9 +38,11 @@ mod changes;
 mod dock;
 mod files;
 mod header;
+mod history;
 mod output;
 mod panel;
 mod session;
+mod syntax;
 mod terminal;
 mod transcript;
 
@@ -105,6 +107,12 @@ pub(crate) struct RunScreen {
     files: Option<files::FilesTab>,
     /// The Terminal tabs: a slot each, with its view made when it first shows.
     terms: terminal::Terms,
+    /// The History tab's log, search and selection, made when it first shows.
+    history: Option<history::HistoryTab>,
+    /// The Commit tabs, by commit, each made when it first shows.
+    commits: HashMap<String, history::CommitTab>,
+    /// Syntax colour of the files in diffs, by file and patch.
+    syntax: syntax::Syntax,
     /// Review's files the person folded, and whether the many-files default was applied.
     review_folded: HashSet<String>,
     review_default_applied: bool,
@@ -182,6 +190,9 @@ impl RunScreen {
             panel_shown: false,
             files: None,
             terms,
+            history: None,
+            commits: HashMap::new(),
+            syntax: syntax::Syntax::default(),
             review_folded: HashSet::new(),
             review_default_applied: false,
             review: changes::Flat::new(),

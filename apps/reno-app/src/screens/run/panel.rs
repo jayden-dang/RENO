@@ -145,8 +145,14 @@ impl RunScreen {
         self.panel_touched = true;
         self.set_panel_open(true, cx);
         let home = surface == Surface::Home;
+        let review = surface == Surface::Review;
         self.panel.open(surface);
         self.persist_panel(cx);
+        if review {
+            // What the diff is now, not what it was when the tab was last looked at: a changed
+            // diff keeps what shows until the new patches are in.
+            self.reload_changes(cx);
+        }
         if home {
             // The page's letters work once the panel has the keyboard.
             window.focus(&self.panel_focus, cx);
@@ -276,6 +282,7 @@ impl RunScreen {
         let note = panel_home::finding_note(run, held, self.result.as_deref(), store.now_ms());
         let facts = HomeFacts {
             files: store.supports_files(),
+            history: store.supports_history(),
             terminals: store.supports_terminals(),
             status: run.status,
             problem: summary::reported_problem(run),
@@ -418,12 +425,12 @@ impl RunScreen {
             Surface::Session => self.session_body(theme, cx),
             Surface::Review => self.review_body(theme, cx),
             Surface::Planned(kind) => view::planned_page(theme, kind),
-            Surface::History => view::planned_page(theme, HomeKind::History),
+            Surface::History => self.history_body(theme, width, cx),
             Surface::Terminal(slot) => self.terminal_body(theme, slot, cx),
             Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
             Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Files => self.files_body(theme, width, window, cx),
-            Surface::Commit(_) => view::planned_page(theme, HomeKind::History),
+            Surface::Commit(sha) => self.commit_body(theme, &sha, cx),
         };
         div()
             .id("panel-canvas")
@@ -454,6 +461,12 @@ impl RunScreen {
     fn on_panel_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let m = &event.keystroke.modifiers;
         if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+        if *self.panel.active() == Surface::History
+            && self.history_key(event.keystroke.key.as_str(), window, cx)
+        {
+            cx.stop_propagation();
             return;
         }
         if *self.panel.active() != Surface::Home {

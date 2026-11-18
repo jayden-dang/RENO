@@ -7,6 +7,7 @@
 pub(crate) mod changes;
 pub(crate) mod composer_prefs;
 pub(crate) mod context;
+pub(crate) mod diff_syntax;
 pub(crate) mod executors;
 pub(crate) mod files;
 pub(crate) mod git_graph;

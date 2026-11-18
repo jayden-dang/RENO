@@ -50,6 +50,9 @@ pub(crate) struct WindowState {
     pub(crate) open: Option<bool>,
     #[serde(default)]
     pub(crate) width: Option<f32>,
+    /// Diffs draw side by side. Absent in a file from before the Review upgrade: unified.
+    #[serde(default)]
+    pub(crate) split: bool,
 }
 
 impl WindowState {
@@ -57,6 +60,7 @@ impl WindowState {
         Self {
             open: self.open,
             width: self.width.filter(|w| w.is_finite() && *w > 0.0),
+            split: self.split,
         }
     }
 }
@@ -380,6 +384,7 @@ mod tests {
         s.set_window(WindowState {
             open: Some(true),
             width: Some(420.5),
+            split: true,
         });
         s.put(key(1), panel(&["a.rs"]));
         s.put(key(2), panel(&["b.rs", "c.rs"]));
@@ -570,11 +575,13 @@ mod tests {
         s.set_window(WindowState {
             open: Some(true),
             width: Some(f32::NAN),
+            split: false,
         });
         assert_eq!(s.window().width, None);
         s.set_window(WindowState {
             open: Some(true),
             width: Some(-3.0),
+            split: false,
         });
         assert_eq!(s.window().width, None);
     }

@@ -369,6 +369,33 @@ pub(crate) fn status_pill_worded(color: Hsla, words: &'static str) -> Div {
         .child(words)
 }
 
+/// A tooltip: a short text on the popover surface.
+pub(crate) struct Tip(pub(crate) SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let theme = super::theme::current(cx);
+        div()
+            .max_w(px(280.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(7.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
+            .shadow_md()
+            .text_size(px(12.0))
+            .text_color(theme.muted)
+            .child(self.0.clone())
+    }
+}
+
+/// `.tooltip(...)` for an element: `text` on hover.
+pub(crate) fn tip(text: impl Into<SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
+    let text: SharedString = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone())).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

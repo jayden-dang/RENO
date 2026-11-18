@@ -44,6 +44,7 @@ impl Saved {
         Prefs {
             open: window.open,
             width: window.width,
+            split: window.split,
         }
         .set_without_saving(cx);
         cx.set_global(Self {

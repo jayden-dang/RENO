@@ -17,12 +17,15 @@ pub(crate) enum Loaded<T> {
     Failed(String),
 }
 
-/// What Review compares: everything the thread did since its base, or only the latest run.
+/// What Review compares: everything the thread did since its base, only the latest run, or what
+/// is not committed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum ReviewScope {
     #[default]
     Thread,
     Run,
+    /// The worktree against `HEAD`: staged, unstaged and untracked files, no commits.
+    WorkingTree,
 }
 
 impl ReviewScope {
@@ -30,6 +33,35 @@ impl ReviewScope {
         match self {
             Self::Thread => "This thread",
             Self::Run => "This run",
+            Self::WorkingTree => "Uncommitted",
+        }
+    }
+
+    /// What `workspace.diff` is asked for; `None` is the method's own default, which every daemon
+    /// with `run.changes` knows.
+    pub(crate) fn diff_scope(self) -> Option<reno_proto::DiffScope> {
+        match self {
+            Self::Thread => None,
+            Self::Run => Some(reno_proto::DiffScope::Run),
+            Self::WorkingTree => Some(reno_proto::DiffScope::WorkingTree),
+        }
+    }
+
+    /// The feature a daemon needs for this scope, `None` when `run.changes` is enough.
+    pub(crate) const fn needs(self) -> Option<&'static str> {
+        match self {
+            Self::Thread => None,
+            Self::Run => Some(reno_proto::FEATURE_THREADS),
+            Self::WorkingTree => Some(reno_proto::FEATURE_HISTORY),
+        }
+    }
+
+    /// Why a daemon without [`Self::needs`] cannot offer it, for a tooltip.
+    pub(crate) const fn needs_words(self) -> &'static str {
+        match self {
+            Self::Thread => "",
+            Self::Run => "This daemon has no threads. Update renod to compare one run.",
+            Self::WorkingTree => "This daemon is too old to show uncommitted changes. Update renod.",
         }
     }
 }
@@ -310,6 +342,9 @@ pub(crate) enum PatchPane {
 pub(crate) struct Patch {
     pub(crate) text: Option<String>,
     pub(crate) truncated: bool,
+    /// The digest of the diff this patch came with: it names the patch a file's syntax colours
+    /// were made for. Empty from a daemon without feature `history`.
+    pub(crate) checksum: String,
 }
 
 pub(crate) fn patch_pane(file: &FileRow, patch: &Loaded<Patch>) -> PatchPane {
@@ -323,6 +358,7 @@ pub(crate) fn patch_pane(file: &FileRow, patch: &Loaded<Patch>) -> PatchPane {
         Loaded::Ready(Patch {
             text: Some(text),
             truncated,
+            ..
         }) => {
             let rows = parse_patch(text);
             if rows.iter().any(|r| r.kind == RowKind::Binary) {
@@ -750,6 +786,7 @@ index 1..2 100644\n--- a/o\n+++ b/n\n@@ -1 +1 @@\n-x\n+y\n";
         let loaded = Loaded::Ready(Patch {
             text: Some(binary.to_owned()),
             truncated: false,
+            checksum: String::new(),
         });
         assert_eq!(patch_pane(&f, &loaded), PatchPane::Binary);
     }
@@ -778,7 +815,8 @@ index 1..2 100644\n--- a/o\n+++ b/n\n@@ -1 +1 @@\n-x\n+y\n";
                 &f,
                 &Loaded::Ready(Patch {
                     text: None,
-                    truncated: false
+                    truncated: false,
+                    checksum: String::new(),
                 })
             ),
             PatchPane::Nothing
@@ -786,6 +824,7 @@ index 1..2 100644\n--- a/o\n+++ b/n\n@@ -1 +1 @@\n-x\n+y\n";
         let cut = Loaded::Ready(Patch {
             text: Some("@@ -1 +1 @@\n-a\n+b\n".to_owned()),
             truncated: true,
+            checksum: String::new(),
         });
         match patch_pane(&f, &cut) {
             PatchPane::Rows { rows, truncated } => assert!(truncated && rows.len() == 3),

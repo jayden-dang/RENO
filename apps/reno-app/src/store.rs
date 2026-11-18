@@ -222,6 +222,12 @@ pub(crate) struct Store {
     reread_changes: BTreeSet<(RunId, ReviewScope)>,
     /// The patch of one file of a run, by `(run, path)`.
     patches: BTreeMap<(RunId, ReviewScope, String), Loaded<Patch>>,
+    /// Patches whose diff moved on since they were read: they stay on screen, and are read again
+    /// quietly the next time they are asked for.
+    stale_patches: BTreeSet<(RunId, ReviewScope, String)>,
+    /// How many patch reads were sent (tests assert a quiet refetch happened).
+    #[cfg(test)]
+    patch_reads: usize,
     /// Routing decisions by run, from `task.run` and `run.routing`.
     routings: BTreeMap<RunId, RoutingEntry>,
     /// Tasks and steers sent and not yet answered.
@@ -289,6 +295,9 @@ impl Store {
             reading_changes: BTreeSet::new(),
             reread_changes: BTreeSet::new(),
             patches: BTreeMap::new(),
+            stale_patches: BTreeSet::new(),
+            #[cfg(test)]
+            patch_reads: 0,
             routings: BTreeMap::new(),
             sending: 0,
             roots: crate::local::Roots::default(),
@@ -764,6 +773,36 @@ impl Store {
         self.state.supports(reno_proto::FEATURE_THREADS)
     }
 
+    /// Whether the daemon has History and the Review upgrade (feature `history`): the commit
+    /// log, the uncommitted scope, file sources for syntax colour, and the diff checksum.
+    pub(crate) fn supports_history(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_HISTORY)
+    }
+
+    /// The connected client, for the History tab's own requests: its answers live in the tab.
+    pub(crate) fn history_client(&self) -> Option<Client> {
+        self.client()
+    }
+
+    /// Whether the daemon can answer a diff over `scope`.
+    pub(crate) fn supports_scope(&self, scope: ReviewScope) -> bool {
+        self.supports_changes() && scope.needs().is_none_or(|f| self.state.supports(f))
+    }
+
+    /// How many patch reads were sent so far.
+    #[cfg(test)]
+    pub(crate) fn patch_reads(&self) -> usize {
+        self.patch_reads
+    }
+
+    /// Whether the patches of `scope` wait to be read again.
+    #[cfg(test)]
+    pub(crate) fn has_stale_patches(&self, run: &RunId, scope: ReviewScope) -> bool {
+        self.stale_patches
+            .iter()
+            .any(|(r, s, _)| r == run && *s == scope)
+    }
+
     /// Reads where `run` works and which files its thread changed.
     pub(crate) fn load_changes(&mut self, run: &RunId, cx: &mut Context<Self>) {
         self.load_changes_in(run, ReviewScope::Thread, cx);
@@ -778,7 +817,7 @@ impl Store {
         scope: ReviewScope,
         cx: &mut Context<Self>,
     ) {
-        if !self.supports_changes() || (scope == ReviewScope::Run && !self.supports_threads()) {
+        if !self.supports_scope(scope) {
             return;
         }
         let key = (run.clone(), scope);
@@ -795,11 +834,11 @@ impl Store {
             "Could not read the run's changes",
             move |client| async move {
                 let diff_call = async {
-                    match scope {
-                        ReviewScope::Thread => client.workspace_diff(id.clone(), None).await,
-                        ReviewScope::Run => {
+                    match scope.diff_scope() {
+                        None => client.workspace_diff(id.clone(), None).await,
+                        Some(diff_scope) => {
                             client
-                                .workspace_diff_scoped(id.clone(), None, reno_proto::DiffScope::Run)
+                                .workspace_diff_scoped(id.clone(), None, diff_scope)
                                 .await
                         }
                     }
@@ -822,18 +861,7 @@ impl Store {
             cx,
             D {
                 ok: Box::new(move |store, read: RunChanges, cx| {
-                    store.reading_changes.remove(&ok_key);
-                    // A patch read for the old list may not fit the new one.
-                    if store.changes.get(&ok_key).map(|c| &c.diff) != Some(&read.diff) {
-                        store
-                            .patches
-                            .retain(|(run, s, _), _| !(run == &ok_key.0 && *s == ok_key.1));
-                    }
-                    store.changes.insert(ok_key.clone(), read);
-                    if store.reread_changes.remove(&ok_key) {
-                        store.load_changes_in(&ok_key.0, ok_key.1, cx);
-                    }
-                    cx.notify();
+                    store.accept_changes(ok_key.clone(), read, cx);
                 }),
                 err: Box::new(move |store, cx| {
                     store.reading_changes.remove(&err_key);
@@ -848,6 +876,35 @@ impl Store {
                 quiet: true,
             },
         );
+        cx.notify();
+    }
+
+    /// Takes what a read of the changes found. When the diff moved on (its checksum, or the list
+    /// where the daemon sends none), the patches read for the old one stay on screen and are
+    /// marked to be read again, so Review does not blank and the scroll position holds.
+    pub(crate) fn accept_changes(
+        &mut self,
+        key: (RunId, ReviewScope),
+        read: RunChanges,
+        cx: &mut Context<Self>,
+    ) {
+        self.reading_changes.remove(&key);
+        if let Some(old) = self.changes.get(&key)
+            && old.diff != read.diff
+            && !matches!(old.diff, Loaded::Loading)
+        {
+            let stale: Vec<_> = self
+                .patches
+                .keys()
+                .filter(|(run, s, _)| run == &key.0 && *s == key.1)
+                .cloned()
+                .collect();
+            self.stale_patches.extend(stale);
+        }
+        self.changes.insert(key.clone(), read);
+        if self.reread_changes.remove(&key) {
+            self.load_changes_in(&key.0, key.1, cx);
+        }
         cx.notify();
     }
 
@@ -867,24 +924,32 @@ impl Store {
         path: &str,
         cx: &mut Context<Self>,
     ) {
-        if !self.supports_changes() || (scope == ReviewScope::Run && !self.supports_threads()) {
+        if !self.supports_scope(scope) {
             return;
         }
         let key = (run.clone(), scope, path.to_owned());
-        if self.patches.contains_key(&key) {
+        // A patch that went stale is read again with the old one still showing.
+        let refetch = self.stale_patches.remove(&key);
+        if self.patches.contains_key(&key) && !refetch {
             return;
         }
-        self.patches.insert(key.clone(), Loaded::Loading);
+        if !refetch {
+            self.patches.insert(key.clone(), Loaded::Loading);
+        }
+        #[cfg(test)]
+        {
+            self.patch_reads += 1;
+        }
         let (id, file) = (run.clone(), path.to_owned());
         let (ok_key, err_key) = (key.clone(), key);
         self.call(
             "Could not read the patch",
             move |client| async move {
-                let read = match scope {
-                    ReviewScope::Thread => client.workspace_diff(id, Some(file)).await,
-                    ReviewScope::Run => {
+                let read = match scope.diff_scope() {
+                    None => client.workspace_diff(id, Some(file)).await,
+                    Some(diff_scope) => {
                         client
-                            .workspace_diff_scoped(id, Some(file), reno_proto::DiffScope::Run)
+                            .workspace_diff_scoped(id, Some(file), diff_scope)
                             .await
                     }
                 };
@@ -892,6 +957,7 @@ impl Store {
                     Ok(d) => Loaded::Ready(Patch {
                         text: d.patch,
                         truncated: d.patch_truncated,
+                        checksum: d.checksum,
                     }),
                     Err(e) => Loaded::Failed(reason(&e)),
                 })
