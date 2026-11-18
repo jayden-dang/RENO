@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use reno_proto::{ExecutorId, RunId, RunStatus, RunSummary};
+use reno_proto::{ExecutorId, RunId, RunStatus, RunSummary, ThreadId};
 
 use crate::summary::{self, Problem};
 
@@ -123,14 +123,21 @@ impl FolderKey {
     }
 }
 
-/// One run under a folder.
+/// One thread under a folder (a run of its own on a daemon without threads).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RunRow {
+pub(crate) struct ThreadRow {
+    /// The thread, when the daemon has them and has named it.
+    pub(crate) thread: Option<ThreadId>,
+    /// The thread's latest run: the one a click opens.
     pub(crate) run: RunId,
+    /// Every run of the thread the app knows, oldest first (the latest included).
+    pub(crate) members: Vec<RunId>,
+    /// The first run's title.
     pub(crate) title: String,
     pub(crate) executor: ExecutorId,
+    /// The latest run's dot.
     pub(crate) dot: Dot,
-    /// "2m", "1h", "1d".
+    /// "2m", "1h", "1d": since the latest run started.
     pub(crate) age: String,
 }
 
@@ -140,9 +147,9 @@ pub(crate) struct Folder {
     pub(crate) key: FolderKey,
     pub(crate) name: String,
     pub(crate) open: bool,
-    /// Runs waiting for you inside, listed even while the folder is closed.
+    /// Threads waiting for you inside, listed even while the folder is closed.
     pub(crate) waiting: usize,
-    pub(crate) rows: Vec<RunRow>,
+    pub(crate) rows: Vec<ThreadRow>,
 }
 
 /// What the sidebar needs besides the runs.
@@ -153,28 +160,81 @@ pub(crate) struct Inputs<'a> {
     /// The run on screen.
     pub(crate) looking_at: Option<&'a RunId>,
     pub(crate) now_ms: u64,
+    /// The thread a run belongs to (always `None` on a daemon without threads).
+    pub(crate) thread_of: &'a dyn Fn(&RunId) -> Option<ThreadId>,
+    /// Whether a thread is closed: it leaves the list.
+    pub(crate) closed: &'a dyn Fn(&ThreadId) -> bool,
 }
 
-/// The folders, most recently active first, "No project" last. Inside a folder, waiting runs
-/// first, then newest first. `root_of` maps a `cwd` to its repository root.
+/// A thread's runs the app knows, oldest first. A run with no known thread is one of its own.
+struct Entry<'a> {
+    thread: Option<ThreadId>,
+    runs: Vec<&'a RunSummary>,
+}
+
+impl<'a> Entry<'a> {
+    fn first(&self) -> &'a RunSummary {
+        self.runs[0]
+    }
+
+    fn latest(&self) -> &'a RunSummary {
+        self.runs[self.runs.len() - 1]
+    }
+}
+
+fn entries<'a>(runs: &[&'a RunSummary], inputs: &Inputs<'_>) -> Vec<Entry<'a>> {
+    let mut out: Vec<Entry<'a>> = Vec::new();
+    for run in runs {
+        match (inputs.thread_of)(&run.run_id) {
+            Some(thread) => match out.iter_mut().find(|e| e.thread.as_ref() == Some(&thread)) {
+                Some(entry) => entry.runs.push(run),
+                None => out.push(Entry {
+                    thread: Some(thread),
+                    runs: vec![run],
+                }),
+            },
+            None => out.push(Entry {
+                thread: None,
+                runs: vec![run],
+            }),
+        }
+    }
+    out.retain(|e| e.thread.as_ref().is_none_or(|t| !(inputs.closed)(t)));
+    for entry in &mut out {
+        entry
+            .runs
+            .sort_by(|a, b| (a.created_at_ms, &a.run_id).cmp(&(b.created_at_ms, &b.run_id)));
+    }
+    out
+}
+
+/// The folders, most recently active first, "No project" last. Inside a folder, waiting threads
+/// first, then the most recently started. `root_of` maps a `cwd` to its repository root. A
+/// thread is listed once: its row says what its first run asked and how its latest run stands.
 pub(crate) fn folders(
     runs: &[&RunSummary],
     root_of: impl Fn(&Path) -> Option<PathBuf>,
     inputs: &Inputs<'_>,
 ) -> Vec<Folder> {
-    let mut groups: Vec<(FolderKey, Vec<&RunSummary>)> = Vec::new();
-    for run in runs {
-        let key = run
+    let mut groups: Vec<(FolderKey, Vec<Entry<'_>>)> = Vec::new();
+    for entry in entries(runs, inputs) {
+        let key = entry
+            .first()
             .cwd
             .as_deref()
             .and_then(&root_of)
             .map_or(FolderKey::NoProject, FolderKey::Repo);
         match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, list)) => list.push(run),
-            None => groups.push((key, vec![run])),
+            Some((_, list)) => list.push(entry),
+            None => groups.push((key, vec![entry])),
         }
     }
-    let latest = |list: &[&RunSummary]| list.iter().map(|r| r.updated_at_ms).max().unwrap_or(0);
+    let latest = |list: &[Entry<'_>]| {
+        list.iter()
+            .map(|e| e.latest().updated_at_ms)
+            .max()
+            .unwrap_or(0)
+    };
     groups.sort_by(|(ka, la), (kb, lb)| {
         (*ka == FolderKey::NoProject)
             .cmp(&(*kb == FolderKey::NoProject))
@@ -185,13 +245,13 @@ pub(crate) fn folders(
         .into_iter()
         .map(|(key, mut list)| {
             list.sort_by(|a, b| {
-                is_waiting(b)
-                    .cmp(&is_waiting(a))
-                    .then_with(|| b.created_at_ms.cmp(&a.created_at_ms))
-                    .then_with(|| a.run_id.cmp(&b.run_id))
+                is_waiting(b.latest())
+                    .cmp(&is_waiting(a.latest()))
+                    .then_with(|| b.latest().created_at_ms.cmp(&a.latest().created_at_ms))
+                    .then_with(|| a.latest().run_id.cmp(&b.latest().run_id))
             });
             let open = key.open_by_default() != inputs.toggled.contains(&key);
-            let waiting = list.iter().filter(|r| is_waiting(r)).count();
+            let waiting = list.iter().filter(|e| is_waiting(e.latest())).count();
             let shown = if open {
                 waiting.max(PER_FOLDER.min(list.len()))
             } else {
@@ -200,12 +260,20 @@ pub(crate) fn folders(
             let rows = list
                 .iter()
                 .take(shown)
-                .map(|run| RunRow {
-                    run: run.run_id.clone(),
-                    title: run.title.clone(),
-                    executor: run.executor.clone(),
-                    dot: dot(run, inputs.seen, inputs.looking_at == Some(&run.run_id)),
-                    age: summary::age_label(inputs.now_ms.saturating_sub(run.created_at_ms)),
+                .map(|entry| {
+                    let latest = entry.latest();
+                    let looking = inputs
+                        .looking_at
+                        .is_some_and(|l| entry.runs.iter().any(|r| &r.run_id == l));
+                    ThreadRow {
+                        thread: entry.thread.clone(),
+                        run: latest.run_id.clone(),
+                        members: entry.runs.iter().map(|r| r.run_id.clone()).collect(),
+                        title: entry.first().title.clone(),
+                        executor: latest.executor.clone(),
+                        dot: dot(latest, inputs.seen, looking),
+                        age: summary::age_label(inputs.now_ms.saturating_sub(latest.created_at_ms)),
+                    }
                 })
                 .collect();
             Folder {
@@ -281,6 +349,8 @@ mod tests {
             toggled,
             looking_at: None,
             now_ms: 1_000_000,
+            thread_of: &|_| None,
+            closed: &|_| false,
         }
     }
 
@@ -342,6 +412,79 @@ mod tests {
         let toggled = HashSet::new();
         let f = &folders(&runs, roots, &inputs(&seen, &toggled))[0];
         assert_eq!(f.rows.len(), 9, "all 9 waiting runs, more than a page");
+    }
+
+    fn thread_named<'a>(
+        table: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&RunId) -> Option<ThreadId> + 'a {
+        move |run: &RunId| {
+            table
+                .iter()
+                .find(|(r, _)| run.as_str().ends_with(r))
+                .map(|(_, t)| ThreadId::from_suffix(t).unwrap())
+        }
+    }
+
+    #[test]
+    fn a_thread_is_one_row_titled_by_its_first_run_and_dotted_by_its_latest() {
+        let first = run("a1", RunStatus::Succeeded, Some("/w/porch"), 100);
+        let second = run("a2", RunStatus::WaitingApproval, Some("/w/porch"), 400);
+        let other = run("b1", RunStatus::Succeeded, Some("/w/porch"), 200);
+        let runs = vec![&second, &other, &first];
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let table = [("a1", "t1"), ("a2", "t1"), ("b1", "t2")];
+        let thread_of = thread_named(&table);
+        let inputs = Inputs {
+            thread_of: &thread_of,
+            ..inputs(&seen, &toggled)
+        };
+        let f = &folders(&runs, roots, &inputs)[0];
+        assert_eq!(f.rows.len(), 2, "two threads, three runs");
+        // Waiting first; the row opens the latest run, says what the first asked, shows the
+        // latest run's state.
+        let row = &f.rows[0];
+        assert_eq!(row.run.as_str(), "run_a2");
+        assert_eq!(row.title, "title a1");
+        assert_eq!(row.dot, Dot::Waiting);
+        assert_eq!(
+            row.members.iter().map(RunId::as_str).collect::<Vec<_>>(),
+            ["run_a1", "run_a2"]
+        );
+        assert_eq!(f.waiting, 1);
+        assert_eq!(f.rows[1].run.as_str(), "run_b1");
+        // Sitting on any run of the thread is "looking at it".
+        let looking = RunId::from_suffix("a1").unwrap();
+        let inputs = Inputs {
+            looking_at: Some(&looking),
+            ..inputs
+        };
+        let ended = run("a2", RunStatus::Succeeded, Some("/w/porch"), 400);
+        let runs = vec![&ended, &first];
+        let f = &folders(&runs, roots, &inputs)[0];
+        assert_eq!(f.rows[0].dot, Dot::Seen);
+    }
+
+    #[test]
+    fn a_closed_thread_leaves_the_list_and_a_run_without_a_thread_is_its_own_row() {
+        let a = run("a1", RunStatus::Succeeded, Some("/w/porch"), 100);
+        let b = run("b1", RunStatus::Succeeded, Some("/w/porch"), 200);
+        let c = run("c1", RunStatus::Succeeded, Some("/w/porch"), 300);
+        let runs = vec![&c, &b, &a];
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let table = [("a1", "t1"), ("b1", "t2")];
+        let thread_of = thread_named(&table);
+        let closed = |t: &ThreadId| t.as_str() == "thr_t1";
+        let inputs = Inputs {
+            thread_of: &thread_of,
+            closed: &closed,
+            ..inputs(&seen, &toggled)
+        };
+        let f = &folders(&runs, roots, &inputs)[0];
+        let listed: Vec<_> = f.rows.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(listed, ["run_c1", "run_b1"]);
+        assert_eq!(f.rows[0].thread, None);
     }
 
     #[test]

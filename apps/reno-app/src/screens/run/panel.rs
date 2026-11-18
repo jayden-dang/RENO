@@ -125,7 +125,7 @@ impl RunScreen {
     }
 
     /// The tabs changed: remember them under the panel's key, and write soon.
-    fn persist_panel(&self, cx: &mut Context<Self>) {
+    pub(super) fn persist_panel(&self, cx: &mut Context<Self>) {
         Saved::put(self.panel_key.clone(), self.panel.snapshot(), cx);
     }
 

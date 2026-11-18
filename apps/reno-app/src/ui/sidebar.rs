@@ -1,5 +1,5 @@
 //! The sidebar (ui-brief 2026-11-17): five nav rows, then "Projects": one folder per repository
-//! with its runs and their status dots, and a footer with the daemon status dot. It sits on
+//! with its threads (a run of its own on a daemon without threads) and their status dots, and a footer with the daemon status dot. It sits on
 //! `shell`. A closed folder still lists the runs that wait for you.
 
 use std::collections::HashSet;
@@ -212,7 +212,7 @@ fn folder_view(
         .children(folder.rows.iter().map(|row| {
             let open = Rc::clone(&handlers.recent_run);
             let run_id = row.run.clone();
-            let is_selected = selected == Some(&row.run);
+            let is_selected = selected.is_some_and(|run| row.members.contains(run));
             let hover = theme.row_selected().opacity(0.6);
             div()
                 .id(SharedString::from(format!("recent-{}", row.run)))
@@ -298,6 +298,12 @@ pub(crate) fn sidebar(
             toggled,
             looking_at: store.looking_at(),
             now_ms: store.now_ms(),
+            thread_of: &|run| store.thread_of(run),
+            closed: &|thread| {
+                state
+                    .thread(thread)
+                    .is_some_and(|t| t.status == reno_proto::ThreadStatus::Closed)
+            },
         },
     );
     let selected_run = store.looking_at().cloned();

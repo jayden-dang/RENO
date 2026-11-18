@@ -40,13 +40,13 @@ use reno_client::{
 use reno_proto::defs::DefKind;
 use reno_proto::{
     ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, FiringOutcome, JobFailure, JobKind,
-    JobPhase, RoutingDecision, RunId, RunListParams, RunStatus, SignedIn, TaskRunParams,
+    JobPhase, RoutingDecision, RunId, RunListParams, RunStatus, SignedIn, TaskRunParams, ThreadId,
     WorkspaceDiffResult, WorkspaceInfo,
 };
 
 use crate::summary;
 use crate::vm;
-use crate::vm::changes::{Loaded, Patch};
+use crate::vm::changes::{Loaded, Patch, ReviewScope};
 
 /// How many runs one page of the runs list asks for.
 pub(crate) const RUNS_PAGE: u32 = 50;
@@ -81,6 +81,13 @@ pub(crate) enum StoreEvent {
     /// A task or steer sent with this ticket did not go through (`Failed` says why): the
     /// composer that sent it gets its draft back.
     SendFailed(u64),
+    /// Why a send with this ticket was refused, in the daemon's words (follows `SendFailed`).
+    SendRefused {
+        ticket: u64,
+        why: String,
+    },
+    /// `thread.close` answered: what became of the worktree.
+    ThreadClosed,
 }
 
 /// What the daemon says about where one run went.
@@ -209,12 +216,12 @@ pub(crate) struct Store {
     /// The run the Run screen shows: its transcript changes notify.
     open: Option<RunId>,
     /// What each run changed, as `workspace.get` and `workspace.diff` last said.
-    changes: BTreeMap<RunId, RunChanges>,
+    changes: BTreeMap<(RunId, ReviewScope), RunChanges>,
     /// Runs whose changes are being read, and those asked again meanwhile.
-    reading_changes: BTreeSet<RunId>,
-    reread_changes: BTreeSet<RunId>,
+    reading_changes: BTreeSet<(RunId, ReviewScope)>,
+    reread_changes: BTreeSet<(RunId, ReviewScope)>,
     /// The patch of one file of a run, by `(run, path)`.
-    patches: BTreeMap<(RunId, String), Loaded<Patch>>,
+    patches: BTreeMap<(RunId, ReviewScope, String), Loaded<Patch>>,
     /// Routing decisions by run, from `task.run` and `run.routing`.
     routings: BTreeMap<RunId, RoutingEntry>,
     /// Tasks and steers sent and not yet answered.
@@ -232,6 +239,14 @@ pub(crate) struct Store {
     configured: BTreeMap<RunId, ConfigApplied>,
     /// The run on screen: it is seen as it changes.
     looking: Option<RunId>,
+    /// The thread `task.run` named for a run, before `thread.list` says it.
+    thread_hints: BTreeMap<RunId, ThreadId>,
+    /// What `thread.close` last answered, by thread.
+    closes: BTreeMap<ThreadId, reno_proto::ThreadCloseResult>,
+    /// Threads being closed (their button is disabled).
+    closing: BTreeSet<ThreadId>,
+    /// The reason of the last failed request, for a sender that shows it itself.
+    last_failure: Option<String>,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
     bridge: Option<Task<()>>,
 }
@@ -283,6 +298,10 @@ impl Store {
             composer_file: None,
             configured: BTreeMap::new(),
             looking: None,
+            thread_hints: BTreeMap::new(),
+            closes: BTreeMap::new(),
+            closing: BTreeSet::new(),
+            last_failure: None,
             bridge: None,
         }
     }
@@ -436,7 +455,9 @@ impl Store {
         if changed.daemon {
             self.status_seen_at_ms = self.now_ms();
         }
-        let open_run_changed = self.open.as_ref().is_some_and(|run| changed.run(run));
+        let open_run_changed = self.open.as_ref().is_some_and(|run| {
+            changed.run(run) || self.thread_run_ids(run).iter().any(|r| changed.run(r))
+        });
         if changed.connection
             || changed.daemon
             || changed.runs
@@ -445,6 +466,7 @@ impl Store {
             || changed.executors
             || changed.defs
             || changed.history
+            || changed.threads
             || changed.feeds
             || open_run_changed
         {
@@ -464,6 +486,11 @@ impl Store {
         }
         if changed.runs {
             self.follow_waiting_questions(cx);
+        }
+        if changed.threads
+            && let Some(run) = self.open.clone()
+        {
+            self.follow_thread_siblings(&run, cx);
         }
         if changed.approvals && self.state.feed(Feed::ApprovalHistory) == FeedState::Live {
             self.load_history(cx);
@@ -687,12 +714,22 @@ impl Store {
 
     /// What `run` changed, as last read; `None` before it was asked for.
     pub(crate) fn changes(&self, run: &RunId) -> Option<&RunChanges> {
-        self.changes.get(run)
+        self.changes_in(run, ReviewScope::Thread)
     }
 
-    /// The patch of `path` in `run`, as last read.
-    pub(crate) fn patch(&self, run: &RunId, path: &str) -> Option<&Loaded<Patch>> {
-        self.patches.get(&(run.clone(), path.to_owned()))
+    /// What `run` changed within `scope`, as last read.
+    pub(crate) fn changes_in(&self, run: &RunId, scope: ReviewScope) -> Option<&RunChanges> {
+        self.changes.get(&(run.clone(), scope))
+    }
+
+    /// The patch of `path` in `run` within `scope`, as last read.
+    pub(crate) fn patch_in(
+        &self,
+        run: &RunId,
+        scope: ReviewScope,
+        path: &str,
+    ) -> Option<&Loaded<Patch>> {
+        self.patches.get(&(run.clone(), scope, path.to_owned()))
     }
 
     /// Whether the daemon can say what a run changed.
@@ -700,30 +737,53 @@ impl Store {
         self.state.supports(reno_proto::FEATURE_RUN_CHANGES)
     }
 
-    /// Reads where `run` works and which files it changed (`workspace.get` and `workspace.diff`).
-    /// What was read before stays on screen while the new answer comes. Asked again while a read
-    /// is in flight, it reads once more when that ends.
+    /// Whether the daemon has threads (feature `threads`).
+    pub(crate) fn supports_threads(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_THREADS)
+    }
+
+    /// Reads where `run` works and which files its thread changed.
     pub(crate) fn load_changes(&mut self, run: &RunId, cx: &mut Context<Self>) {
-        if !self.supports_changes() {
+        self.load_changes_in(run, ReviewScope::Thread, cx);
+    }
+
+    /// Reads where `run` works and which files it changed (`workspace.get` and `workspace.diff`),
+    /// over `scope`. What was read before stays on screen while the new answer comes. Asked
+    /// again while a read is in flight, it reads once more when that ends.
+    pub(crate) fn load_changes_in(
+        &mut self,
+        run: &RunId,
+        scope: ReviewScope,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_changes() || (scope == ReviewScope::Run && !self.supports_threads()) {
             return;
         }
-        if !self.reading_changes.insert(run.clone()) {
-            self.reread_changes.insert(run.clone());
+        let key = (run.clone(), scope);
+        if !self.reading_changes.insert(key.clone()) {
+            self.reread_changes.insert(key);
             return;
         }
-        self.changes.entry(run.clone()).or_insert(RunChanges {
+        self.changes.entry(key.clone()).or_insert(RunChanges {
             workspace: Loaded::Loading,
             diff: Loaded::Loading,
         });
-        let (ok_run, err_run, id) = (run.clone(), run.clone(), run.clone());
+        let (ok_key, err_key, id) = (key.clone(), key, run.clone());
         self.call(
             "Could not read the run's changes",
             move |client| async move {
-                let (workspace, diff) = futures::future::join(
-                    client.get_workspace(id.clone()),
-                    client.workspace_diff(id, None),
-                )
-                .await;
+                let diff_call = async {
+                    match scope {
+                        ReviewScope::Thread => client.workspace_diff(id.clone(), None).await,
+                        ReviewScope::Run => {
+                            client
+                                .workspace_diff_scoped(id.clone(), None, reno_proto::DiffScope::Run)
+                                .await
+                        }
+                    }
+                };
+                let (workspace, diff) =
+                    futures::future::join(client.get_workspace(id.clone()), diff_call).await;
                 let workspace = match workspace {
                     Ok(info) => Loaded::Ready(Some(info)),
                     Err(e) if e.code() == Some(reno_proto::ErrorCode::NotFound) => {
@@ -740,21 +800,23 @@ impl Store {
             cx,
             D {
                 ok: Box::new(move |store, read: RunChanges, cx| {
-                    store.reading_changes.remove(&ok_run);
+                    store.reading_changes.remove(&ok_key);
                     // A patch read for the old list may not fit the new one.
-                    if store.changes.get(&ok_run).map(|c| &c.diff) != Some(&read.diff) {
-                        store.patches.retain(|(run, _), _| run != &ok_run);
+                    if store.changes.get(&ok_key).map(|c| &c.diff) != Some(&read.diff) {
+                        store
+                            .patches
+                            .retain(|(run, s, _), _| !(run == &ok_key.0 && *s == ok_key.1));
                     }
-                    store.changes.insert(ok_run.clone(), read);
-                    if store.reread_changes.remove(&ok_run) {
-                        store.load_changes(&ok_run, cx);
+                    store.changes.insert(ok_key.clone(), read);
+                    if store.reread_changes.remove(&ok_key) {
+                        store.load_changes_in(&ok_key.0, ok_key.1, cx);
                     }
                     cx.notify();
                 }),
                 err: Box::new(move |store, cx| {
-                    store.reading_changes.remove(&err_run);
-                    store.reread_changes.remove(&err_run);
-                    if let Some(c) = store.changes.get_mut(&err_run)
+                    store.reading_changes.remove(&err_key);
+                    store.reread_changes.remove(&err_key);
+                    if let Some(c) = store.changes.get_mut(&err_key)
                         && c.diff == Loaded::Loading
                     {
                         c.diff = Loaded::Failed("the daemon is not connected".to_owned());
@@ -767,20 +829,26 @@ impl Store {
         cx.notify();
     }
 
-    /// Forgets a failed read of a patch, so the next [`Self::load_patch`] asks again.
-    pub(crate) fn forget_failed_patch(&mut self, run: &RunId, path: &str) {
-        let key = (run.clone(), path.to_owned());
+    /// Forgets a failed read of a patch, so the next [`Self::load_patch_in`] asks again.
+    pub(crate) fn forget_failed_patch(&mut self, run: &RunId, scope: ReviewScope, path: &str) {
+        let key = (run.clone(), scope, path.to_owned());
         if matches!(self.patches.get(&key), Some(Loaded::Failed(_))) {
             self.patches.remove(&key);
         }
     }
 
-    /// Reads the patch of `path` in `run` unless it was read, failed or is on its way.
-    pub(crate) fn load_patch(&mut self, run: &RunId, path: &str, cx: &mut Context<Self>) {
-        if !self.supports_changes() {
+    /// Reads the patch of `path` in `run` over `scope` unless it was read, failed or is on its way.
+    pub(crate) fn load_patch_in(
+        &mut self,
+        run: &RunId,
+        scope: ReviewScope,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.supports_changes() || (scope == ReviewScope::Run && !self.supports_threads()) {
             return;
         }
-        let key = (run.clone(), path.to_owned());
+        let key = (run.clone(), scope, path.to_owned());
         if self.patches.contains_key(&key) {
             return;
         }
@@ -790,7 +858,15 @@ impl Store {
         self.call(
             "Could not read the patch",
             move |client| async move {
-                Ok(match client.workspace_diff(id, Some(file)).await {
+                let read = match scope {
+                    ReviewScope::Thread => client.workspace_diff(id, Some(file)).await,
+                    ReviewScope::Run => {
+                        client
+                            .workspace_diff_scoped(id, Some(file), reno_proto::DiffScope::Run)
+                            .await
+                    }
+                };
+                Ok(match read {
                     Ok(d) => Loaded::Ready(Patch {
                         text: d.patch,
                         truncated: d.patch_truncated,
@@ -860,10 +936,85 @@ impl Store {
             mirror.follow_run(run.clone(), from);
         }
         self.ensure_run(&run, cx);
+        self.follow_thread_siblings(&run, cx);
         if let Some((bot, version)) = vm::runs::bot_to_fetch(&self.state, &run) {
             self.ensure_bot(&bot, version, cx);
         }
         cx.notify();
+    }
+
+    /// The thread of `run`: what `thread.list` says, else what `task.run` answered.
+    pub(crate) fn thread_of(&self, run: &RunId) -> Option<ThreadId> {
+        self.state
+            .thread_of(run)
+            .or_else(|| self.thread_hints.get(run))
+            .cloned()
+    }
+
+    /// The runs of `run`'s thread, oldest first, `run` among them (just `run` for a run with no
+    /// known thread).
+    pub(crate) fn thread_run_ids(&self, run: &RunId) -> Vec<RunId> {
+        self.state
+            .thread_of(run)
+            .and_then(|thread| self.state.thread(thread))
+            .map(|thread| thread.runs.iter().map(|r| r.run_id.clone()).collect())
+            .unwrap_or_else(|| vec![run.clone()])
+    }
+
+    /// Follows the transcripts of the other runs of the open run's thread, each from where the
+    /// state has it, through the same machinery as the open run. A run followed is left alone.
+    fn follow_thread_siblings(&mut self, run: &RunId, cx: &mut Context<Self>) {
+        for sibling in self.thread_run_ids(run) {
+            if &sibling == run {
+                continue;
+            }
+            let from = self.state.transcript(&sibling).map(Transcript::resume_from);
+            if let Some(mirror) = &self.mirror {
+                let _entered = Tokio::handle(cx).enter();
+                mirror.follow_run(sibling.clone(), from);
+            }
+            self.ensure_run(&sibling, cx);
+        }
+    }
+
+    /// `thread.close` (never forced): the worktree is kept when it holds unmerged work, and the
+    /// answer says so. The sidebar follows through a fresh `thread.list`.
+    pub(crate) fn close_thread(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
+        if !self.closing.insert(thread.clone()) {
+            return;
+        }
+        let (id, ok_id, err_id) = (thread.clone(), thread.clone(), thread);
+        self.call(
+            "Could not close the thread",
+            move |client| async move { client.close_thread(id, false).await },
+            cx,
+            D {
+                ok: Box::new(move |store, result: reno_proto::ThreadCloseResult, cx| {
+                    store.closing.remove(&ok_id);
+                    store.closes.insert(ok_id.clone(), result);
+                    if let Some(mirror) = &store.mirror {
+                        mirror.refresh_threads();
+                    }
+                    cx.emit(StoreEvent::ThreadClosed);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.closing.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+        cx.notify();
+    }
+
+    /// What `thread.close` answered for `thread` in this session.
+    pub(crate) fn close_result(&self, thread: &ThreadId) -> Option<&reno_proto::ThreadCloseResult> {
+        self.closes.get(thread)
+    }
+
+    pub(crate) fn is_closing(&self, thread: &ThreadId) -> bool {
+        self.closing.contains(thread)
     }
 
     /// Starts following the transcript of every run waiting on a question, so Home and the run can show
@@ -907,6 +1058,7 @@ impl Store {
             this.update(cx, |store, cx| match result {
                 Ok(value) => (done.ok)(store, value, cx),
                 Err(reason) => {
+                    store.last_failure = Some(reason.clone());
                     (done.err)(store, cx);
                     if !done.quiet {
                         cx.emit(StoreEvent::Failed(format!("{what}: {reason}")));
@@ -1367,11 +1519,16 @@ impl Store {
                             },
                         );
                     }
+                    if let Some(thread) = started.thread_id {
+                        store.thread_hints.insert(started.run_id.clone(), thread);
+                    }
                     cx.emit(StoreEvent::RunStarted(started.run_id));
                 }),
                 err: Box::new(move |store, cx| {
                     store.sending = store.sending.saturating_sub(1);
+                    let why = store.last_failure.take().unwrap_or_default();
                     cx.emit(StoreEvent::SendFailed(ticket));
+                    cx.emit(StoreEvent::SendRefused { ticket, why });
                 }),
                 quiet: false,
             },

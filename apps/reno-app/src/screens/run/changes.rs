@@ -16,7 +16,8 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
 use crate::vm::changes::{
-    self as facts, DiffRow, FileRow, KindTone, Overview, Pane, PatchPane, RowKind,
+    self as facts, DiffRow, FileRow, KindTone, Loaded, Overview, Pane, PatchPane, ReviewScope,
+    RowKind,
 };
 use crate::vm::review::{Note, ReviewRow, review_rows};
 
@@ -118,9 +119,27 @@ fn tone_color(theme: &Theme, tone: KindTone) -> Hsla {
 impl RunScreen {
     /// What the daemon has said about the run's changes, in the words of the screen.
     pub(super) fn pane(&self, cx: &App) -> Pane {
+        self.pane_in(ReviewScope::Thread, cx)
+    }
+
+    /// The scope Review compares: always the thread's on a daemon without threads.
+    pub(super) fn effective_scope(&self, cx: &App) -> ReviewScope {
+        if self.store.read(cx).supports_threads() {
+            self.scope
+        } else {
+            ReviewScope::Thread
+        }
+    }
+
+    /// The pane for what Review compares now.
+    pub(super) fn review_pane(&self, cx: &App) -> Pane {
+        self.pane_in(self.effective_scope(cx), cx)
+    }
+
+    fn pane_in(&self, scope: ReviewScope, cx: &App) -> Pane {
         let store = self.store.read(cx);
         let connected = store.connection() == reno_client::ConnectionStatus::Connected;
-        match store.changes(&self.run) {
+        match store.changes_in(&self.run, scope) {
             Some(read) => facts::pane(store.supports_changes(), &read.workspace, &read.diff),
             // An older daemon says so; before it is connected, or asked, nothing is said.
             None if connected && !store.supports_changes() => Pane::Unsupported,
@@ -137,8 +156,9 @@ impl RunScreen {
         if self.review_folded.remove(&path) {
             // Opened again: a patch that failed to read is asked for once more.
             let run = self.run.clone();
+            let scope = self.effective_scope(cx);
             self.store
-                .update(cx, |store, _| store.forget_failed_patch(&run, &path));
+                .update(cx, |store, _| store.forget_failed_patch(&run, scope, &path));
         } else {
             self.review_folded.insert(path);
         }
@@ -163,9 +183,10 @@ impl RunScreen {
         if !review && file_tab.is_none() {
             return;
         }
-        let Pane::Files(overview) = self.pane(cx) else {
+        let Pane::Files(overview) = self.review_pane(cx) else {
             return;
         };
+        let scope = self.effective_scope(cx);
         if review && !self.review_default_applied {
             self.review_default_applied = true;
             if overview.rows.len() > OPEN_ALL_UP_TO {
@@ -186,14 +207,15 @@ impl RunScreen {
                 || file_tab.as_deref() == Some(r.path.as_str())
         }) {
             if !row.binary {
-                self.store
-                    .update(cx, |store, cx| store.load_patch(&run, &row.path, cx));
+                self.store.update(cx, |store, cx| {
+                    store.load_patch_in(&run, scope, &row.path, cx)
+                });
             }
             // The rows of the patch, parsed once per answer.
             let loaded = self
                 .store
                 .read(cx)
-                .patch(&run, &row.path)
+                .patch_in(&run, scope, &row.path)
                 .cloned()
                 .unwrap_or(facts::Loaded::Loading);
             if self.patch_panes.get(&row.path).map(|(l, _)| l) != Some(&loaded) {
@@ -228,7 +250,7 @@ impl RunScreen {
         let loaded = self
             .store
             .read(cx)
-            .patch(&self.run, path)
+            .patch_in(&self.run, self.effective_scope(cx), path)
             .cloned()
             .unwrap_or(facts::Loaded::Loading);
         let pane = PatchPane::Rows {
@@ -279,8 +301,99 @@ impl RunScreen {
     /// Reads the changes again (the "Try again" of a failed read).
     pub(super) fn reload_changes(&mut self, cx: &mut Context<Self>) {
         let run = self.run.clone();
-        self.store
-            .update(cx, |store, cx| store.load_changes(&run, cx));
+        let scope = self.effective_scope(cx);
+        self.store.update(cx, |store, cx| {
+            // The thread's changes are what the Session tab, the tab counts and the result line
+            // say; Review's own scope is read as well while it is the run's.
+            store.load_changes(&run, cx);
+            if scope == ReviewScope::Run {
+                store.load_changes_in(&run, scope, cx);
+            }
+        });
+    }
+
+    /// Review compares `scope` from now on (a person's choice in the sticky bar).
+    pub(crate) fn set_scope(&mut self, scope: ReviewScope, cx: &mut Context<Self>) {
+        if self.scope == scope || !self.store.read(cx).supports_threads() {
+            return;
+        }
+        self.scope = scope;
+        // The files and their patches are another list now.
+        self.patch_panes.clear();
+        self.review_folded.clear();
+        self.review_default_applied = false;
+        self.review.sync(Vec::new(), Vec::new());
+        self.reload_changes(cx);
+        self.ensure_patches(cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope(&self) -> ReviewScope {
+        self.scope
+    }
+
+    /// "This run | This thread": the segmented control of Review's bar.
+    fn scope_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.effective_scope(cx);
+        let one = |scope: ReviewScope, id: &'static str| {
+            let on = scope == current;
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .h(px(24.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .text_size(px(12.0))
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(theme.raised)
+                        .text_color(theme.text)
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!on, |d| d.text_color(theme.muted))
+                .child(scope.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_scope(scope, cx)))
+        };
+        div()
+            .id("review-scope")
+            .debug_selector(|| "review-scope".to_owned())
+            .flex_none()
+            .p(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .bg(theme.text.opacity(0.06))
+            .child(one(ReviewScope::Run, "scope-run"))
+            .child(one(ReviewScope::Thread, "scope-thread"))
+            .into_any_element()
+    }
+
+    /// The slim bar under the branch bar that holds the switch.
+    fn scope_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_none()
+            .h(px(36.0))
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.hairline)
+            .child(self.scope_switch(theme, cx))
+            .into_any_element()
+    }
+
+    /// Whether Review offers the scope switch: the daemon has threads and a workspace to compare.
+    fn offers_scope(&self, cx: &App) -> bool {
+        let store = self.store.read(cx);
+        store.supports_threads()
+            && matches!(
+                store.changes(&self.run).map(|c| &c.workspace),
+                Some(Loaded::Ready(Some(_)))
+            )
     }
 
     /// "Branch reno/x has 3 commits, 7 files changed (+120 −30)", under the Done row of a
@@ -317,7 +430,7 @@ impl RunScreen {
     /// The Review tab: the finding line, then the states of the pane, or the branch bar and the
     /// files. The transcript beside it stays.
     pub(super) fn review_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let pane = self.pane(cx);
+        let pane = self.review_pane(cx);
         let finding = self.home(cx).map(|home| {
             div()
                 .id("review-finding")
@@ -334,7 +447,23 @@ impl RunScreen {
         });
         let body: AnyElement = match &pane {
             Pane::Files(o) => self.files_view(theme, o, cx),
-            other => self.pane_note(theme, other, cx),
+            other => {
+                // Without files there is no branch bar: the switch keeps its own, so a scope
+                // that shows nothing can be left.
+                let note = self.pane_note(theme, other, cx);
+                if self.offers_scope(cx) {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.scope_bar(theme, cx))
+                        .child(note)
+                        .into_any_element()
+                } else {
+                    note
+                }
+            }
         };
         div()
             .id("review")
@@ -371,7 +500,13 @@ impl RunScreen {
         };
         match pane {
             // Not asked yet, which a restored tab can be: not the same as "nothing".
-            Pane::Hidden if self.store.read(cx).changes(&self.run).is_none() => {
+            Pane::Hidden
+                if self
+                    .store
+                    .read(cx)
+                    .changes_in(&self.run, self.effective_scope(cx))
+                    .is_none() =>
+            {
                 note("Reading the changes\u{2026}".to_owned(), theme.faint).into_any_element()
             }
             Pane::Hidden => note(
@@ -513,6 +648,9 @@ impl RunScreen {
             .flex()
             .flex_col()
             .child(bar)
+            .when(self.offers_scope(cx), |d| {
+                d.child(self.scope_bar(theme, cx))
+            })
             .child(
                 div()
                     .id("review-files")

@@ -17,6 +17,23 @@ pub(crate) enum Loaded<T> {
     Failed(String),
 }
 
+/// What Review compares: everything the thread did since its base, or only the latest run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum ReviewScope {
+    #[default]
+    Thread,
+    Run,
+}
+
+impl ReviewScope {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Thread => "This thread",
+            Self::Run => "This run",
+        }
+    }
+}
+
 // --- tool output --------------------------------------------------------------------------------
 
 /// The first lines of an output and how many are left.

@@ -23,8 +23,8 @@
 //! - `Done` is the last row; anything after it is ignored.
 
 use reno_proto::{
-    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ReportStatus, ResolvedBy, Seq,
-    StopReason, ToolOutput,
+    Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, ExecutorId, Question, ReportStatus,
+    ResolvedBy, Seq, StopReason, ToolOutput,
 };
 
 use crate::summary;
@@ -41,6 +41,23 @@ impl Key {
 
     fn at(seq: Seq) -> Self {
         Self(seq.0.saturating_add(1))
+    }
+
+    /// The key of a row of the `segment`th run of a thread's transcript: the run's index in the
+    /// high bits, so rows of different runs never share a key. The routing key keeps its place
+    /// at the top of the range, one step down per segment.
+    pub(crate) fn in_segment(self, segment: usize) -> Self {
+        let n = u64::try_from(segment).unwrap_or(0);
+        if self.0 >= u64::MAX - 0xffff {
+            Self(self.0.saturating_sub(n))
+        } else {
+            Self(self.0 | (n << 40))
+        }
+    }
+
+    /// The key of a divider before the `segment`th run.
+    pub(crate) fn divider(segment: usize) -> Self {
+        Self((u64::try_from(segment).unwrap_or(0) << 40) | 0xff_ffff_ffff)
     }
 }
 
@@ -108,6 +125,13 @@ pub(crate) enum Row {
     /// The run's model was changed while it ran: "Switched to Haiku 5.5". `model` is the id the
     /// harness reported.
     ModelChanged { key: Key, model: String },
+    /// Where a follow-up run of the thread begins: "New run · Claude Code · sonnet", with when.
+    Divider {
+        key: Key,
+        executor: ExecutorId,
+        model: Option<String>,
+        at_ms: u64,
+    },
     /// The final status line.
     Done {
         key: Key,
@@ -174,8 +198,30 @@ impl Row {
             | Self::Asked { key, .. }
             | Self::Routing { key, .. }
             | Self::ModelChanged { key, .. }
+            | Self::Divider { key, .. }
             | Self::Done { key, .. } => *key,
         }
+    }
+
+    /// The row with its key moved into the `segment`th run of a thread's transcript, so keys of
+    /// different runs never meet. Segment 0 is the identity.
+    pub(crate) fn in_segment(mut self, segment: usize) -> Self {
+        if segment == 0 {
+            return self;
+        }
+        let (Self::User { key, .. }
+        | Self::Prose { key, .. }
+        | Self::Reasoning { key, .. }
+        | Self::Tools { key, .. }
+        | Self::Question { key, .. }
+        | Self::Approval { key, .. }
+        | Self::Asked { key, .. }
+        | Self::Routing { key, .. }
+        | Self::ModelChanged { key, .. }
+        | Self::Divider { key, .. }
+        | Self::Done { key, .. }) = &mut self;
+        *key = key.in_segment(segment);
+        self
     }
 }
 
@@ -1338,6 +1384,7 @@ mod tests {
                 Row::Asked { .. } => "asked",
                 Row::Routing { .. } => "routing",
                 Row::ModelChanged { .. } => "model",
+                Row::Divider { .. } => "divider",
                 Row::Done { .. } => "done",
             })
             .collect();

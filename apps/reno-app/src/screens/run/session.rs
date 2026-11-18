@@ -12,6 +12,7 @@ use crate::ui::theme::Theme;
 use crate::vm::changes::Loaded;
 use crate::vm::executors as executor_facts;
 use crate::vm::panel_home::{self, KvRow, SessionFacts};
+use crate::vm::threads;
 
 impl RunScreen {
     pub(super) fn session_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -124,7 +125,142 @@ impl RunScreen {
             })
             .child(heading("Usage"))
             .children(group(&sections.usage))
+            .children(self.thread_block(theme, cx))
             .into_any_element()
+    }
+}
+
+impl RunScreen {
+    /// The thread's own block: what closing does, and the action. `None` on a daemon without
+    /// threads or before the daemon has named the thread.
+    fn thread_block(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (thread, info, result, closing, held) = {
+            let store = self.store.read(cx);
+            let thread = store
+                .thread_of(&self.run)
+                .filter(|_| store.supports_threads())?;
+            let info = store.state().thread(&thread)?.clone();
+            let held = store.changes(&self.run).and_then(|c| match &c.workspace {
+                Loaded::Ready(Some(w)) => w.changes,
+                _ => None,
+            });
+            let result = store.close_result(&thread).cloned();
+            let closing = store.is_closing(&thread);
+            (thread, info, result, closing, held)
+        };
+        let heading = div()
+            .pt(px(18.0))
+            .pb(px(4.0))
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.faint)
+            .child("Thread");
+        let line = |id: &'static str, text: String, tone: gpui::Hsla| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .py(px(6.0))
+                .text_size(px(13.0))
+                .line_height(px(19.0))
+                .text_color(tone)
+                .child(SharedString::from(text))
+        };
+        let body: AnyElement = if let Some(result) = result {
+            line("thread-closed", threads::closed_line(&result), theme.muted).into_any_element()
+        } else if info.status == reno_proto::ThreadStatus::Closed {
+            line(
+                "thread-closed",
+                "This thread is closed.".to_owned(),
+                theme.muted,
+            )
+            .into_any_element()
+        } else if info.status == reno_proto::ThreadStatus::Active {
+            line(
+                "thread-busy",
+                "A run is going in this thread. Stop it before closing.".to_owned(),
+                theme.muted,
+            )
+            .into_any_element()
+        } else if self.close_confirm {
+            let keeps = threads::keeps(&info, held.as_ref()).unwrap_or_default();
+            let ask = thread.clone();
+            line("thread-confirm", keeps, theme.muted)
+                .child(
+                    div()
+                        .pt(px(8.0))
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            kit::line_button(
+                                theme,
+                                "thread-close-confirm",
+                                None,
+                                "Close thread",
+                                kit::Tone::Quiet,
+                                !closing,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.close_confirm = false;
+                                    let thread = ask.clone();
+                                    this.store
+                                        .update(cx, |store, cx| store.close_thread(thread, cx));
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            kit::line_button(
+                                theme,
+                                "thread-close-cancel",
+                                None,
+                                "Cancel",
+                                kit::Tone::Quiet,
+                                true,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_confirm = false;
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            let keeps = threads::keeps(&info, held.as_ref());
+            let ask = thread;
+            div()
+                .py(px(6.0))
+                .child(
+                    kit::line_button(
+                        theme,
+                        "thread-close",
+                        None,
+                        "Close thread",
+                        kit::Tone::Quiet,
+                        !closing,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if keeps.is_some() {
+                            // Something unmerged: say what stays before closing.
+                            this.close_confirm = true;
+                        } else {
+                            let thread = ask.clone();
+                            this.store
+                                .update(cx, |store, cx| store.close_thread(thread, cx));
+                        }
+                        cx.notify();
+                    })),
+                )
+                .into_any_element()
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .child(heading)
+                .child(body)
+                .into_any_element(),
+        )
     }
 }
 

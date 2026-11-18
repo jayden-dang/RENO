@@ -19,6 +19,7 @@ pub(crate) mod routing;
 pub(crate) mod rules;
 pub(crate) mod runs;
 pub(crate) mod settings;
+pub(crate) mod threads;
 pub(crate) mod triggers;
 
 use reno_client::{ConnectionStatus, FeedState, State};

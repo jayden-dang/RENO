@@ -63,6 +63,9 @@ pub(crate) struct Options {
     /// `RENO_PANEL=home|session|review|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
+    /// `RENO_FOLLOW_UP=<text>`: with `RENO_OPEN=run_<id>`, send `text` from that run's box once it
+    /// is open, so a thread with two runs can be looked at (screenshots, reviews).
+    pub(crate) follow_up: Option<String>,
     /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
     /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
     /// data dir.
@@ -131,6 +134,7 @@ impl Options {
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
+        options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
@@ -164,6 +168,8 @@ pub(crate) struct Start {
     pub(crate) open_project: Option<PathBuf>,
     /// A panel tab to put in front once `open_run` is open.
     pub(crate) panel: Option<Surface>,
+    /// A message to send from that run's box once it is open.
+    pub(crate) follow_up: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -204,6 +210,7 @@ pub(crate) fn run(options: Options) {
             open_run: options.open_run.clone(),
             open_project: options.open_project.clone(),
             panel: options.panel.clone(),
+            follow_up: options.follow_up.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -244,6 +251,7 @@ pub(crate) fn open_window(
         open_run,
         open_project,
         panel,
+        follow_up,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -293,6 +301,22 @@ pub(crate) fn open_window(
                             }
                         })
                         .ok();
+                        if let Some(text) = follow_up {
+                            // Once the threads are read, so the message continues the thread.
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1500))
+                                .await;
+                            root.update_in(cx, |root, window, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    let steer = screen.read(cx).steer_input().clone();
+                                    steer.update(cx, |c, cx| {
+                                        c.fill(&text, window, cx);
+                                        c.submit(window, cx);
+                                    });
+                                }
+                            })
+                            .ok();
+                        }
                     })
                     .detach();
                 }
@@ -402,7 +426,9 @@ impl RootView {
                         this.open_run(run.clone(), window, cx);
                     }
                     // The composer that sent it takes its draft back.
-                    StoreEvent::SendFailed(_) => {}
+                    StoreEvent::SendFailed(_)
+                    | StoreEvent::SendRefused { .. }
+                    | StoreEvent::ThreadClosed => {}
                     StoreEvent::ExecutorInstalled(id) => {
                         toast::push(
                             cx,
@@ -532,7 +558,6 @@ impl RootView {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn run_screen(&self) -> Option<&Entity<RunScreen>> {
         match &self.screen {
             Screen::Run(run) => Some(run),
@@ -982,6 +1007,7 @@ mod tests {
                 open_run: None,
                 open_project: None,
                 panel: None,
+                follow_up: None,
                 data_dir: None,
             })
         );
