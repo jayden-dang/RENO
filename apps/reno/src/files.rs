@@ -105,6 +105,11 @@ pub(crate) enum GitCommand {
     /// What changed in a run's worktree, staged and not: two letters (index, worktree) and the
     /// path, as `git status --short`.
     Status(GitStatusArgs),
+    /// A run's commit history, newest first (topological order): the short name, date, author,
+    /// refs and subject of each commit. `--search` finds a message, an author or a commit name.
+    Log(crate::history::GitLogArgs),
+    /// One commit of the thread's branch: its message, its changed files and their patches.
+    Show(crate::history::GitShowArgs),
 }
 
 #[derive(Debug, Args)]
@@ -127,6 +132,8 @@ pub(crate) async fn fs(env: &Env, command: FsCommand) -> anyhow::Result<ExitCode
 pub(crate) async fn git(env: &Env, command: GitCommand) -> anyhow::Result<ExitCode> {
     match command {
         GitCommand::Status(args) => status(env, args).await,
+        GitCommand::Log(args) => crate::history::log(env, args).await,
+        GitCommand::Show(args) => crate::history::show(env, args).await,
     }
 }
 

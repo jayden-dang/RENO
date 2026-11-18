@@ -249,6 +249,7 @@ impl World {
             whole.files.clear();
             whole.commits = 0;
             whole.patch = None;
+            changes::seal(&mut whole);
             return Ok(Some(whole));
         }
         let keep: Option<(usize, usize, &str, u32)> = match scope {
@@ -256,6 +257,8 @@ impl World {
             DiffScope::Run if record.parent.is_some() => Some((3, 6, changes::FOLLOW_UP_START, 1)),
             DiffScope::Run => None,
             DiffScope::Commit { sha } => Some((0, 1, sha.as_str(), 1)),
+            // What is not committed: the last two files, against the branch's head.
+            DiffScope::WorkingTree => Some((4, 6, changes::HEAD, 0)),
         };
         if let Some((from, to, base, commits)) = keep {
             whole.files = whole.files.into_iter().skip(from).take(to - from).collect();
@@ -265,6 +268,7 @@ impl World {
                 whole.patch = None;
             }
         }
+        changes::seal(&mut whole);
         Ok(Some(whole))
     }
 }

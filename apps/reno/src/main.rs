@@ -14,6 +14,7 @@ mod defs;
 mod env;
 mod files;
 mod follow;
+mod history;
 mod mcp;
 mod policy;
 mod render;

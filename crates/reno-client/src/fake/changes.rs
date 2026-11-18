@@ -149,7 +149,7 @@ pub(super) fn diff(run: &RunId, path: Option<&str>) -> Option<WorkspaceDiffResul
         .and_then(|p| files.iter().find(|f| f.path == p))
         .filter(|f| !f.binary)
         .and_then(|f| patch_of(&f.path));
-    Some(WorkspaceDiffResult {
+    let mut result = WorkspaceDiffResult {
         run_id: run.clone(),
         branch: branch(run),
         base_sha: BASE.to_owned(),
@@ -157,7 +157,23 @@ pub(super) fn diff(run: &RunId, path: Option<&str>) -> Option<WorkspaceDiffResul
         files,
         patch,
         patch_truncated: false,
-    })
+        checksum: String::new(),
+    };
+    seal(&mut result);
+    Some(result)
+}
+
+/// What the working-tree scope of a run's worktree has: the last two files, nothing committed,
+/// against the run's `HEAD`.
+pub(super) const HEAD: &str = "e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6";
+
+/// Sets the checksum of a diff the way the daemon does: of what is sent.
+pub(super) fn seal(result: &mut WorkspaceDiffResult) {
+    result.checksum = reno_proto::diff_checksum(
+        &result.files,
+        result.patch.as_deref(),
+        result.patch_truncated,
+    );
 }
 
 fn patch_of(path: &str) -> Option<String> {

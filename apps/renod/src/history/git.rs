@@ -249,7 +249,7 @@ pub(crate) fn parse_log(bytes: &[u8]) -> Result<Vec<GitCommit>, FsError> {
     {
         fields.pop();
     }
-    if fields.len() % FIELDS != 0 {
+    if !fields.len().is_multiple_of(FIELDS) {
         return Err(FsError::Git(
             "git log printed something unexpected".to_owned(),
         ));
