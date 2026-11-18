@@ -546,6 +546,14 @@ mod tests {
     }
 
     #[test]
+    fn pi_is_named_like_any_executor() {
+        let mut d = decision(None);
+        d.rejected = vec![signed_out("pi", "run `pi` and use /login")];
+        let v = view(&d);
+        assert_eq!(v.because.as_deref(), Some("Pi was signed out"));
+    }
+
+    #[test]
     fn every_reject_reason_reads_as_a_sentence() {
         let cases = [
             (

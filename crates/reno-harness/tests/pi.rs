@@ -1073,6 +1073,9 @@ async fn a_real_pi_plays_a_run_against_its_mock_provider() {
         spec.env.clear();
         // The probe extension is a user extension: this run inherits it.
         spec.inherit_user_config = true;
+        // Pin the mock model: whatever provider keys the environment holds, the prompt goes
+        // nowhere else.
+        spec.model = Some("reno-probe/mock".into());
         let events = drive(&mut start(&exec, spec).await).await;
         assert_eq!(done(&events).0, stop, "{prompt}: {events:?}");
         if prompt == "hello" {

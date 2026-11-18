@@ -1,6 +1,6 @@
 //! Built-in protected paths: what no run may change, whatever the policy says.
 //!
-//! A bot that can edit `.claude/settings.json`, `.codex/config.toml`, `.mcp.json`, a git hook or
+//! A bot that can edit `.claude/settings.json`, `.codex/config.toml`, `.pi/extensions`, `.mcp.json`, a git hook or
 //! Reno's own policy and definitions can grant itself permissions or plant a hook that runs in a
 //! later session, outside any approval. So [`violation`] is checked by [`super::evaluate`]
 //! **before the policy's rules**: its denial is final, an `allow` rule in `policy.toml` cannot
@@ -8,7 +8,7 @@
 //!
 //! # What is protected
 //!
-//! A path with a component `.git`, `.claude`, `.codex` or `.reno` anywhere in it, a file named
+//! A path with a component `.git`, `.claude`, `.codex`, `.pi` or `.reno` anywhere in it, a file named
 //! `.mcp.json`, and (outside the run's worktree) Reno's data directory, `Application Support/Reno`.
 //! Components compare ASCII case-insensitively, as macOS does. A path inside the worktree is
 //! judged by its worktree-relative part, so a worktree that itself lives under a `.claude` or
@@ -42,7 +42,7 @@ use crate::exec::{ActionClass, ApprovalSubject, ToolCall};
 /// The name the denial carries in place of a policy rule.
 pub const PROTECTED_RULE: &str = "built-in protected paths";
 
-const PROTECTED_DIRS: &[&str] = &[".git", ".claude", ".codex", ".reno"];
+const PROTECTED_DIRS: &[&str] = &[".git", ".claude", ".codex", ".pi", ".reno"];
 const PROTECTED_FILE: &str = ".mcp.json";
 
 /// Why `subject` is refused by the built-in protection, or `None`. `cwd` must be lexical.
@@ -236,6 +236,8 @@ mod tests {
         for path in [
             ".claude/settings.json",
             "a/.codex/c.toml",
+            // Pi loads extensions, settings and an MCP config from its project directory.
+            ".pi/extensions/x.ts",
             ".reno/policy.toml",
             ".mcp.json",
             "x/.MCP.json",

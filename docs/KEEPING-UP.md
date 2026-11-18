@@ -1,6 +1,6 @@
 # Keeping up with the agent CLIs
 
-Reno drives Claude Code, Codex and the ACP agents (Grok, Devin, Hermes and the registry's) through
+Reno drives Claude Code, Codex, Pi and the ACP agents (Grok, Devin, Hermes and the registry's) through
 their own command-line programs. Those programs update on their own schedule and Reno's drivers
 read their wire formats directly, so the drivers can fall behind without any test of ours
 noticing. Four things tell us when they have; this page is what to do about each, and the weekly
@@ -17,6 +17,18 @@ checklist that ties them together.
 and the newest one a green live run covered (`verified`). A CLI above `verified` still runs, and
 is shown as `untested`. Nothing raises `verified` by itself: a person does, after a green live run
 (see "Bump `cli_verified`").
+
+Pi (`pi --mode rpc`, `cli_verified` 1.5.0) is covered by the unrecognised-frame counters and the
+version gate, but not by the live conformance suite, which needs a paid model. A newer Pi runs and
+shows `untested`. To clear it, read the Pi changelog for RPC changes, then run the live Pi test,
+which plays a whole run against Pi's own mock provider in a throwaway agent directory (no model,
+no network, nothing under `~/.pi`):
+
+```
+RENO_PI_LIVE=1 cargo test -p reno-harness --test pi -- --ignored --nocapture
+```
+
+and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/pi/mod.rs` by hand.
 
 ## The weekly checklist
 

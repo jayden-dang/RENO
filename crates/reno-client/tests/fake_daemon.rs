@@ -585,6 +585,7 @@ async fn executors_are_listed_refreshed_and_watched() {
         [
             "claude-code",
             "codex",
+            "pi",
             "acp.grok",
             "acp.hermes",
             "acp.antigravity",

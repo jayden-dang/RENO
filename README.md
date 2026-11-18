@@ -49,8 +49,9 @@ open, and the logins you already have.
 |---|---|
 | Claude Code | `claude` CLI, stream-json with its control channel |
 | Codex | `codex app-server`, JSON-RPC |
+| Pi | `pi --mode rpc`, JSONL |
 | Grok, Devin, Hermes, Antigravity and other ACP agents | Agent Client Protocol |
-| opencode, Pi | Planned |
+| opencode | Planned |
 
 Reno uses your installed CLIs and your own sign-ins or API keys. It never runs a model itself.
 

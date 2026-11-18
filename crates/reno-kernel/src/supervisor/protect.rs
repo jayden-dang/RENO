@@ -2,7 +2,7 @@
 //!
 //! The built-in protection (`reno_proto::defs::protect`) refuses a write to `.claude`, `.codex`,
 //! `.reno`, `.mcp.json` or git internals when the harness **asks** first. A harness that cannot
-//! ask (Grok, Devin and Hermes, answered in-driver), or a run whose edits are accepted without
+//! ask (Grok, Devin and Hermes, answered in-driver, and Pi, which asks nothing), or a run whose edits are accepted without
 //! a question, would write them unseen. So the supervisor also looks at what the run did.
 //!
 //! # Two detectors
