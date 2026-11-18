@@ -51,6 +51,7 @@ open, and the logins you already have.
 | Codex | `codex app-server`, JSON-RPC |
 | Pi | `pi --mode rpc`, JSONL |
 | Muse Code | `muse serve`, Muse Session Protocol (JSON-RPC) |
+| Cursor | the pinned `@cursor/sdk`, through a small Node shim (needs `CURSOR_API_KEY`) |
 | Grok, Devin, Hermes, Antigravity and other ACP agents | Agent Client Protocol |
 | opencode | Planned |
 

@@ -338,7 +338,7 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
     wait_drawn(vcx, |vcx| painted(vcx, "line-codex"));
     let view = executor_view(vcx, &root);
     let ids = |g: Group| -> Vec<String> { view.group(g).iter().map(|r| r.id.clone()).collect() };
-    assert_eq!(ids(Group::NeedsYou), ["codex", "acp.grok"]);
+    assert_eq!(ids(Group::NeedsYou), ["codex", "cursor", "acp.grok"]);
     assert_eq!(
         ids(Group::Ready),
         ["acp.antigravity", "claude-code", "muse", "pi"]
@@ -348,8 +348,23 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
         ["acp.devin", "acp.fx", "acp.hermes"]
     );
     assert_eq!(ids(Group::Test), ["mock"]);
-    assert_eq!(view.lede, "2 executors can't take runs");
-    assert_eq!(view.detail, "Codex is signed out \u{b7} Grok is too old");
+    assert_eq!(view.lede, "3 executors can't take runs");
+    assert_eq!(
+        view.detail,
+        "Codex is signed out \u{b7} Cursor is signed out \u{b7} Grok is too old"
+    );
+    // Cursor's fix is an environment variable: the line says which, and offers no sign-in
+    // command (Reno never starts the SDK's browser login), and being a managed install it has
+    // no Auto-update switch.
+    let cursor = row_of(vcx, &root, "cursor");
+    let fix = cursor
+        .middle
+        .as_ref()
+        .expect("a sign-in fact")
+        .detail
+        .clone();
+    assert!(fix.unwrap_or_default().contains("CURSOR_API_KEY"));
+    assert!(cursor.sign_in.is_none() && cursor.managed && cursor.switch.is_none());
     // The mock is collapsed until its group is opened.
     assert!(!painted(vcx, "line-mock"));
     click(vcx, "group-Test executors");
@@ -369,6 +384,10 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
     assert!(
         !painted(vcx, "auto-muse"),
         "no updater is declared for Muse: no switch"
+    );
+    assert!(
+        !painted(vcx, "auto-cursor") && !painted(vcx, "sign-in-cursor"),
+        "a managed install with no sign-in command: no switch, no button"
     );
     assert!(!painted(vcx, "update-codex"), "auto-update is on");
 

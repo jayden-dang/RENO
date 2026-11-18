@@ -1,7 +1,8 @@
 # Keeping up with the agent CLIs
 
-Reno drives Claude Code, Codex, Pi, Muse Code and the ACP agents (Grok, Devin, Hermes and the registry's) through
-their own command-line programs. Those programs update on their own schedule and Reno's drivers
+Reno drives Claude Code, Codex, Pi, Muse Code, Cursor and the ACP agents (Grok, Devin, Hermes and the
+registry's) through their own command-line programs (Cursor through its SDK, below). Those programs
+update on their own schedule and Reno's drivers
 read their wire formats directly, so the drivers can fall behind without any test of ours
 noticing. Four things tell us when they have; this page is what to do about each, and the weekly
 checklist that ties them together.
@@ -51,6 +52,23 @@ RENO_MUSE_LIVE=1 cargo test -p reno-harness --test muse -- --ignored --nocapture
 and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/muse/mod.rs` by hand. The
 echo provider calls no tool, so an approval, a question, a steer and a subagent are still shown
 only by the fake until a person has run them against a real model.
+
+Cursor is different: nothing of Cursor's is on PATH. Reno installs a pinned `@cursor/sdk` (a public
+beta with about weekly releases) into its own adapter directory, and a small Node shim over it is
+the wire. `cli_verified` is that pin, `1.0.32`, and it moves only with a Reno release: no updater
+is declared, so auto-update has nothing to run, and the install step never fetches another version.
+The unrecognised-frame counters (`ev:`, `tool:`) and the shim's own tests are the signals; the
+version gate cannot be, because the installed SDK is always the pin. To move the pin, install the
+new SDK into a throwaway directory with `npm install --ignore-scripts`, diff its typings against
+what `crates/reno-harness/src/drivers/cursor/shim.mjs` maps (the notes in `drivers/cursor/mod.rs`
+say what was read last and what changed in 1.4.1), then run the live test, which installs the pin
+into a temp directory and plays one real run (it spends a model call):
+
+```
+RENO_CURSOR_LIVE=1 CURSOR_API_KEY=... cargo test -p reno-harness --test cursor -- --ignored --nocapture
+```
+
+and change `SDK_VERSION` in `crates/reno-harness/src/drivers/cursor/mod.rs`.
 
 ## The weekly checklist
 

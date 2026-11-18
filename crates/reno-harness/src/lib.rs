@@ -38,7 +38,7 @@ mod agent_id;
 pub mod child_env;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
-pub use drivers::{acp, claude, codex, muse, pi};
+pub use drivers::{acp, claude, codex, cursor, muse, pi};
 #[cfg(all(feature = "conformance", unix))]
 pub mod conformance;
 pub mod exec;
@@ -359,6 +359,7 @@ pub(crate) fn crash_message(
 pub use acp::AcpExecutor;
 pub use claude::ClaudeExecutor;
 pub use codex::CodexExecutor;
+pub use cursor::CursorExecutor;
 pub use muse::MuseExecutor;
 pub use pi::PiExecutor;
 

@@ -588,6 +588,7 @@ async fn executors_are_listed_refreshed_and_watched() {
             "codex",
             "pi",
             "muse",
+            "cursor",
             "acp.grok",
             "acp.hermes",
             "acp.antigravity",

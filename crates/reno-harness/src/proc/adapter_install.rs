@@ -288,6 +288,125 @@ pub(crate) async fn ensure_installed(
     })
 }
 
+// ---------------------------------------------------------------------------------------------
+// A package consumed as a LIBRARY by a Reno-owned shim (the Cursor SDK has no bin entry)
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the managed install of `pin` under `root` is complete: its marker is written last.
+pub(crate) fn is_installed_in(root: &Path, pin: &NpmPin) -> bool {
+    install_dir_in(root, pin).join(OK_MARKER).is_file()
+}
+
+/// A Reno-owned shim script materialized INSIDE a managed install dir, for SDK packages with no
+/// bin entry (`@cursor/sdk`): the shim resolves the SDK from the sibling `node_modules`. Returns
+/// the shim path when the install under `root` (see [`adapters_root`]) is complete, and `None`
+/// when it is not (nothing is installed here). Each build's shim source has its own immutable
+/// filename.
+pub(crate) fn installed_shim_in(
+    root: &Path,
+    pin: &NpmPin,
+    shim_name: &str,
+    contents: &str,
+) -> Option<PathBuf> {
+    if !is_installed_in(root, pin) {
+        return None;
+    }
+    materialize_shim(&install_dir_in(root, pin), shim_name, contents).ok()
+}
+
+/// Different running Reno builds must never replace each other's shim: publish complete,
+/// content-addressed files, so a reader never sees a partial write.
+fn materialize_shim(dir: &Path, name: &str, contents: &str) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+    let name = Path::new(name);
+    let stem = name.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = name.extension().unwrap_or_default().to_string_lossy();
+    let shim = dir.join(format!("{stem}-{digest}.{extension}"));
+    if std::fs::read(&shim).ok().as_deref() == Some(contents.as_bytes()) {
+        return Ok(shim);
+    }
+    let temporary = dir.join(format!(".shim-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, contents)?;
+    if let Err(error) = std::fs::rename(&temporary, &shim) {
+        let _ = std::fs::remove_file(&temporary);
+        // Another writer publishing these same immutable bytes is a successful race.
+        if std::fs::read(&shim).ok().as_deref() != Some(contents.as_bytes()) {
+            return Err(error);
+        }
+    }
+    Ok(shim)
+}
+
+/// Like [`ensure_installed`], for a package consumed as a LIBRARY by a Reno-owned shim rather
+/// than through a bin entry. Installs the pin once under `root` (the explicit install step: a
+/// run never calls this), writes `contents` to a content-addressed sibling of `shim_name`, and
+/// returns the shim path (spawn it via [`launch_for_entry`]). The package's install scripts
+/// never run. `npm` is [`find_npm`]'s answer, passed in so a test can stand its own.
+pub(crate) async fn ensure_installed_shim_in(
+    root: &Path,
+    npm: Option<PathBuf>,
+    pin: NpmPin,
+    display_name: &str,
+    shim_name: &str,
+    contents: &str,
+) -> Result<PathBuf, HarnessError> {
+    if let Some(shim) = installed_shim_in(root, &pin, shim_name, contents) {
+        return Ok(shim);
+    }
+    let _guard = install_lock().lock().await;
+    if let Some(shim) = installed_shim_in(root, &pin, shim_name, contents) {
+        return Ok(shim);
+    }
+    let Some(npm) = npm else {
+        return Err(HarnessError::NotInstalled(format!(
+            "npm (required to install the {display_name} SDK {}; searched PATH, the login \
+             shell's PATH, and fnm/nvm/volta/pnpm/bun install dirs)",
+            pin.spec()
+        )));
+    };
+    let final_dir = install_dir_in(root, &pin);
+    let tmp_dir = root.join(format!(
+        ".tmp-{}-{}-{}",
+        pin.dir_name(),
+        pin.version,
+        std::process::id()
+    ));
+    let cache_dir = root.join(".npm-cache");
+    // The SDK's scripts are its build's (`build`, `prepare:rg`, ...); none runs at install, and
+    // none may.
+    let install = install_into(&npm, &pin, &tmp_dir, &cache_dir, display_name, true).await;
+    if let Err(e) = install {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+    let published = materialize_shim(&tmp_dir, shim_name, contents)
+        .and_then(|_| std::fs::write(tmp_dir.join(OK_MARKER), pin.version));
+    if let Err(e) = published {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(e.into());
+    }
+    if let Some(parent) = final_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::rename(&tmp_dir, &final_dir).is_err() {
+        // Lost a cross-process race (or a stale dir): keep whatever is in place if it is
+        // complete, else replace it.
+        if !is_installed_in(root, &pin) {
+            let _ = std::fs::remove_dir_all(&final_dir);
+            std::fs::rename(&tmp_dir, &final_dir)?;
+        } else {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+    }
+    installed_shim_in(root, &pin, shim_name, contents).ok_or_else(|| {
+        HarnessError::Install(format!(
+            "install of {} finished but its shim did not resolve",
+            pin.spec()
+        ))
+    })
+}
+
 fn npm_install_plan(
     npm: &Path,
     pin: &NpmPin,
@@ -582,5 +701,141 @@ mod tests {
         let launch = launch_for_entry_with_node(&js, Some(node.clone())).unwrap();
         assert_eq!(launch.0, node);
         assert_eq!(launch.1, vec![js.display().to_string()]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod shim_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    const PIN: &str = "@scope/sdk@1.2.3";
+
+    /// Make `path` executable and wait out ETXTBSY: a script written while other tests fork can
+    /// be "text file busy" for a moment, because a forked child holds the write descriptor
+    /// until it execs.
+    fn executable(path: &Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..200 {
+            let ran = std::process::Command::new(path)
+                .arg("--probe")
+                .current_dir(path.parent().unwrap())
+                .output();
+            match ran {
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// An `npm` that lays a package out the way a real install does, and records its arguments.
+    fn fake_npm(dir: &Path) -> (PathBuf, PathBuf) {
+        let log = dir.join("npm.log");
+        let npm = dir.join("npm");
+        executable(
+            &npm,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\nmkdir -p node_modules/@scope/sdk\n\
+                 echo '{{\"name\":\"@scope/sdk\",\"version\":\"1.2.3\"}}' > \
+                 node_modules/@scope/sdk/package.json\n",
+                log.display()
+            ),
+        );
+        // The wait above ran it once with `--probe`.
+        std::fs::remove_file(&log).ok();
+        (npm, log)
+    }
+
+    #[tokio::test]
+    async fn the_explicit_install_runs_npm_without_scripts_and_publishes_the_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("adapters");
+        let (npm, log) = fake_npm(dir.path());
+        let pin = NpmPin::parse(PIN);
+        assert!(!is_installed_in(&root, &pin));
+        assert_eq!(installed_shim_in(&root, &pin, "shim.mjs", "x"), None);
+
+        let shim = ensure_installed_shim_in(&root, Some(npm.clone()), pin, "Sdk", "shim.mjs", "x")
+            .await
+            .unwrap();
+        assert!(is_installed_in(&root, &pin));
+        assert_eq!(std::fs::read_to_string(&shim).unwrap(), "x");
+        assert!(shim.starts_with(root.join("scope__sdk").join("1.2.3")));
+        assert!(
+            root.join("scope__sdk/1.2.3/node_modules/@scope/sdk/package.json")
+                .is_file()
+        );
+        let args = std::fs::read_to_string(&log).unwrap();
+        assert!(args.contains("--ignore-scripts"), "{args}");
+        assert!(args.contains("@scope/sdk@1.2.3"), "{args}");
+        assert_eq!(args.lines().count(), 1);
+
+        // Done once: a second call, and one from a build with another shim source, run no npm.
+        let again = ensure_installed_shim_in(&root, Some(npm.clone()), pin, "Sdk", "shim.mjs", "x")
+            .await
+            .unwrap();
+        assert_eq!(again, shim);
+        let newer = ensure_installed_shim_in(&root, Some(npm), pin, "Sdk", "shim.mjs", "y")
+            .await
+            .unwrap();
+        assert_ne!(newer, shim);
+        assert_eq!(std::fs::read_to_string(&shim).unwrap(), "x");
+        assert_eq!(std::fs::read_to_string(&newer).unwrap(), "y");
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_npm_is_not_installed_and_a_failed_install_leaves_nothing_that_looks_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("adapters");
+        let pin = NpmPin::parse(PIN);
+        let error = ensure_installed_shim_in(&root, None, pin, "Sdk", "shim.mjs", "x")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HarnessError::NotInstalled(_)), "{error}");
+
+        let failing = dir.path().join("failing-npm");
+        executable(&failing, "#!/bin/sh\necho 'registry down' >&2\nexit 1\n");
+        let error = ensure_installed_shim_in(&root, Some(failing), pin, "Sdk", "shim.mjs", "x")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("registry down"), "{error}");
+        assert!(!is_installed_in(&root, &pin));
+        assert_eq!(installed_shim_in(&root, &pin, "shim.mjs", "x"), None);
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn concurrent_builds_publish_immutable_complete_shims() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources: Vec<String> = (0..8)
+            .map(|build| format!("// build {build}\n{}", "x".repeat(64 * 1024)))
+            .collect();
+        std::thread::scope(|scope| {
+            for source in &sources {
+                let dir = dir.path();
+                scope.spawn(move || {
+                    for _ in 0..40 {
+                        let shim = materialize_shim(dir, "shim.mjs", source).unwrap();
+                        assert_eq!(std::fs::read_to_string(shim).unwrap(), *source);
+                        // An older Reno can still rewrite a legacy filename.
+                        std::fs::write(dir.join("shim.mjs"), "old build").unwrap();
+                    }
+                });
+            }
+        });
     }
 }

@@ -15,8 +15,8 @@ mod targets;
 use reno_harness::conformance::{CaseId, Status, Target, TargetReport, render_table, run_suite};
 
 use targets::{
-    claude_target, codex_target, devin_target, grok_target, hermes_target, mock_target,
-    muse_target, pi_target, registry_target,
+    claude_target, codex_target, cursor_target, devin_target, grok_target, hermes_target,
+    mock_target, muse_target, pi_target, registry_target,
 };
 
 async fn run_all(targets: Vec<Target>) -> Vec<TargetReport> {
@@ -52,6 +52,7 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         hermes_target(),
         pi_target(),
         muse_target(),
+        cursor_target(),
     ])
     .await;
     println!("\n{}", render_table(&reports));
@@ -125,6 +126,18 @@ async fn the_mock_and_every_driver_pass_the_suite() {
             ("user-config", "skip"),
         ])
     );
+    // Cursor asks for no approval and has no way to take a question's answer back: full access
+    // only, no input case, and it isolates the owner's settings, so the user-config case runs.
+    assert_eq!(
+        labels("cursor"),
+        pinned(&[
+            ("approval-allow", "skip"),
+            ("approval-deny", "skip"),
+            ("deny-message", "skip"),
+            ("input", "skip"),
+            ("plan-mode", "skip"),
+        ])
+    );
     assert_eq!(
         labels("acp.registry"),
         pinned(&[("plan-mode", "skip"), ("user-config", "skip")])
@@ -171,6 +184,13 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         vec![
             ("item:hologram".to_owned(), 1),
             ("method:turn/teleported".to_owned(), 1),
+        ]
+    );
+    assert_eq!(
+        counted("cursor").into_iter().collect::<Vec<_>>(),
+        vec![
+            ("ev:hologram".to_owned(), 1),
+            ("tool:teleport".to_owned(), 1)
         ]
     );
     assert!(counted("mock").is_empty());

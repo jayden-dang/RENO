@@ -492,6 +492,10 @@ pub struct Profile {
     /// Its wire layer counts the frames it does not recognise
     /// ([`Executor::unknown_frames`]).
     pub counts_unknown_frames: bool,
+    /// Its wire can put a question to a person (`NeedsInput`). False for an executor that
+    /// has no way to take the answer back (Cursor's SDK has no answer channel for
+    /// `askQuestion`, so the tool is not offered).
+    pub asks_questions: bool,
 }
 
 impl Profile {
@@ -501,6 +505,7 @@ impl Profile {
             spawns_process: true,
             deny_message_on_wire: false,
             counts_unknown_frames: true,
+            asks_questions: true,
         }
     }
 
@@ -510,6 +515,7 @@ impl Profile {
             spawns_process: false,
             deny_message_on_wire: false,
             counts_unknown_frames: false,
+            asks_questions: true,
         }
     }
 }

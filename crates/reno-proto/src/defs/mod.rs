@@ -120,6 +120,7 @@ pub const BUILTIN_EXECUTORS: &[&str] = &[
     "codex",
     "pi",
     "muse",
+    "cursor",
     "acp.grok",
     "acp.devin",
     "acp.hermes",

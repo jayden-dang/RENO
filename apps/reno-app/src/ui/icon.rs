@@ -278,6 +278,9 @@ mod tests {
         // Nor has Muse Code.
         assert_eq!(logo_path("muse", true), None);
         assert_eq!(logo_path("muse", false), None);
+        // Nor has Cursor.
+        assert_eq!(logo_path("cursor", true), None);
+        assert_eq!(logo_path("cursor", false), None);
         assert_eq!(logo_path("mock", false), None);
     }
 }

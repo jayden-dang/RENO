@@ -204,6 +204,15 @@ pub const MUSE: DriverEnv = DriverEnv {
     prefixes: &[],
 };
 
+/// Cursor (its SDK, through the shim): the one variable that signs it in. The SDK also reads
+/// `CURSOR_BACKEND_URL` and `CURSOR_WEBSITE_URL` (`auth/login.d.ts`, 1.0.32) to reach another
+/// backend; they are not passed, so a key minted for the default backend is never sent elsewhere.
+/// The SDK's stored login (`~/.cursor/sdk/auth.json`) is a file, not a variable.
+pub const CURSOR: DriverEnv = DriverEnv {
+    names: &["CURSOR_API_KEY"],
+    prefixes: &[],
+};
+
 const DEVIN: DriverEnv = DriverEnv {
     names: &["DEVIN_API_KEY", "WINDSURF_API_KEY"],
     prefixes: &[],
@@ -272,6 +281,7 @@ pub fn for_harness(harness: HarnessId) -> DriverEnv {
         HarnessId::Antigravity => ANTIGRAVITY,
         HarnessId::Pi => PI,
         HarnessId::Muse => MUSE,
+        HarnessId::Cursor => CURSOR,
         HarnessId::Registry(agent) if agent.registry_id() == "gemini" => GEMINI_REGISTRY,
         HarnessId::Registry(_) => NONE,
     }
