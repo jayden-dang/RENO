@@ -73,6 +73,9 @@ pub(crate) struct RunScreen {
     prefix_runs: Vec<(RunId, (usize, Option<RunStatus>))>,
     /// Older runs' rows, by run.
     segments: HashMap<RunId, Segment>,
+    /// How many times an older run's rows were built (tests assert it stays put).
+    #[cfg(test)]
+    older_builds: usize,
     /// What Review compares: the whole thread (default) or the latest run.
     scope: ReviewScope,
     /// The Session tab's "Close thread" is asking for a confirmation.
@@ -146,6 +149,8 @@ impl RunScreen {
             prefix_len: 0,
             prefix_runs: Vec::new(),
             segments: HashMap::new(),
+            #[cfg(test)]
+            older_builds: 0,
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
@@ -202,6 +207,21 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn reason_input(&self, approval: &ApprovalId) -> Option<&Entity<Composer>> {
         self.reasons.get(approval).map(|(input, _)| input)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn older_builds(&self) -> usize {
+        self.older_builds
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panel_key(&self) -> &PanelKey {
+        &self.panel_key
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panel_state(&self) -> &PanelState {
+        &self.panel
     }
 
     #[cfg(test)]
@@ -330,6 +350,10 @@ impl RunScreen {
             let segment = match cache.remove(id).filter(|c| &c.signature == sig) {
                 Some(segment) => segment,
                 None => {
+                    #[cfg(test)]
+                    {
+                        self.older_builds += 1;
+                    }
                     let built = build(id, &[]);
                     let mut seg_rows: Vec<Row> = divider(id, at, built.facts.model.clone())
                         .into_iter()

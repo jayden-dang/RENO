@@ -33,6 +33,8 @@ mod notify_tests;
 mod screen_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thread_tests;
 
 use std::process::ExitCode;
 

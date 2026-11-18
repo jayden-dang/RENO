@@ -705,6 +705,25 @@ impl Composer {
         self.text_changed(window, cx);
     }
 
+    #[cfg(test)]
+    pub(crate) fn refusal_note(&self) -> Option<threads::Refusal> {
+        self.refusal
+    }
+
+    /// The note above the box, as the tests read it.
+    #[cfg(test)]
+    pub(crate) fn note_for_test(&self, cx: &App) -> String {
+        match self.steer_state(cx) {
+            Some(SteerState::Ended(why)) => ended_note(
+                &why,
+                &self.project_name(cx),
+                self.store.read(cx).supports_threads(),
+                self.thread_is_gone(cx),
+            ),
+            _ => String::new(),
+        }
+    }
+
     /// The thread a message to this ended run continues: the run's own, while it has a worktree
     /// to continue (or never had one) and the daemon has not said otherwise.
     fn continuing(&self, cx: &App) -> Option<reno_proto::ThreadId> {
