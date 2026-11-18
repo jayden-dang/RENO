@@ -86,6 +86,15 @@ pub trait Executor: Send + Sync {
     /// harness that needs an install says so (`NeedsInstall`) and waits for [`Self::install`].
     async fn probe(&self) -> HealthProbe;
 
+    /// The signed-in account's plan usage (feature `executor.usage`), or `None` when this
+    /// executor has none to show or it is unavailable: no login with meters, a token the
+    /// provider rejected, no answer. A separate call from [`Self::probe`] because it asks the
+    /// provider over the network, not the CLI. Read-only: never refreshes or writes a
+    /// credential. The default has no usage.
+    async fn plan_usage(&self) -> Option<crate::usage::UsageReading> {
+        None
+    }
+
     /// The explicit install step for a harness whose probe said `NeedsInstall`: fetches and
     /// verifies the managed adapter. Never called by a run. The default has nothing to install.
     async fn install(&self) -> Result<(), crate::HarnessError> {

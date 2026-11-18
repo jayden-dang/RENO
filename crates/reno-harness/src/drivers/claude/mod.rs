@@ -302,6 +302,8 @@ pub struct ClaudeExecutor {
     probe_budget: Duration,
     /// Where `probe` looks for a credential in the environment.
     probe_env: health::EnvLookup,
+    /// Where `plan_usage` reads the account's meters; none until the daemon wires one.
+    usage: Option<Arc<dyn crate::usage::UsageSource>>,
     tracker: TaskTracker,
     /// Frames of a type the wire layer does not know, counted across runs.
     unknown: UnknownFrames,
@@ -331,6 +333,7 @@ impl Default for ClaudeExecutor {
             live_models: Arc::new(Mutex::new(None)),
             probe_budget: probe::COMMAND_BUDGET,
             probe_env: health::process_env(),
+            usage: None,
             tracker: TaskTracker::new(),
             unknown: UnknownFrames::new(),
         }
@@ -342,6 +345,13 @@ impl ClaudeExecutor {
     /// install location.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reads the signed-in account's plan usage from `source` (`Executor::plan_usage`).
+    #[must_use]
+    pub fn with_usage_source(mut self, source: Arc<dyn crate::usage::UsageSource>) -> Self {
+        self.usage = Some(source);
+        self
     }
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
@@ -633,6 +643,10 @@ impl Executor for ClaudeExecutor {
     /// whether it is signed in (`claude auth status`, or a credential in the environment; see
     /// [`health`]). The model list is the curated one: the CLI has no cheap, offline way to
     /// list models.
+    async fn plan_usage(&self) -> Option<crate::usage::UsageReading> {
+        self.usage.as_ref()?.read().await
+    }
+
     async fn probe(&self) -> HealthProbe {
         let overridden = self.executable.is_some()
             || std::env::var_os("CLAUDE_CODE_EXECUTABLE").is_some_and(|value| !value.is_empty());

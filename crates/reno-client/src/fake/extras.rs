@@ -424,6 +424,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
         signed_in: SignedIn::Unknown,
         models: ModelCatalog::curated(vec![]),
         checked_at_ms: NOW_MS - 5 * MINUTE,
+        plan_usage: None,
     };
     let all = [
         AccessMode::Supervised,
@@ -451,6 +452,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     ("claude-haiku-5-5", "Haiku 5.5"),
                 ])),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             Some(Maintenance {
                 setup: None,
@@ -480,6 +482,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 },
                 models: ModelCatalog::live(models(&[("gpt-6-astra", "GPT-6-Astra")])),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             Some(Maintenance {
                 setup: None,
@@ -505,6 +508,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 },
                 models: ModelCatalog::curated(models(&[("grok-4", "Grok 4")])),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             Some(Maintenance {
                 setup: None,
@@ -530,6 +534,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 signed_in: SignedIn::Unknown,
                 models: ModelCatalog::curated(vec![]),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             Some(Maintenance {
                 setup: Some(recipe(
@@ -567,6 +572,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 signed_in: SignedIn::Unknown,
                 models: ModelCatalog::curated(vec![]),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             Some(Maintenance {
                 setup: None,
@@ -634,6 +640,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 signed_in: SignedIn::Yes { account: None },
                 models: ModelCatalog::curated(models(&[("mock-1", "Mock 1")])),
                 checked_at_ms: at,
+                plan_usage: None,
             },
             None,
         )?,

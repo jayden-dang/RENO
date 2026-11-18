@@ -308,6 +308,7 @@ mod tests {
             signed_in,
             models: ModelCatalog::curated(vec![]),
             checked_at_ms: 1,
+            plan_usage: None,
         }
     }
 

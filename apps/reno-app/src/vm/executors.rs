@@ -947,6 +947,7 @@ mod tests {
             },
             models: ModelCatalog::curated(vec![]),
             checked_at_ms: NOW - 3 * MIN,
+            plan_usage: None,
         }
     }
 
@@ -1366,6 +1367,7 @@ mod roster_tests {
             signed_in,
             models: ModelCatalog::curated(vec![]),
             checked_at_ms: NOW - 12 * 60_000,
+            plan_usage: None,
         }
     }
 
@@ -1386,6 +1388,7 @@ mod roster_tests {
             signed_in: SignedIn::Unknown,
             models: ModelCatalog::curated(vec![]),
             checked_at_ms: NOW - 12 * 60_000,
+            plan_usage: None,
         }
     }
 

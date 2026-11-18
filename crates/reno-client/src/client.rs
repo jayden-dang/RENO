@@ -397,7 +397,10 @@ impl Client {
         self.require(reno_proto::FEATURE_EXECUTORS)?;
         Ok(self
             .rpc
-            .call::<reno_proto::ExecutorRefresh>(reno_proto::ExecutorRefreshParams { id })
+            .call::<reno_proto::ExecutorRefresh>(reno_proto::ExecutorRefreshParams {
+                id,
+                usage_only: false,
+            })
             .await?
             .executors)
     }

@@ -97,6 +97,8 @@ pub struct MockExecutor {
     log: Arc<Mutex<MockLog>>,
     /// Whether `log` is written. A long-lived daemon turns it off: the log grows with every run.
     recording: bool,
+    /// Where `plan_usage` reads from; none by default.
+    usage: Option<Arc<dyn crate::usage::UsageSource>>,
 }
 
 impl MockExecutor {
@@ -108,7 +110,14 @@ impl MockExecutor {
             steps: Vec::new(),
             log: Arc::default(),
             recording: true,
+            usage: None,
         }
+    }
+
+    /// Gives `plan_usage` a source to read.
+    pub fn with_usage_source(mut self, source: Arc<dyn crate::usage::UsageSource>) -> Self {
+        self.usage = Some(source);
+        self
     }
 
     /// The descriptor a mock starts with: every access mode and sandbox level, step-boundary
@@ -192,6 +201,10 @@ impl Executor for MockExecutor {
     }
 
     /// Always installed and signed in: the mock is the daemon's own script, nothing to find.
+    async fn plan_usage(&self) -> Option<crate::usage::UsageReading> {
+        self.usage.as_ref()?.read().await
+    }
+
     async fn probe(&self) -> HealthProbe {
         HealthProbe {
             installed: InstallStatus::Installed {

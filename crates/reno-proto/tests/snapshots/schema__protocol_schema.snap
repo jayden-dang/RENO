@@ -716,7 +716,8 @@ expression: protocol_schema()
     "run.model",
     "run.effort",
     "executor.maintain",
-    "run.changes"
+    "run.changes",
+    "executor.usage"
   ],
   "methods": [
     {
@@ -7415,6 +7416,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -7941,6 +7953,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -8135,6 +8177,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
+            ],
+            "type": "object"
+          },
           "VersionGate": {
             "description": "The installed version against the adapter's verified range.",
             "oneOf": [
@@ -8261,6 +8333,10 @@ expression: protocol_schema()
               }
             ],
             "description": "The executor to probe again; every executor when absent."
+          },
+          "usageOnly": {
+            "description": "Only read the plan usage again (feature `executor.usage`): no probe, so it answers in\nthe time of one HTTPS request. Throttled to once per 30 s per executor either way.",
+            "type": "boolean"
           }
         },
         "title": "ExecutorRefreshParams",
@@ -8472,6 +8548,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -8998,6 +9085,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -9189,6 +9306,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -9525,6 +9672,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -10051,6 +10209,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -10242,6 +10430,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -10599,6 +10817,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -11125,6 +11354,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -11316,6 +11575,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -11649,6 +11938,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -12175,6 +12475,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -12366,6 +12696,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -12699,6 +13059,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -13225,6 +13596,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -13416,6 +13817,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -13806,6 +14237,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -14332,6 +14774,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -14523,6 +14995,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },
@@ -17697,6 +18199,17 @@ expression: protocol_schema()
                 "$ref": "#/$defs/ModelCatalog",
                 "description": "The models on offer, and whether they came from the live harness or the adapter's list."
               },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
               "signedIn": {
                 "$ref": "#/$defs/SignedIn",
                 "description": "Whether the harness is signed in."
@@ -18223,6 +18736,36 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
           "SandboxLevel": {
             "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
             "oneOf": [
@@ -18414,6 +18957,36 @@ expression: protocol_schema()
               "command",
               "selfUpdating",
               "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
             ],
             "type": "object"
           },

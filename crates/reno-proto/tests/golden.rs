@@ -311,7 +311,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "executor.maintain", "run.changes"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "executor.maintain", "run.changes", "executor.usage"],
                "pid": 4242}),
     );
 }
@@ -1117,6 +1117,7 @@ fn executor_health_on_the_wire() {
                 description: None,
             }]),
             checked_at_ms: 1_800_000_000_000,
+            plan_usage: None,
         },
         json!({
             "installed": {"type": "installed", "path": "/usr/local/bin/codex", "version": "0.169.0"},
@@ -1137,6 +1138,7 @@ fn executor_health_on_the_wire() {
             signed_in: SignedIn::Unknown,
             models: ModelCatalog::curated(vec![]),
             checked_at_ms: 5,
+            plan_usage: None,
         },
         json!({
             "installed": {"type": "not_installed", "why": {"type": "needs_install", "what": "the Hermes ACP adapter (npm)"}},
@@ -1176,12 +1178,62 @@ fn executor_health_on_the_wire() {
         },
         json!({"type": "no", "hint": "run `claude auth login`"}),
     );
+    // Plan usage rides on the health as `planUsage`; a window's reset is optional.
+    golden(
+        &ExecutorHealth {
+            installed: InstallStatus::Installed {
+                path: "/usr/local/bin/claude".into(),
+                version: Some("2.2.0".into()),
+            },
+            version_gate: VersionGate::Ok,
+            signed_in: SignedIn::Unknown,
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: 5,
+            plan_usage: Some(PlanUsage {
+                plan_label: Some("ChatGPT Plus".into()),
+                windows: vec![
+                    UsageWindow::new("Session", 0.54, Some(1_800_007_200_000)),
+                    UsageWindow::new("Week", 0.21, None),
+                ],
+                fetched_at_ms: 1_800_000_000_000,
+            }),
+        },
+        json!({
+            "installed": {"type": "installed", "path": "/usr/local/bin/claude", "version": "2.2.0"},
+            "versionGate": {"type": "ok"},
+            "signedIn": {"type": "unknown"},
+            "models": {"source": "curated", "models": []},
+            "checkedAtMs": 5,
+            "planUsage": {
+                "planLabel": "ChatGPT Plus",
+                "windows": [
+                    {"label": "Session", "usedPermille": 540, "resetsAtMs": 1_800_007_200_000_u64},
+                    {"label": "Week", "usedPermille": 210}
+                ],
+                "fetchedAtMs": 1_800_000_000_000_u64
+            }
+        }),
+    );
+    golden(
+        &ExecutorRefreshParams {
+            id: None,
+            usage_only: true,
+        },
+        json!({"usageOnly": true}),
+    );
     golden(&ModelSource::Curated, json!("curated"));
     golden(&ModelSource::Live, json!("live"));
-    golden(&ExecutorRefreshParams { id: None }, json!({}));
+    golden(
+        &ExecutorRefreshParams {
+            id: None,
+            usage_only: false,
+        },
+        json!({}),
+    );
     golden(
         &ExecutorRefreshParams {
             id: Some("codex".parse().unwrap()),
+            usage_only: false,
         },
         json!({"id": "codex"}),
     );

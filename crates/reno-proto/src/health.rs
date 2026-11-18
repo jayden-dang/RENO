@@ -275,6 +275,11 @@ pub struct ExecutorHealth {
     pub models: ModelCatalog,
     /// When the probe finished, in milliseconds since the Unix epoch.
     pub checked_at_ms: u64,
+    /// The account's plan meters, with feature `executor.usage`. Read separately from the probe
+    /// (it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.
+    /// Absent when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_usage: Option<crate::usage::PlanUsage>,
 }
 
 impl ExecutorHealth {
@@ -292,6 +297,7 @@ impl ExecutorHealth {
             signed_in,
             models,
             checked_at_ms,
+            plan_usage: None,
         }
     }
 
@@ -605,6 +611,10 @@ pub struct ExecutorRefreshParams {
     /// The executor to probe again; every executor when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<ExecutorId>,
+    /// Only read the plan usage again (feature `executor.usage`): no probe, so it answers in
+    /// the time of one HTTPS request. Throttled to once per 30 s per executor either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usage_only: bool,
 }
 
 /// Params of `executor.install`.
