@@ -231,3 +231,31 @@ fn the_panel_width_and_visibility_persist(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn a_file_tab_is_saved_and_comes_back_showing_its_diff(cx: &mut TestAppContext) {
+    let mut f = fixture(cx, |_| {});
+    let screen = open(&mut f, "builder1");
+    wait_drawn(f.vcx, |vcx| painted(vcx, "panel-tab-review"));
+    let file = Surface::File("Cargo.toml".to_owned());
+    screen.update_in(f.vcx, |s, window, cx| {
+        s.open_surface(file.clone(), window, cx);
+    });
+    advance(&mut f, SAVE_DELAY);
+    let (store, _) = PanelStore::load(&path(&f.dir));
+    let saved = store
+        .get(&PanelKey(run_id("builder1").to_string()))
+        .unwrap();
+    let restored = crate::panel::PanelState::restore(saved);
+    assert!(restored.tabs().contains(&file));
+    assert_eq!(*restored.active(), file);
+
+    // A new screen restores it, shows "reading" until the changes arrive, then the diff.
+    let other = open(&mut f, "keeper1");
+    wait_drawn(f.vcx, |vcx| painted(vcx, "panel-tab-session"));
+    assert!(!tabs(&f, &other).contains(&file));
+    let again = open(&mut f, "builder1");
+    assert_eq!(active(&f, &again), file);
+    wait_drawn(f.vcx, |vcx| painted(vcx, "change-patch-Cargo.toml"));
+    assert!(painted(f.vcx, "file-tab-Cargo.toml"));
+}

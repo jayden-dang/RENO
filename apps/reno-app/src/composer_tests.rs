@@ -267,7 +267,7 @@ fn a_finder_copy_pastes_as_a_chip_on_home_and_a_toast_on_a_steer(cx: &mut TestAp
 
     // A steer: a toast, no chip, the text as it was.
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
+    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
     let steer = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .unwrap()
@@ -295,7 +295,7 @@ fn dropping_files_on_a_steer_says_a_steer_is_text(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
+    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("note.txt");
     std::fs::write(&file, b"x").unwrap();
@@ -426,27 +426,32 @@ fn a_draft_comes_back_when_the_daemon_refuses_the_task(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn a_live_run_shows_stop_until_something_is_typed_and_steer_then(cx: &mut TestAppContext) {
+fn a_live_run_has_one_stop_in_the_header_and_the_box_steers(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
-    assert!(!painted(vcx, "send"), "one button at a time");
+    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
+    assert!(!painted(vcx, "stop"), "the box has no second Stop");
+    assert!(painted(vcx, "send"), "the box shows Send, dim until typed");
     let steer = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .unwrap()
         .read_with(vcx, |s, _| s.steer_input().clone());
+    assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
     steer.update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
-    wait_drawn(vcx, |vcx| painted(vcx, "send") && !painted(vcx, "stop"));
+    wait_drawn(vcx, |vcx| steer.read_with(vcx, |c, cx| c.can_send(cx)));
+    assert!(
+        painted(vcx, "header-stop"),
+        "typing does not hide the header Stop"
+    );
     click(vcx, "send");
     assert_eq!(steer.read_with(vcx, |c, _| c.text().to_owned()), "");
     wait_drawn(vcx, |vcx| painted(vcx, "composer-note"));
     assert!(steer.read_with(vcx, |c, _| c.is_sent_noted()));
-    // Stop is back, and it stops the run.
-    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
-    click(vcx, "stop");
+    // The header Stop stops the run.
+    click(vcx, "header-stop");
     wait_until(vcx, |cx| {
         store.read_with(cx, |s, _| {
             s.state()
@@ -458,7 +463,7 @@ fn a_live_run_shows_stop_until_something_is_typed_and_steer_then(cx: &mut TestAp
     // Ended: no Stop; the box now offers a new run in the project, so Send stays (disabled
     // until something is typed).
     wait_drawn(vcx, |vcx| {
-        !painted(vcx, "stop") && painted(vcx, "composer-note")
+        !painted(vcx, "header-stop") && painted(vcx, "composer-note")
     });
     assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
 }
@@ -1258,6 +1263,30 @@ fn a_composer_dropped_with_its_menu_open_clears_the_signal(cx: &mut TestAppConte
     });
     draw(vcx);
     assert!(!overlay_open(vcx), "the run's composer went with its menu");
+}
+
+#[gpui::test]
+fn a_home_composer_hidden_by_navigation_releases_the_signal_with_its_menu(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "class-menu");
+    assert!(overlay_open(vcx), "the home composer's menu raises it");
+    root.update_in(vcx, |r, window, cx| {
+        r.navigate(crate::nav::Nav::Runs, window, cx);
+    });
+    draw(vcx);
+    assert!(
+        !overlay_open(vcx),
+        "the home composer is hidden, not dropped, and its menu went with the screen"
+    );
+    // Back home the menu is closed, not left open invisibly.
+    root.update_in(vcx, |r, window, cx| {
+        r.navigate(crate::nav::Nav::Home, window, cx);
+    });
+    draw(vcx);
+    assert!(!overlay_open(vcx));
 }
 
 #[gpui::test]

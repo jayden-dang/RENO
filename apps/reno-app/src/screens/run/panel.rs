@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, DragMoveEvent, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    Render, Window, div, prelude::*, px,
+    AnyElement, App, Context, DragMoveEvent, IntoElement, KeyDownEvent, MouseButton, Render,
+    Window, div, prelude::*, px,
 };
 
 use super::RunScreen;
@@ -241,13 +241,16 @@ impl RunScreen {
         let state = store.state();
         let run = state.run(&self.run)?;
         let pane = self.pane(cx);
-        // A `workspace.get` answer means the run's folder is in a repository. A daemon that
-        // cannot answer (too old) leaves it unknown, which is not "no repository".
-        let in_repository = panel_home::in_repository(
+        // What `workspace.get` said. A daemon that is not connected, or has not answered, leaves
+        // it unread, which is neither "no repository" nor "same folder".
+        let connected = store.connection() == reno_client::ConnectionStatus::Connected;
+        let record = panel_home::record(
+            connected,
             store.supports_changes(),
-            store
-                .changes(&self.run)
-                .is_some_and(|c| matches!(c.workspace, Loaded::Ready(Some(_)))),
+            store.changes(&self.run).and_then(|c| match &c.workspace {
+                Loaded::Ready(w) => Some(w.is_some()),
+                _ => None,
+            }),
         );
         let project = crate::vm::projects::key_of(Some(run), |dir| store.root_of(dir));
         let project = match project {
@@ -264,7 +267,7 @@ impl RunScreen {
             executor: run.executor.as_str(),
             project: project.as_deref(),
             path: path.as_deref(),
-            in_repository,
+            record,
             model: model.as_deref(),
             bot: summary::run_bot(run),
             note: Some(&note),
@@ -393,7 +396,7 @@ impl RunScreen {
             Surface::History => view::planned_page(theme, HomeKind::History),
             Surface::Terminal(_) => view::planned_page(theme, HomeKind::Terminal),
             Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
-            Surface::File(_) => view::planned_page(theme, HomeKind::Files),
+            Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Commit(_) => view::planned_page(theme, HomeKind::History),
         };
         div()
@@ -438,64 +441,5 @@ impl RunScreen {
             cx.stop_propagation();
             self.open_kind(kind, window, cx);
         }
-    }
-
-    // --- header pieces ----------------------------------------------------------------------
-
-    /// The header's Stop, on a run that can be stopped.
-    pub(super) fn stop_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.summary(cx).is_some_and(|r| summary::is_live(r.status));
-        if !live {
-            return None;
-        }
-        let run = self.run.clone();
-        Some(
-            crate::ui::kit::line_button(
-                theme,
-                "header-stop",
-                Some(crate::ui::icon::Icon::Stop),
-                "Stop",
-                crate::ui::kit::Tone::Quiet,
-                true,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let run = run.clone();
-                this.store.update(cx, |store, cx| store.cancel_run(run, cx));
-            }))
-            .into_any_element(),
-        )
-    }
-
-    /// The tokens chip: a ring and "1.4k". Hidden until there are tokens; it opens Session.
-    pub(super) fn usage_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let usage = self.facts.usage.filter(|u| u.total() > 0)?;
-        let hover = theme.text.opacity(0.06);
-        Some(
-            div()
-                .id("usage-chip")
-                .debug_selector(|| "usage-chip".to_owned())
-                .flex_none()
-                .h(px(30.0))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .rounded(px(8.0))
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.muted)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child(crate::ui::icon::icon(
-                    crate::ui::icon::Icon::Ring,
-                    14.0,
-                    theme.muted,
-                ))
-                .child(panel_home::usage_chip(usage))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_surface(Surface::Session, window, cx);
-                }))
-                .into_any_element(),
-        )
     }
 }

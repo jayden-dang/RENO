@@ -60,7 +60,7 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
-    /// `RENO_PANEL=home|session|review`: with `RENO_OPEN=run_<id>`, put that tab of the side
+    /// `RENO_PANEL=home|session|review|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
     /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
@@ -125,6 +125,9 @@ impl Options {
             Some("home") => Some(Surface::Home),
             Some("session") => Some(Surface::Session),
             Some("review") => Some(Surface::Review),
+            Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
+                Some(Surface::File(other["file:".len()..].to_owned()))
+            }
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
@@ -588,9 +591,19 @@ impl RootView {
         window.focus(&handle, cx);
     }
 
+    /// The home screen is about to be replaced: its composer lives on, hidden, so it closes its
+    /// menus and lets go of the overlay signal.
+    fn leave_home(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.screen, Screen::Home) {
+            let composer = self.home.read(cx).composer().clone();
+            composer.update(cx, |c, cx| c.hide(cx));
+        }
+    }
+
     /// Shows a built destination; the others say they are not built yet.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
+        self.leave_home(cx);
         self.screen = match nav {
             Nav::Runs => {
                 self.runs.update(cx, |screen, cx| screen.shown(cx));
@@ -625,6 +638,7 @@ impl RootView {
             cx.subscribe_in(&screen, window, Self::on_screen_event),
             cx.subscribe_in(&steer, window, Self::on_open_executors),
         ];
+        self.leave_home(cx);
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
         cx.notify();
@@ -672,6 +686,7 @@ impl RootView {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
         let store = self.store.clone();
         let screen = cx.new(|cx| crate::screens::project::ProjectScreen::new(store, key, cx));
+        self.leave_home(cx);
         self.screen = Screen::Project(screen);
         self.focus_composer(window, cx);
         cx.notify();
@@ -995,8 +1010,13 @@ mod tests {
         assert_eq!(tab("home"), Ok(Some(Surface::Home)));
         assert_eq!(tab("session"), Ok(Some(Surface::Session)));
         assert_eq!(tab("review"), Ok(Some(Surface::Review)));
+        assert_eq!(
+            tab("file:src/a.rs"),
+            Ok(Some(Surface::File("src/a.rs".into())))
+        );
         assert_eq!(tab(""), Ok(None));
         assert!(tab("files").is_err());
+        assert!(tab("file:").is_err());
     }
 
     #[test]

@@ -161,6 +161,39 @@ enum Place {
     /// In the repository's own folder, with no worktree.
     SameFolder,
     NoRepository,
+    /// Not known yet (the daemon is not connected, or has not answered): the rows look as they
+    /// do for a worktree and nothing says "no repository" or "same folder".
+    Unknown,
+}
+
+/// What the daemon said about the run's workspace record (`workspace.get`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Record {
+    /// Not connected, or not answered yet.
+    Unread,
+    /// Answered: there is a worktree record.
+    Present,
+    /// Answered, connected: no record. The run works in its own folder (in place, or a read-only
+    /// run), because the wire has no flag for it; with no folder at all it is no repository.
+    Missing,
+    /// A daemon that cannot answer at all.
+    OldDaemon,
+}
+
+/// The state of the workspace record. `answer` is `Some(has record)` once `workspace.get` was
+/// answered.
+pub(crate) fn record(connected: bool, supports_changes: bool, answer: Option<bool>) -> Record {
+    if !connected {
+        return Record::Unread;
+    }
+    if !supports_changes {
+        return Record::OldDaemon;
+    }
+    match answer {
+        Some(true) => Record::Present,
+        Some(false) => Record::Missing,
+        None => Record::Unread,
+    }
 }
 
 /// What the home needs to know about a run beyond its changes pane.
@@ -175,8 +208,8 @@ pub(crate) struct HomeFacts<'a> {
     pub(crate) project: Option<&'a str>,
     /// The run's whole directory, for "in <path>, not a worktree".
     pub(crate) path: Option<&'a str>,
-    /// Whether the run's directory is inside a git repository.
-    pub(crate) in_repository: bool,
+    /// What the daemon said about the run's workspace record, and so whether it connected.
+    pub(crate) record: Record,
     /// The model by name.
     pub(crate) model: Option<&'a str>,
     pub(crate) bot: Option<&'a str>,
@@ -314,18 +347,15 @@ fn pane_branch(pane: &Pane) -> Option<&str> {
     }
 }
 
-/// Whether the run's folder counts as inside a repository. `answered` is a `workspace.get`
-/// answer that says so. A daemon that cannot answer at all (`!supports_changes`, an old one) has
-/// not said "no repository", so it is not taken as that: Changes then says the daemon is too old.
-pub(crate) fn in_repository(supports_changes: bool, answered: bool) -> bool {
-    !supports_changes || answered
-}
-
 fn place(pane: &Pane, facts: &HomeFacts<'_>) -> Place {
     match pane {
         Pane::Removed { .. } => Place::Removed,
-        Pane::Hidden | Pane::Unsupported if !facts.in_repository => Place::NoRepository,
-        Pane::Hidden => Place::SameFolder,
+        Pane::Hidden | Pane::Unsupported => match (facts.record, facts.path.is_some()) {
+            (Record::Unread, _) => Place::Unknown,
+            (Record::Missing, true) => Place::SameFolder,
+            (Record::Missing, false) => Place::NoRepository,
+            (Record::OldDaemon | Record::Present, _) => Place::Worktree,
+        },
         _ => Place::Worktree,
     }
 }
@@ -364,6 +394,7 @@ fn changes_row(pane: &Pane, place: Place) -> HomeRow {
     match (pane, place) {
         (_, Place::NoRepository) => HomeRow::off(kind, NO_REPO),
         (Pane::Removed { .. }, _) => HomeRow::off(kind, REMOVED),
+        (Pane::Hidden, Place::Unknown) => HomeRow::open(kind, "reading\u{2026}"),
         (Pane::Hidden, _) => HomeRow::off(kind, "not a worktree"),
         (Pane::Unsupported, _) => HomeRow::off(kind, "daemon too old"),
         (Pane::Loading, _) => HomeRow::open(kind, "reading\u{2026}"),
@@ -386,7 +417,7 @@ fn gated(kind: HomeKind, place: Place, detail: impl Into<String>) -> HomeRow {
     match place {
         Place::Removed => HomeRow::off(kind, REMOVED),
         Place::NoRepository => HomeRow::off(kind, NO_REPO),
-        Place::Worktree | Place::SameFolder => HomeRow::open(kind, detail),
+        Place::Worktree | Place::SameFolder | Place::Unknown => HomeRow::open(kind, detail),
     }
 }
 
@@ -745,7 +776,7 @@ mod tests {
             executor: "claude-code",
             project: Some("porch"),
             path: Some("/work/porch"),
-            in_repository: true,
+            record: Record::Present,
             model: Some("Opus 4"),
             bot: Some("reviewer"),
             note: Some("Waiting on you."),
@@ -845,33 +876,32 @@ mod tests {
     }
 
     #[test]
-    fn no_repository_dims_changes_files_history_and_terminal() {
+    fn no_folder_and_no_record_dims_changes_files_history_and_terminal() {
         let mut f = facts(RunStatus::Succeeded);
-        f.in_repository = false;
-        for pane in [Pane::Hidden, Pane::Unsupported] {
-            let h = home(&f, &pane);
-            for kind in [
-                HomeKind::Changes,
-                HomeKind::Files,
-                HomeKind::History,
-                HomeKind::Terminal,
-            ] {
-                let r = row(&h, kind);
-                assert!(!r.enabled, "{kind:?} {pane:?}");
-                assert_eq!(r.reason.as_deref(), Some("no repository"));
-            }
+        f.record = Record::Missing;
+        f.path = None;
+        let h = home(&f, &Pane::Hidden);
+        for kind in [
+            HomeKind::Changes,
+            HomeKind::Files,
+            HomeKind::History,
+            HomeKind::Terminal,
+        ] {
+            let r = row(&h, kind);
+            assert!(!r.enabled, "{kind:?}");
+            assert_eq!(r.reason.as_deref(), Some("no repository"));
         }
     }
 
     #[test]
     fn an_old_daemon_is_unknown_not_no_repository() {
-        // A daemon without changes support never answers `workspace.get`.
-        assert!(in_repository(false, false));
-        assert!(in_repository(true, true));
-        assert!(!in_repository(true, false));
+        assert_eq!(record(true, false, None), Record::OldDaemon);
+        assert_eq!(record(true, true, Some(true)), Record::Present);
+        assert_eq!(record(true, true, Some(false)), Record::Missing);
+        assert_eq!(record(true, true, None), Record::Unread);
 
         let mut f = facts(RunStatus::Succeeded);
-        f.in_repository = in_repository(false, false);
+        f.record = record(true, false, None);
         let h = home(&f, &Pane::Unsupported);
         let changes = row(&h, HomeKind::Changes);
         assert_eq!(changes.detail, "daemon too old");
@@ -879,6 +909,46 @@ mod tests {
         for kind in [HomeKind::Files, HomeKind::History, HomeKind::Terminal] {
             assert!(row(&h, kind).enabled, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn before_the_daemon_connects_nothing_says_same_folder_or_no_repository() {
+        assert_eq!(record(false, false, None), Record::Unread);
+        assert_eq!(record(false, true, Some(false)), Record::Unread);
+        for status in [RunStatus::Running, RunStatus::Succeeded] {
+            let mut f = facts(status);
+            f.record = record(false, false, None);
+            let h = home(&f, &Pane::Hidden);
+            let changes = row(&h, HomeKind::Changes);
+            assert_eq!(changes.detail, "reading\u{2026}");
+            assert!(changes.enabled);
+            for kind in [HomeKind::Files, HomeKind::History, HomeKind::Terminal] {
+                let r = row(&h, kind);
+                assert!(r.enabled, "{kind:?}");
+                assert!(r.reason.is_none(), "{kind:?}");
+                assert!(
+                    !r.detail.contains("not a worktree"),
+                    "{kind:?} {}",
+                    r.detail
+                );
+                assert!(!r.detail.contains("repository"), "{kind:?} {}", r.detail);
+            }
+        }
+    }
+
+    #[test]
+    fn a_connected_daemon_with_no_record_and_a_folder_says_in_place() {
+        let mut f = facts(RunStatus::Succeeded);
+        f.record = record(true, true, Some(false));
+        let h = home(&f, &Pane::Hidden);
+        assert_eq!(
+            row(&h, HomeKind::Terminal).detail,
+            "in /work/porch, not a worktree"
+        );
+        let changes = row(&h, HomeKind::Changes);
+        assert_eq!(changes.reason.as_deref(), Some("not a worktree"));
+        assert!(!changes.enabled);
+        assert!(row(&h, HomeKind::Files).enabled);
     }
 
     #[test]
@@ -912,12 +982,17 @@ mod tests {
         }
         // In place: its own words, live or not, and still openable.
         for status in [RunStatus::Running, RunStatus::Succeeded] {
-            let r = t(status, &Pane::Hidden);
+            let mut f = facts(status);
+            f.record = Record::Missing;
+            let h = home(&f, &Pane::Hidden);
+            let r = row(&h, HomeKind::Terminal).clone();
             assert_eq!(r.detail, "in /work/porch, not a worktree");
             assert!(r.enabled);
         }
         // In place: there is no worktree to compare, so Changes is off for that reason.
-        let h = home(&facts(RunStatus::Running), &Pane::Hidden);
+        let mut f = facts(RunStatus::Running);
+        f.record = Record::Missing;
+        let h = home(&f, &Pane::Hidden);
         assert_eq!(
             row(&h, HomeKind::Changes).reason.as_deref(),
             Some("not a worktree")
