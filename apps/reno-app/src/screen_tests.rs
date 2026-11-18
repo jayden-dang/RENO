@@ -1136,3 +1136,516 @@ fn without_rules_or_reasons_the_card_is_approve_and_deny(cx: &mut TestAppContext
     click(vcx, "deny");
     wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
 }
+
+// --- The ACP registry group ------------------------------------------------------------------
+
+fn registry_config(job_millis: u64) -> FakeConfig {
+    FakeConfig {
+        registry_agents: true,
+        job_duration: std::time::Duration::from_millis(job_millis),
+        ..FakeConfig::default()
+    }
+}
+
+/// The Executors screen on a window tall enough to click the registry group at its foot.
+fn registry_page(
+    cx: &mut TestAppContext,
+    config: FakeConfig,
+) -> (Entity<Store>, Entity<RootView>, &mut VisualTestContext) {
+    let store = store_with(cx, config);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(3200.0)));
+    go(vcx, &root, Nav::Executors);
+    (store, root, vcx)
+}
+
+fn registry_of(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+) -> Option<crate::vm::registry::RegistryView> {
+    root.read_with(vcx, |r, cx| r.executors().read(cx).registry_view(cx))
+}
+
+fn line_names(view: &crate::vm::registry::RegistryView) -> Vec<String> {
+    view.lines.iter().map(|l| l.name.clone()).collect()
+}
+
+fn wait_registry(vcx: &mut VisualTestContext) {
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-agent-goose"));
+}
+
+/// What the daemon holds as an added agent's environment, read through the client.
+fn env_of(vcx: &mut VisualTestContext, store: &Entity<Store>, id: &'static str) -> String {
+    let task = store.read_with(vcx, |s, cx| {
+        s.registry_task(
+            move |client| async move { client.registry_env_get(id).await },
+            cx,
+        )
+    });
+    let slot = Rc::new(std::cell::RefCell::new(None));
+    let out = slot.clone();
+    vcx.spawn(async move |_| {
+        *out.borrow_mut() = Some(task.await);
+    })
+    .detach();
+    wait_drawn(vcx, |_| slot.borrow().is_some());
+    let result = slot.borrow_mut().take().unwrap();
+    result.unwrap()
+}
+
+fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|_, cx| crate::ui::toast::shown(cx))
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect()
+}
+
+#[gpui::test]
+fn an_old_daemon_has_no_registry_group_and_makes_no_call(cx: &mut TestAppContext) {
+    let (store, root, vcx) = registry_page(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_EXECUTOR_REGISTRY.to_owned()],
+            ..registry_config(50)
+        },
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    draw(vcx);
+    assert!(registry_of(vcx, &root).is_none());
+    assert!(!painted(vcx, "group-registry"));
+    store.read_with(vcx, |s, _| {
+        assert!(s.registry().listing.is_none() && !s.registry().fetching);
+        assert!(s.registry().failure.is_none(), "no call, so no failure");
+    });
+    assert!(toasts(vcx).is_empty(), "no toast either");
+}
+
+#[gpui::test]
+fn the_registry_group_lists_what_can_be_added_after_the_roster(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(50));
+    wait_registry(vcx);
+    let view = registry_of(vcx, &root).unwrap();
+    assert_eq!(
+        line_names(&view),
+        [
+            "Claude Agent",
+            "Codex CLI",
+            "Devin",
+            "fast-agent",
+            "Gemini CLI",
+            "goose",
+            "VT Code",
+            "Windows Only"
+        ]
+    );
+    // Built-in agents and the added ones are not counted: 5 can be looked at, 3 cannot run.
+    assert_eq!(view.count, 5);
+    assert_eq!(
+        view.finding,
+        "5 agents in the registry \u{b7} 3 can't run on this Mac"
+    );
+    assert_eq!(view.checked.as_deref(), Some("registry checked just now"));
+    for id in ["claude-acp", "codex-acp", "devin"] {
+        assert!(painted(vcx, &format!("registry-agent-{id}")));
+        assert!(
+            !painted(vcx, &format!("registry-line-{id}")),
+            "{id} is built in: it does not open"
+        );
+    }
+    assert!(painted(vcx, "registry-line-goose") && painted(vcx, "registry-add-goose"));
+    assert!(painted(vcx, "registry-search") && painted(vcx, "registry-refresh"));
+    assert!(painted(vcx, "registry-own-line"));
+    // The added agents are ordinary lines of the roster, with where they came from.
+    let cline = row_of(vcx, &root, "acp.cline");
+    assert_eq!(cline.group, Group::Ready);
+    assert_eq!(cline.registry.unwrap().id, "cline");
+    assert!(
+        cline.update,
+        "the index lists 1.1.0 over the installed 1.0.0"
+    );
+    assert!(painted(vcx, "update-acp.cline") && painted(vcx, "remove-acp.cline"));
+    assert_eq!(
+        row_of(vcx, &root, "acp.old-agent").registry.unwrap().note,
+        crate::vm::executors::RegistryNote::Delisted
+    );
+    assert!(!painted(vcx, "update-acp.old-agent") && painted(vcx, "remove-acp.old-agent"));
+}
+
+#[gpui::test]
+fn search_and_the_filter_narrow_the_list_and_nothing_matches_says_so(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(50));
+    wait_registry(vcx);
+    // Typed through the field, as a person does.
+    click(vcx, "registry-search");
+    vcx.simulate_input("gem");
+    draw(vcx);
+    assert_eq!(
+        line_names(&registry_of(vcx, &root).unwrap()),
+        ["Gemini CLI"]
+    );
+    assert!(!painted(vcx, "registry-agent-goose"));
+    vcx.simulate_input("zzz");
+    draw(vcx);
+    assert!(painted(vcx, "registry-nothing"));
+    assert!(registry_of(vcx, &root).unwrap().nothing_matches);
+    // Clear the search; the filter keeps what cannot run here.
+    let search = root.read_with(vcx, |r, cx| r.executors().read(cx).search_field().clone());
+    search.update(vcx, |f, cx| f.set_text("", cx));
+    draw(vcx);
+    click(vcx, "registry-filter-cant-run");
+    let view = registry_of(vcx, &root).unwrap();
+    assert_eq!(
+        line_names(&view),
+        ["fast-agent", "Gemini CLI", "Windows Only"]
+    );
+    assert!(
+        view.segments
+            .iter()
+            .any(|s| s.filter == crate::vm::registry::Filter::CantRun && s.pressed)
+    );
+    assert!(
+        !painted(vcx, "registry-agent-claude-acp"),
+        "built-in agents stay under All only"
+    );
+}
+
+#[gpui::test]
+fn an_opened_line_shows_the_facts_and_the_three_steps_and_cannot_run_shows_why(
+    cx: &mut TestAppContext,
+) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(50));
+    wait_registry(vcx);
+    click(vcx, "registry-line-goose");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-step-goose-3"));
+    assert!(painted(vcx, "registry-step-goose-1") && painted(vcx, "registry-step-goose-2"));
+    // While open, Add is step 1 inside the line and not on the line itself.
+    assert!(painted(vcx, "registry-step-add-goose") && !painted(vcx, "registry-add-goose"));
+    let line = registry_of(vcx, &root)
+        .unwrap()
+        .lines
+        .into_iter()
+        .find(|l| l.id == "goose")
+        .unwrap();
+    assert!(line.steps[0].enabled && !line.steps[1].enabled && !line.steps[2].enabled);
+    // Closing it brings Add back.
+    click(vcx, "registry-line-goose");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-add-goose"));
+    assert!(!painted(vcx, "registry-step-goose-1"));
+
+    // A line that cannot run has no steps: its reason, in danger, and no Add.
+    click(vcx, "registry-line-fast-agent");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-cant-run-fast-agent"));
+    assert!(!painted(vcx, "registry-step-fast-agent-1"));
+    assert!(!painted(vcx, "registry-add-fast-agent"));
+    let line = registry_of(vcx, &root)
+        .unwrap()
+        .lines
+        .into_iter()
+        .find(|l| l.id == "fast-agent")
+        .unwrap();
+    assert_eq!(line.cant_run.as_deref(), Some("needs uv: brew install uv"));
+}
+
+#[gpui::test]
+fn adding_shows_progress_on_the_line_then_the_agent_joins_the_roster(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(250));
+    wait_registry(vcx);
+    click(vcx, "registry-add-goose");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-cancel-goose"));
+    let line = registry_of(vcx, &root)
+        .unwrap()
+        .lines
+        .into_iter()
+        .find(|l| l.id == "goose")
+        .unwrap();
+    assert_eq!(line.progress_words().as_deref(), Some("Adding"));
+    assert!(
+        !painted(vcx, "registry-add-goose"),
+        "Add is spent while it runs"
+    );
+    // It is on its registry line only, not also under Not installed.
+    assert!(
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .all(|r| r.id != "acp.goose")
+    );
+    // Done: the agent leaves the group, joins Ready, and the toast says it can take runs.
+    wait_drawn(vcx, |vcx| {
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .any(|r| r.id == "acp.goose" && r.group == Group::Ready)
+    });
+    wait_drawn(vcx, |vcx| {
+        toasts(vcx)
+            .iter()
+            .any(|m| m == "goose added. It can take runs.")
+    });
+    wait_drawn(vcx, |vcx| !painted(vcx, "registry-agent-goose"));
+    assert_eq!(registry_of(vcx, &root).unwrap().count, 4);
+}
+
+#[gpui::test]
+fn a_failed_add_says_why_with_the_log_and_retry_adds_it(cx: &mut TestAppContext) {
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    daemon(vcx, &store).fail_next_job(
+        reno_proto::JobFailure::ExitCode,
+        "the download failed its sha256 check",
+    );
+    click(vcx, "registry-add-goose");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-retry-goose"));
+    let line = registry_of(vcx, &root)
+        .unwrap()
+        .lines
+        .into_iter()
+        .find(|l| l.id == "goose")
+        .unwrap();
+    assert_eq!(line.progress_words().as_deref(), Some("Add failed"));
+    assert!(painted(vcx, "registry-log-goose"));
+    click(vcx, "registry-log-goose");
+    wait_drawn(vcx, |vcx| painted(vcx, "job-log-acp.goose"));
+    click(vcx, "registry-retry-goose");
+    wait_drawn(vcx, |vcx| {
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .any(|r| r.id == "acp.goose" && r.group == Group::Ready)
+    });
+}
+
+#[gpui::test]
+fn update_adds_the_new_version_and_says_so(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    assert_eq!(
+        row_of(vcx, &root, "acp.cline").available.as_deref(),
+        Some("1.1.0")
+    );
+    click(vcx, "update-acp.cline");
+    wait_drawn(vcx, |vcx| {
+        row_of(vcx, &root, "acp.cline").version_text.as_deref() == Some("1.1.0")
+    });
+    wait_drawn(vcx, |vcx| {
+        toasts(vcx).iter().any(|m| m == "Cline updated to 1.1.0.")
+    });
+    assert!(!painted(vcx, "update-acp.cline"));
+}
+
+#[gpui::test]
+fn remove_is_confirmed_on_the_line_then_the_agent_is_listed_again(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    assert!(!painted(vcx, "registry-agent-cline"));
+    click(vcx, "remove-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "remove-dialog-acp.cline"));
+    assert!(painted(vcx, "remove-confirm-acp.cline") && painted(vcx, "remove-cancel-acp.cline"));
+    // Cancel puts the line back.
+    click(vcx, "remove-cancel-acp.cline");
+    wait_drawn(vcx, |vcx| !painted(vcx, "remove-dialog-acp.cline"));
+    assert!(painted(vcx, "remove-acp.cline"));
+    // Confirm deletes it: it is a registry line again.
+    click(vcx, "remove-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "remove-confirm-acp.cline"));
+    click(vcx, "remove-confirm-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-agent-cline"));
+    assert!(
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .all(|r| r.id != "acp.cline")
+    );
+}
+
+#[gpui::test]
+fn a_removal_the_daemon_refuses_is_said_on_the_line(cx: &mut TestAppContext) {
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    daemon(vcx, &store).set_active_runs(&"acp.cline".parse().unwrap(), 1);
+    click(vcx, "remove-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "remove-confirm-acp.cline"));
+    click(vcx, "remove-confirm-acp.cline");
+    wait_drawn(vcx, |vcx| !painted(vcx, "remove-confirm-acp.cline"));
+    assert!(painted(vcx, "remove-dialog-acp.cline"));
+    assert!(
+        store.read_with(vcx, |s, _| s.registry_refusal("cline").is_some()),
+        "the refusal is on the line, in the daemon's words"
+    );
+    assert!(toasts(vcx).is_empty(), "not a toast");
+    assert_eq!(
+        row_of(vcx, &root, "acp.cline").group,
+        Group::Ready,
+        "it is still there"
+    );
+    click(vcx, "remove-cancel-acp.cline");
+    wait_drawn(vcx, |vcx| !painted(vcx, "remove-dialog-acp.cline"));
+}
+
+#[gpui::test]
+fn the_keys_editor_reads_and_saves_an_agents_environment_and_never_shows_it_elsewhere(
+    cx: &mut TestAppContext,
+) {
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    click(vcx, "line-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "env-card-acp.cline"));
+    let field = root.read_with(vcx, |r, cx| {
+        r.executors().read(cx).env_field("cline").cloned()
+    });
+    let field = field.expect("the editor opened with the line");
+    // The value is typed and saved; it reaches the daemon and nowhere else.
+    field.update(vcx, |f, cx| f.set_text("CLINE_API_KEY=sk-secret-value", cx));
+    draw(vcx);
+    click(vcx, "env-save-acp.cline");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, cx| r.executors().read(cx).env_saved("cline"))
+    });
+    assert_eq!(
+        env_of(vcx, &store, "cline"),
+        "CLINE_API_KEY=sk-secret-value"
+    );
+    assert!(toasts(vcx).iter().all(|m| !m.contains("sk-secret")));
+
+    // A bad line is refused by the daemon; the failure is in fixed words, not the value.
+    field.update(vcx, |f, cx| f.set_text("not a pair sk-secret-value", cx));
+    draw(vcx);
+    click(vcx, "env-save-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "env-status-acp.cline"));
+    let status = root.read_with(vcx, |r, cx| r.executors().read(cx).env_failure("cline"));
+    let status = status.expect("it failed");
+    assert!(!status.contains("sk-secret") && status.contains("KEY=VALUE"));
+    assert!(toasts(vcx).iter().all(|m| !m.contains("sk-secret")));
+}
+
+#[gpui::test]
+fn your_own_agent_has_a_form_and_joins_the_roster(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    click(vcx, "registry-own-line");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-own-add"));
+    assert!(painted(vcx, "registry-own-name") && painted(vcx, "registry-own-command"));
+    assert!(painted(vcx, "registry-own-env"));
+    // Not ready: nothing is sent.
+    click(vcx, "registry-own-add");
+    assert!(
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .all(|r| r.id != "acp.own.zed-fork")
+    );
+    let (name, command) = root.read_with(vcx, |r, cx| r.executors().read(cx).own_fields());
+    name.update(vcx, |f, cx| f.set_text("Zed Fork", cx));
+    command.update(vcx, |f, cx| f.set_text("zed-fork --acp", cx));
+    draw(vcx);
+    click(vcx, "registry-own-add");
+    wait_drawn(vcx, |vcx| {
+        executor_view(vcx, &root)
+            .rows
+            .rows()
+            .iter()
+            .any(|r| r.id == "acp.own.zed-fork")
+    });
+    let own = row_of(vcx, &root, "acp.own.zed-fork");
+    assert_eq!(
+        own.registry.unwrap().note,
+        crate::vm::executors::RegistryNote::Own
+    );
+    wait_drawn(vcx, |vcx| !painted(vcx, "registry-own-add"));
+}
+
+#[gpui::test]
+fn an_added_agent_that_needs_a_sign_in_opens_terminal_with_its_own_command_through_the_opener(
+    cx: &mut TestAppContext,
+) {
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
+    let recording = Rc::new(crate::terminal::fake::Recording::default());
+    vcx.update(|_, cx| crate::terminal::install(cx, recording.clone()));
+    wait_registry(vcx);
+    // The agent said it is signed out, and the daemon has its command.
+    let mut list = store.read_with(vcx, |s, _| s.state().executors().to_vec());
+    let cline = list
+        .iter_mut()
+        .find(|e| e.descriptor.id.as_str() == "acp.cline")
+        .unwrap();
+    cline.health.as_mut().unwrap().signed_in = reno_proto::SignedIn::No {
+        hint: "run `cline auth`".into(),
+    };
+    cline.maintenance.as_mut().unwrap().sign_in = Some(reno_proto::PersonStep {
+        label: "Sign in".into(),
+        command: "cline auth".into(),
+    });
+    daemon(vcx, &store).set_executors(list);
+    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-acp.cline"));
+    assert_eq!(row_of(vcx, &root, "acp.cline").group, Group::NeedsYou);
+    click(vcx, "sign-in-acp.cline");
+    assert_eq!(
+        recording.opened.borrow().as_slice(),
+        [("Sign in to Cline".to_owned(), "cline auth".to_owned())]
+    );
+    // The opened line has the same step, and no browser sign-in: the daemon has none.
+    wait_drawn(vcx, |vcx| painted(vcx, "check-now-acp.cline"));
+    click(vcx, "wait-cancel-acp.cline");
+    click(vcx, "line-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-open-terminal-acp.cline"));
+    click(vcx, "registry-open-terminal-acp.cline");
+    assert_eq!(recording.opened.borrow().len(), 2);
+    assert!(!painted(vcx, "registry-browser-signin-acp.cline"));
+}
+
+#[gpui::test]
+fn an_agent_that_needs_a_key_offers_add_key_which_opens_its_editor(cx: &mut TestAppContext) {
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
+    wait_registry(vcx);
+    let mut list = store.read_with(vcx, |s, _| s.state().executors().to_vec());
+    let cline = list
+        .iter_mut()
+        .find(|e| e.descriptor.id.as_str() == "acp.cline")
+        .unwrap();
+    cline.health.as_mut().unwrap().signed_in = reno_proto::SignedIn::No {
+        hint: "needs CLINE_API_KEY".into(),
+    };
+    daemon(vcx, &store).set_executors(list);
+    wait_drawn(vcx, |vcx| painted(vcx, "add-key-acp.cline"));
+    assert_eq!(row_of(vcx, &root, "acp.cline").group, Group::NeedsYou);
+    click(vcx, "add-key-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "env-card-acp.cline"));
+}
+
+#[gpui::test]
+fn the_registry_failing_says_so_with_retry_and_offline_keeps_the_copy(cx: &mut TestAppContext) {
+    let store = store_with(cx, registry_config(50));
+    executors_live(cx, &store);
+    daemon(cx, &store).fail(
+        "executor.registry.list",
+        ErrorObject::new(ErrorCode::Internal, "the registry could not be read"),
+    );
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(3200.0)));
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-failed"));
+    assert!(matches!(
+        registry_of(vcx, &root).unwrap().state,
+        crate::vm::registry::ListState::Failed(_)
+    ));
+    assert!(toasts(vcx).is_empty(), "the group says it, not a toast");
+    daemon(vcx, &store).clear_failures();
+    click(vcx, "registry-retry");
+    wait_registry(vcx);
+
+    // Offline: the daemon serves the cached copy and says when it was fetched.
+    daemon(vcx, &store).set_registry_offline(true);
+    click(vcx, "registry-refresh");
+    wait_drawn(vcx, |vcx| {
+        registry_of(vcx, &root).is_some_and(|v| v.offline)
+    });
+    let checked = registry_of(vcx, &root).unwrap().checked.unwrap();
+    assert!(checked.starts_with("offline \u{b7} showing the copy from"));
+    assert!(painted(vcx, "registry-agent-goose"), "the copy still lists");
+}

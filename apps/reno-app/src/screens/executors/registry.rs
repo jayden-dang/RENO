@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use super::{ExecutorsScreen, info_color, mono};
-use crate::ui::field::{Field, FieldEvent, Look};
+use crate::ui::field::{Field, Look};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
 use crate::ui::theme::Theme;
@@ -109,13 +109,9 @@ impl RegistryUi {
                 cx,
             )
         });
-        let redraw = |_: &mut ExecutorsScreen,
-                      _: Entity<Field>,
-                      _: &FieldEvent,
-                      cx: &mut Context<ExecutorsScreen>| cx.notify();
         let subs = [&search, &own_name, &own_command, &own_env]
             .into_iter()
-            .map(|f| cx.subscribe(f, redraw))
+            .map(|f| cx.observe(f, |_, _, cx| cx.notify()))
             .collect();
         Self {
             filter: Filter::All,
@@ -140,7 +136,7 @@ fn is_web_link(link: &str) -> bool {
 }
 
 impl ExecutorsScreen {
-    pub(super) fn registry_view(&self, cx: &gpui::App) -> Option<RegistryView> {
+    pub(crate) fn registry_view(&self, cx: &gpui::App) -> Option<RegistryView> {
         let store = self.store.read(cx);
         registry::build(
             store.state(),
@@ -185,13 +181,24 @@ impl ExecutorsScreen {
         cx.notify();
     }
 
-    fn cancel_remove(&mut self, executor: &str, cx: &mut Context<Self>) {
+    fn cancel_remove(&mut self, executor: &str, registry_id: &str, cx: &mut Context<Self>) {
         self.registry.removing.remove(executor);
+        self.store.update(cx, |store, cx| {
+            store.dismiss_registry_refusal(registry_id, cx)
+        });
         cx.notify();
     }
 
-    fn remove_agent(&mut self, executor: &str, registry_id: &str, cx: &mut Context<Self>) {
-        self.registry.removing.remove(executor);
+    /// Forgets confirmations of agents that are gone.
+    pub(super) fn prune_registry(&mut self, rows: &[&ExecutorRow]) {
+        self.registry
+            .removing
+            .retain(|id| rows.iter().any(|r| &r.id == id));
+    }
+
+    fn remove_agent(&mut self, registry_id: &str, cx: &mut Context<Self>) {
+        // The confirm stays on the line (as "Removing...", or the daemon's refusal) until the
+        // agent is gone.
         self.store
             .update(cx, |store, cx| store.registry_remove(registry_id, cx));
         cx.notify();
@@ -214,10 +221,10 @@ impl ExecutorsScreen {
             )
         });
         let owner = id.to_owned();
-        let sub = cx.subscribe(&field, move |this, _, event: &FieldEvent, cx| {
-            if *event == FieldEvent::Changed
-                && let Some(editor) = this.registry.env.get_mut(&owner)
-                && editor.state != EnvState::Loading
+        // Any change of the text (typed, pasted, or set) re-arms Save.
+        let sub = cx.observe(&field, move |this, _, cx| {
+            if let Some(editor) = this.registry.env.get_mut(&owner)
+                && matches!(editor.state, EnvState::Saved | EnvState::Failed(_))
             {
                 editor.state = EnvState::Ready;
             }
@@ -847,6 +854,10 @@ impl ExecutorsScreen {
         });
         div()
             .id(SharedString::from(format!("registry-agent-{}", line.id)))
+            .debug_selector({
+                let id = line.id.clone();
+                move || format!("registry-agent-{id}")
+            })
             .w_full()
             .flex()
             .flex_col()
@@ -1279,7 +1290,7 @@ impl ExecutorsScreen {
         }
         let executor = row.id.clone();
         let cancel = {
-            let executor = executor.clone();
+            let (executor, registry_id) = (executor.clone(), reg.id.clone());
             kit::line_button(
                 theme,
                 format!("remove-cancel-{executor}"),
@@ -1288,30 +1299,40 @@ impl ExecutorsScreen {
                 Tone::Quiet,
                 true,
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.cancel_remove(&executor, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.cancel_remove(&executor, &registry_id, cx);
+            }))
         };
-        let (words, confirm): (String, Option<Stateful<Div>>) = if reg.remove_blocked {
-            (registry::remove_refused_words(&row.name), None)
-        } else {
-            let registry_id = reg.id.clone();
-            let executor = executor.clone();
-            (
-                registry::remove_words(&row.name),
-                Some(
-                    kit::line_button(
-                        theme,
-                        format!("remove-confirm-{executor}"),
-                        None,
-                        "Remove",
-                        Tone::Danger,
-                        true,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.remove_agent(&executor, &registry_id, cx);
-                    })),
-                ),
-            )
-        };
+        let store = self.store.read(cx);
+        let (words, confirm, can_cancel): (String, Option<Stateful<Div>>, bool) =
+            if let Some(why) = store.registry_refusal(&reg.id) {
+                // The daemon refused (a run started since): the line says so.
+                (format!("Could not remove {}: {why}", row.name), None, true)
+            } else if reg.remove_blocked {
+                (registry::remove_refused_words(&row.name), None, true)
+            } else if store.is_removing(&reg.id) {
+                (format!("Removing {}...", row.name), None, false)
+            } else {
+                let registry_id = reg.id.clone();
+                let executor = executor.clone();
+                (
+                    registry::remove_words(&row.name),
+                    Some(
+                        kit::line_button(
+                            theme,
+                            format!("remove-confirm-{executor}"),
+                            None,
+                            "Remove",
+                            Tone::Danger,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_agent(&registry_id, cx);
+                        })),
+                    ),
+                    true,
+                )
+            };
         Some(
             div()
                 .id(SharedString::from(format!("remove-dialog-{executor}")))
@@ -1336,7 +1357,7 @@ impl ExecutorsScreen {
                         .text_size(px(13.0))
                         .child(SharedString::from(words)),
                 )
-                .child(cancel)
+                .children(can_cancel.then_some(cancel))
                 .children(confirm)
                 .into_any_element(),
         )
@@ -1486,6 +1507,10 @@ impl ExecutorsScreen {
         };
         let card = div()
             .id(SharedString::from(format!("env-card-{}", row.id)))
+            .debug_selector({
+                let id = row.id.clone();
+                move || format!("env-card-{id}")
+            })
             .w_full()
             .flex()
             .flex_col()
@@ -1551,5 +1576,48 @@ impl ExecutorsScreen {
                 .text_color(color)
                 .child(format!("\u{b7} {}", reg.note.words())),
         )
+    }
+}
+
+#[cfg(test)]
+impl ExecutorsScreen {
+    pub(crate) fn search_field(&self) -> &Entity<Field> {
+        &self.registry.search
+    }
+
+    pub(crate) fn env_field(&self, id: &str) -> Option<&Entity<Field>> {
+        self.registry.env.get(id).map(|e| &e.field)
+    }
+
+    pub(crate) fn env_saved(&self, id: &str) -> bool {
+        self.registry
+            .env
+            .get(id)
+            .is_some_and(|e| e.state == EnvState::Saved)
+    }
+
+    pub(crate) fn env_failure(&self, id: &str) -> Option<String> {
+        match self.registry.env.get(id).map(|e| &e.state) {
+            Some(EnvState::Failed(why)) => Some(why.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn own_fields(&self) -> (Entity<Field>, Entity<Field>) {
+        (
+            self.registry.own_name.clone(),
+            self.registry.own_command.clone(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_web_link;
+
+    #[test]
+    fn only_web_links_are_opened_from_a_registry_entry() {
+        assert!(is_web_link("https://github.com/a/b") && is_web_link("http://example.com"));
+        assert!(!is_web_link("file:///etc/passwd") && !is_web_link("javascript:alert(1)"));
     }
 }

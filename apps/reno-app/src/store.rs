@@ -1326,6 +1326,13 @@ impl Store {
         self.registry_refused.get(id).map(String::as_str)
     }
 
+    /// Forgets a refusal once the person has seen it and cancelled.
+    pub(crate) fn dismiss_registry_refusal(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.registry_refused.remove(id).is_some() {
+            cx.notify();
+        }
+    }
+
     pub(crate) fn is_removing(&self, id: &str) -> bool {
         self.registry_removing.contains(id)
     }

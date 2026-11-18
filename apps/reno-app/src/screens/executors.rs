@@ -1311,6 +1311,7 @@ impl Render for ExecutorsScreen {
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
         let rows = view.rows.rows();
+        self.prune_registry(&rows.iter().collect::<Vec<_>>());
 
         let checking_all = self.store.read(cx).is_checking(None);
         let check_all = kit::pill_button_enabled(
