@@ -116,49 +116,54 @@ fn a_call_without_output_adds_no_block(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn changes_open_from_the_details_and_a_file_shows_its_patch(cx: &mut TestAppContext) {
+fn review_shows_in_the_panel_beside_the_transcript_and_each_file_folds(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     let screen = open(vcx, &root, "builder1");
-    wait_drawn(vcx, |vcx| painted(vcx, "open-changes"));
-    assert!(painted(vcx, "header-changes"), "the header reaches it too");
+    // The run changed files, so Review is in front; the transcript and the composer stay.
+    wait_drawn(vcx, |vcx| painted(vcx, "change-patch-Cargo.toml"));
+    assert!(painted(vcx, "panel-tab-review"));
+    assert!(painted(vcx, "panel-tab-session"));
+    assert!(painted(vcx, "review-finding"));
+    assert!(painted(vcx, "chat-canvas"));
+    assert!(painted(vcx, "composer"), "the chat is not replaced");
+    // The header's Changes pill is gone.
+    assert!(!painted(vcx, "header-changes"));
 
-    click(vcx, "open-changes");
-    wait_drawn(vcx, |vcx| painted(vcx, "change-patch"));
-    // The first file is picked: its patch shows.
-    assert!(painted(vcx, "change-file-Cargo.toml"));
-
-    click(vcx, "change-file-crates/reno-kernel/src/lease.rs");
+    // Every file is a section with its patch.
+    let lease = "crates/reno-kernel/src/lease.rs";
     wait_drawn(vcx, |vcx| {
         screen.read_with(vcx, |s, _| {
-            matches!(&s.patch_pane, PatchPane::Rows { rows, .. }
+            matches!(s.patch_pane_of(lease), Some(PatchPane::Rows { rows, .. })
                 if rows.iter().any(|r| r.text.contains("saturating_add")))
         })
     });
     screen.read_with(vcx, |s, _| {
-        let PatchPane::Rows { rows, truncated } = &s.patch_pane else {
+        let Some(PatchPane::Rows { rows, truncated }) = s.patch_pane_of(lease) else {
             panic!("rows");
         };
         assert!(!truncated);
         assert_eq!(rows.iter().filter(|r| r.kind == RowKind::Hunk).count(), 2);
     });
-
     // A binary file says so and asks for no patch.
-    click(vcx, "change-file-assets/logo.png");
     wait_drawn(vcx, |vcx| {
-        screen.read_with(vcx, |s, _| s.patch_pane == PatchPane::Binary)
+        screen.read_with(vcx, |s, _| {
+            s.patch_pane_of("assets/logo.png") == Some(&PatchPane::Binary)
+        })
     });
 
-    // The branch and the worktree path can be copied.
+    // Folding a file hides its patch, and opening it brings it back.
+    assert!(painted(vcx, &format!("change-patch-{lease}")));
+    click(vcx, &format!("change-file-{lease}"));
+    assert!(!painted(vcx, &format!("change-patch-{lease}")));
+    click(vcx, &format!("change-file-{lease}"));
+    assert!(painted(vcx, &format!("change-patch-{lease}")));
+
+    // The branch can be copied from the bar that stays above the files.
     click(vcx, "copy-branch");
     assert_eq!(clipboard(vcx), "reno/builder1");
-    click(vcx, "copy-path");
-    assert!(clipboard(vcx).ends_with("run_builder1"));
-
-    click(vcx, "changes-back");
-    wait_drawn(vcx, |vcx| !painted(vcx, "changes-view"));
 }
 
 #[gpui::test]
@@ -195,8 +200,11 @@ fn a_finished_run_says_what_its_branch_holds(cx: &mut TestAppContext) {
         "{line}"
     );
 
+    // The panel may be showing Session; the result line brings Review in front.
+    click(vcx, "panel-tab-session");
+    wait_drawn(vcx, |vcx| painted(vcx, "details"));
     click(vcx, "changes-result");
-    wait_drawn(vcx, |vcx| painted(vcx, "changes-view"));
+    wait_drawn(vcx, |vcx| painted(vcx, "review"));
 }
 
 #[gpui::test]
@@ -206,8 +214,10 @@ fn a_workspace_with_no_changes_says_so(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     open(vcx, &root, "scout1");
-    wait_drawn(vcx, |vcx| painted(vcx, "section-changes-empty"));
-    click(vcx, "header-changes");
+    // Nothing changed: Session stays in front, and Review is a tab that says so.
+    wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-review"));
+    assert!(painted(vcx, "details"));
+    click(vcx, "panel-tab-review");
     wait_drawn(vcx, |vcx| painted(vcx, "view-changes-empty"));
 }
 
@@ -218,13 +228,13 @@ fn a_removed_workspace_says_there_is_nothing_to_show(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     open(vcx, &root, "builder0");
-    wait_drawn(vcx, |vcx| painted(vcx, "section-changes-removed"));
-    click(vcx, "header-changes");
+    wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-review"));
+    click(vcx, "panel-tab-review");
     wait_drawn(vcx, |vcx| painted(vcx, "view-changes-removed"));
 }
 
 #[gpui::test]
-fn a_run_that_never_had_a_workspace_has_no_changes_section(cx: &mut TestAppContext) {
+fn a_run_that_never_had_a_workspace_has_no_review_tab(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -237,9 +247,8 @@ fn a_run_that_never_had_a_workspace_has_no_changes_section(cx: &mut TestAppConte
     });
     draw(vcx);
     assert!(painted(vcx, "details"));
-    assert!(!painted(vcx, "header-changes"));
-    assert!(!painted(vcx, "section-changes-hidden"));
-    assert!(!painted(vcx, "section-changes-failed"));
+    assert!(painted(vcx, "panel-tab-session"));
+    assert!(!painted(vcx, "panel-tab-review"));
 }
 
 #[gpui::test]
@@ -254,14 +263,16 @@ fn a_failed_read_says_why_and_can_be_tried_again(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     open(vcx, &root, "builder1");
-    wait_drawn(vcx, |vcx| painted(vcx, "section-changes-failed"));
+    wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-review"));
+    click(vcx, "panel-tab-review");
+    wait_drawn(vcx, |vcx| painted(vcx, "view-changes-failed"));
     daemon.clear_failures();
     click(vcx, "changes-retry");
-    wait_drawn(vcx, |vcx| painted(vcx, "open-changes"));
+    wait_drawn(vcx, |vcx| painted(vcx, "view-changes-files"));
 }
 
 #[gpui::test]
-fn an_older_daemon_says_to_update_and_offers_no_view(cx: &mut TestAppContext) {
+fn an_older_daemon_has_no_review_tab_and_the_home_says_why(cx: &mut TestAppContext) {
     let store = store_with(
         cx,
         FakeConfig {
@@ -272,8 +283,16 @@ fn an_older_daemon_says_to_update_and_offers_no_view(cx: &mut TestAppContext) {
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    open(vcx, &root, "builder1");
-    wait_drawn(vcx, |vcx| painted(vcx, "section-changes-unsupported"));
-    assert!(!painted(vcx, "open-changes"));
-    assert!(!painted(vcx, "header-changes"));
+    let screen = open(vcx, &root, "builder1");
+    // No Review tab; the home dims its Changes row.
+    wait_drawn(vcx, |vcx| painted(vcx, "details"));
+    assert!(!painted(vcx, "panel-tab-review"));
+    click(vcx, "panel-new-tab");
+    wait_drawn(vcx, |vcx| painted(vcx, "home-row-changes"));
+    let home = screen.read_with(vcx, |s, cx| s.home(cx).unwrap());
+    let row = home.row(crate::vm::panel_home::HomeKind::Changes).unwrap();
+    assert!(!row.enabled);
+    // An old daemon cannot say whether the folder is a repository (no `workspace.get`): that is
+    // unknown, not "no repository", so the row says the daemon is too old.
+    assert_eq!(row.detail, "daemon too old");
 }

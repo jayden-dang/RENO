@@ -18,13 +18,17 @@ use gpui::{
 use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
-use crate::actions::{self, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
+use crate::actions::{
+    self, ClosePanelTab, GoRuns, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab, Quit,
+    ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
+};
 use crate::lifecycle;
 use crate::nav::Nav;
+use crate::panel::surface::Surface;
 use crate::screens::ScreenEvent;
 use crate::screens::executors::ExecutorsScreen;
 use crate::screens::home::HomeScreen;
-use crate::screens::run::RunScreen;
+use crate::screens::run::{PanelAction, RunScreen};
 use crate::screens::runs::RunsScreen;
 use crate::screens::settings::SettingsScreen;
 use crate::screens::triggers::TriggersScreen;
@@ -33,6 +37,7 @@ use crate::ui::composer;
 use crate::ui::icon::{Assets, Icon};
 use crate::ui::kit::{self, SANS};
 use crate::ui::motion::{self, ReduceMotion};
+use crate::ui::overlay;
 use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
@@ -55,6 +60,24 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
+    /// `RENO_PANEL=home|session|review`: with `RENO_OPEN=run_<id>`, put that tab of the side
+    /// panel in front (screenshots, reviews).
+    pub(crate) panel: Option<Surface>,
+    /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
+    /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
+    /// data dir.
+    pub(crate) data_dir: Option<PathBuf>,
+}
+
+impl Options {
+    /// Where the panel state lives, or `None` when it is not kept.
+    pub(crate) fn panel_state_path(&self) -> Option<PathBuf> {
+        match (&self.data_dir, self.fake) {
+            (Some(dir), _) => Some(crate::panel::persist::path_in(dir)),
+            (None, false) => crate::panel::persist::default_path(),
+            (None, true) => None,
+        }
+    }
 }
 
 impl Options {
@@ -98,6 +121,16 @@ impl Options {
             }
             Some(other) => return Err(format!("unknown RENO_OPEN screen: {other}")),
         };
+        options.panel = match env("RENO_PANEL").as_deref() {
+            Some("home") => Some(Surface::Home),
+            Some("session") => Some(Surface::Session),
+            Some("review") => Some(Surface::Review),
+            None | Some("") => None,
+            Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
+        };
+        options.data_dir = env("RENO_DATA_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
         Ok(options)
     }
 }
@@ -126,6 +159,8 @@ pub(crate) struct Start {
     pub(crate) open: Option<Nav>,
     pub(crate) open_run: Option<RunId>,
     pub(crate) open_project: Option<PathBuf>,
+    /// A panel tab to put in front once `open_run` is open.
+    pub(crate) panel: Option<Surface>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -145,6 +180,9 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
+        if let Some(path) = options.panel_state_path() {
+            crate::panel::saved::Saved::install(path, cx);
+        }
         let toasts = toast::install(cx);
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
@@ -162,11 +200,21 @@ pub(crate) fn run(options: Options) {
             open: options.open,
             open_run: options.open_run.clone(),
             open_project: options.open_project.clone(),
+            panel: options.panel.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
             return;
         }
+
+        // Closing the last window does not quit (lifecycle.rs); the panel state is written now
+        // all the same, as it would be on quit.
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                crate::panel::saved::Saved::flush(cx);
+            }
+        })
+        .detach();
 
         if let Some(after) = options.quit_after {
             cx.spawn(async move |cx| {
@@ -192,6 +240,7 @@ pub(crate) fn open_window(
         open,
         open_run,
         open_project,
+        panel,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -236,6 +285,9 @@ pub(crate) fn open_window(
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.open_run(run, window, cx);
+                            if let Some(tab) = panel {
+                                root.show_panel_tab(tab, window, cx);
+                            }
                         })
                         .ok();
                     })
@@ -558,6 +610,38 @@ impl RootView {
         cx.notify();
     }
 
+    /// A panel key command, for the run screen when one is showing.
+    fn panel_action(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Run(run) = &self.screen {
+            run.update(cx, |run, cx| run.panel_action(action, window, cx));
+        }
+    }
+
+    /// ⌘W: the run panel's tab when the panel is open, else the window.
+    fn close_tab_or_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel_open = match &self.screen {
+            Screen::Run(run) => run.read(cx).panel_is_open(window, cx),
+            _ => false,
+        };
+        if panel_open {
+            self.panel_action(PanelAction::CloseTab, window, cx);
+        } else {
+            window.remove_window();
+        }
+    }
+
+    /// Puts `tab` in front in the open run's side panel.
+    pub(crate) fn show_panel_tab(
+        &mut self,
+        tab: Surface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Screen::Run(run) = &self.screen {
+            run.update(cx, |run, cx| run.open_surface(tab, window, cx));
+        }
+    }
+
     /// Shows a project's Allowlist and History.
     pub(crate) fn open_project(
         &mut self,
@@ -621,12 +705,14 @@ impl RootView {
         .detach();
         let handle = palette.focus_handle(cx);
         window.focus(&handle, cx);
+        overlay::set(cx, palette.entity_id(), true);
         self.palette = Some(palette);
         cx.notify();
     }
 
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
+        if let Some(palette) = self.palette.take() {
+            overlay::set(cx, palette.entity_id(), false);
             self.focus_composer(window, cx);
             cx.notify();
         }
@@ -720,6 +806,14 @@ impl Render for RootView {
         let theme = Theme::for_appearance(self.appearance(window));
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
+        // What the run screen's panel needs to fit itself on its first frame: the sidebar and
+        // the insets around the canvas.
+        cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
+            16.0
+        } else {
+            sidebar::WIDTH + 8.0
+        }));
+        let on_run = matches!(self.screen, Screen::Run(_));
 
         let panel = div()
             .id("canvas-panel")
@@ -729,11 +823,14 @@ impl Render for RootView {
             .mr(px(8.0))
             .when(self.sidebar_hidden, |p| p.ml(px(8.0)))
             .when(!self.sidebar_hidden, |p| p.mt(px(8.0)))
-            .rounded(px(14.0))
-            .bg(theme.canvas)
-            .border_1()
-            .border_color(theme.hairline)
-            .overflow_hidden()
+            // A run draws its own two canvases; every other screen sits on this one.
+            .when(!on_run, |p| {
+                p.rounded(px(14.0))
+                    .bg(theme.canvas)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .overflow_hidden()
+            })
             .child(match &self.screen {
                 Screen::Home => self.home.clone().into_any_element(),
                 Screen::Runs => self.runs.clone().into_any_element(),
@@ -763,6 +860,24 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
+                this.panel_action(PanelAction::Toggle, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewPanelTab, w, cx| {
+                this.panel_action(PanelAction::NewTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePanelTab, w, cx| {
+                this.close_tab_or_window(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReopenPanelTab, w, cx| {
+                this.panel_action(PanelAction::ReopenTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextPanelTab, w, cx| {
+                this.panel_action(PanelAction::NextTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevPanelTab, w, cx| {
+                this.panel_action(PanelAction::PrevTab, w, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &GoRuns, window, cx| this.navigate(Nav::Runs, window, cx)),
             )
@@ -831,6 +946,8 @@ mod tests {
                 open: Some(Nav::Executors),
                 open_run: None,
                 open_project: None,
+                panel: None,
+                data_dir: None,
             })
         );
         let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();
@@ -839,6 +956,27 @@ mod tests {
             run.open_run.map(|r| r.to_string()).as_deref(),
             Some("run_keeper1")
         );
+    }
+
+    #[test]
+    fn a_fake_run_keeps_the_panel_state_only_in_a_directory_it_was_given() {
+        let none = parse(&["--fake"], &[]).unwrap();
+        assert_eq!(none.panel_state_path(), None);
+        let given = parse(&["--fake"], &[("RENO_DATA_DIR", "/tmp/x")]).unwrap();
+        assert_eq!(
+            given.panel_state_path(),
+            Some(PathBuf::from("/tmp/x/app/panel-state.json"))
+        );
+    }
+
+    #[test]
+    fn the_panel_tab_to_show_comes_from_the_environment() {
+        let tab = |name| parse(&[], &[("RENO_PANEL", name)]).map(|o| o.panel);
+        assert_eq!(tab("home"), Ok(Some(Surface::Home)));
+        assert_eq!(tab("session"), Ok(Some(Surface::Session)));
+        assert_eq!(tab("review"), Ok(Some(Surface::Review)));
+        assert_eq!(tab(""), Ok(None));
+        assert!(tab("files").is_err());
     }
 
     #[test]

@@ -768,6 +768,7 @@ fn a_run_refused_for_its_executor_shows_the_executors_health(cx: &mut TestAppCon
     executors_live(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     store.update(vcx, |s, cx| s.run_task("/refused".into(), "codex", cx));
+    crate::tests::show_session(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "run-open-executors"));
     // The signed-out reason is on the run's own screen, with the way to the Executors screen.
     assert!(painted(vcx, "run-check-executor"));

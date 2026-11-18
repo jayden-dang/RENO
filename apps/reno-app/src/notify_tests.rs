@@ -13,7 +13,7 @@ use reno_client::{ConnectionStatus, Feed, FeedState};
 use reno_notify::Delivery;
 use reno_proto::{ApprovalDecision, RunId, RunStatus};
 
-use crate::actions::CloseWindow;
+use crate::actions::{ClosePanelTab, CloseWindow};
 use crate::app::RootView;
 use crate::banners::Banners;
 use crate::desktop::Recorder;
@@ -429,4 +429,17 @@ fn turning_the_badge_off_clears_it_and_banners_off_posts_nothing(cx: &mut TestAp
     assert_eq!(recorder.badge(), Some(Some("1".to_owned())));
     banners.update(vcx, |b, cx| b.set_pref(Pref::DockBadge, false, cx));
     assert_eq!(recorder.badge(), Some(None));
+}
+
+/// ⌘W off a run screen (no panel tab to close) closes the window, which leaves Reno running.
+#[gpui::test]
+fn command_w_with_no_panel_tab_closes_the_window(cx: &mut TestAppContext) {
+    let store = empty_store(cx);
+    let _shell = shell(cx, &store, PrefStore::in_memory());
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| root.focus_composer(window, cx));
+    draw(vcx);
+    vcx.dispatch_action(ClosePanelTab);
+    vcx.run_until_parked();
+    assert!(cx.update(|cx| cx.windows().is_empty()), "the window closed");
 }

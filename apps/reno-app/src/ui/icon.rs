@@ -74,6 +74,7 @@ icons! {
     Play => "play",
     Plus => "plus",
     Question => "question",
+    Ring => "ring",
     Route => "route",
     Search => "search",
     Settings => "settings",
