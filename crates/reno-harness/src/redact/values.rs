@@ -24,9 +24,12 @@
 //! journal's size only after this runs (`ToolOutput::recut`); text that is cut before it is
 //! seen (a patch) is passed through [`ValueRedactor::without_cut_tail`].
 //!
-//! What it does not catch: a value the agent transforms otherwise (base64, hex, reversed,
-//! split across two events), or two values that overlap each other in the text. The fence is
-//! the allowlist and the Keychain, not this.
+//! A value split across consecutive text events is caught by [`ValueRedactor::push`] (the
+//! supervisor holds back a possible partial value until the next piece decides it).
+//!
+//! What it does not catch: a value the agent transforms otherwise (base64, hex, reversed), or
+//! two values that overlap each other in the text. The fence is the allowlist and the Keychain,
+//! not this.
 
 use std::borrow::Cow;
 
@@ -84,6 +87,39 @@ impl ValueRedactor {
     /// Nothing to redact: no secret was long enough.
     pub fn is_empty(&self) -> bool {
         self.needles.is_empty()
+    }
+
+    /// How many bytes at the end of `text` could be the start of a secret value that the next
+    /// piece of text completes: the longest suffix that is a proper prefix of some needle and
+    /// does not cut through a match already complete in `text`. 0 when none.
+    pub fn partial_suffix_len(&self, text: &str) -> usize {
+        let longest = self.needles.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        if longest < 2 {
+            return 0;
+        }
+        let from = text.len().saturating_sub(longest - 1);
+        (from..text.len())
+            .filter(|&i| text.is_char_boundary(i))
+            .find(|&i| {
+                let tail = &text[i..];
+                self.needles
+                    .iter()
+                    .any(|(n, _)| n.len() > tail.len() && n.starts_with(tail))
+                    && !self.match_crosses(text, i)
+            })
+            .map_or(0, |i| text.len() - i)
+    }
+
+    /// Whether a complete needle in `text` starts before byte `at` and ends after it.
+    fn match_crosses(&self, text: &str, at: usize) -> bool {
+        self.needles.iter().any(|(needle, _)| {
+            let lo = at.saturating_sub(needle.len() - 1);
+            (lo..at).any(|pos| {
+                text.is_char_boundary(pos)
+                    && text[pos..].starts_with(needle.as_str())
+                    && pos + needle.len() > at
+            })
+        })
     }
 
     /// `text` with every secret value replaced.

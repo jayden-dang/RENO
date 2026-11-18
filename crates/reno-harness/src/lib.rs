@@ -53,7 +53,7 @@ pub use proc::{
 };
 pub(crate) use proc::{adapter_install, code_signature, executable};
 pub use proc::{archive_install, process, shell_env};
-pub use redact::{MIN_SECRET_VALUE_LEN, ValueRedactor};
+pub use redact::{Held, MIN_SECRET_VALUE_LEN, ValueRedactor};
 pub(crate) mod wire;
 
 /// Compose the child's PATH: the resolved executable's directory first, then
