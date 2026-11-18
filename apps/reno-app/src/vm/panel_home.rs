@@ -13,6 +13,7 @@ use reno_proto::{RunStatus, RunSummary, WorkspaceInfo, WorkspaceStatus};
 
 use crate::summary::{self, Problem, RunRepo};
 use crate::transcript::Usage;
+use crate::ui::icon::Icon;
 use crate::vm::changes::Pane;
 
 /// The words of a disabled row whose workspace is gone.
@@ -63,6 +64,35 @@ impl HomeKind {
             Self::Terminal => "Terminal",
             Self::SideChat => "Side chat",
             Self::ForkChat => "Fork chat",
+        }
+    }
+
+    /// The row's icon.
+    pub(crate) const fn icon(self) -> Icon {
+        match self {
+            Self::Changes => Icon::Branch,
+            Self::Files => Icon::Folder,
+            Self::History => Icon::History,
+            Self::Terminal => Icon::Terminal,
+            Self::SideChat => Icon::Msg,
+            Self::ForkChat => Icon::Merge,
+        }
+    }
+
+    /// What the placeholder tab says the feature will be.
+    pub(crate) const fn planned_note(self) -> &'static str {
+        match self {
+            Self::Changes => "What the run changed.",
+            Self::Files => "A read-only tree and viewer over the worktree.",
+            Self::History => "The branch's commits as a graph; a row opens that commit's diff.",
+            Self::Terminal => {
+                "A shell in the worktree. While the run is live it starts sandboxed, with \
+                 .git, .claude, .codex, .reno and .mcp.json read-only."
+            }
+            Self::SideChat => {
+                "A new run beside this one, with its own worktree cut from this branch."
+            }
+            Self::ForkChat => "Like a side chat, started from this run's session.",
         }
     }
 
@@ -453,6 +483,42 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
             HomeRow::open(HomeKind::SideChat, "a new run beside this one"),
             fork,
         ],
+    }
+}
+
+/// What follows the state word in the finding sentence: who holds what and for how long, the
+/// agent's own report when it reported a problem, or what the branch holds once the run ended.
+/// Ends with a full stop, or is empty when there is nothing to add.
+pub(crate) fn finding_note(
+    run: &RunSummary,
+    held: Option<&reno_proto::Approval>,
+    result: Option<&str>,
+    now_ms: u64,
+) -> String {
+    let who = summary::run_bot(run).unwrap_or("It");
+    match run.status {
+        RunStatus::WaitingApproval => {
+            let Some(approval) = held else {
+                return String::new();
+            };
+            let verb = if approval.subject.command.is_some() {
+                "wants to run"
+            } else {
+                "wants to use"
+            };
+            let what = summary::subject_line(&approval.subject);
+            match summary::age_label(now_ms.saturating_sub(approval.requested_at_ms)).as_str() {
+                "just now" => format!("{who} {verb} {what} \u{2014} just held."),
+                age => format!("{who} {verb} {what} \u{2014} held {age}."),
+            }
+        }
+        RunStatus::WaitingInput => format!("{who} is waiting for your answer."),
+        _ => {
+            if let (Some(report), Some(_)) = (&run.report, summary::reported_problem(run)) {
+                return report.summary.clone();
+            }
+            result.map(|line| format!("{line}.")).unwrap_or_default()
+        }
     }
 }
 
@@ -1202,5 +1268,68 @@ mod tests {
         let s = session(&f);
         assert!(s.executor_health);
         assert_eq!(s.workspace[0].sub.as_deref(), Some("workspace removed"));
+    }
+
+    // --- the finding's words ---
+
+    fn held(command: &str, at_ms: u64) -> reno_proto::Approval {
+        reno_proto::Approval {
+            id: reno_proto::ApprovalId::from_suffix("a1").unwrap(),
+            run_id: RunId::from_suffix("a000001").unwrap(),
+            subject: reno_proto::ApprovalSubject {
+                action: reno_proto::ActionClass::Command,
+                tool: "Bash".to_owned(),
+                command: Some(command.to_owned()),
+                paths: Vec::new(),
+                raw: serde_json::Value::Null,
+            },
+            requested_at_ms: at_ms,
+        }
+    }
+
+    #[test]
+    fn a_held_action_reads_who_wants_what_and_for_how_long() {
+        let mut r = run(RunStatus::WaitingApproval);
+        r.title = "keeper \u{b7} porch: push".to_owned();
+        let a = held("/bin/zsh -lc 'git push -u origin HEAD'", 0);
+        assert_eq!(
+            finding_note(&r, Some(&a), None, 3 * 60_000),
+            "keeper wants to run git push -u origin HEAD \u{2014} held 3m."
+        );
+        // Held for under a minute, and with no bot named.
+        r.title = "fix the thing".to_owned();
+        assert_eq!(
+            finding_note(&r, Some(&a), None, 10_000),
+            "It wants to run git push -u origin HEAD \u{2014} just held."
+        );
+    }
+
+    #[test]
+    fn a_wait_for_an_answer_and_a_run_still_going_say_little() {
+        assert_eq!(
+            finding_note(&run(RunStatus::WaitingInput), None, None, 0),
+            "It is waiting for your answer."
+        );
+        assert_eq!(finding_note(&run(RunStatus::Running), None, None, 0), "");
+    }
+
+    #[test]
+    fn an_ended_run_says_its_report_or_what_its_branch_holds() {
+        let mut r = run(RunStatus::Succeeded);
+        let result = "Branch reno/x has 1 commit, 1 file changed (+72 \u{2212}73)";
+        assert_eq!(
+            finding_note(&r, None, Some(result), 0),
+            format!("{result}.")
+        );
+        // The agent's own words come first when it reported a problem.
+        r.report = Some(RunReport {
+            status: ReportStatus::Blocked,
+            summary: "Cargo.lock is committed but not pushed.".to_owned(),
+        });
+        assert_eq!(
+            finding_note(&r, None, Some(result), 0),
+            "Cargo.lock is committed but not pushed."
+        );
+        assert_eq!(finding_note(&run(RunStatus::Failed), None, None, 0), "");
     }
 }

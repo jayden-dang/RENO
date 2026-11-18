@@ -1,12 +1,10 @@
 //! The run side panel as a pure model: which tabs are open, which one shows, what a close falls
 //! back to, and what can be reopened. No window and no GPUI, so every rule is a unit test; the
 //! strip and the surfaces only draw and drive this.
-//!
-//! Nothing outside `panel/` is wired to it yet (RP0 builds the model first).
-#![allow(dead_code)]
 
 pub(crate) mod layout;
 pub(crate) mod surface;
+pub(crate) mod view;
 
 use serde::{Deserialize, Serialize};
 use surface::{Descriptor, Surface};
@@ -20,6 +18,8 @@ pub(crate) const CLOSED_CAP: usize = 10;
 pub(crate) struct PanelKey(pub(crate) String);
 
 impl PanelKey {
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -59,6 +59,8 @@ impl Default for PanelState {
 }
 
 /// A panel as saved (D8): descriptors and the active one. Small, versioned by its container.
+// Saved panel state arrives with its own task; until then nothing builds this.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Descriptors {
     pub(crate) tabs: Vec<Descriptor>,
@@ -90,6 +92,8 @@ impl PanelState {
         &self.active
     }
 
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn is_open(&self, surface: &Surface) -> bool {
         self.tabs.contains(surface)
     }
@@ -97,6 +101,8 @@ impl PanelState {
     /// Show `surface`, adding a tab if it has none. A kind opens once; a file is the same tab
     /// for the same path.
     pub(crate) fn open(&mut self, surface: Surface) {
+        // Open now, so no longer "recently closed".
+        self.closed.retain(|s| *s != surface);
         if !self.tabs.contains(&surface) {
             self.tabs.push(surface.clone());
         }
@@ -193,6 +199,8 @@ impl PanelState {
     }
 
     /// The saved form.
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn snapshot(&self) -> Descriptors {
         Descriptors {
             tabs: self.tabs.iter().map(Surface::descriptor).collect(),
@@ -203,6 +211,8 @@ impl PanelState {
 
     /// Rebuild from the saved form. Descriptors this build cannot read are dropped; Session is
     /// put back if missing; an active tab that is gone becomes Session.
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn restore(saved: &Descriptors) -> Self {
         let mut tabs = vec![Surface::Session];
         for surface in saved.tabs.iter().filter_map(Descriptor::surface) {
@@ -454,6 +464,15 @@ mod tests {
         assert_eq!(s.active(), &file("b.rs"));
         assert_eq!(s.reopen_closed(), Some(file("a.rs")));
         assert_eq!(s.reopen_closed(), None);
+    }
+
+    #[test]
+    fn opening_a_closed_tab_takes_it_off_the_recently_closed_list() {
+        let mut s = state_with(&["a.rs", "b.rs"]);
+        s.close(&file("a.rs"));
+        s.close(&file("b.rs"));
+        s.open(file("a.rs"));
+        assert_eq!(s.recently_closed(3), [&file("b.rs")]);
     }
 
     #[test]

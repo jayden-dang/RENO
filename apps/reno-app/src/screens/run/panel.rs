@@ -1,0 +1,469 @@
+//! The run screen's side panel: how it sits beside the chat, the tab commands and keys, and the
+//! page each tab shows. Drawing the strip and the Home page is `panel::view`; the Session and
+//! Review pages are in `session.rs` and `changes.rs`, because they read the store.
+
+use std::rc::Rc;
+
+use gpui::{
+    AnyElement, App, Context, DragMoveEvent, FontWeight, IntoElement, KeyDownEvent, MouseButton,
+    Render, Window, div, prelude::*, px,
+};
+
+use super::RunScreen;
+use crate::actions::{
+    ClosePanelTab, NewPanelTab, NextPanelTab, PrevPanelTab, ReopenPanelTab, TogglePanel,
+};
+use crate::panel::layout::{GUTTER, Layout, OVERLAY_BELOW, fit};
+use crate::panel::surface::{Counts, Surface};
+use crate::panel::view::{self, Cmd, Emit, Prefs};
+use crate::summary;
+use crate::ui::theme::Theme;
+use crate::ui::toast;
+use crate::vm::changes::{Loaded, Pane};
+use crate::vm::panel_home::{self, Home, HomeFacts, HomeKind};
+
+/// What the resize gutter drags.
+#[derive(Clone, Copy)]
+struct ResizeDrag;
+
+/// The label that follows the pointer while the gutter drags: nothing.
+struct NoLabel;
+
+impl Render for NoLabel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+impl RunScreen {
+    // --- layout and visibility ---------------------------------------------------------------
+
+    /// How the stage is shared now, from the window, the sidebar and what the person chose.
+    pub(super) fn layout(&self, window: &Window, cx: &App) -> Layout {
+        let window_w = f32::from(window.viewport_size().width);
+        let stage_w = (window_w - view::stage_inset(cx)).max(0.0);
+        let prefs = Prefs::get(cx);
+        fit(
+            window_w,
+            stage_w,
+            prefs.width,
+            prefs.open.unwrap_or(window_w >= OVERLAY_BELOW),
+        )
+    }
+
+    fn panel_is_open(&self, window: &Window, cx: &App) -> bool {
+        self.layout(window, cx) != Layout::Hidden
+    }
+
+    fn set_panel_open(&self, open: bool, cx: &mut App) {
+        Prefs {
+            open: Some(open),
+            ..Prefs::get(cx)
+        }
+        .set(cx);
+    }
+
+    pub(crate) fn toggle_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let open = self.panel_is_open(window, cx);
+        self.set_panel_open(!open, cx);
+        self.ensure_patches(cx);
+        cx.notify();
+    }
+
+    // --- opening tabs ------------------------------------------------------------------------
+
+    /// Shows the panel on `surface`, adding its tab when it has none.
+    pub(crate) fn open_surface(
+        &mut self,
+        surface: Surface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel_touched = true;
+        self.set_panel_open(true, cx);
+        let home = surface == Surface::Home;
+        self.panel.open(surface);
+        if home {
+            // The page's letters work once the panel has the keyboard.
+            window.focus(&self.panel_focus, cx);
+        }
+        self.ensure_patches(cx);
+        cx.notify();
+    }
+
+    /// A home row, or its letter. A row that is dimmed does nothing; the one that is built
+    /// opens its tab, and the rest open a placeholder.
+    fn open_kind(&mut self, kind: HomeKind, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self
+            .home(cx)
+            .and_then(|h| h.row(kind).map(|r| r.enabled))
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        // The page that was chosen from is replaced by what it opened.
+        if *self.panel.active() == Surface::Home {
+            self.panel.close(&Surface::Home);
+        }
+        self.open_surface(Surface::for_row(kind), window, cx);
+    }
+
+    pub(super) fn panel_cmd(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        match cmd {
+            Cmd::Activate(surface) => {
+                self.panel_touched = true;
+                self.panel.activate(&surface);
+            }
+            Cmd::Close(surface) => {
+                self.panel_touched = true;
+                self.panel.close(&surface);
+            }
+            Cmd::NewTab => return self.open_surface(Surface::Home, window, cx),
+            Cmd::Hide => self.set_panel_open(false, cx),
+            Cmd::Reorder { from, to } => {
+                self.panel.reorder(from, to);
+            }
+            Cmd::Open(kind) => return self.open_kind(kind, window, cx),
+            Cmd::Reopen(surface) => return self.open_surface(surface, window, cx),
+            Cmd::AddAction => toast::not_yet(cx, "Actions"),
+        }
+        self.ensure_patches(cx);
+        cx.notify();
+    }
+
+    fn emitter(&self, cx: &mut Context<Self>) -> Emit {
+        let this = cx.entity();
+        Rc::new(move |cmd, window, cx| {
+            this.update(cx, |screen, cx| screen.panel_cmd(cmd, window, cx));
+        })
+    }
+
+    // --- seeding ------------------------------------------------------------------------------
+
+    /// Chooses the first tabs once what the run has is known: Review when it has a workspace,
+    /// in front when it changed something. Never again, and not after the person has used the
+    /// tabs, so it cannot undo what they did.
+    pub(super) fn seed_panel(&mut self, cx: &mut Context<Self>) {
+        if self.panel_seeded || self.panel_touched {
+            return;
+        }
+        let pane = self.pane(cx);
+        let facts = match pane {
+            // Not answered yet.
+            Pane::Hidden if self.store.read(cx).changes(&self.run).is_none() => return,
+            Pane::Loading => return,
+            Pane::Hidden | Pane::Unsupported => crate::panel::RunFacts::default(),
+            Pane::Failed(_) | Pane::Removed { .. } | Pane::Empty { .. } => crate::panel::RunFacts {
+                has_workspace: true,
+                has_changes: false,
+            },
+            Pane::Files(_) => crate::panel::RunFacts {
+                has_workspace: true,
+                has_changes: true,
+            },
+        };
+        self.panel_seeded = true;
+        self.panel = crate::panel::PanelState::reset_for(facts);
+        self.ensure_patches(cx);
+    }
+
+    // --- what the home needs --------------------------------------------------------------------
+
+    /// The Home page's content for this run, `None` before the run is known.
+    pub(super) fn home(&self, cx: &App) -> Option<Home> {
+        let store = self.store.read(cx);
+        let state = store.state();
+        let run = state.run(&self.run)?;
+        let pane = self.pane(cx);
+        // A `workspace.get` answer means the run's folder is in a repository.
+        let in_repository = store
+            .changes(&self.run)
+            .is_some_and(|c| matches!(c.workspace, Loaded::Ready(Some(_))));
+        let project = crate::vm::projects::key_of(Some(run), |dir| store.root_of(dir));
+        let project = match project {
+            crate::vm::projects::FolderKey::NoProject => None,
+            key => Some(key.name()),
+        };
+        let path = run.cwd.as_ref().map(|p| p.display().to_string());
+        let model = self.model_label(cx).map(|(name, _)| name);
+        let held = state.approvals_for(&self.run).next();
+        let note = panel_home::finding_note(run, held, self.result.as_deref(), store.now_ms());
+        let facts = HomeFacts {
+            status: run.status,
+            problem: summary::reported_problem(run),
+            executor: run.executor.as_str(),
+            project: project.as_deref(),
+            path: path.as_deref(),
+            in_repository,
+            model: model.as_deref(),
+            bot: summary::run_bot(run),
+            note: Some(&note),
+        };
+        Some(panel_home::home(&facts, &pane))
+    }
+
+    /// The model in use by name, and by name with its id, as the Session tab words it.
+    pub(super) fn model_label(&self, cx: &App) -> Option<(String, String)> {
+        let state = self.store.read(cx).state();
+        let run = state.run(&self.run)?;
+        let id = crate::vm::models::in_use(state, &run.run_id).or_else(|| self.facts.model.clone())?;
+        let name = crate::vm::models::model_name(state, &run.executor, &id);
+        let long = if name == id {
+            id
+        } else {
+            format!("{name} \u{b7} {id}")
+        };
+        Some((name, long))
+    }
+
+    pub(super) fn counts(&self, cx: &App) -> Counts {
+        Counts {
+            changed_files: match self.pane(cx) {
+                Pane::Files(o) => o.rows.len(),
+                _ => 0,
+            },
+        }
+    }
+
+    // --- the stage -----------------------------------------------------------------------------
+
+    /// Puts the panel canvas beside the chat (or over it), with the gutter between, and the keys
+    /// that drive it.
+    pub(super) fn with_panel(
+        &mut self,
+        stage: gpui::Stateful<gpui::Div>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let layout = self.layout(window, cx);
+        let stage = stage
+            .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
+                this.toggle_panel(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewPanelTab, window, cx| {
+                this.open_surface(Surface::Home, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePanelTab, window, cx| {
+                if this.panel_is_open(window, cx) {
+                    let active = this.panel.active().clone();
+                    this.panel_cmd(Cmd::Close(active), window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ReopenPanelTab, _, cx| {
+                this.panel_touched = true;
+                if this.panel.reopen_closed().is_some() {
+                    this.set_panel_open(true, cx);
+                    this.ensure_patches(cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextPanelTab, window, cx| {
+                if this.panel_is_open(window, cx) {
+                    this.panel.cycle(true);
+                    this.ensure_patches(cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevPanelTab, window, cx| {
+                if this.panel_is_open(window, cx) {
+                    this.panel.cycle(false);
+                    this.ensure_patches(cx);
+                    cx.notify();
+                }
+            }));
+        match layout {
+            Layout::Hidden => stage.into_any_element(),
+            Layout::Split { panel_w, .. } => {
+                let canvas = self.panel_canvas(theme, panel_w, window, cx);
+                stage
+                    .on_drag_move(cx.listener(|_, e: &DragMoveEvent<ResizeDrag>, _, cx| {
+                        // The gutter's middle is under the pointer; the panel is what is right
+                        // of it. `fit` clamps whatever this says.
+                        let width = f32::from(e.bounds.right() - e.event.position.x) - GUTTER / 2.0;
+                        Prefs {
+                            width: Some(width),
+                            ..Prefs::get(cx)
+                        }
+                        .set(cx);
+                        cx.notify();
+                    }))
+                    .child(self.gutter(theme))
+                    .child(canvas)
+                    .into_any_element()
+            }
+            Layout::Overlay { panel_w } => {
+                let canvas = self.panel_canvas(theme, panel_w, window, cx);
+                stage
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .occlude()
+                            .shadow_lg()
+                            .child(canvas),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn gutter(&self, theme: &Theme) -> impl IntoElement {
+        let accent = theme.accent;
+        div()
+            .id("panel-gutter")
+            .debug_selector(|| "panel-gutter".to_owned())
+            .group("panel-gutter")
+            .flex_none()
+            .w(px(GUTTER))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_col_resize()
+            .on_drag(ResizeDrag, |_, _, _, cx| cx.new(|_| NoLabel))
+            .child(
+                div()
+                    .w(px(2.0))
+                    .h(px(40.0))
+                    .rounded(px(1.0))
+                    .group_hover("panel-gutter", move |s| s.bg(accent)),
+            )
+    }
+
+    fn panel_canvas(
+        &mut self,
+        theme: &Theme,
+        width: f32,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let emit = self.emitter(cx);
+        let counts = self.counts(cx);
+        let body = match self.panel.active().clone() {
+            Surface::Home => match self.home(cx) {
+                Some(home) => {
+                    let closed: Vec<Surface> = self
+                        .panel
+                        .recently_closed(3)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    view::home_page(theme, &home, &closed, &emit)
+                }
+                None => div().into_any_element(),
+            },
+            Surface::Session => self.session_body(theme, cx),
+            Surface::Review => self.review_body(theme, cx),
+            Surface::Planned(kind) => view::planned_page(theme, kind),
+            Surface::History => view::planned_page(theme, HomeKind::History),
+            Surface::Terminal(_) => view::planned_page(theme, HomeKind::Terminal),
+            Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
+            Surface::File(_) => view::planned_page(theme, HomeKind::Files),
+            Surface::Commit(_) => view::planned_page(theme, HomeKind::History),
+        };
+        div()
+            .id("panel-canvas")
+            .debug_selector(|| "panel-canvas".to_owned())
+            .track_focus(&self.panel_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| window.focus(&this.panel_focus, cx)),
+            )
+            .on_key_down(cx.listener(Self::on_panel_key))
+            .w(px(width))
+            .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
+            .rounded(px(14.0))
+            .bg(theme.canvas)
+            .border_1()
+            .border_color(theme.hairline)
+            .overflow_hidden()
+            .child(view::tab_strip(theme, &self.panel, &counts, &emit))
+            .child(div().id("panel-body").flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    /// A letter opens its row while the home is in front. It only arrives here when the panel
+    /// has the keyboard, so a text field never loses one; a key with no row goes on.
+    fn on_panel_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &event.keystroke.modifiers;
+        if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+        if *self.panel.active() != Surface::Home {
+            return;
+        }
+        let mut chars = event.keystroke.key.chars();
+        let (Some(letter), None) = (chars.next(), chars.next()) else {
+            return;
+        };
+        if let Some(kind) = panel_home::letter_to_kind(letter) {
+            cx.stop_propagation();
+            self.open_kind(kind, window, cx);
+        }
+    }
+
+    // --- header pieces ----------------------------------------------------------------------
+
+    /// The header's Stop, on a run that can be stopped.
+    pub(super) fn stop_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.summary(cx).is_some_and(|r| summary::is_live(r.status));
+        if !live {
+            return None;
+        }
+        let run = self.run.clone();
+        Some(
+            crate::ui::kit::line_button(
+                theme,
+                "header-stop",
+                Some(crate::ui::icon::Icon::Stop),
+                "Stop",
+                crate::ui::kit::Tone::Quiet,
+                true,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let run = run.clone();
+                this.store.update(cx, |store, cx| store.cancel_run(run, cx));
+            }))
+            .into_any_element(),
+        )
+    }
+
+    /// The tokens chip: a ring and "1.4k". Hidden until there are tokens; it opens Session.
+    pub(super) fn usage_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let usage = self.facts.usage.filter(|u| u.total() > 0)?;
+        let hover = theme.text.opacity(0.06);
+        Some(
+            div()
+                .id("usage-chip")
+                .debug_selector(|| "usage-chip".to_owned())
+                .flex_none()
+                .h(px(30.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded(px(8.0))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.muted)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(crate::ui::icon::icon(
+                    crate::ui::icon::Icon::Ring,
+                    14.0,
+                    theme.muted,
+                ))
+                .child(panel_home::usage_chip(usage))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_surface(Surface::Session, window, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+}

@@ -699,6 +699,14 @@ impl Render for RootView {
         let theme = Theme::for_appearance(self.appearance(window));
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
+        // What the run screen's panel needs to fit itself on its first frame: the sidebar and
+        // the insets around the canvas.
+        cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
+            16.0
+        } else {
+            sidebar::WIDTH + 8.0
+        }));
+        let on_run = matches!(self.screen, Screen::Run(_));
 
         let panel = div()
             .id("canvas-panel")
@@ -708,11 +716,14 @@ impl Render for RootView {
             .mr(px(8.0))
             .when(self.sidebar_hidden, |p| p.ml(px(8.0)))
             .when(!self.sidebar_hidden, |p| p.mt(px(8.0)))
-            .rounded(px(14.0))
-            .bg(theme.canvas)
-            .border_1()
-            .border_color(theme.hairline)
-            .overflow_hidden()
+            // A run draws its own two canvases; every other screen sits on this one.
+            .when(!on_run, |p| {
+                p.rounded(px(14.0))
+                    .bg(theme.canvas)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .overflow_hidden()
+            })
             .child(match &self.screen {
                 Screen::Home => self.home.clone().into_any_element(),
                 Screen::Runs => self.runs.clone().into_any_element(),

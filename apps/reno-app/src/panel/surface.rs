@@ -4,7 +4,12 @@
 use reno_proto::RunId;
 use serde::{Deserialize, Serialize};
 
+use crate::ui::icon::Icon;
+use crate::vm::panel_home::HomeKind;
+
 /// One thing the panel can show.
+// The kinds past Review are built by later phases; the model carries them already.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Surface {
     /// The New-tab page. Also what the panel shows with no tab.
@@ -23,6 +28,9 @@ pub(crate) enum Surface {
     Commit(String),
     /// A side conversation, by its run.
     SideChat(RunId),
+    /// A tab whose feature arrives in a later phase: the page says so. It goes away when the
+    /// feature gets its own kind, and is not saved.
+    Planned(HomeKind),
 }
 
 /// The facts a tab count is read from.
@@ -48,20 +56,45 @@ impl Surface {
             Self::History => "History".into(),
             Self::Commit(sha) => sha.chars().take(7).collect(),
             Self::SideChat(_) => "Side chat".into(),
+            Self::Planned(kind) => kind.label().into(),
         }
     }
 
-    /// The icon's name in the app's icon set.
-    pub(crate) fn icon_name(&self) -> &'static str {
+    /// The tab a home row opens: Changes is Review; the others are placeholders for now.
+    pub(crate) fn for_row(kind: HomeKind) -> Self {
+        match kind {
+            HomeKind::Changes => Self::Review,
+            other => Self::Planned(other),
+        }
+    }
+
+    /// A stable name for selectors and accessible labels: "review", "planned-files".
+    pub(crate) fn slug(&self) -> String {
         match self {
-            Self::Home => "plus",
-            Self::Session => "sliders",
-            Self::Review => "git-diff",
-            Self::File(_) => "file",
-            Self::Terminal(_) => "terminal",
-            Self::History => "history",
-            Self::Commit(_) => "git-commit",
-            Self::SideChat(_) => "message",
+            Self::Home => "home".into(),
+            Self::Session => "session".into(),
+            Self::Review => "review".into(),
+            Self::File(path) => format!("file-{path}"),
+            Self::Terminal(id) => format!("terminal-{id}"),
+            Self::History => "history".into(),
+            Self::Commit(sha) => format!("commit-{sha}"),
+            Self::SideChat(run) => format!("side-chat-{run}"),
+            Self::Planned(kind) => format!("planned-{}", kind.label().to_lowercase().replace(' ', "-")),
+        }
+    }
+
+    /// The tab's icon.
+    pub(crate) fn icon(&self) -> Icon {
+        match self {
+            Self::Home => Icon::Plus,
+            Self::Session => Icon::Sliders,
+            Self::Review => Icon::Branch,
+            Self::File(_) => Icon::File,
+            Self::Terminal(_) => Icon::Terminal,
+            Self::History => Icon::History,
+            Self::Commit(_) => Icon::Merge,
+            Self::SideChat(_) => Icon::Msg,
+            Self::Planned(kind) => kind.icon(),
         }
     }
 
@@ -79,6 +112,8 @@ impl Surface {
     }
 
     /// The form that is saved.
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn descriptor(&self) -> Descriptor {
         let (kind, key) = match self {
             Self::Home => (Kind::Home, String::new()),
@@ -89,11 +124,15 @@ impl Surface {
             Self::History => (Kind::History, String::new()),
             Self::Commit(sha) => (Kind::Commit, sha.clone()),
             Self::SideChat(run) => (Kind::SideChat, run.as_str().to_owned()),
+            // A placeholder is not saved: a build that knows no such kind reads it as nothing.
+            Self::Planned(_) => (Kind::Unknown, String::new()),
         };
         Descriptor { kind, key }
     }
 }
 
+// Saved panel state arrives with its own task; until then nothing builds this.
+#[allow(dead_code)]
 /// The kind of a saved tab. A kind this build does not know reads as `Unknown`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +149,8 @@ pub(crate) enum Kind {
     Unknown,
 }
 
+// Saved panel state arrives with its own task; until then nothing builds this.
+#[allow(dead_code)]
 /// A tab as saved: a kind and the key that identifies it. Small and stable on purpose; the live
 /// entity behind it is rebuilt on demand.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +162,8 @@ pub(crate) struct Descriptor {
 
 impl Descriptor {
     /// The tab this describes, or `None` for a kind or key this build cannot read.
+    // Saved panel state arrives with its own task; until then nothing reads this.
+    #[allow(dead_code)]
     pub(crate) fn surface(&self) -> Option<Surface> {
         let key = self.key.as_str();
         match self.kind {
@@ -199,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_names_are_distinct_and_nonempty() {
+    fn icons_are_distinct() {
         let all = [
             Surface::Home,
             Surface::Session,
@@ -210,11 +253,10 @@ mod tests {
             Surface::Commit("a".into()),
             Surface::SideChat(run()),
         ];
-        let mut names: Vec<_> = all.iter().map(Surface::icon_name).collect();
-        assert!(names.iter().all(|n| !n.is_empty()));
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), all.len());
+        let mut icons: Vec<_> = all.iter().map(|s| s.icon().path()).collect();
+        icons.sort_unstable();
+        icons.dedup();
+        assert_eq!(icons.len(), all.len());
     }
 
     #[test]
