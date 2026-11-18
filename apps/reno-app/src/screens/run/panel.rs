@@ -10,9 +10,6 @@ use gpui::{
 };
 
 use super::RunScreen;
-use crate::actions::{
-    ClosePanelTab, NewPanelTab, NextPanelTab, PrevPanelTab, ReopenPanelTab, TogglePanel,
-};
 use crate::panel::layout::{GUTTER, Layout, OVERLAY_BELOW, fit};
 use crate::panel::surface::{Counts, Surface};
 use crate::panel::view::{self, Cmd, Emit, Prefs};
@@ -21,6 +18,18 @@ use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes::{Loaded, Pane};
 use crate::vm::panel_home::{self, Home, HomeFacts, HomeKind};
+
+/// A key command for the panel. The root view hears the keys (focus can be anywhere, or
+/// nowhere, after a click) and hands them to the open run screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelAction {
+    Toggle,
+    NewTab,
+    CloseTab,
+    ReopenTab,
+    NextTab,
+    PrevTab,
+}
 
 /// What the resize gutter drags.
 #[derive(Clone, Copy)]
@@ -63,11 +72,53 @@ impl RunScreen {
         .set(cx);
     }
 
-    pub(crate) fn toggle_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
+    /// The panel is going away: if it had the keyboard, the steer field takes it back, so the
+    /// screen's keys keep working.
+    fn give_back_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_focus.contains_focused(window, cx) {
+            window.focus(&self.focus_handle(cx), cx);
+        }
+    }
+
+    pub(crate) fn toggle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.panel_is_open(window, cx);
         self.set_panel_open(!open, cx);
+        if open {
+            self.give_back_focus(window, cx);
+        }
         self.ensure_patches(cx);
         cx.notify();
+    }
+
+    pub(crate) fn panel_action(
+        &mut self,
+        action: PanelAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.panel_is_open(window, cx);
+        match action {
+            PanelAction::Toggle => self.toggle_panel(window, cx),
+            PanelAction::NewTab => self.open_surface(Surface::Home, window, cx),
+            PanelAction::CloseTab if open => {
+                let active = self.panel.active().clone();
+                self.panel_cmd(Cmd::Close(active), window, cx);
+            }
+            PanelAction::ReopenTab => {
+                self.panel_touched = true;
+                if self.panel.reopen_closed().is_some() {
+                    self.set_panel_open(true, cx);
+                    self.ensure_patches(cx);
+                    cx.notify();
+                }
+            }
+            PanelAction::NextTab | PanelAction::PrevTab if open => {
+                self.panel.cycle(action == PanelAction::NextTab);
+                self.ensure_patches(cx);
+                cx.notify();
+            }
+            PanelAction::CloseTab | PanelAction::NextTab | PanelAction::PrevTab => {}
+        }
     }
 
     // --- opening tabs ------------------------------------------------------------------------
@@ -119,7 +170,10 @@ impl RunScreen {
                 self.panel.close(&surface);
             }
             Cmd::NewTab => return self.open_surface(Surface::Home, window, cx),
-            Cmd::Hide => self.set_panel_open(false, cx),
+            Cmd::Hide => {
+                self.set_panel_open(false, cx);
+                self.give_back_focus(window, cx);
+            }
             Cmd::Reorder { from, to } => {
                 self.panel.reorder(from, to);
             }
@@ -206,7 +260,8 @@ impl RunScreen {
     pub(super) fn model_label(&self, cx: &App) -> Option<(String, String)> {
         let state = self.store.read(cx).state();
         let run = state.run(&self.run)?;
-        let id = crate::vm::models::in_use(state, &run.run_id).or_else(|| self.facts.model.clone())?;
+        let id =
+            crate::vm::models::in_use(state, &run.run_id).or_else(|| self.facts.model.clone())?;
         let name = crate::vm::models::model_name(state, &run.executor, &id);
         let long = if name == id {
             id
@@ -237,41 +292,6 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let layout = self.layout(window, cx);
-        let stage = stage
-            .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
-                this.toggle_panel(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NewPanelTab, window, cx| {
-                this.open_surface(Surface::Home, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ClosePanelTab, window, cx| {
-                if this.panel_is_open(window, cx) {
-                    let active = this.panel.active().clone();
-                    this.panel_cmd(Cmd::Close(active), window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ReopenPanelTab, _, cx| {
-                this.panel_touched = true;
-                if this.panel.reopen_closed().is_some() {
-                    this.set_panel_open(true, cx);
-                    this.ensure_patches(cx);
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &NextPanelTab, window, cx| {
-                if this.panel_is_open(window, cx) {
-                    this.panel.cycle(true);
-                    this.ensure_patches(cx);
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &PrevPanelTab, window, cx| {
-                if this.panel_is_open(window, cx) {
-                    this.panel.cycle(false);
-                    this.ensure_patches(cx);
-                    cx.notify();
-                }
-            }));
         match layout {
             Layout::Hidden => stage.into_any_element(),
             Layout::Split { panel_w, .. } => {
@@ -345,12 +365,8 @@ impl RunScreen {
         let body = match self.panel.active().clone() {
             Surface::Home => match self.home(cx) {
                 Some(home) => {
-                    let closed: Vec<Surface> = self
-                        .panel
-                        .recently_closed(3)
-                        .into_iter()
-                        .cloned()
-                        .collect();
+                    let closed: Vec<Surface> =
+                        self.panel.recently_closed(3).into_iter().cloned().collect();
                     view::home_page(theme, &home, &closed, &emit)
                 }
                 None => div().into_any_element(),

@@ -3,14 +3,14 @@
 
 use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
-use super::RunScreen;
 use super::super::executors::health_lines;
-use crate::panel::view::tone_ink;
+use super::RunScreen;
+use crate::panel::view::{finding_text, tone_ink};
 use crate::summary;
 use crate::ui::kit;
 use crate::ui::theme::Theme;
-use crate::vm::executors as executor_facts;
 use crate::vm::changes::Loaded;
+use crate::vm::executors as executor_facts;
 use crate::vm::panel_home::{self, KvRow, SessionFacts};
 
 impl RunScreen {
@@ -104,19 +104,7 @@ impl RunScreen {
                 .bg(theme.text.opacity(0.06))
                 .text_size(px(13.5))
                 .line_height(px(20.0))
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(state_ink)
-                        .child(SharedString::from(format!("{}.", home.now.lead))),
-                )
-                .when(!home.now.text.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_color(theme.muted)
-                            .child(SharedString::from(home.now.text)),
-                    )
-                })
+                .child(finding_text(theme, &home.now, theme.muted))
         });
 
         body.children(finding_block)

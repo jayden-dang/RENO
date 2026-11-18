@@ -79,7 +79,9 @@ impl Surface {
             Self::History => "history".into(),
             Self::Commit(sha) => format!("commit-{sha}"),
             Self::SideChat(run) => format!("side-chat-{run}"),
-            Self::Planned(kind) => format!("planned-{}", kind.label().to_lowercase().replace(' ', "-")),
+            Self::Planned(kind) => {
+                format!("planned-{}", kind.label().to_lowercase().replace(' ', "-"))
+            }
         }
     }
 

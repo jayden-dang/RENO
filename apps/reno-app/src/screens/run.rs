@@ -20,10 +20,10 @@ use reno_proto::{
 };
 
 use super::ScreenEvent;
+use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Resolution, Row, ToolEntry};
-use crate::panel::{PanelKey, PanelState};
 use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
@@ -38,6 +38,8 @@ mod changes;
 mod output;
 mod panel;
 mod session;
+
+pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
@@ -1286,3 +1288,6 @@ mod question_card_tests;
 
 #[cfg(test)]
 mod changes_tests;
+
+#[cfg(test)]
+mod panel_tests;

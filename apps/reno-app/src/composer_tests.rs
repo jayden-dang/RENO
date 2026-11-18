@@ -816,7 +816,10 @@ fn the_overlay_signal_follows_the_palette_and_the_menus(cx: &mut TestAppContext)
     root.update_in(vcx, |r, window, cx| r.close_palette(window, cx));
     assert!(overlay_open(vcx));
     click(vcx, "class-menu");
-    assert!(!overlay_open(vcx), "the toggle closes the menu and the signal");
+    assert!(
+        !overlay_open(vcx),
+        "the toggle closes the menu and the signal"
+    );
 }
 
 #[gpui::test]

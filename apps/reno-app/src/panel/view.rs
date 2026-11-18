@@ -14,7 +14,7 @@ use super::surface::{Counts, Surface};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
-use crate::vm::panel_home::{Home, HomeKind, HomeRow, NowTone};
+use crate::vm::panel_home::{Home, HomeKind, HomeRow, Now, NowTone};
 
 /// What a click in the panel asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,10 @@ pub(crate) enum Cmd {
     /// The hide button.
     Hide,
     /// A drag dropped the tab at `from` onto the one at `to`.
-    Reorder { from: usize, to: usize },
+    Reorder {
+        from: usize,
+        to: usize,
+    },
     /// A home row (or its letter).
     Open(HomeKind),
     /// A recently closed row.
@@ -265,6 +268,38 @@ pub(crate) fn tone_ink(theme: &Theme, tone: NowTone) -> Hsla {
     }
 }
 
+/// "held for you" as "Held for you.": the state word, capitalised, with its full stop.
+pub(crate) fn lead_word(lead: &str) -> String {
+    let mut chars = lead.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// The finding sentence: the state word in bold and in its colour, then the rest, on one line
+/// that wraps.
+pub(crate) fn finding_text(theme: &Theme, now: &Now, muted: Hsla) -> gpui::Div {
+    div()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .gap_x(px(5.0))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(tone_ink(theme, now.tone))
+                .child(SharedString::from(lead_word(&now.lead))),
+        )
+        .when(!now.text.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_color(muted)
+                    .child(SharedString::from(now.text.clone())),
+            )
+        })
+}
+
 /// A key's cap: a small bordered box, in mono.
 fn keycap(theme: &Theme, label: &str) -> gpui::Div {
     div()
@@ -326,7 +361,11 @@ fn home_row(theme: &Theme, row: &HomeRow, emit: &Emit) -> Stateful<gpui::Div> {
         .child(icon(
             row.kind.icon(),
             15.0,
-            if row.enabled { theme.muted } else { theme.faint },
+            if row.enabled {
+                theme.muted
+            } else {
+                theme.faint
+            },
         ))
         .child(
             div()
@@ -344,19 +383,15 @@ fn home_row(theme: &Theme, row: &HomeRow, emit: &Emit) -> Stateful<gpui::Div> {
                 .text_color(detail_ink)
                 .child(SharedString::from(row.detail.clone())),
         )
-        .child(div().when(!row.enabled, |d| d.opacity(0.4)).child(keycap(
-            theme,
-            &row.letter.to_string(),
-        )))
+        .child(
+            div()
+                .when(!row.enabled, |d| d.opacity(0.4))
+                .child(keycap(theme, &row.letter.to_string())),
+        )
 }
 
 /// The "New tab" page.
-pub(crate) fn home_page(
-    theme: &Theme,
-    home: &Home,
-    closed: &[Surface],
-    emit: &Emit,
-) -> AnyElement {
+pub(crate) fn home_page(theme: &Theme, home: &Home, closed: &[Surface], emit: &Emit) -> AnyElement {
     let place = &home.place;
     let where_line = div()
         .flex()
@@ -436,28 +471,17 @@ pub(crate) fn home_page(
         .id("home-now")
         .debug_selector(|| "home-now".to_owned())
         .flex()
-        .items_baseline()
+        .items_start()
         .gap(px(9.0))
         .text_size(px(14.0))
         .line_height(px(21.0))
-        .child(div().flex_none().child(kit::dot(tone_dot(theme, now.tone), 7.0)))
         .child(
             div()
-                .min_w_0()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tone_ink(theme, now.tone))
-                        .child(SharedString::from(format!("{}.", now.lead))),
-                )
-                .when(!now.text.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_color(theme.muted)
-                            .child(SharedString::from(now.text.clone())),
-                    )
-                }),
-        );
+                .flex_none()
+                .pt(px(7.0))
+                .child(kit::dot(tone_dot(theme, now.tone), 7.0)),
+        )
+        .child(finding_text(theme, now, theme.muted));
 
     let meta = div()
         .flex()
@@ -593,7 +617,12 @@ pub(crate) fn home_page(
 pub(crate) fn planned_page(theme: &Theme, kind: HomeKind) -> AnyElement {
     div()
         .id("panel-planned")
-        .debug_selector(move || format!("panel-planned-{}", kind.label().to_lowercase().replace(' ', "-")))
+        .debug_selector(move || {
+            format!(
+                "panel-planned-{}",
+                kind.label().to_lowercase().replace(' ', "-")
+            )
+        })
         .size_full()
         .flex()
         .justify_center()

@@ -6,9 +6,6 @@
 //! Unavailable rows stay in the list, dimmed, with the reason as their detail: they are never
 //! hidden.
 
-// Nothing draws these yet: the panel that does arrives in a later task, which removes this.
-#![allow(dead_code)]
-
 use reno_proto::{RunStatus, RunSummary, WorkspaceInfo, WorkspaceStatus};
 
 use crate::summary::{self, Problem, RunRepo};

@@ -10,12 +10,14 @@ use gpui::{
 use super::RunScreen;
 use super::output::copy;
 use crate::panel::surface::Surface;
-use crate::panel::view::{Prefs, tone_ink};
+use crate::panel::view::{Prefs, finding_text};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
 use crate::ui::toast;
-use crate::vm::changes::{self as facts, DiffRow, FileRow, KindTone, Overview, Pane, PatchPane, RowKind};
+use crate::vm::changes::{
+    self as facts, DiffRow, FileRow, KindTone, Overview, Pane, PatchPane, RowKind,
+};
 
 /// A name for each state of the pane, the selector tests find it by.
 fn tag(pane: &Pane) -> &'static str {
@@ -90,8 +92,13 @@ impl RunScreen {
         if !self.review_default_applied {
             self.review_default_applied = true;
             if overview.rows.len() > OPEN_ALL_UP_TO {
-                self.review_folded
-                    .extend(overview.rows.iter().skip(OPEN_FIRST).map(|r| r.path.clone()));
+                self.review_folded.extend(
+                    overview
+                        .rows
+                        .iter()
+                        .skip(OPEN_FIRST)
+                        .map(|r| r.path.clone()),
+                );
             }
         }
         self.patch_panes
@@ -179,15 +186,7 @@ impl RunScreen {
                 .text_size(px(13.0))
                 .line_height(px(19.5))
                 .text_color(theme.muted)
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tone_ink(theme, home.now.tone))
-                        .child(SharedString::from(format!("{}.", home.now.lead))),
-                )
-                .when(!home.now.text.is_empty(), |d| {
-                    d.child(SharedString::from(home.now.text.clone()))
-                })
+                .child(finding_text(theme, &home.now, theme.muted))
         });
         let note = |text: String, tone: Hsla| {
             div()
@@ -199,8 +198,11 @@ impl RunScreen {
                 .child(SharedString::from(text))
         };
         let body: AnyElement = match &pane {
-            Pane::Hidden => note("There is nothing to show for this run.".to_owned(), theme.muted)
-                .into_any_element(),
+            Pane::Hidden => note(
+                "There is nothing to show for this run.".to_owned(),
+                theme.muted,
+            )
+            .into_any_element(),
             Pane::Unsupported => note(
                 "This daemon is too old to show what a run changed. Update renod and look again."
                     .to_owned(),
@@ -361,24 +363,20 @@ impl RunScreen {
                     .child(row.letter.to_string()),
             )
             .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .child(
-                        div()
-                            .flex()
-                            .child(
-                                div()
-                                    .text_color(theme.faint)
-                                    .child(SharedString::from(row.dir.clone())),
-                            )
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(SharedString::from(row.name.clone())),
-                            ),
-                    ),
+                div().min_w_0().truncate().text_size(px(13.0)).child(
+                    div()
+                        .flex()
+                        .child(
+                            div()
+                                .text_color(theme.faint)
+                                .child(SharedString::from(row.dir.clone())),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(SharedString::from(row.name.clone())),
+                        ),
+                ),
             )
             .child(div().flex_1())
             .child(match stats {
