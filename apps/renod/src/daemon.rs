@@ -306,6 +306,7 @@ impl Daemon {
         kernel.home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from);
+        let files = crate::files::Files::new(Arc::clone(&watchers), kernel.watch_retry);
         let fs_watch = Arc::new(FsWatch::with_watchers(watchers));
         let wake = WakeSignal::new();
         let mut setup = DefsSetup::new(fs_defs.clone(), context)
@@ -379,6 +380,7 @@ impl Daemon {
             secrets,
             fs_defs: Arc::clone(&fs_defs),
             maintenance: can_maintain,
+            files,
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));
         drop(ctx);

@@ -720,7 +720,8 @@ expression: protocol_schema()
     "executor.maintain",
     "run.changes",
     "executor.usage",
-    "threads"
+    "threads",
+    "files"
   ],
   "methods": [
     {
@@ -7637,6 +7638,702 @@ expression: protocol_schema()
           "items"
         ],
         "title": "WorkspaceCleanResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fs.list",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `fs.list`.",
+        "properties": {
+          "cursor": {
+            "description": "The previous page's `nextCursor`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dir": {
+            "default": "",
+            "description": "The directory, relative to the root; empty for the root itself.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "At most this many entries ([`FS_LIST_DEFAULT_LIMIT`] when absent).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree to list."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "FsListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FsEntry": {
+            "description": "One entry of a directory.",
+            "properties": {
+              "ignored": {
+                "description": "Git ignores it (a build directory, say): shown dimmed. Always false outside a repository.",
+                "type": "boolean"
+              },
+              "kind": {
+                "$ref": "#/$defs/FsEntryKind",
+                "description": "What it is."
+              },
+              "mtimeMs": {
+                "description": "When it was last modified, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "The entry's name.",
+                "type": "string"
+              },
+              "path": {
+                "description": "Its path relative to the worktree root.",
+                "type": "string"
+              },
+              "size": {
+                "description": "Its size in bytes; absent for a directory.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "FsEntryKind": {
+            "description": "What a directory entry is.",
+            "oneOf": [
+              {
+                "const": "file",
+                "description": "A regular file.",
+                "type": "string"
+              },
+              {
+                "const": "dir",
+                "description": "A directory.",
+                "type": "string"
+              },
+              {
+                "const": "symlink",
+                "description": "A symbolic link (not followed by `fs.list`).",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `fs.list`: directories first, then the rest, each by name; `.git` is never listed.",
+        "properties": {
+          "entries": {
+            "description": "One page of entries.",
+            "items": {
+              "$ref": "#/$defs/FsEntry"
+            },
+            "type": "array"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "nextCursor": {
+            "description": "Pass it as `cursor` for the next page; absent on the last page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "FsListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fs.read",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `fs.read`.",
+        "properties": {
+          "path": {
+            "description": "The file, relative to the root.",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree holds the file."
+          }
+        },
+        "required": [
+          "runId",
+          "path"
+        ],
+        "title": "FsReadParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "LineEnding": {
+            "description": "How a text file ends its lines.",
+            "oneOf": [
+              {
+                "const": "lf",
+                "description": "`\\n` only.",
+                "type": "string"
+              },
+              {
+                "const": "crlf",
+                "description": "`\\r\\n` only.",
+                "type": "string"
+              },
+              {
+                "const": "mixed",
+                "description": "More than one kind.",
+                "type": "string"
+              },
+              {
+                "const": "none",
+                "description": "No line ends at all.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `fs.read`.",
+        "properties": {
+          "binary": {
+            "description": "The file is not text (it holds NUL bytes): no `text`.",
+            "type": "boolean"
+          },
+          "contentHash": {
+            "description": "SHA-256 of the bytes that were read (the whole file unless `truncated`), in lower-case\nhex: equal hashes mean equal content. Absent for a binary file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "encoding": {
+            "description": "`utf-8`; `utf-8-bom` when the file started with a byte order mark (not in `text`);\n`utf-8-lossy` when invalid bytes were replaced; `binary`.",
+            "type": "string"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "lineEnding": {
+            "$ref": "#/$defs/LineEnding",
+            "description": "How its lines end."
+          },
+          "mtimeMs": {
+            "description": "When the file was last modified, in milliseconds since the Unix epoch.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "The file.",
+            "type": "string"
+          },
+          "size": {
+            "description": "The file's size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "description": "Its text, cut to [`FS_READ_MAX_BYTES`]; absent for a binary file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "description": "The file is longer than what `text` holds.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "truncated",
+          "encoding",
+          "lineEnding",
+          "size",
+          "binary"
+        ],
+        "title": "FsReadResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fs.read_image",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `fs.read_image`.",
+        "properties": {
+          "offset": {
+            "default": 0,
+            "description": "The byte to start at: 0, then each chunk's `offset + length`.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "The image (png, jpg, gif, webp or svg), relative to the root.",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree holds the image."
+          }
+        },
+        "required": [
+          "runId",
+          "path"
+        ],
+        "title": "FsReadImageParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `fs.read_image`: one chunk of at most [`FS_IMAGE_CHUNK_BYTES`].",
+        "properties": {
+          "data": {
+            "description": "The chunk's bytes, standard base64.",
+            "type": "string"
+          },
+          "eof": {
+            "description": "The chunk reaches the end of the image.",
+            "type": "boolean"
+          },
+          "hash": {
+            "description": "SHA-256 of the whole image, in lower-case hex: the same on every chunk of one image, and\na change between chunks means the file changed underneath (start again).",
+            "type": "string"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "mime": {
+            "description": "Its media type, such as `image/png`.",
+            "type": "string"
+          },
+          "offset": {
+            "description": "Where this chunk starts.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "The image.",
+            "type": "string"
+          },
+          "size": {
+            "description": "The whole image's size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "mime",
+          "size",
+          "offset",
+          "data",
+          "eof",
+          "hash"
+        ],
+        "title": "FsImageChunk",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fs.search_files",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `fs.search_files`.",
+        "properties": {
+          "limit": {
+            "description": "At most this many ([`FS_SEARCH_DEFAULT_LIMIT`] when absent).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "The characters of a file's path, in order (a fuzzy match on the name).",
+            "type": "string"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree to search."
+          }
+        },
+        "required": [
+          "runId",
+          "query"
+        ],
+        "title": "FsSearchFilesParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FsFileMatch": {
+            "description": "One file `fs.search_files` found.",
+            "properties": {
+              "path": {
+                "description": "The file, relative to the root.",
+                "type": "string"
+              },
+              "score": {
+                "description": "How well it matches: higher is better.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "score"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `fs.search_files`: best match first. Gitignored files are not searched unless git\ntracks them; `.git` never is.",
+        "properties": {
+          "files": {
+            "description": "The matches.",
+            "items": {
+              "$ref": "#/$defs/FsFileMatch"
+            },
+            "type": "array"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "More files matched than `limit` allowed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "files",
+          "truncated"
+        ],
+        "title": "FsSearchFilesResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "fs.search_content",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `fs.search_content`.",
+        "properties": {
+          "ignoreCase": {
+            "default": false,
+            "description": "Match upper and lower case alike.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "At most this many lines ([`FS_SEARCH_DEFAULT_LIMIT`] when absent).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "The text to find: literal, or an extended regular expression with `regex`.",
+            "type": "string"
+          },
+          "regex": {
+            "default": false,
+            "description": "Read `query` as an extended regular expression.",
+            "type": "boolean"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree to search."
+          }
+        },
+        "required": [
+          "runId",
+          "query"
+        ],
+        "title": "FsSearchContentParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "FsContentMatch": {
+            "description": "One line `fs.search_content` found.",
+            "properties": {
+              "column": {
+                "default": 0,
+                "description": "The byte offset of the first match in the line, from 0 (before the line was cut).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "line": {
+                "description": "The line, from 1.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "description": "The file, relative to the root.",
+                "type": "string"
+              },
+              "text": {
+                "description": "The line's text, cut at 500 characters.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `fs.search_content`, by file then line. Binary files and gitignored files are not\nsearched.",
+        "properties": {
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "matches": {
+            "description": "The matching lines.",
+            "items": {
+              "$ref": "#/$defs/FsContentMatch"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "description": "More lines matched than `limit` allowed.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "matches",
+          "truncated"
+        ],
+        "title": "FsSearchContentResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "git.status",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `git.status`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree to ask about."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "GitStatusParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "GitChange": {
+            "description": "What git says about one side of a path (the index, or the working tree).",
+            "oneOf": [
+              {
+                "const": "unmodified",
+                "description": "No change on this side.",
+                "type": "string"
+              },
+              {
+                "const": "modified",
+                "description": "Content changed.",
+                "type": "string"
+              },
+              {
+                "const": "added",
+                "description": "New.",
+                "type": "string"
+              },
+              {
+                "const": "deleted",
+                "description": "Removed.",
+                "type": "string"
+              },
+              {
+                "const": "renamed",
+                "description": "Renamed (see `oldPath`).",
+                "type": "string"
+              },
+              {
+                "const": "copied",
+                "description": "Copied (see `oldPath`).",
+                "type": "string"
+              },
+              {
+                "const": "type_changed",
+                "description": "Its type changed (file to symlink, say).",
+                "type": "string"
+              },
+              {
+                "const": "untracked",
+                "description": "Not tracked by git (both sides).",
+                "type": "string"
+              },
+              {
+                "const": "conflicted",
+                "description": "A merge conflict (both sides).",
+                "type": "string"
+              }
+            ]
+          },
+          "GitFileStatus": {
+            "description": "One path `git.status` reports.",
+            "properties": {
+              "index": {
+                "$ref": "#/$defs/GitChange",
+                "description": "Its state in the index (what is staged)."
+              },
+              "oldPath": {
+                "description": "Where it came from, for a rename or a copy.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "description": "The path, relative to the root.",
+                "type": "string"
+              },
+              "worktree": {
+                "$ref": "#/$defs/GitChange",
+                "description": "Its state in the working tree (what is not staged)."
+              }
+            },
+            "required": [
+              "path",
+              "index",
+              "worktree"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `git.status`: `git status --porcelain=v2` of the worktree, changed paths only,\nsorted by path.",
+        "properties": {
+          "branch": {
+            "description": "The checked-out branch; absent when HEAD is detached or the folder is not a repository.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files": {
+            "description": "The changed paths.",
+            "items": {
+              "$ref": "#/$defs/GitFileStatus"
+            },
+            "type": "array"
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and is served from its working directory.",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "The folder is inside a git repository. False for a non-git folder served in place.",
+            "type": "boolean"
+          },
+          "revision": {
+            "default": "",
+            "description": "A digest of `branch` and `files`: the same while nothing changed, so a client can skip\nredrawing.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "files"
+        ],
+        "title": "GitStatusResult",
         "type": "object"
       }
     },
@@ -21281,6 +21978,61 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of the `executors.watch` subscription.",
         "title": "ExecutorsWatchParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of `fs.watch`: a settled burst of changes.",
+        "properties": {
+          "degraded": {
+            "default": false,
+            "description": "Live updates are down: the watcher could not start (the platform's pool is used up) and\nthe daemon is retrying with a growing delay. The next item without `degraded` has\n`overflow` set.",
+            "type": "boolean"
+          },
+          "dirs": {
+            "default": [],
+            "description": "The directories whose entries changed (created, removed, renamed or written inside),\nrelative to the root, sorted; the root is the empty string. Empty with `overflow`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "git": {
+            "default": false,
+            "description": "Git's own state changed (the index, `HEAD` or a ref): ask `git.status` again.",
+            "type": "boolean"
+          },
+          "overflow": {
+            "default": false,
+            "description": "Too much changed to list, or events were lost (a slow reader, or a watch that was down and\ncame back): rescan everything that is shown.",
+            "type": "boolean"
+          }
+        },
+        "title": "FsChange",
+        "type": "object"
+      },
+      "name": "fs.watch",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `fs.watch` subscription.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree to watch. The daemon watches it only while this subscription\nlives."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "FsWatchParams",
         "type": "object"
       }
     }

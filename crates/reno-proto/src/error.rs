@@ -56,6 +56,12 @@ pub enum ErrorCode {
     NothingToDo,
     /// -32012: the executor has no updater to run.
     NoUpdater,
+    /// -32013: the run's files cannot be shown: its worktree was removed, is gone, or the run
+    /// has no folder.
+    WorkspaceUnavailable,
+    /// -32014: the path is refused by the sandbox: it climbs out of the root (`..`), is absolute,
+    /// leaves the root through a symlink, or reaches into `.git`.
+    PathRejected,
     /// A code this version does not know. Never produced by this crate's own servers.
     Other(i32),
 }
@@ -81,6 +87,8 @@ impl ErrorCode {
             Self::JobRunning => -32010,
             Self::NothingToDo => -32011,
             Self::NoUpdater => -32012,
+            Self::WorkspaceUnavailable => -32013,
+            Self::PathRejected => -32014,
             Self::Other(code) => code,
         }
     }
@@ -105,6 +113,8 @@ impl ErrorCode {
             -32010 => Self::JobRunning,
             -32011 => Self::NothingToDo,
             -32012 => Self::NoUpdater,
+            -32013 => Self::WorkspaceUnavailable,
+            -32014 => Self::PathRejected,
             other => Self::Other(other),
         }
     }
@@ -179,6 +189,8 @@ mod tests {
         (ErrorCode::JobRunning, -32010),
         (ErrorCode::NothingToDo, -32011),
         (ErrorCode::NoUpdater, -32012),
+        (ErrorCode::WorkspaceUnavailable, -32013),
+        (ErrorCode::PathRejected, -32014),
     ];
 
     #[test]

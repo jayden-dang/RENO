@@ -27,6 +27,11 @@ use crate::defs::{
 };
 use crate::exec::SessionRef;
 use crate::exec::{ApprovalSubject, ExecEvent, ResolvedBy};
+use crate::files::{
+    FsChange, FsImageChunk, FsListParams, FsListResult, FsReadImageParams, FsReadParams,
+    FsReadResult, FsSearchContentParams, FsSearchContentResult, FsSearchFilesParams,
+    FsSearchFilesResult, FsWatchParams, GitStatusParams, GitStatusResult,
+};
 use crate::health::{
     ExecutorAutoUpdateSetParams, ExecutorFramesParams, ExecutorFramesResult, ExecutorInstallParams,
     ExecutorInstallResult, ExecutorJobLogResult, ExecutorJobParams, ExecutorJobResult,
@@ -184,6 +189,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_CHANGES,
     crate::usage::FEATURE_EXECUTOR_USAGE,
     FEATURE_THREADS,
+    crate::files::FEATURE_FILES,
 ];
 
 /// A request with a single reply.
@@ -967,6 +973,36 @@ method!(
     WorkspaceClean, "workspace.clean", WorkspaceCleanParams => WorkspaceCleanResult
 );
 method!(
+    /// `fs.list`: one page of a directory of a run's worktree. Person-only. Needs feature
+    /// `files`.
+    FsList, "fs.list", FsListParams => FsListResult
+);
+method!(
+    /// `fs.read`: a text file of a run's worktree (cut at 1 MiB), or the fact that it is binary.
+    /// Person-only. Needs feature `files`.
+    FsRead, "fs.read", FsReadParams => FsReadResult
+);
+method!(
+    /// `fs.read_image`: one 256 KiB chunk of an image of a run's worktree. Person-only. Needs
+    /// feature `files`.
+    FsReadImage, "fs.read_image", FsReadImageParams => FsImageChunk
+);
+method!(
+    /// `fs.search_files`: files of a run's worktree whose path matches a query, fuzzily.
+    /// Person-only. Needs feature `files`.
+    FsSearchFiles, "fs.search_files", FsSearchFilesParams => FsSearchFilesResult
+);
+method!(
+    /// `fs.search_content`: lines of a run's worktree that match a query (`git grep`).
+    /// Person-only. Needs feature `files`.
+    FsSearchContent, "fs.search_content", FsSearchContentParams => FsSearchContentResult
+);
+method!(
+    /// `git.status`: what changed in a run's worktree, staged and not. Person-only. Needs
+    /// feature `files`.
+    GitStatus, "git.status", GitStatusParams => GitStatusResult
+);
+method!(
     /// `secret.list`: the names of the secrets in the Keychain and of those bots ask for, and
     /// whether each is set. Never a value. Needs feature `secrets`.
     SecretList, "secret.list", NoParams => SecretListResult
@@ -1079,6 +1115,12 @@ subscription!(
     TriggersWatch, "triggers.watch", TriggersWatchParams => TriggersSnapshot
 );
 subscription!(
+    /// `fs.watch`: the directories of a run's worktree that changed, in settled bursts, only
+    /// while subscribed. Each item has a sequence number: a reader that falls behind gets
+    /// `sub.gap`, and subscribes again and rescans. Person-only. Needs feature `files`.
+    FsWatch, "fs.watch", FsWatchParams => FsChange
+);
+subscription!(
     /// `executors.watch`: every executor and its last health, replaced on every change. Needs
     /// feature `executors`.
     ExecutorsWatch, "executors.watch", ExecutorsWatchParams => ExecutorsSnapshot
@@ -1163,6 +1205,12 @@ pub fn protocol_schema() -> Value {
             method_entry::<WorkspaceGet>(),
             method_entry::<WorkspaceDiff>(),
             method_entry::<WorkspaceClean>(),
+            method_entry::<FsList>(),
+            method_entry::<FsRead>(),
+            method_entry::<FsReadImage>(),
+            method_entry::<FsSearchFiles>(),
+            method_entry::<FsSearchContent>(),
+            method_entry::<GitStatus>(),
             method_entry::<SecretList>(),
             method_entry::<SecretSet>(),
             method_entry::<SecretDelete>(),
@@ -1199,6 +1247,7 @@ pub fn protocol_schema() -> Value {
             subscription_entry::<DefsWatch>(),
             subscription_entry::<TriggersWatch>(),
             subscription_entry::<ExecutorsWatch>(),
+            subscription_entry::<FsWatch>(),
         ],
     })
 }

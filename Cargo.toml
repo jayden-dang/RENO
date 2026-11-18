@@ -83,6 +83,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 
 # Harness layer (imported).
 async-trait = "0.1"
+base64 = "0.22"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 filetime = "0.2"

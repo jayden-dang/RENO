@@ -32,8 +32,9 @@ fn the_names_and_the_feature() {
     assert_eq!(ThreadList::NAME, "thread.list");
     assert_eq!(ThreadGet::NAME, "thread.get");
     assert_eq!(ThreadClose::NAME, "thread.close");
-    // The feature is appended: nothing earlier moved.
-    assert_eq!(FEATURES.last(), Some(&FEATURE_THREADS));
+    // Appended: nothing earlier moved (later features follow it).
+    let at = FEATURES.iter().position(|f| *f == FEATURE_THREADS).unwrap();
+    assert_eq!(at, FEATURES.len() - 2);
     const { assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT) };
 }
 

@@ -12,6 +12,7 @@ mod commands;
 mod daemon;
 mod defs;
 mod env;
+mod files;
 mod follow;
 mod mcp;
 mod policy;
@@ -66,6 +67,8 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Budget => commands::budget(env).await,
         Command::Workspace(command) => commands::workspace(env, command).await,
         Command::Thread(command) => commands::thread(env, command).await,
+        Command::Fs(command) => files::fs(env, command).await,
+        Command::Git(command) => files::git(env, command).await,
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
         Command::Secret(command) => secret::run(env, command).await,
