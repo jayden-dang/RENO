@@ -97,7 +97,8 @@ impl Installer {
     pub(crate) fn new(registry: &ExecutorRegistry, stop: CancellationToken) -> Self {
         let executors = registry
             .ids()
-            .filter_map(|id| Some((id.clone(), Arc::clone(registry.get(id)?))))
+            .into_iter()
+            .filter_map(|id| registry.get(&id).map(|executor| (id, executor)))
             .collect();
         Self {
             executors,

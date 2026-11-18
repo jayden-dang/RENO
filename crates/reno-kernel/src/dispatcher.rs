@@ -550,7 +550,7 @@ async fn attempt(
         Some(redactor) => redactor.redact_str(&text).into_owned(),
         None => text,
     };
-    let Some(executor) = shared.executors.get(id).cloned() else {
+    let Some(executor) = shared.executors.get(id) else {
         return Attempt::Failed {
             why: format!("unknown executor {id}"),
             refusal: StartRefusal::Invalid,

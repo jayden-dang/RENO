@@ -520,7 +520,13 @@ impl Store {
 
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
-        self.start_fake_with(FakeConfig::default(), cx);
+        self.start_fake_with(
+            FakeConfig {
+                registry_agents: true,
+                ..FakeConfig::default()
+            },
+            cx,
+        );
     }
 
     /// Like [`Store::start_fake`], with a config (an empty world, missing features).

@@ -335,6 +335,14 @@ pub struct ExecutorInfo {
     /// there is none (a job that succeeded leaves no trace: the fresh health shows the result).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job: Option<ExecutorJob>,
+    /// Whether Reno drives this executor itself or it was added from the ACP registry (feature
+    /// `executor.registry`). Left off the wire for a built-in one, which is also what a daemon
+    /// without the feature means.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::registry::ExecutorSource::is_builtin"
+    )]
+    pub source: crate::registry::ExecutorSource,
 }
 
 /// What a person and Reno can do to install, update and sign in to one executor (feature

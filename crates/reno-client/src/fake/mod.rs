@@ -43,6 +43,7 @@ mod extras;
 pub mod files;
 mod history;
 mod jobs;
+mod registry;
 mod script;
 pub mod terminals;
 mod world;
@@ -89,6 +90,10 @@ pub struct FakeConfig {
     pub empty: bool,
     /// How long a simulated executor install or update takes, on tokio time. Default 3 s.
     pub job_duration: Duration,
+    /// Start with agents added from the ACP registry (see the `registry` module for each one's
+    /// state): the demo `--fake` runs with them, tests that count executors do not. The registry
+    /// index itself is always served. Default false.
+    pub registry_agents: bool,
 }
 
 impl Default for FakeConfig {
@@ -101,6 +106,7 @@ impl Default for FakeConfig {
             without_features: Vec::new(),
             empty: false,
             job_duration: Duration::from_secs(3),
+            registry_agents: false,
         }
     }
 }
@@ -227,7 +233,12 @@ impl FakeDaemon {
         } else {
             data::seed().map_err(|e| ClientError::Protocol(e.to_string()))?
         };
-        let world = World::from_seed(seed, &cancel);
+        let mut world = World::from_seed(seed, &cancel);
+        if config.registry_agents {
+            world
+                .executors
+                .extend(registry::seed().map_err(|e| ClientError::Protocol(e.to_string()))?);
+        }
         let (runs_tx, _) = watch::channel(world.summaries());
         let (approvals_tx, _) = watch::channel(world.pending());
         let (triggers_tx, _) = watch::channel(world.triggers.clone());
@@ -306,6 +317,11 @@ impl FakeDaemon {
         self.shared.with(|w| {
             w.jobs.fail_next = Some((failure, detail.to_owned()));
         });
+    }
+
+    /// Serves the registry index from its cache, as when the device is offline.
+    pub fn set_registry_offline(&self, offline: bool) {
+        self.shared.with(|w| w.registry.offline = offline);
     }
 
     /// Sets how many runs `id` has in flight. An update waits (`queued`) while it is above zero,
@@ -1041,8 +1057,10 @@ fn router(shared: &Arc<Shared>) -> Router {
         let s = Arc::clone(&s);
         async move {
             injected(&s, "executor.job.dismiss")?;
+            // (As the daemon answers: the agent as it was, which a failed add then leaves.)
+            let before = executor_result(&s, &p.id)?;
             s.with(|w| w.dismiss_job(&p.id))?;
-            executor_result(&s, &p.id)
+            Ok(executor_result(&s, &p.id).unwrap_or(before))
         }
     };
 
@@ -1063,6 +1081,68 @@ fn router(shared: &Arc<Shared>) -> Router {
             injected(&s, "executor.auto_update.set")?;
             s.with(|w| w.set_auto_update(&p.id, p.on, p.verified_only))?;
             executor_result(&s, &p.id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_list = move |_: reno_proto::ExecutorRegistryListParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.list")?;
+            s.read(|w| w.registry_list())
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_add = move |p: reno_proto::ExecutorRegistryParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.add")?;
+            let (id, plan) = s.with(|w| w.registry_add(&p.id, &s.cancel))?;
+            if let Some(plan) = plan {
+                jobs::spawn(&s, plan, s.config.job_duration);
+            }
+            executor_result(&s, &id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_remove = move |p: reno_proto::ExecutorRegistryParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.remove")?;
+            let executor = s.with(|w| w.registry_remove(&p.id))?;
+            Ok(reno_proto::ExecutorRegistryRemoveResult { executor })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_add_own = move |p: reno_proto::ExecutorRegistryAddOwnParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.add_own")?;
+            let id = s.with(|w| w.registry_add_own(&p.name, &p.command, &p.env))?;
+            executor_result(&s, &id)
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_env_get = move |p: reno_proto::ExecutorRegistryParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.env_get")?;
+            let env = s.read(|w| w.registry_env_get(&p.id))?;
+            Ok(reno_proto::ExecutorRegistryEnvResult { id: p.id, env })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let registry_env_set = move |p: reno_proto::ExecutorRegistryEnvSetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.registry.env_set")?;
+            let env = s.with(|w| w.registry_env_set(&p.id, &p.env))?;
+            Ok(reno_proto::ExecutorRegistryEnvResult { id: p.id, env })
         }
     };
 
@@ -1229,6 +1309,12 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::ExecutorJobLog, _, _>(executor_job_log)
         .method::<reno_proto::ExecutorAutoUpdateSet, _, _>(executor_auto_update_set)
         .method::<reno_proto::ExecutorFrames, _, _>(executor_frames)
+        .method::<reno_proto::ExecutorRegistryList, _, _>(registry_list)
+        .method::<reno_proto::ExecutorRegistryAdd, _, _>(registry_add)
+        .method::<reno_proto::ExecutorRegistryRemove, _, _>(registry_remove)
+        .method::<reno_proto::ExecutorRegistryAddOwn, _, _>(registry_add_own)
+        .method::<reno_proto::ExecutorRegistryEnvGet, _, _>(registry_env_get)
+        .method::<reno_proto::ExecutorRegistryEnvSet, _, _>(registry_env_set)
         .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
         .method::<reno_proto::DefList, _, _>(def_list)
         .method::<reno_proto::DefGet, _, _>(def_get)

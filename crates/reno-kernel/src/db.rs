@@ -656,6 +656,11 @@ impl Db {
             .await
     }
 
+    pub(crate) async fn delete_executor_health(&self, executor: &ExecutorId) -> Result<()> {
+        self.wrote();
+        self.store.delete_executor_health(executor).await
+    }
+
     pub(crate) async fn put_executor_setting(
         &self,
         setting: &reno_store::ExecutorSetting,

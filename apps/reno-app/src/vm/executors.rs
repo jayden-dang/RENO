@@ -985,6 +985,7 @@ mod tests {
             health,
             maintenance: None,
             job: None,
+            source: Default::default(),
         }
     }
 
@@ -1471,6 +1472,7 @@ mod roster_tests {
             health,
             maintenance,
             job,
+            source: Default::default(),
         }
     }
 

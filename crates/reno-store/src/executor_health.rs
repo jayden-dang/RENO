@@ -56,6 +56,20 @@ impl Store {
         .await
     }
 
+    /// Forgets the stored health of `executor` (an agent removed from this device), so one added
+    /// again later starts from nothing instead of a stale sign-in.
+    pub async fn delete_executor_health(&self, executor: &ExecutorId) -> Result<()> {
+        let executor = executor.clone();
+        self.write(Durability::Normal, move |c| {
+            c.prepare_cached("DELETE FROM executor_health WHERE executor = ?1")
+                .db()?
+                .execute(params![executor.as_str()])
+                .db()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// The latest stored health of every executor that has one, by executor id.
     ///
     /// A row that no longer reads as the current wire type (written by a build with a different

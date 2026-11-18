@@ -153,6 +153,12 @@ pub trait Executor: Send + Sync {
     fn maintenance(&self) -> Option<maintenance::MaintenanceDecl> {
         None
     }
+
+    /// Whether Reno drives this harness itself or it is an agent added from the ACP registry
+    /// (or the person's own). The default is built in.
+    fn source(&self) -> reno_proto::ExecutorSource {
+        reno_proto::ExecutorSource::Builtin
+    }
 }
 
 /// Why [`Executor::start`] refused a run. Every variant means nothing was spawned.

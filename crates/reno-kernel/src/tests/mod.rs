@@ -23,6 +23,7 @@ mod maintain;
 mod protect;
 mod queue;
 mod recovery;
+mod registry_live;
 mod resume;
 mod routing;
 mod rules;

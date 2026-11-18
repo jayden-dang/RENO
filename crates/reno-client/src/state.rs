@@ -969,6 +969,7 @@ mod tests {
             health: None,
             maintenance: None,
             job: None,
+            source: Default::default(),
         };
         let mut s = State::new();
         assert_eq!(s.feed(Feed::Executors), FeedState::Loading);

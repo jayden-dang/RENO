@@ -207,7 +207,7 @@ impl Kernel {
         let has_definitions = definitions.is_some();
         let context = match &definitions {
             Some(setup) => setup.context.clone(),
-            None => ValidationContext::with_builtin(executors.ids().cloned()),
+            None => ValidationContext::with_builtin(executors.ids().into_iter()),
         };
         let mut shared = Shared::new(
             Db::new(store, clock),
@@ -1555,6 +1555,7 @@ pub(crate) fn plan_route(
     let candidates: Vec<Candidate> = shared
         .executors
         .ids()
+        .iter()
         .filter_map(|id| {
             Some(Candidate {
                 descriptor: shared.executors.get(id)?.descriptor(),
@@ -1605,8 +1606,14 @@ pub(crate) fn plan_route(
                 .default_executors
                 .iter()
                 .find(registered)
-                .or_else(|| shared.executors.ids().min_by_key(|id| id.as_str()))
-                .cloned(),
+                .cloned()
+                .or_else(|| {
+                    shared
+                        .executors
+                        .ids()
+                        .into_iter()
+                        .min_by_key(|id| id.to_string())
+                }),
         })
         .ok_or_else(|| KernelError::NoExecutor(bot.unwrap_or("(any)").to_owned()))?;
     // Refused before anything is queued: the run would fail at start, or silently run at another

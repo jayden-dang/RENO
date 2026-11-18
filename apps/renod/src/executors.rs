@@ -242,7 +242,8 @@ mod tests {
     #[test]
     fn without_harnesses_only_the_mock_is_registered_and_nothing_is_probed() {
         let set = discover(false, false).expect("discover");
-        let ids: Vec<_> = set.registry.ids().map(ExecutorId::as_str).collect();
+        let ids = set.registry.ids();
+        let ids: Vec<_> = ids.iter().map(ExecutorId::as_str).collect();
         assert_eq!(ids, [MOCK_ID]);
         assert!(set.harnesses.is_empty());
     }

@@ -74,6 +74,37 @@ pub struct MaintenancePorts {
     pub check_at_start: bool,
 }
 
+/// The install of an agent from the ACP registry, as the daemon builds it (ARCH-7: the download
+/// is the daemon's I/O, not the kernel's).
+pub type InstallWork = Arc<
+    dyn Fn() -> futures::future::BoxFuture<'static, std::result::Result<(), HarnessError>>
+        + Send
+        + Sync,
+>;
+
+/// What the kernel asks of the ACP registry: the newest version it lists and the work that installs
+/// it. The index, its cache and the installs are the daemon's.
+pub trait RegistryPort: Send + Sync + std::fmt::Debug {
+    /// The version the index lists for registry agent `id`; `None` when it lists none (the agent
+    /// is delisted, or the index cannot be read and nothing is cached).
+    fn latest<'a>(&'a self, id: &'a str) -> futures::future::BoxFuture<'a, Option<String>>;
+    /// The work that installs registry agent `id` at the index's version; `None` when the index
+    /// does not list it.
+    fn install_work<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> futures::future::BoxFuture<'a, Option<InstallWork>>;
+}
+
+#[derive(Clone)]
+struct WorkFn(InstallWork);
+
+impl std::fmt::Debug for WorkFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkFn")
+    }
+}
+
 /// What a started job does.
 #[derive(Debug, Clone)]
 enum Work {
@@ -81,15 +112,34 @@ enum Work {
     Steps(Vec<String>),
     /// The adapter's own `Executor::install`.
     Managed,
+    /// The install of an agent from the ACP registry.
+    Registry(WorkFn),
 }
 
 impl Work {
     fn steps(&self) -> u32 {
         match self {
             Self::Steps(steps) => u32::try_from(steps.len()).unwrap_or(u32::MAX),
-            Self::Managed => 1,
+            Self::Managed | Self::Registry(_) => 1,
         }
     }
+}
+
+/// The registry id of an agent added from the ACP registry (`acp.gemini` is `gemini`); `None`
+/// for any other executor, and for the person's own agents (`acp.own.<slug>`), which Reno never
+/// installs or updates.
+fn registry_id(id: &ExecutorId) -> Option<&str> {
+    id.as_str()
+        .strip_prefix("acp.")
+        .filter(|rest| !rest.starts_with("own."))
+}
+
+fn is_registry_agent(shared: &Shared, id: &ExecutorId) -> bool {
+    registry_id(id).is_some()
+        && shared
+            .executors
+            .get(id)
+            .is_some_and(|e| e.source() == reno_proto::ExecutorSource::Registry)
 }
 
 struct JobState {
@@ -150,6 +200,9 @@ struct State {
     runs: HashMap<ExecutorId, u32>,
     /// Executors whose daily check is running.
     checking: std::collections::HashSet<ExecutorId>,
+    /// Executors being removed: they take no run and no job from the moment the removal is
+    /// decided.
+    removing: std::collections::HashSet<ExecutorId>,
     next_job: u64,
 }
 
@@ -161,6 +214,8 @@ pub(crate) struct Maintainer {
     changed: Notify,
     /// Output lines are waiting to be published.
     dirty: Notify,
+    /// The ACP registry, when the daemon has one (`Kernel::attach_registry`).
+    registry: Mutex<Option<Arc<dyn RegistryPort>>>,
 }
 
 impl std::fmt::Debug for Maintainer {
@@ -221,6 +276,9 @@ impl Shared {
 }
 
 fn busy(state: &State, id: &ExecutorId) -> Option<String> {
+    if state.removing.contains(id) {
+        return Some(format!("{id} is being removed"));
+    }
     let job = state.jobs.get(id)?;
     matches!(job.phase, JobPhase::Running { .. }).then(|| {
         let what = match job.kind {
@@ -234,6 +292,13 @@ fn busy(state: &State, id: &ExecutorId) -> Option<String> {
 impl Maintainer {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn registry_port(&self) -> Option<Arc<dyn RegistryPort>> {
+        self.registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Tells the maintenance task that something it looks at changed.
@@ -287,6 +352,32 @@ impl Maintainer {
         let resolved = self.resolved(shared, &id, info.health.as_ref());
         let state = self.state();
         info.job = state.jobs.get(&id).map(JobState::wire);
+        if resolved.is_none() && is_registry_agent(shared, &id) {
+            // An agent from the registry updates by adding it again at the index's version.
+            let installed = matches!(
+                info.health.as_ref().map(|h| &h.installed),
+                Some(InstallStatus::Installed { .. })
+            );
+            let setting = Self::setting(&state, &id);
+            let latest = state.latest.get(&id);
+            info.maintenance = Some(Maintenance {
+                setup: None,
+                sign_in: None,
+                updater: installed.then(|| UpdaterInfo {
+                    command: format!("reno executor add {}", registry_id(&id).unwrap_or_default()),
+                    self_updating: false,
+                    can_pin: false,
+                    latest: latest.map(|l| l.version.clone()),
+                    checked_at_ms: latest.map(|l| l.at_ms),
+                }),
+                managed: true,
+                auto_update: AutoUpdate {
+                    on: setting.auto_update,
+                    verified_only: false,
+                },
+            });
+            return;
+        }
         let Some(resolved) = resolved else { return };
         let installed = matches!(
             info.health.as_ref().map(|h| &h.installed),
@@ -338,13 +429,14 @@ pub(crate) async fn attach(shared: &Arc<Shared>, ports: MaintenancePorts) -> Res
         }),
         changed: Notify::new(),
         dirty: Notify::new(),
+        registry: Mutex::new(None),
     });
     if shared.maint.set(Arc::clone(&maintainer)).is_err() {
         return Ok(());
     }
     // An executor Reno has no stored check for is first checked a day from now, not at start-up.
     let now = shared.db.now_ms();
-    let ids: Vec<ExecutorId> = shared.executors.ids().cloned().collect();
+    let ids: Vec<ExecutorId> = shared.executors.ids();
     for id in ids {
         let Some(executor) = shared.executors.get(&id) else {
             continue;
@@ -401,7 +493,7 @@ async fn maintenance_loop(shared: Arc<Shared>) {
     let mut woke = shared.system_wake.as_ref().map(|wake| wake.subscribe());
     // Executors still owed their read-only start-up check (`check_at_start`).
     let mut owed: Vec<ExecutorId> = if maintainer.ports.check_at_start {
-        shared.executors.ids().cloned().collect()
+        shared.executors.ids()
     } else {
         Vec::new()
     };
@@ -432,6 +524,15 @@ fn start_up_checks(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>, owed: &mu
         let Some(health) = shared.any_health(id) else {
             return true; // not probed yet: wait for it
         };
+        if is_registry_agent(shared, id) {
+            if health.installed.version().is_some() && maintainer.registry_port().is_some() {
+                let (shared, maintainer, id) =
+                    (Arc::clone(shared), Arc::clone(maintainer), id.clone());
+                let task = Arc::clone(&shared);
+                task.spawn(async move { refresh_registry_latest(&shared, &maintainer, &id).await });
+            }
+            return false;
+        }
         let resolved = maintainer.resolved(shared, id, Some(&health));
         let Some(updater) = resolved.as_deref().and_then(Resolved::updater).cloned() else {
             return false;
@@ -654,8 +755,10 @@ async fn start(
     let executor = shared
         .executors
         .get(id)
-        .cloned()
         .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))?;
+    if is_registry_agent(shared, id) {
+        return start_registry_job(shared, &maintainer, id, kind, force, idle_only).await;
+    }
     let mut health = shared.any_health(id);
     if health.is_none() {
         // The auto-update (`idle_only`) is not a person's request: quiet. A job a person started
@@ -789,6 +892,20 @@ async fn run_job(
             .await
         }
         Work::Managed => managed(&shared, &maintainer, &id, &job, &cancel, limits).await,
+        Work::Registry(work) => {
+            let label = format!("install {id} from the ACP registry");
+            run_install(
+                &shared,
+                &maintainer,
+                &id,
+                &job,
+                &cancel,
+                limits,
+                label,
+                work.0(),
+            )
+            .await
+        }
     };
     finish(&shared, &maintainer, &id, &job, kind, by_person, outcome).await;
 }
@@ -801,12 +918,38 @@ async fn managed(
     cancel: &CancellationToken,
     limits: Limits,
 ) -> Outcome {
-    let Some(executor) = shared.executors.get(id).cloned() else {
+    let Some(executor) = shared.executors.get(id) else {
         return Outcome::Failed {
             failure: JobFailure::Broken,
             detail: format!("executor {id} is not registered"),
         };
     };
+    let label = format!("install {id}'s adapter");
+    run_install(
+        shared,
+        maintainer,
+        id,
+        job,
+        cancel,
+        limits,
+        label,
+        install_managed(executor),
+    )
+    .await
+}
+
+/// Runs one install future as a job's only step: bounded by the ceiling, cancellable.
+#[allow(clippy::too_many_arguments)]
+async fn run_install(
+    shared: &Arc<Shared>,
+    maintainer: &Arc<Maintainer>,
+    id: &ExecutorId,
+    job: &str,
+    cancel: &CancellationToken,
+    limits: Limits,
+    label: String,
+    installing: futures::future::BoxFuture<'static, std::result::Result<(), HarnessError>>,
+) -> Outcome {
     apply(
         shared,
         maintainer,
@@ -815,10 +958,9 @@ async fn managed(
         Progress::Step {
             n: 1,
             of: 1,
-            command: format!("install {id}'s adapter"),
+            command: label,
         },
     );
-    let installing = install_managed(executor);
     tokio::select! {
         biased;
         () = cancel.cancelled() => Outcome::Failed {
@@ -847,8 +989,10 @@ async fn managed(
     }
 }
 
-async fn install_managed(executor: Arc<dyn Executor>) -> std::result::Result<(), HarnessError> {
-    executor.install().await
+fn install_managed(
+    executor: Arc<dyn Executor>,
+) -> futures::future::BoxFuture<'static, std::result::Result<(), HarnessError>> {
+    Box::pin(async move { executor.install().await })
 }
 
 /// Applies a line of progress to the job, if it is still the one running.
@@ -976,7 +1120,7 @@ fn daily_round(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>) -> Option<Dur
     let now = shared.db.now_ms();
     let mut next: Option<i64> = None;
     let mut due: Vec<ExecutorId> = Vec::new();
-    let mut ids: Vec<ExecutorId> = shared.executors.ids().cloned().collect();
+    let mut ids: Vec<ExecutorId> = shared.executors.ids();
     ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for id in ids {
         let health = shared.any_health(&id);
@@ -985,7 +1129,10 @@ fn daily_round(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>) -> Option<Dur
             health.as_ref().map(|h| &h.installed),
             Some(InstallStatus::Installed { .. })
         );
-        if !installed || resolved.as_deref().and_then(Resolved::updater).is_none() {
+        let registry_agent = is_registry_agent(shared, &id) && maintainer.registry_port().is_some();
+        if !installed
+            || (!registry_agent && resolved.as_deref().and_then(Resolved::updater).is_none())
+        {
             continue;
         }
         let state = maintainer.state();
@@ -1037,6 +1184,27 @@ async fn daily_one(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>, id: &Exec
     let Some(health) = shared.any_health(id) else {
         return;
     };
+    if is_registry_agent(shared, id) {
+        // The newest version comes from the index, and an update is an add job. Background: the
+        // job ends with a quiet probe, which never starts the agent.
+        let setting = Maintainer::setting(&maintainer.state(), id);
+        refresh_registry_latest(shared, maintainer, id).await;
+        let (latest, installed) = (
+            maintainer.state().latest.get(id).map(|l| l.version.clone()),
+            health.installed.version().map(str::to_owned),
+        );
+        if let (true, Some(latest), Some(installed)) = (setting.auto_update, latest, installed)
+            && is_newer(&latest, &installed)
+        {
+            match start(shared, id, JobKind::Update, false, true).await {
+                Ok(_) => tracing::info!(executor = %id, "registry auto-update started"),
+                Err(error) => {
+                    tracing::info!(executor = %id, %error, "registry auto-update did not start")
+                }
+            }
+        }
+        return;
+    }
     let resolved = maintainer.resolved(shared, id, Some(&health));
     let Some(updater) = resolved.as_deref().and_then(Resolved::updater) else {
         return;
@@ -1077,6 +1245,87 @@ async fn daily_one(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>, id: &Exec
         Ok(_) => tracing::info!(executor = %id, "auto-update started"),
         Err(error) => tracing::info!(executor = %id, %error, "auto-update did not start"),
     }
+}
+
+/// Reads the index's version of a registry agent and remembers it (or forgets it: delisted).
+async fn refresh_registry_latest(
+    shared: &Arc<Shared>,
+    maintainer: &Arc<Maintainer>,
+    id: &ExecutorId,
+) {
+    let (Some(port), Some(rid)) = (maintainer.registry_port(), registry_id(id)) else {
+        return;
+    };
+    let latest = port.latest(rid).await;
+    {
+        let mut state = maintainer.state();
+        match latest {
+            Some(version) => {
+                let at_ms = now_ms(shared);
+                state.latest.insert(id.clone(), Latest { version, at_ms });
+            }
+            None => {
+                state.latest.remove(id);
+            }
+        }
+    }
+    shared.publish_executors();
+}
+
+/// Starts (or queues) the install or update of a registry agent: the daemon's install work for
+/// the index's version, as a job like any other. An update needs a newer version in the index;
+/// a delisted agent cannot be updated.
+async fn start_registry_job(
+    shared: &Arc<Shared>,
+    maintainer: &Arc<Maintainer>,
+    id: &ExecutorId,
+    kind: JobKind,
+    force: bool,
+    idle_only: bool,
+) -> Result<ExecutorInfo> {
+    let nothing = |why: &str| KernelError::NothingToDo {
+        executor: id.clone(),
+        why: why.to_owned(),
+    };
+    let (Some(port), Some(rid)) = (maintainer.registry_port(), registry_id(id)) else {
+        return Err(KernelError::NoUpdater(id.clone()));
+    };
+    let health = shared.any_health(id);
+    let installed = health
+        .as_ref()
+        .and_then(|h| h.installed.version().map(str::to_owned));
+    if kind == JobKind::Update {
+        let Some(installed) = installed else {
+            return Err(nothing("it is not installed"));
+        };
+        let Some(latest) = port.latest(rid).await else {
+            return Err(nothing(
+                "the registry no longer lists it, so it cannot be updated",
+            ));
+        };
+        if !is_newer(&latest, &installed) {
+            return Err(nothing("it is up to date"));
+        }
+    } else if installed.is_some() {
+        return Err(nothing("it is already installed"));
+    }
+    let work = port
+        .install_work(rid)
+        .await
+        .ok_or_else(|| nothing("the registry no longer lists it"))?;
+    let plan = Plan {
+        work: Work::Registry(WorkFn(work)),
+        kind,
+    };
+    let started = begin(shared, maintainer, id, plan, force, idle_only)?;
+    if let Begin::Run { job, cancel } = started {
+        spawn_job(shared, maintainer, id, job, cancel);
+    }
+    shared.publish_executors();
+    maintainer.changed.notify_one();
+    shared
+        .published(id)
+        .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))
 }
 
 /// Asks the executor's check command for the newest version and remembers the answer.
@@ -1133,6 +1382,163 @@ impl crate::Kernel {
         start(self.shared(), id, kind, force, false).await
     }
 
+    /// Gives the kernel the ACP registry (ARCH-7): agents added from it are updated against its
+    /// index, and can be added by [`Self::add_registry_executor`]. Needs maintenance attached.
+    pub fn attach_registry(&self, port: Arc<dyn RegistryPort>) -> Result<()> {
+        let maintainer = attached(self.shared())?;
+        *maintainer
+            .registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(port);
+        Ok(())
+    }
+
+    /// Registers `executor` while the daemon runs, and nothing else: an executor with that id
+    /// (built in, or already added) is never replaced. Publishes it on `executors.watch`. With
+    /// `probe`, it ends with the full probe (a person asked for it).
+    pub async fn register_executor(
+        &self,
+        executor: Arc<dyn Executor>,
+        probe: bool,
+    ) -> Result<ExecutorInfo> {
+        let shared = self.shared();
+        let id = executor.descriptor().id;
+        if !shared.executors.insert_new(id.clone(), executor) {
+            return Err(KernelError::NothingToDo {
+                executor: id,
+                why: "an executor with this id is already registered".into(),
+            });
+        }
+        shared.publish_executors();
+        if probe {
+            shared
+                .probe_executor(&id, Probing::Fresh, ProbeDepth::Full)
+                .await?;
+        }
+        self.published(&id)
+    }
+
+    /// `executor.registry.add`: registers the agent (when it is not yet) and installs it as a
+    /// job the person started: it ends with the full probe. The install is the registry port's.
+    /// If the install cannot start, an executor registered here is unregistered again.
+    pub async fn add_registry_executor(&self, executor: Arc<dyn Executor>) -> Result<ExecutorInfo> {
+        let shared = self.shared();
+        let maintainer = attached(shared)?;
+        let id = executor.descriptor().id;
+        if registry_id(&id).is_none() || executor.source() != reno_proto::ExecutorSource::Registry {
+            return Err(KernelError::Invalid(format!(
+                "{id} is not a registry agent"
+            )));
+        }
+        let fresh = shared.executors.insert_new(id.clone(), executor);
+        if !fresh && !is_registry_agent(shared, &id) {
+            return Err(KernelError::NothingToDo {
+                executor: id,
+                why: "an executor with this id is already registered".into(),
+            });
+        }
+        if fresh {
+            shared.publish_executors();
+        }
+        let installed = shared
+            .any_health(&id)
+            .is_some_and(|h| matches!(h.installed, InstallStatus::Installed { .. }));
+        let kind = if installed {
+            JobKind::Update
+        } else {
+            JobKind::Install
+        };
+        match start_registry_job(shared, &maintainer, &id, kind, false, false).await {
+            Ok(info) => Ok(info),
+            Err(error) => {
+                if fresh {
+                    self.forget(&id).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// `executor.registry.remove`: unregisters an agent added from the registry (or the person's
+    /// own), refused while a run on it is queued or live. After this the executor is gone from the
+    /// set and from `executors.watch`; a run that already holds it keeps it. The caller deletes
+    /// the install.
+    pub async fn remove_registry_executor(&self, id: &ExecutorId) -> Result<()> {
+        let shared = self.shared();
+        let executor = shared
+            .executors
+            .get(id)
+            .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))?;
+        let in_use = |why: &str| KernelError::ExecutorInUse {
+            executor: id.clone(),
+            why: why.to_owned(),
+        };
+        if executor.source() != reno_proto::ExecutorSource::Registry {
+            return Err(in_use("Reno drives it itself; it is not an added agent"));
+        }
+        let maintainer = shared.maint.get().cloned();
+        // From here the executor takes no run and no job: the check of the runs standing on it and
+        // the mark are one step relative to `claim_run`.
+        if let Some(maintainer) = &maintainer {
+            let mut state = maintainer.state();
+            if state.runs.get(id).copied().unwrap_or(0) > 0 {
+                return Err(in_use("a run on it is live"));
+            }
+            if state.jobs.get(id).is_some_and(JobState::live) {
+                return Err(in_use("an install or update of it is running"));
+            }
+            if !state.removing.insert(id.clone()) {
+                return Err(in_use("it is already being removed"));
+            }
+        }
+        let unmark = |maintainer: &Option<Arc<Maintainer>>| {
+            if let Some(maintainer) = maintainer {
+                maintainer.state().removing.remove(id);
+            }
+        };
+        // Queued runs (not yet on it) and runs waiting on an approval are in the store.
+        let open = shared.db.nonterminal_runs().await;
+        match open {
+            Ok(runs) if runs.iter().any(|run| &run.executor == id) => {
+                unmark(&maintainer);
+                return Err(in_use("a run on it is queued or live"));
+            }
+            Err(error) => {
+                unmark(&maintainer);
+                return Err(KernelError::Store(error));
+            }
+            Ok(_) => {}
+        }
+        self.forget(id).await;
+        unmark(&maintainer);
+        Ok(())
+    }
+
+    /// Takes `id` out of the set and forgets everything the kernel held for it.
+    async fn forget(&self, id: &ExecutorId) {
+        let shared = self.shared();
+        let removed = shared.executors.remove(id);
+        shared.purge_executor(id);
+        if let Some(maintainer) = shared.maint.get() {
+            let mut state = maintainer.state();
+            state.resolved.remove(id);
+            state.latest.remove(id);
+            state.jobs.remove(id);
+            state.logs.remove(id);
+            state.runs.remove(id);
+            state.checking.remove(id);
+            drop(state);
+            maintainer.changed.notify_one();
+        }
+        if let Err(error) = shared.db.delete_executor_health(id).await {
+            tracing::warn!(executor = %id, %error, "could not forget the stored executor health");
+        }
+        shared.publish_executors();
+        if let Some(executor) = removed {
+            executor.shutdown().await;
+        }
+    }
+
     /// `executor.job.cancel`: ends the job as cancelled and kills what it runs.
     pub async fn cancel_job(&self, id: &ExecutorId) -> Result<ExecutorInfo> {
         let shared = self.shared();
@@ -1174,6 +1580,16 @@ impl crate::Kernel {
             state.jobs.remove(id);
         }
         shared.publish_executors();
+        // An add that failed leaves the agent registered, uninstalled, with its failure. Once the
+        // person dismisses the failure it has nothing left to show: it goes.
+        let never_installed = !shared
+            .any_health(id)
+            .is_some_and(|h| matches!(h.installed, InstallStatus::Installed { .. }));
+        if never_installed && is_registry_agent(shared, id) {
+            let info = self.published(id)?;
+            self.forget(id).await;
+            return Ok(info);
+        }
         self.published(id)
     }
 
@@ -1201,6 +1617,20 @@ impl crate::Kernel {
         let shared = self.shared();
         let maintainer = attached(shared)?;
         self.known(id)?;
+        if is_registry_agent(shared, id) {
+            let mut row = Maintainer::setting(&maintainer.state(), id);
+            row.auto_update = on;
+            row.verified_only = false;
+            shared.db.put_executor_setting(&row).await?;
+            {
+                let mut state = maintainer.state();
+                row.last_checked_ms = state.settings.get(id).and_then(|s| s.last_checked_ms);
+                state.settings.insert(id.clone(), row);
+            }
+            shared.publish_executors();
+            maintainer.changed.notify_one();
+            return self.published(id);
+        }
         let health = shared.any_health(id);
         let resolved = maintainer.resolved(shared, id, health.as_ref());
         let decl = resolved

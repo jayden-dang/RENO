@@ -82,6 +82,8 @@ pub(super) struct World {
     secrets: std::collections::BTreeSet<String>,
     /// Executor jobs.
     pub(super) jobs: super::jobs::Jobs,
+    /// The ACP registry's fake state.
+    pub(super) registry: super::registry::RegistryState,
     /// What threads have been through that their runs do not say.
     threads: ThreadState,
 }
@@ -127,6 +129,7 @@ impl World {
             paused_bots: std::collections::BTreeSet::new(),
             secrets: std::collections::BTreeSet::new(),
             jobs: super::jobs::Jobs::default(),
+            registry: super::registry::RegistryState::default(),
             threads: ThreadState::default(),
         };
         // Codex has a run waiting for approval, as on the machine the demo mirrors.

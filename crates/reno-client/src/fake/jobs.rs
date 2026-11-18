@@ -249,6 +249,16 @@ impl World {
             )),
             _ => {
                 self.executors[at].job = None;
+                // An add that failed leaves an agent that was never installed: it goes.
+                let info = &self.executors[at];
+                if info.source == reno_proto::ExecutorSource::Registry
+                    && !matches!(
+                        info.health.as_ref().map(|h| &h.installed),
+                        Some(InstallStatus::Installed { .. })
+                    )
+                {
+                    self.executors.remove(at);
+                }
                 Ok(())
             }
         }
@@ -348,6 +358,7 @@ impl World {
             return;
         }
         let now = self.tick();
+        let index_version = self.index_version(&plan.id);
         let Some(info) = self
             .executors
             .iter_mut()
@@ -365,7 +376,7 @@ impl World {
         if let Some(health) = &mut info.health {
             match kind {
                 Some(JobKind::Install) => {
-                    let version = "1.0.0".to_owned();
+                    let version = index_version.unwrap_or_else(|| "1.0.0".to_owned());
                     health.version_gate = version_gate(Some(&version), &range);
                     health.installed = InstallStatus::Installed {
                         path: format!("/fake/bin/{}", plan.id).into(),

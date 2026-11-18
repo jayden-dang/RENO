@@ -43,6 +43,11 @@ use crate::history::{
     GitLogSearchResult,
 };
 use crate::ids::{ApprovalId, ExecutorId, RunId, Seq, SubscriptionId, TaskId};
+use crate::registry::{
+    ExecutorRegistryAddOwnParams, ExecutorRegistryEnvResult, ExecutorRegistryEnvSetParams,
+    ExecutorRegistryListParams, ExecutorRegistryListResult, ExecutorRegistryParams,
+    ExecutorRegistryRemoveResult,
+};
 use crate::routing::{
     RoutePreviewParams, RoutePreviewResult, RoutingDecision, RunRoutingParams, RunRoutingResult,
 };
@@ -190,6 +195,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_CONTEXT,
     FEATURE_RUN_CONFIGURE,
     FEATURE_EXECUTOR_MAINTAIN,
+    crate::registry::FEATURE_EXECUTOR_REGISTRY,
     FEATURE_RUN_CHANGES,
     crate::usage::FEATURE_EXECUTOR_USAGE,
     FEATURE_THREADS,
@@ -1098,6 +1104,43 @@ method!(
     ExecutorAutoUpdateSet, "executor.auto_update.set", ExecutorAutoUpdateSetParams => ExecutorJobResult
 );
 method!(
+    /// `executor.registry.list`: the agents of the ACP registry's index with, for this device,
+    /// the build that would be installed, what it lacks to install it, and whether it is added
+    /// (and at which version) or built in. The index is fetched with a cache; offline, the
+    /// cached copy is served and `source` says `offline`. Needs feature `executor.registry`.
+    ExecutorRegistryList, "executor.registry.list", ExecutorRegistryListParams => ExecutorRegistryListResult
+);
+method!(
+    /// `executor.registry.add`: adds a registry agent as an install job of its executor
+    /// (`acp.<id>`), which appears in `executors.watch` at once and ends with a full probe. Answers
+    /// when the job started. Fails with `NotFound` (not in the index), `NothingToDo` (built in,
+    /// or already added), `Conflict` (the device lacks Node.js or uv, or has no build; the
+    /// message names the fix) and `JobRunning`. Needs feature `executor.registry`.
+    ExecutorRegistryAdd, "executor.registry.add", ExecutorRegistryParams => ExecutorJobResult
+);
+method!(
+    /// `executor.registry.remove`: unregisters an added agent and deletes its install. Fails with
+    /// `Conflict` while a run on it is queued or live, and `NotFound` for an agent that is not
+    /// added. Needs feature `executor.registry`.
+    ExecutorRegistryRemove, "executor.registry.remove", ExecutorRegistryParams => ExecutorRegistryRemoveResult
+);
+method!(
+    /// `executor.registry.add_own`: adds an agent that is not in the registry (its own command),
+    /// as `own.<slug>`, and probes it. Reno never installs or updates it. Needs feature
+    /// `executor.registry`.
+    ExecutorRegistryAddOwn, "executor.registry.add_own", ExecutorRegistryAddOwnParams => ExecutorJobResult
+);
+method!(
+    /// `executor.registry.env_get`: the agent's own environment as `KEY=VALUE` lines. Needs
+    /// feature `executor.registry`.
+    ExecutorRegistryEnvGet, "executor.registry.env_get", ExecutorRegistryParams => ExecutorRegistryEnvResult
+);
+method!(
+    /// `executor.registry.env_set`: replaces the agent's own environment. It is read by the
+    /// next start of the agent. Needs feature `executor.registry`.
+    ExecutorRegistryEnvSet, "executor.registry.env_set", ExecutorRegistryEnvSetParams => ExecutorRegistryEnvResult
+);
+method!(
     /// `executor.frames`: the frames each executor's wire layer did not recognise, by kind, since
     /// the daemon started, and the CLI version they were first seen under. A rising number is
     /// the early sign that a harness CLI moved. Needs feature `executor.frames`.
@@ -1291,6 +1334,12 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorJobLog>(),
             method_entry::<ExecutorAutoUpdateSet>(),
             method_entry::<ExecutorFrames>(),
+            method_entry::<ExecutorRegistryList>(),
+            method_entry::<ExecutorRegistryAdd>(),
+            method_entry::<ExecutorRegistryRemove>(),
+            method_entry::<ExecutorRegistryAddOwn>(),
+            method_entry::<ExecutorRegistryEnvGet>(),
+            method_entry::<ExecutorRegistryEnvSet>(),
             method_entry::<crate::agent::AgentAuth>(),
             method_entry::<crate::agent::AgentReport>(),
             method_entry::<crate::agent::AgentRequestApproval>(),

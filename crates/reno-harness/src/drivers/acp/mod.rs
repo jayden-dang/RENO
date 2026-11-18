@@ -553,6 +553,14 @@ fn failed(diagnostic: String) -> BoxStream<'static, ExecEvent> {
 
 #[async_trait]
 impl Executor for AcpExecutor {
+    fn source(&self) -> reno_proto::ExecutorSource {
+        if matches!(self.spec.id, HarnessId::Registry(_)) {
+            reno_proto::ExecutorSource::Registry
+        } else {
+            reno_proto::ExecutorSource::Builtin
+        }
+    }
+
     fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
         crate::exec::maintenance::declaration(&self.spec.id)
     }

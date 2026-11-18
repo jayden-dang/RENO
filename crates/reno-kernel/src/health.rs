@@ -256,12 +256,13 @@ impl Shared {
                 health.plan_usage.clone_from(&usage.last);
             }
         }
-        let mut ids: Vec<&ExecutorId> = self.executors.ids().collect();
+        let mut ids: Vec<ExecutorId> = self.executors.ids();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let list = ids
-            .into_iter()
+            .iter()
             .filter_map(|id| {
-                let mut descriptor = self.executors.get(id)?.descriptor();
+                let executor = self.executors.get(id)?;
+                let mut descriptor = executor.descriptor();
                 let health = health.get(id).cloned();
                 // The models shown are the ones the health labels: the live list when a probe
                 // got one, else the curated one.
@@ -275,6 +276,7 @@ impl Shared {
                     health,
                     maintenance: None,
                     job: None,
+                    source: executor.source(),
                 };
                 if let Some(maintainer) = self.maint.get() {
                     maintainer.decorate(self, &mut info);
@@ -283,6 +285,28 @@ impl Shared {
             })
             .collect();
         self.health.tx.send_replace(Arc::new(list));
+    }
+
+    /// Forgets what the board holds for an executor that was removed: its health, probe gate,
+    /// queued probe, frame counts and usage, so one added again starts from nothing.
+    pub(crate) fn purge_executor(&self, id: &ExecutorId) {
+        self.health.entries().remove(id);
+        self.health
+            .gates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        self.health
+            .queued
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        self.health
+            .frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
+        self.health.usage_map().remove(id);
     }
 
     /// Loads what the previous daemon stored, for display only, then publishes.
@@ -317,7 +341,6 @@ impl Shared {
         let executor = self
             .executors
             .get(id)
-            .cloned()
             .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))?;
         let gate = self.health.gate_of(id);
         let finished_before = gate.finished.load(Ordering::SeqCst);
@@ -405,7 +428,7 @@ impl Shared {
     ) -> Result<()> {
         let ids: Vec<ExecutorId> = match ids {
             Some(id) => vec![id.clone()],
-            None => self.executors.ids().cloned().collect(),
+            None => self.executors.ids(),
         };
         for outcome in join_all(ids.iter().map(|id| self.probe_executor(id, how, depth))).await {
             outcome?;
@@ -567,7 +590,7 @@ impl Shared {
     ) -> Result<Vec<ExecutorFrameCounts>> {
         let mut ids: Vec<ExecutorId> = match id {
             Some(id) => vec![id.clone()],
-            None => self.executors.ids().cloned().collect(),
+            None => self.executors.ids(),
         };
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         ids.iter()
@@ -609,7 +632,7 @@ impl Shared {
     pub(crate) async fn refresh_plan_usage(&self, ids: Option<&ExecutorId>) -> Result<()> {
         let ids: Vec<ExecutorId> = match ids {
             Some(id) => vec![id.clone()],
-            None => self.executors.ids().cloned().collect(),
+            None => self.executors.ids(),
         };
         for id in &ids {
             if self.executors.get(id).is_none() {
@@ -631,7 +654,7 @@ impl Shared {
 
     /// One executor's usage read; whether what is shown changed.
     async fn read_plan_usage(&self, id: &ExecutorId) -> bool {
-        let Some(executor) = self.executors.get(id).cloned() else {
+        let Some(executor) = self.executors.get(id) else {
             return false;
         };
         let asked = self.any_health(id).is_some_and(|health| {

@@ -367,6 +367,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             health: Some(health),
             maintenance,
             job: None,
+            source: reno_proto::ExecutorSource::Builtin,
         })
     };
     // The efforts each demo model takes, as its CLI would report them: Claude's big models go to

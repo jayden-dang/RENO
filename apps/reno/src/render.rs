@@ -1008,6 +1008,7 @@ mod tests {
             health,
             maintenance: None,
             job: None,
+            source: Default::default(),
         }
     }
 

@@ -313,7 +313,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes", "executor.usage", "threads", "files", "terminals", "history"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "executor.registry", "run.changes", "executor.usage", "threads", "files", "terminals", "history"],
                "pid": 4242}),
     );
 }

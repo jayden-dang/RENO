@@ -718,6 +718,7 @@ expression: protocol_schema()
     "run.context",
     "run.configure",
     "executor.maintain",
+    "executor.registry",
     "run.changes",
     "executor.usage",
     "threads",
@@ -10453,6 +10454,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -10489,6 +10494,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -11687,6 +11707,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -11723,6 +11747,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -12913,6 +12952,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -12949,6 +12992,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -14160,6 +14218,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -14196,6 +14258,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -15383,6 +15460,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -15419,6 +15500,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -16606,6 +16702,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -16642,6 +16742,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -17886,6 +18001,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -17922,6 +18041,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",
@@ -18870,6 +19004,2868 @@ expression: protocol_schema()
           "executors"
         ],
         "title": "ExecutorFramesResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.list",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.list`.",
+        "properties": {
+          "refresh": {
+            "default": false,
+            "description": "Fetch the index now, even if the cached copy is fresh (it stays fresh for 5 minutes).",
+            "type": "boolean"
+          }
+        },
+        "title": "ExecutorRegistryListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "RegistryAdded": {
+            "description": "An entry that is added on this device.",
+            "properties": {
+              "updateAvailable": {
+                "description": "The index lists a different (newer or not) version than the installed one.",
+                "type": "boolean"
+              },
+              "version": {
+                "description": "The version installed.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "updateAvailable"
+            ],
+            "type": "object"
+          },
+          "RegistryDistribution": {
+            "description": "How the registry's entry would be installed on this device.",
+            "oneOf": [
+              {
+                "const": "binary",
+                "description": "A prebuilt archive for this platform.",
+                "type": "string"
+              },
+              {
+                "const": "npx",
+                "description": "An npm package, run with Node.js.",
+                "type": "string"
+              },
+              {
+                "const": "uvx",
+                "description": "A Python package, installed with uv.",
+                "type": "string"
+              }
+            ]
+          },
+          "RegistryEntry": {
+            "description": "One agent as the list shows it: an agent of the registry's index, or one added on this device\nthat the index no longer lists (`delisted`) or that is the person's own (`own`).",
+            "properties": {
+              "added": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RegistryAdded"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when the agent is added on this device."
+              },
+              "adding": {
+                "default": false,
+                "description": "An add or update of it is running.",
+                "type": "boolean"
+              },
+              "authors": {
+                "default": [],
+                "description": "Who makes it.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "builtIn": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Set when Reno drives this agent itself: the built-in executor to use instead (`codex`).\nSuch an entry is listed so a search finds it, and is never added from the registry."
+              },
+              "checksum": {
+                "description": "For a binary: whether the registry publishes a sha256 the download is checked against\n(`false`: it installs unchecked). Absent for a package, which npm or PyPI checks.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "delisted": {
+                "default": false,
+                "description": "Added, but the index no longer lists it: it can be removed, not updated.",
+                "type": "boolean"
+              },
+              "description": {
+                "default": "",
+                "description": "One paragraph, as the registry words it.",
+                "type": "string"
+              },
+              "executor": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "The executor the agent runs under once added (`acp.gemini`)."
+              },
+              "fix": {
+                "description": "What to do about `readiness`, when it is not `ready` (\"brew install uv\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "host": {
+                "description": "Where a binary downloads from (its host name). Absent for a package.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "icon": {
+                "description": "The registry's icon, a sanitized one-ink SVG (cached with the index). Absent when it has\nnone or it could not be fetched.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "description": "The registry's id (`gemini`, `goose`), or `own.<slug>` for a person's own agent. What\n`executor.registry.add` and `.remove` take.",
+                "type": "string"
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RegistryDistribution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The build chosen for this device. Absent when there is none (`readiness: no_build`) and\nfor an own agent."
+              },
+              "license": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "description": "Display name.",
+                "type": "string"
+              },
+              "own": {
+                "default": false,
+                "description": "The person's own agent (`own.<slug>`): never installed or updated by Reno.",
+                "type": "boolean"
+              },
+              "readiness": {
+                "$ref": "#/$defs/RegistryReadiness",
+                "description": "What this device lacks to add it."
+              },
+              "repository": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "version": {
+                "description": "The version the index lists (the installed one for a delisted or own agent).",
+                "type": "string"
+              },
+              "website": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "executor",
+              "name",
+              "version",
+              "readiness"
+            ],
+            "type": "object"
+          },
+          "RegistryReadiness": {
+            "description": "What this device lacks to install an entry.",
+            "oneOf": [
+              {
+                "const": "ready",
+                "description": "Nothing: it can be added now.",
+                "type": "string"
+              },
+              {
+                "const": "needs_node",
+                "description": "Node.js (npm) is not installed.",
+                "type": "string"
+              },
+              {
+                "const": "needs_uv",
+                "description": "uv is not installed.",
+                "type": "string"
+              },
+              {
+                "const": "no_build",
+                "description": "The entry has no build for this platform.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.registry.list`.",
+        "properties": {
+          "entries": {
+            "description": "Every agent the index lists, built-in ones included, then the agents added here that it\ndoes not list, sorted by name.",
+            "items": {
+              "$ref": "#/$defs/RegistryEntry"
+            },
+            "type": "array"
+          },
+          "error": {
+            "description": "Why the fetch failed, when `offline`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fetchedAtMs": {
+            "description": "When the index was fetched (ms since the Unix epoch).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offline": {
+            "default": false,
+            "description": "The index could not be fetched, so this is the cached copy of `fetched_at_ms`; `error`\nsays why.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entries",
+          "fetchedAtMs"
+        ],
+        "title": "ExecutorRegistryListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.add",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.add`, `.remove`, `.env_get`.",
+        "properties": {
+          "id": {
+            "description": "The registry's id (`own.<slug>` for an own agent).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ExecutorRegistryParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AccessMode": {
+            "description": "How much a harness may do without asking. Never run with more than requested (ARCH-15).",
+            "oneOf": [
+              {
+                "const": "supervised",
+                "description": "Every consequential action needs approval.",
+                "type": "string"
+              },
+              {
+                "const": "auto_accept_edits",
+                "description": "File edits proceed; commands and network still ask.",
+                "type": "string"
+              },
+              {
+                "const": "full_access",
+                "description": "The harness asks nothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "AutoUpdate": {
+            "description": "The stored auto-update setting of one executor.",
+            "properties": {
+              "on": {
+                "description": "Update when the executor is idle.",
+                "type": "boolean"
+              },
+              "verifiedOnly": {
+                "description": "Only to the version the adapter was verified on (needs an updater that can pin).",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "on",
+              "verifiedOnly"
+            ],
+            "type": "object"
+          },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
+          "ExecutorCaps": {
+            "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
+            "properties": {
+              "accessModes": {
+                "description": "Access modes the executor can honour.",
+                "items": {
+                  "$ref": "#/$defs/AccessMode"
+                },
+                "type": "array"
+              },
+              "deterministicTurnEnd": {
+                "description": "Whether the end of a turn is reported deterministically.",
+                "type": "boolean"
+              },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
+                "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
+              },
+              "mcpInjection": {
+                "description": "False means it cannot join a team or use boards.",
+                "type": "boolean"
+              },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
+              "models": {
+                "description": "Models on offer.",
+                "items": {
+                  "$ref": "#/$defs/ModelInfo"
+                },
+                "type": "array"
+              },
+              "planMode": {
+                "description": "Whether a plan mode exists.",
+                "type": "boolean"
+              },
+              "resume": {
+                "description": "Whether sessions can be resumed.",
+                "type": "boolean"
+              },
+              "sandboxLevels": {
+                "description": "Sandbox levels the executor can honour: a run is only started at a level listed here. An\nexecutor with no sandbox of its own honours only `Unrestricted`.",
+                "items": {
+                  "$ref": "#/$defs/SandboxLevel"
+                },
+                "type": "array"
+              },
+              "steering": {
+                "$ref": "#/$defs/Steering",
+                "description": "When steering messages can land."
+              },
+              "structuredOutput": {
+                "description": "Whether `output_schema` is honoured.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "steering",
+              "resume",
+              "accessModes",
+              "sandboxLevels",
+              "mcpInjection",
+              "structuredOutput",
+              "deterministicTurnEnd",
+              "planMode",
+              "models"
+            ],
+            "type": "object"
+          },
+          "ExecutorDescriptor": {
+            "description": "An installed harness and what it can do.",
+            "properties": {
+              "adapterVersion": {
+                "description": "Driver version plus the detected harness CLI version.",
+                "type": "string"
+              },
+              "caps": {
+                "$ref": "#/$defs/ExecutorCaps",
+                "description": "Declared capabilities."
+              },
+              "cliVerified": {
+                "$ref": "#/$defs/VersionRange",
+                "description": "Supported harness CLI versions."
+              },
+              "contractVersion": {
+                "description": "Version of the Reno executor contract the adapter implements.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "Executor id, for example `claude-code`."
+              }
+            },
+            "required": [
+              "id",
+              "contractVersion",
+              "adapterVersion",
+              "cliVerified",
+              "caps"
+            ],
+            "type": "object"
+          },
+          "ExecutorHealth": {
+            "description": "What the daemon last found out about one executor.",
+            "properties": {
+              "checkedAtMs": {
+                "description": "When the probe finished, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "installed": {
+                "$ref": "#/$defs/InstallStatus",
+                "description": "Whether and where the harness is installed."
+              },
+              "models": {
+                "$ref": "#/$defs/ModelCatalog",
+                "description": "The models on offer, and whether they came from the live harness or the adapter's list."
+              },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
+              "signedIn": {
+                "$ref": "#/$defs/SignedIn",
+                "description": "Whether the harness is signed in."
+              },
+              "versionGate": {
+                "$ref": "#/$defs/VersionGate",
+                "description": "The installed version against the verified range."
+              }
+            },
+            "required": [
+              "installed",
+              "versionGate",
+              "signedIn",
+              "models",
+              "checkedAtMs"
+            ],
+            "type": "object"
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "ExecutorInfo": {
+            "description": "One executor as `executor.list` shows it.",
+            "properties": {
+              "descriptor": {
+                "$ref": "#/$defs/ExecutorDescriptor",
+                "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
+              },
+              "health": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorHealth"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The last probe. Absent until the first probe of this executor has finished."
+              },
+              "job": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorJob"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The install or update running on this executor, or the last one that failed. Absent when\nthere is none (a job that succeeded leaves no trace: the fresh health shows the result)."
+              },
+              "maintenance": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Maintenance"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
+              }
+            },
+            "required": [
+              "descriptor"
+            ],
+            "type": "object"
+          },
+          "ExecutorJob": {
+            "description": "An install or update of one executor. At most one per executor.",
+            "properties": {
+              "id": {
+                "description": "Opaque.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/JobKind",
+                "description": "What it does."
+              },
+              "phase": {
+                "$ref": "#/$defs/JobPhase",
+                "description": "Where it is."
+              },
+              "startedAtMs": {
+                "description": "When it started, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "phase",
+              "startedAtMs"
+            ],
+            "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
+          },
+          "InstallStatus": {
+            "description": "Whether the harness can be launched, and from where.",
+            "oneOf": [
+              {
+                "description": "A launchable program was found.",
+                "properties": {
+                  "path": {
+                    "description": "The program a run would launch.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "installed",
+                    "type": "string"
+                  },
+                  "version": {
+                    "description": "Its version, when it could be read.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nothing launchable.",
+                "properties": {
+                  "type": {
+                    "const": "not_installed",
+                    "type": "string"
+                  },
+                  "why": {
+                    "$ref": "#/$defs/NotInstalledReason",
+                    "description": "Why."
+                  }
+                },
+                "required": [
+                  "type",
+                  "why"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "JobFailure": {
+            "description": "Why a job failed.",
+            "oneOf": [
+              {
+                "const": "exit_code",
+                "description": "A step exited with a failure status.",
+                "type": "string"
+              },
+              {
+                "const": "needs_password",
+                "description": "A step asked for a password. Reno never supplies one.",
+                "type": "string"
+              },
+              {
+                "const": "timed_out",
+                "description": "The job ran longer than the ceiling and was killed.",
+                "type": "string"
+              },
+              {
+                "const": "stalled",
+                "description": "The job made no progress.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "A person cancelled it.",
+                "type": "string"
+              },
+              {
+                "const": "probe",
+                "description": "The steps finished but the probe after them did not find the executor.",
+                "type": "string"
+              },
+              {
+                "const": "broken",
+                "description": "The job could not run at all (the shell would not start, the recipe is unusable).",
+                "type": "string"
+              }
+            ]
+          },
+          "JobKind": {
+            "description": "What a job does.",
+            "oneOf": [
+              {
+                "const": "install",
+                "description": "Install an executor that is not found.",
+                "type": "string"
+              },
+              {
+                "const": "update",
+                "description": "Update an installed executor with its own updater.",
+                "type": "string"
+              }
+            ]
+          },
+          "JobPhase": {
+            "description": "Where a job is.",
+            "oneOf": [
+              {
+                "description": "An update waiting for the executor's runs to end.",
+                "properties": {
+                  "type": {
+                    "const": "queued",
+                    "type": "string"
+                  },
+                  "waitingRuns": {
+                    "description": "How many runs it waits for.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "waitingRuns"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Running.",
+                "properties": {
+                  "lastLine": {
+                    "description": "The last line of output, when there is one.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "quietSinceMs": {
+                    "description": "Milliseconds since the Unix epoch of the last output, once the job has been quiet for\na while. The job keeps running.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "step": {
+                    "description": "The step that runs, from 1.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "steps": {
+                    "description": "How many steps there are.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "running",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "step",
+                  "steps"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Ended without success. Stays until the next start on this executor or a dismiss.",
+                "properties": {
+                  "detail": {
+                    "description": "What happened, for a person.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/JobFailure",
+                    "description": "Why, as a kind."
+                  },
+                  "finishedAtMs": {
+                    "description": "When it ended, in milliseconds since the Unix epoch.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail",
+                  "finishedAtMs"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Maintenance": {
+            "description": "What a person and Reno can do to install, update and sign in to one executor (feature\n`executor.maintain`). The commands are compiled into the daemon per adapter: they are shown,\nnever sent back by a client.",
+            "properties": {
+              "autoUpdate": {
+                "$ref": "#/$defs/AutoUpdate",
+                "description": "The stored auto-update setting."
+              },
+              "managed": {
+                "description": "A Reno-managed adapter (pinned and checksum-verified): it updates with Reno.",
+                "type": "boolean"
+              },
+              "setup": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SetupRecipe"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "For an executor that is not found: how Reno installs it. Absent when the adapter\ndeclares no recipe."
+              },
+              "signIn": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PersonStep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The command a person runs to sign in, when the harness has one."
+              },
+              "updater": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdaterInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The executor's own updater. Absent for executors with no updater (and for managed\nadapters: see `managed`)."
+              }
+            },
+            "required": [
+              "managed",
+              "autoUpdate"
+            ],
+            "type": "object"
+          },
+          "ModelCatalog": {
+            "description": "The models an executor offers and where the list came from.",
+            "properties": {
+              "models": {
+                "description": "The models.",
+                "items": {
+                  "$ref": "#/$defs/ModelInfo"
+                },
+                "type": "array"
+              },
+              "source": {
+                "$ref": "#/$defs/ModelSource",
+                "description": "Where the list came from."
+              }
+            },
+            "required": [
+              "source",
+              "models"
+            ],
+            "type": "object"
+          },
+          "ModelInfo": {
+            "description": "A model an executor offers.",
+            "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "displayName": {
+                "description": "Display name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Model id as passed to the harness.",
+                "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "type": "object"
+          },
+          "ModelSource": {
+            "description": "Where a list of models came from.",
+            "oneOf": [
+              {
+                "const": "curated",
+                "description": "The adapter's built-in list.",
+                "type": "string"
+              },
+              {
+                "const": "live",
+                "description": "Asked of the live harness by the last probe.",
+                "type": "string"
+              }
+            ]
+          },
+          "NotInstalledReason": {
+            "description": "Why a harness cannot be launched.",
+            "oneOf": [
+              {
+                "description": "No program was found where the driver looks.",
+                "properties": {
+                  "hint": {
+                    "description": "Where it looks and how to get it, for a person.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The agent's launcher needs a managed install (an adapter package or a release archive)\nthat has not been done. A run never installs: this is an explicit step.",
+                "properties": {
+                  "type": {
+                    "const": "needs_install",
+                    "type": "string"
+                  },
+                  "what": {
+                    "description": "What would be installed.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "what"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Something is there but cannot be launched (an override that points at nothing, a file\nthat is not executable).",
+                "properties": {
+                  "detail": {
+                    "description": "What is wrong with it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "unusable",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The probe itself failed, so nothing is known.",
+                "properties": {
+                  "detail": {
+                    "description": "What happened.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "probe_failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "PersonStep": {
+            "description": "A command a person runs themselves.",
+            "properties": {
+              "command": {
+                "description": "The command line.",
+                "type": "string"
+              },
+              "label": {
+                "description": "What it does (\"Sign in\").",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "command"
+            ],
+            "type": "object"
+          },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
+          "SandboxLevel": {
+            "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "No writes.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_write",
+                "description": "Writes confined to the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "unrestricted",
+                "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
+                "type": "string"
+              }
+            ]
+          },
+          "SetupRecipe": {
+            "description": "How Reno installs an executor that is not found.",
+            "properties": {
+              "source": {
+                "description": "Where the install comes from, for a person (\"Homebrew cask devin-cli\").",
+                "type": "string"
+              },
+              "steps": {
+                "description": "The steps, in order.",
+                "items": {
+                  "$ref": "#/$defs/SetupStep"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "source",
+              "steps"
+            ],
+            "type": "object"
+          },
+          "SetupStep": {
+            "description": "One step of a [`SetupRecipe`].",
+            "properties": {
+              "command": {
+                "description": "The command line, shown as is.",
+                "type": "string"
+              },
+              "label": {
+                "description": "What the step does, in a few words (\"Install\").",
+                "type": "string"
+              },
+              "runner": {
+                "$ref": "#/$defs/StepRunner",
+                "description": "Who runs it."
+              }
+            },
+            "required": [
+              "label",
+              "command",
+              "runner"
+            ],
+            "type": "object"
+          },
+          "SignedIn": {
+            "description": "Whether the harness has a login.",
+            "oneOf": [
+              {
+                "description": "A login exists.",
+                "properties": {
+                  "account": {
+                    "description": "Who, when the harness says.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "const": "yes",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "No login: not eligible.",
+                "properties": {
+                  "hint": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "no",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness offers no way to tell without running a model call. Stays eligible.",
+                "properties": {
+                  "type": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Steering": {
+            "description": "When a running harness can accept a steering message.",
+            "oneOf": [
+              {
+                "const": "none",
+                "description": "Cannot be steered mid-run.",
+                "type": "string"
+              },
+              {
+                "const": "turn_boundary",
+                "description": "Steering lands at the next turn.",
+                "type": "string"
+              },
+              {
+                "const": "step_boundary",
+                "description": "Steering lands at the next step.",
+                "type": "string"
+              }
+            ]
+          },
+          "StepRunner": {
+            "description": "Who runs a [`SetupStep`].",
+            "oneOf": [
+              {
+                "const": "reno",
+                "description": "The daemon, as the user, with no stdin and no sudo.",
+                "type": "string"
+              },
+              {
+                "const": "person",
+                "description": "The person, in a terminal: it is interactive or needs a login.",
+                "type": "string"
+              }
+            ]
+          },
+          "UpdaterInfo": {
+            "description": "An executor's own updater.",
+            "properties": {
+              "canPin": {
+                "description": "The updater can install a given version (so \"verified only\" can pin).",
+                "type": "boolean"
+              },
+              "checkedAtMs": {
+                "description": "When that check ran, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "command": {
+                "description": "The command that updates it (\"codex update\"), shown in the UI.",
+                "type": "string"
+              },
+              "latest": {
+                "description": "The newest version a check found, when a check could tell.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "selfUpdating": {
+                "description": "The CLI updates itself already.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "command",
+              "selfUpdating",
+              "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
+            ],
+            "type": "object"
+          },
+          "VersionGate": {
+            "description": "The installed version against the adapter's verified range.",
+            "oneOf": [
+              {
+                "description": "At least the minimum, and no newer than the last version the adapter was verified on.",
+                "properties": {
+                  "type": {
+                    "const": "ok",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Older than the minimum the adapter supports: not eligible.",
+                "properties": {
+                  "min": {
+                    "description": "The oldest supported version.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "too_old",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "min"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Newer than the last version the adapter was verified on: eligible, but unproven.",
+                "properties": {
+                  "type": {
+                    "const": "untested",
+                    "type": "string"
+                  },
+                  "verified": {
+                    "description": "The newest version the conformance suite passed on.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "verified"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "There is no version to compare: not installed, or the CLI did not report one.",
+                "properties": {
+                  "type": {
+                    "const": "unchecked",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "VersionRange": {
+            "description": "Harness CLI versions an adapter supports.",
+            "properties": {
+              "min": {
+                "description": "Oldest supported version.",
+                "type": "string"
+              },
+              "verified": {
+                "description": "Newest version the conformance suite passed against.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "min",
+              "verified"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.job.start`, `executor.job.cancel`, `executor.job.dismiss` and\n`executor.auto_update.set`.",
+        "properties": {
+          "executor": {
+            "$ref": "#/$defs/ExecutorInfo",
+            "description": "The executor after the call."
+          }
+        },
+        "required": [
+          "executor"
+        ],
+        "title": "ExecutorJobResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.remove",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.add`, `.remove`, `.env_get`.",
+        "properties": {
+          "id": {
+            "description": "The registry's id (`own.<slug>` for an own agent).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ExecutorRegistryParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.registry.remove`.",
+        "properties": {
+          "executor": {
+            "$ref": "#/$defs/ExecutorId",
+            "description": "The executor that was removed."
+          }
+        },
+        "required": [
+          "executor"
+        ],
+        "title": "ExecutorRegistryRemoveResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.add_own",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.add_own`.",
+        "properties": {
+          "command": {
+            "description": "The program and its arguments, as typed (`my-agent --acp`); quotes group words. Run as\nthe agent, never installed or updated by Reno.",
+            "type": "string"
+          },
+          "env": {
+            "default": "",
+            "description": "The agent's own environment, as `KEY=VALUE` lines. Kept owner-only under Reno's data\ndir, never in a log.",
+            "type": "string"
+          },
+          "name": {
+            "description": "What to call it; its id is `own.<slug of the name>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ],
+        "title": "ExecutorRegistryAddOwnParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "AccessMode": {
+            "description": "How much a harness may do without asking. Never run with more than requested (ARCH-15).",
+            "oneOf": [
+              {
+                "const": "supervised",
+                "description": "Every consequential action needs approval.",
+                "type": "string"
+              },
+              {
+                "const": "auto_accept_edits",
+                "description": "File edits proceed; commands and network still ask.",
+                "type": "string"
+              },
+              {
+                "const": "full_access",
+                "description": "The harness asks nothing.",
+                "type": "string"
+              }
+            ]
+          },
+          "AutoUpdate": {
+            "description": "The stored auto-update setting of one executor.",
+            "properties": {
+              "on": {
+                "description": "Update when the executor is idle.",
+                "type": "boolean"
+              },
+              "verifiedOnly": {
+                "description": "Only to the version the adapter was verified on (needs an updater that can pin).",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "on",
+              "verifiedOnly"
+            ],
+            "type": "object"
+          },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
+          "ExecutorCaps": {
+            "description": "What an executor declares it can do. Nothing is trusted beyond this (ARCH-15).",
+            "properties": {
+              "accessModes": {
+                "description": "Access modes the executor can honour.",
+                "items": {
+                  "$ref": "#/$defs/AccessMode"
+                },
+                "type": "array"
+              },
+              "deterministicTurnEnd": {
+                "description": "Whether the end of a turn is reported deterministically.",
+                "type": "boolean"
+              },
+              "isolatesUserConfig": {
+                "default": false,
+                "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
+                "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
+              },
+              "mcpInjection": {
+                "description": "False means it cannot join a team or use boards.",
+                "type": "boolean"
+              },
+              "modelAliases": {
+                "description": "Names the CLI accepts for a model besides the ids in `models`: short aliases that\nresolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.\nEmpty when the harness has none.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "modelSwitch": {
+                "default": false,
+                "description": "Whether a running run's model can be changed (`run.set_model`). The harness applies it\nfrom its next model call, inside the same turn. Only claimed where a live run proved it\n(Claude Code's `set_model` control request, checked against 2.1.326); Codex fixes the\nmodel per turn and an ACP agent's `session/set_model` is unproven mid-prompt.",
+                "type": "boolean"
+              },
+              "models": {
+                "description": "Models on offer.",
+                "items": {
+                  "$ref": "#/$defs/ModelInfo"
+                },
+                "type": "array"
+              },
+              "planMode": {
+                "description": "Whether a plan mode exists.",
+                "type": "boolean"
+              },
+              "resume": {
+                "description": "Whether sessions can be resumed.",
+                "type": "boolean"
+              },
+              "sandboxLevels": {
+                "description": "Sandbox levels the executor can honour: a run is only started at a level listed here. An\nexecutor with no sandbox of its own honours only `Unrestricted`.",
+                "items": {
+                  "$ref": "#/$defs/SandboxLevel"
+                },
+                "type": "array"
+              },
+              "steering": {
+                "$ref": "#/$defs/Steering",
+                "description": "When steering messages can land."
+              },
+              "structuredOutput": {
+                "description": "Whether `output_schema` is honoured.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "steering",
+              "resume",
+              "accessModes",
+              "sandboxLevels",
+              "mcpInjection",
+              "structuredOutput",
+              "deterministicTurnEnd",
+              "planMode",
+              "models"
+            ],
+            "type": "object"
+          },
+          "ExecutorDescriptor": {
+            "description": "An installed harness and what it can do.",
+            "properties": {
+              "adapterVersion": {
+                "description": "Driver version plus the detected harness CLI version.",
+                "type": "string"
+              },
+              "caps": {
+                "$ref": "#/$defs/ExecutorCaps",
+                "description": "Declared capabilities."
+              },
+              "cliVerified": {
+                "$ref": "#/$defs/VersionRange",
+                "description": "Supported harness CLI versions."
+              },
+              "contractVersion": {
+                "description": "Version of the Reno executor contract the adapter implements.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "$ref": "#/$defs/ExecutorId",
+                "description": "Executor id, for example `claude-code`."
+              }
+            },
+            "required": [
+              "id",
+              "contractVersion",
+              "adapterVersion",
+              "cliVerified",
+              "caps"
+            ],
+            "type": "object"
+          },
+          "ExecutorHealth": {
+            "description": "What the daemon last found out about one executor.",
+            "properties": {
+              "checkedAtMs": {
+                "description": "When the probe finished, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "installed": {
+                "$ref": "#/$defs/InstallStatus",
+                "description": "Whether and where the harness is installed."
+              },
+              "models": {
+                "$ref": "#/$defs/ModelCatalog",
+                "description": "The models on offer, and whether they came from the live harness or the adapter's list."
+              },
+              "planUsage": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PlanUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The account's plan meters, with feature `executor.usage`. Read separately from the probe\n(it asks the provider, not the CLI), so it can be newer or older than `checked_at_ms`.\nAbsent when unavailable."
+              },
+              "signedIn": {
+                "$ref": "#/$defs/SignedIn",
+                "description": "Whether the harness is signed in."
+              },
+              "versionGate": {
+                "$ref": "#/$defs/VersionGate",
+                "description": "The installed version against the verified range."
+              }
+            },
+            "required": [
+              "installed",
+              "versionGate",
+              "signedIn",
+              "models",
+              "checkedAtMs"
+            ],
+            "type": "object"
+          },
+          "ExecutorId": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$",
+            "type": "string"
+          },
+          "ExecutorInfo": {
+            "description": "One executor as `executor.list` shows it.",
+            "properties": {
+              "descriptor": {
+                "$ref": "#/$defs/ExecutorDescriptor",
+                "description": "What the executor declares it can do. Its `caps.models` is the list `health.models`\nlabels: the live list when a probe got one, else the curated list."
+              },
+              "health": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorHealth"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The last probe. Absent until the first probe of this executor has finished."
+              },
+              "job": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ExecutorJob"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The install or update running on this executor, or the last one that failed. Absent when\nthere is none (a job that succeeded leaves no trace: the fresh health shows the result)."
+              },
+              "maintenance": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Maintenance"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
+              }
+            },
+            "required": [
+              "descriptor"
+            ],
+            "type": "object"
+          },
+          "ExecutorJob": {
+            "description": "An install or update of one executor. At most one per executor.",
+            "properties": {
+              "id": {
+                "description": "Opaque.",
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/JobKind",
+                "description": "What it does."
+              },
+              "phase": {
+                "$ref": "#/$defs/JobPhase",
+                "description": "Where it is."
+              },
+              "startedAtMs": {
+                "description": "When it started, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "phase",
+              "startedAtMs"
+            ],
+            "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
+          },
+          "InstallStatus": {
+            "description": "Whether the harness can be launched, and from where.",
+            "oneOf": [
+              {
+                "description": "A launchable program was found.",
+                "properties": {
+                  "path": {
+                    "description": "The program a run would launch.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "installed",
+                    "type": "string"
+                  },
+                  "version": {
+                    "description": "Its version, when it could be read.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "path"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Nothing launchable.",
+                "properties": {
+                  "type": {
+                    "const": "not_installed",
+                    "type": "string"
+                  },
+                  "why": {
+                    "$ref": "#/$defs/NotInstalledReason",
+                    "description": "Why."
+                  }
+                },
+                "required": [
+                  "type",
+                  "why"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "JobFailure": {
+            "description": "Why a job failed.",
+            "oneOf": [
+              {
+                "const": "exit_code",
+                "description": "A step exited with a failure status.",
+                "type": "string"
+              },
+              {
+                "const": "needs_password",
+                "description": "A step asked for a password. Reno never supplies one.",
+                "type": "string"
+              },
+              {
+                "const": "timed_out",
+                "description": "The job ran longer than the ceiling and was killed.",
+                "type": "string"
+              },
+              {
+                "const": "stalled",
+                "description": "The job made no progress.",
+                "type": "string"
+              },
+              {
+                "const": "cancelled",
+                "description": "A person cancelled it.",
+                "type": "string"
+              },
+              {
+                "const": "probe",
+                "description": "The steps finished but the probe after them did not find the executor.",
+                "type": "string"
+              },
+              {
+                "const": "broken",
+                "description": "The job could not run at all (the shell would not start, the recipe is unusable).",
+                "type": "string"
+              }
+            ]
+          },
+          "JobKind": {
+            "description": "What a job does.",
+            "oneOf": [
+              {
+                "const": "install",
+                "description": "Install an executor that is not found.",
+                "type": "string"
+              },
+              {
+                "const": "update",
+                "description": "Update an installed executor with its own updater.",
+                "type": "string"
+              }
+            ]
+          },
+          "JobPhase": {
+            "description": "Where a job is.",
+            "oneOf": [
+              {
+                "description": "An update waiting for the executor's runs to end.",
+                "properties": {
+                  "type": {
+                    "const": "queued",
+                    "type": "string"
+                  },
+                  "waitingRuns": {
+                    "description": "How many runs it waits for.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "waitingRuns"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Running.",
+                "properties": {
+                  "lastLine": {
+                    "description": "The last line of output, when there is one.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "quietSinceMs": {
+                    "description": "Milliseconds since the Unix epoch of the last output, once the job has been quiet for\na while. The job keeps running.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "step": {
+                    "description": "The step that runs, from 1.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "steps": {
+                    "description": "How many steps there are.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "running",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "step",
+                  "steps"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Ended without success. Stays until the next start on this executor or a dismiss.",
+                "properties": {
+                  "detail": {
+                    "description": "What happened, for a person.",
+                    "type": "string"
+                  },
+                  "failure": {
+                    "$ref": "#/$defs/JobFailure",
+                    "description": "Why, as a kind."
+                  },
+                  "finishedAtMs": {
+                    "description": "When it ended, in milliseconds since the Unix epoch.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "failure",
+                  "detail",
+                  "finishedAtMs"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Maintenance": {
+            "description": "What a person and Reno can do to install, update and sign in to one executor (feature\n`executor.maintain`). The commands are compiled into the daemon per adapter: they are shown,\nnever sent back by a client.",
+            "properties": {
+              "autoUpdate": {
+                "$ref": "#/$defs/AutoUpdate",
+                "description": "The stored auto-update setting."
+              },
+              "managed": {
+                "description": "A Reno-managed adapter (pinned and checksum-verified): it updates with Reno.",
+                "type": "boolean"
+              },
+              "setup": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SetupRecipe"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "For an executor that is not found: how Reno installs it. Absent when the adapter\ndeclares no recipe."
+              },
+              "signIn": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PersonStep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The command a person runs to sign in, when the harness has one."
+              },
+              "updater": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UpdaterInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The executor's own updater. Absent for executors with no updater (and for managed\nadapters: see `managed`)."
+              }
+            },
+            "required": [
+              "managed",
+              "autoUpdate"
+            ],
+            "type": "object"
+          },
+          "ModelCatalog": {
+            "description": "The models an executor offers and where the list came from.",
+            "properties": {
+              "models": {
+                "description": "The models.",
+                "items": {
+                  "$ref": "#/$defs/ModelInfo"
+                },
+                "type": "array"
+              },
+              "source": {
+                "$ref": "#/$defs/ModelSource",
+                "description": "Where the list came from."
+              }
+            },
+            "required": [
+              "source",
+              "models"
+            ],
+            "type": "object"
+          },
+          "ModelInfo": {
+            "description": "A model an executor offers.",
+            "properties": {
+              "defaultEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Effort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The level the model uses when none is asked for, when the harness says."
+              },
+              "description": {
+                "description": "What the harness says it is for (\"Most efficient for simpler tasks\"), when it says.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "displayName": {
+                "description": "Display name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "efforts": {
+                "description": "The effort levels the harness says this model takes, least to most. Empty: the harness\ndid not say, and no effort may be asked of it.",
+                "items": {
+                  "$ref": "#/$defs/Effort"
+                },
+                "type": "array"
+              },
+              "id": {
+                "description": "Model id as passed to the harness.",
+                "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "type": "object"
+          },
+          "ModelSource": {
+            "description": "Where a list of models came from.",
+            "oneOf": [
+              {
+                "const": "curated",
+                "description": "The adapter's built-in list.",
+                "type": "string"
+              },
+              {
+                "const": "live",
+                "description": "Asked of the live harness by the last probe.",
+                "type": "string"
+              }
+            ]
+          },
+          "NotInstalledReason": {
+            "description": "Why a harness cannot be launched.",
+            "oneOf": [
+              {
+                "description": "No program was found where the driver looks.",
+                "properties": {
+                  "hint": {
+                    "description": "Where it looks and how to get it, for a person.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "not_found",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The agent's launcher needs a managed install (an adapter package or a release archive)\nthat has not been done. A run never installs: this is an explicit step.",
+                "properties": {
+                  "type": {
+                    "const": "needs_install",
+                    "type": "string"
+                  },
+                  "what": {
+                    "description": "What would be installed.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "what"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Something is there but cannot be launched (an override that points at nothing, a file\nthat is not executable).",
+                "properties": {
+                  "detail": {
+                    "description": "What is wrong with it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "unusable",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The probe itself failed, so nothing is known.",
+                "properties": {
+                  "detail": {
+                    "description": "What happened.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "probe_failed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "detail"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "PersonStep": {
+            "description": "A command a person runs themselves.",
+            "properties": {
+              "command": {
+                "description": "The command line.",
+                "type": "string"
+              },
+              "label": {
+                "description": "What it does (\"Sign in\").",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "command"
+            ],
+            "type": "object"
+          },
+          "PlanUsage": {
+            "description": "An account's plan meters at one moment.",
+            "properties": {
+              "fetchedAtMs": {
+                "description": "When the daemon read them, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "planLabel": {
+                "description": "The live plan name when the provider says (\"ChatGPT Plus\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windows": {
+                "description": "The meters, never empty.",
+                "items": {
+                  "$ref": "#/$defs/UsageWindow"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "windows",
+              "fetchedAtMs"
+            ],
+            "type": "object"
+          },
+          "SandboxLevel": {
+            "description": "The sandbox the harness itself enforces around its tools: a ceiling below the access mode.\nA run that asks for `ReadOnly` or `WorkspaceWrite` goes only to an executor that enforces that\nlevel; `Unrestricted` asks for no ceiling beyond the access mode, so every executor can take it.",
+            "oneOf": [
+              {
+                "const": "read_only",
+                "description": "No writes.",
+                "type": "string"
+              },
+              {
+                "const": "workspace_write",
+                "description": "Writes confined to the workspace.",
+                "type": "string"
+              },
+              {
+                "const": "unrestricted",
+                "description": "No sandbox ceiling beyond the access mode (and the run's worktree).",
+                "type": "string"
+              }
+            ]
+          },
+          "SetupRecipe": {
+            "description": "How Reno installs an executor that is not found.",
+            "properties": {
+              "source": {
+                "description": "Where the install comes from, for a person (\"Homebrew cask devin-cli\").",
+                "type": "string"
+              },
+              "steps": {
+                "description": "The steps, in order.",
+                "items": {
+                  "$ref": "#/$defs/SetupStep"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "source",
+              "steps"
+            ],
+            "type": "object"
+          },
+          "SetupStep": {
+            "description": "One step of a [`SetupRecipe`].",
+            "properties": {
+              "command": {
+                "description": "The command line, shown as is.",
+                "type": "string"
+              },
+              "label": {
+                "description": "What the step does, in a few words (\"Install\").",
+                "type": "string"
+              },
+              "runner": {
+                "$ref": "#/$defs/StepRunner",
+                "description": "Who runs it."
+              }
+            },
+            "required": [
+              "label",
+              "command",
+              "runner"
+            ],
+            "type": "object"
+          },
+          "SignedIn": {
+            "description": "Whether the harness has a login.",
+            "oneOf": [
+              {
+                "description": "A login exists.",
+                "properties": {
+                  "account": {
+                    "description": "Who, when the harness says.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "const": "yes",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "No login: not eligible.",
+                "properties": {
+                  "hint": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "no",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "hint"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The harness offers no way to tell without running a model call. Stays eligible.",
+                "properties": {
+                  "type": {
+                    "const": "unknown",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Steering": {
+            "description": "When a running harness can accept a steering message.",
+            "oneOf": [
+              {
+                "const": "none",
+                "description": "Cannot be steered mid-run.",
+                "type": "string"
+              },
+              {
+                "const": "turn_boundary",
+                "description": "Steering lands at the next turn.",
+                "type": "string"
+              },
+              {
+                "const": "step_boundary",
+                "description": "Steering lands at the next step.",
+                "type": "string"
+              }
+            ]
+          },
+          "StepRunner": {
+            "description": "Who runs a [`SetupStep`].",
+            "oneOf": [
+              {
+                "const": "reno",
+                "description": "The daemon, as the user, with no stdin and no sudo.",
+                "type": "string"
+              },
+              {
+                "const": "person",
+                "description": "The person, in a terminal: it is interactive or needs a login.",
+                "type": "string"
+              }
+            ]
+          },
+          "UpdaterInfo": {
+            "description": "An executor's own updater.",
+            "properties": {
+              "canPin": {
+                "description": "The updater can install a given version (so \"verified only\" can pin).",
+                "type": "boolean"
+              },
+              "checkedAtMs": {
+                "description": "When that check ran, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "command": {
+                "description": "The command that updates it (\"codex update\"), shown in the UI.",
+                "type": "string"
+              },
+              "latest": {
+                "description": "The newest version a check found, when a check could tell.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "selfUpdating": {
+                "description": "The CLI updates itself already.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "command",
+              "selfUpdating",
+              "canPin"
+            ],
+            "type": "object"
+          },
+          "UsageWindow": {
+            "description": "One meter of a plan: a rolling window with how much of it is used.",
+            "properties": {
+              "label": {
+                "description": "\"Session\", \"Week\" or \"Month\".",
+                "type": "string"
+              },
+              "resetsAtMs": {
+                "description": "When the window resets, in milliseconds since the Unix epoch, when the provider says.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "usedPermille": {
+                "description": "How much of the window is used, in thousandths (540 is 54.0%). Clamped to 0..=1000 by\n[`UsageWindow::new`]; an integer so the type stays `Eq`.",
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "label",
+              "usedPermille"
+            ],
+            "type": "object"
+          },
+          "VersionGate": {
+            "description": "The installed version against the adapter's verified range.",
+            "oneOf": [
+              {
+                "description": "At least the minimum, and no newer than the last version the adapter was verified on.",
+                "properties": {
+                  "type": {
+                    "const": "ok",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Older than the minimum the adapter supports: not eligible.",
+                "properties": {
+                  "min": {
+                    "description": "The oldest supported version.",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "too_old",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "min"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Newer than the last version the adapter was verified on: eligible, but unproven.",
+                "properties": {
+                  "type": {
+                    "const": "untested",
+                    "type": "string"
+                  },
+                  "verified": {
+                    "description": "The newest version the conformance suite passed on.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "verified"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "There is no version to compare: not installed, or the CLI did not report one.",
+                "properties": {
+                  "type": {
+                    "const": "unchecked",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "VersionRange": {
+            "description": "Harness CLI versions an adapter supports.",
+            "properties": {
+              "min": {
+                "description": "Oldest supported version.",
+                "type": "string"
+              },
+              "verified": {
+                "description": "Newest version the conformance suite passed against.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "min",
+              "verified"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.job.start`, `executor.job.cancel`, `executor.job.dismiss` and\n`executor.auto_update.set`.",
+        "properties": {
+          "executor": {
+            "$ref": "#/$defs/ExecutorInfo",
+            "description": "The executor after the call."
+          }
+        },
+        "required": [
+          "executor"
+        ],
+        "title": "ExecutorJobResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.env_get",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.add`, `.remove`, `.env_get`.",
+        "properties": {
+          "id": {
+            "description": "The registry's id (`own.<slug>` for an own agent).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ExecutorRegistryParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.registry.env_get` and `.env_set`: the agent's own environment, which the\nregistry's own variables for it sit under (yours win).",
+        "properties": {
+          "env": {
+            "description": "`KEY=VALUE` lines.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "env"
+        ],
+        "title": "ExecutorRegistryEnvResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "executor.registry.env_set",
+      "params": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `executor.registry.env_set`.",
+        "properties": {
+          "env": {
+            "description": "`KEY=VALUE` lines (blank lines and `#` comments skipped); replaces the agent's own\nenvironment. Empty clears it.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The registry's id (or `own.<slug>`) of an added agent.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "env"
+        ],
+        "title": "ExecutorRegistryEnvSetParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `executor.registry.env_get` and `.env_set`: the agent's own environment, which the\nregistry's own variables for it sit under (yours win).",
+        "properties": {
+          "env": {
+            "description": "`KEY=VALUE` lines.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "env"
+        ],
+        "title": "ExecutorRegistryEnvResult",
         "type": "object"
       }
     },
@@ -22054,6 +25050,10 @@ expression: protocol_schema()
                   }
                 ],
                 "description": "How this executor is installed, updated and signed in to. Absent from a daemon without\nfeature `executor.maintain`."
+              },
+              "source": {
+                "$ref": "#/$defs/ExecutorSource",
+                "description": "Whether Reno drives this executor itself or it was added from the ACP registry (feature\n`executor.registry`). Left off the wire for a built-in one, which is also what a daemon\nwithout the feature means."
               }
             },
             "required": [
@@ -22090,6 +25090,21 @@ expression: protocol_schema()
               "startedAtMs"
             ],
             "type": "object"
+          },
+          "ExecutorSource": {
+            "description": "Where an executor comes from.",
+            "oneOf": [
+              {
+                "const": "builtin",
+                "description": "Reno drives it itself (its own harness), or it is the mock.",
+                "type": "string"
+              },
+              {
+                "const": "registry",
+                "description": "Added from the ACP registry, through the generic ACP driver.",
+                "type": "string"
+              }
+            ]
           },
           "InstallStatus": {
             "description": "Whether the harness can be launched, and from where.",

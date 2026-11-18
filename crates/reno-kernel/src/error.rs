@@ -132,6 +132,14 @@ pub enum KernelError {
         /// Why, in words.
         why: String,
     },
+    /// The executor has runs queued or live, or is being removed, so it cannot be removed.
+    #[error("executor {executor} cannot be removed: {why}")]
+    ExecutorInUse {
+        /// The executor.
+        executor: ExecutorId,
+        /// Why, in words.
+        why: String,
+    },
     /// The executor has no updater of its own.
     #[error("executor {0} has no updater")]
     NoUpdater(ExecutorId),

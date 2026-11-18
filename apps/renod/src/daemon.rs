@@ -285,7 +285,7 @@ impl Daemon {
         let stop = CancellationToken::new();
         let installer = Installer::new(&registry, stop.clone());
         let installs = installer.tasks();
-        let mut ids: Vec<ExecutorId> = registry.ids().cloned().collect();
+        let mut ids: Vec<ExecutorId> = registry.ids();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
         // Everything Reno can build is a name a definition may use, installed or not.

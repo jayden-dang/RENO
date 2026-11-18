@@ -503,6 +503,93 @@ impl Client {
             .executor)
     }
 
+    /// `executor.registry.list`: the ACP registry's agents with this device's build, readiness
+    /// and what is added. `refresh` skips the cache. Needs feature `executor.registry`.
+    pub async fn registry_list(
+        &self,
+        refresh: bool,
+    ) -> Result<reno_proto::ExecutorRegistryListResult, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRegistryList>(reno_proto::ExecutorRegistryListParams {
+                refresh,
+            })
+            .await?)
+    }
+
+    /// `executor.registry.add`: adds the registry agent `id` (or updates it) as an install job,
+    /// returning its executor once the job started. Progress arrives through
+    /// [`Client::watch_executors`]. Needs feature `executor.registry`.
+    pub async fn registry_add(&self, id: &str) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRegistryAdd>(reno_proto::ExecutorRegistryParams {
+                id: id.to_owned(),
+            })
+            .await?
+            .executor)
+    }
+
+    /// `executor.registry.remove`. Needs feature `executor.registry`.
+    pub async fn registry_remove(&self, id: &str) -> Result<reno_proto::ExecutorId, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRegistryRemove>(reno_proto::ExecutorRegistryParams {
+                id: id.to_owned(),
+            })
+            .await?
+            .executor)
+    }
+
+    /// `executor.registry.add_own`: adds an agent of your own (`command` is its program and
+    /// arguments, `env` its `KEY=VALUE` lines). Needs feature `executor.registry`.
+    pub async fn registry_add_own(
+        &self,
+        name: &str,
+        command: &str,
+        env: &str,
+    ) -> Result<reno_proto::ExecutorInfo, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRegistryAddOwn>(reno_proto::ExecutorRegistryAddOwnParams {
+                name: name.to_owned(),
+                command: command.to_owned(),
+                env: env.to_owned(),
+            })
+            .await?
+            .executor)
+    }
+
+    /// `executor.registry.env_get`: the agent's own environment as `KEY=VALUE` lines. Needs
+    /// feature `executor.registry`.
+    pub async fn registry_env_get(&self, id: &str) -> Result<String, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRegistryEnvGet>(reno_proto::ExecutorRegistryParams {
+                id: id.to_owned(),
+            })
+            .await?
+            .env)
+    }
+
+    /// `executor.registry.env_set`: replaces the agent's own environment. Needs feature
+    /// `executor.registry`.
+    pub async fn registry_env_set(&self, id: &str, env: &str) -> Result<(), ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_REGISTRY)?;
+        self.rpc
+            .call::<reno_proto::ExecutorRegistryEnvSet>(reno_proto::ExecutorRegistryEnvSetParams {
+                id: id.to_owned(),
+                env: env.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// `executor.job.cancel`: stops the executor's job, which ends `cancelled`. Needs feature
     /// `executor.maintain`.
     pub async fn cancel_executor_job(
