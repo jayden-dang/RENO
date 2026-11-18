@@ -1531,13 +1531,11 @@ impl<'a> Player<'a> {
                     return Err(());
                 }
             }
-            "session/closed" => {
-                if !self.interrupted && self.last.is_none() {
-                    self.failed = Some(format!(
-                        "Muse closed the session ({})",
-                        params["reason"].as_str().unwrap_or("no reason given")
-                    ));
-                }
+            "session/closed" if !self.interrupted && self.last.is_none() => {
+                self.failed = Some(format!(
+                    "Muse closed the session ({})",
+                    params["reason"].as_str().unwrap_or("no reason given")
+                ));
             }
             _ => {}
         }

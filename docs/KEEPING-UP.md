@@ -1,6 +1,6 @@
 # Keeping up with the agent CLIs
 
-Reno drives Claude Code, Codex, Pi and the ACP agents (Grok, Devin, Hermes and the registry's) through
+Reno drives Claude Code, Codex, Pi, Muse Code and the ACP agents (Grok, Devin, Hermes and the registry's) through
 their own command-line programs. Those programs update on their own schedule and Reno's drivers
 read their wire formats directly, so the drivers can fall behind without any test of ours
 noticing. Four things tell us when they have; this page is what to do about each, and the weekly
@@ -29,6 +29,28 @@ RENO_PI_LIVE=1 cargo test -p reno-harness --test pi -- --ignored --nocapture
 ```
 
 and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/pi/mod.rs` by hand.
+
+Muse Code (`muse serve`, `cli_verified` 1.4.23) is covered the same way: the counters, the version
+gate, and not the live conformance suite. A newer Muse runs and shows `untested`. To clear it,
+export the new CLI's own schema and compare it with the tables in `wire/muse/known.rs` (the
+notifications and item kinds) and `wire/muse/frames.rs` (the methods Reno sends):
+
+```
+muse schema generate-json-schema --experimental --out /tmp/muse-schema
+```
+
+(run it with `MUSE_NO_AUTO_UPDATE=1`: the installed `muse` is a launcher script that updates the
+install itself on any start), then run the live Muse test, which plays a whole run over Muse's own
+`echo` provider, a mock model, in a throwaway home, config and data directory (no model, no
+network, nothing under `~/.config/muse`):
+
+```
+RENO_MUSE_LIVE=1 cargo test -p reno-harness --test muse -- --ignored --nocapture
+```
+
+and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/muse/mod.rs` by hand. The
+echo provider calls no tool, so an approval, a question, a steer and a subagent are still shown
+only by the fake until a person has run them against a real model.
 
 ## The weekly checklist
 

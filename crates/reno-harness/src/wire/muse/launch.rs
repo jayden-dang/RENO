@@ -235,6 +235,28 @@ mod tests {
     }
 
     #[test]
+    fn the_posture_checks_read_what_a_real_1_4_23_reported() {
+        // `session/start` and `session/resume` results as a real Muse Code 1.4.23 answered them
+        // over its echo provider (trimmed to the members read here). The resumed session had last
+        // been set to allowAll, which is what `session/setApprovalMode` then replaces.
+        let started = json!({"sessionId": "s", "providerId": "echo", "modelId": null,
+            "approvalMode": {"mode": "promptUnmatched", "source": "startup", "lastCommandId": null},
+            "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
+                "axes": {"filesystem": "sandboxed", "network": "off", "approval": "onRequest",
+                         "reviewer": "human"}, "reviewerAttached": true}});
+        assert!(Posture::ASK.confirmed_by(&started).is_ok());
+        let resumed = json!({"sessionId": "s", "modelId": "echo",
+            "approvalMode": {"mode": "allowAll", "source": "replay", "lastCommandId": null},
+            "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
+                "reviewerAttached": true}});
+        assert!(Posture::ASK.confirmed_by(&resumed).is_ok());
+        let applied = json!({"commandId": "c", "status": "accepted", "applyOutcome": "completed",
+            "effectiveMode": {"mode": "promptUnmatched", "source": "approvalReconfigure",
+                              "lastCommandId": "c"}});
+        assert!(Posture::ASK.mode_applied(&applied).is_ok());
+    }
+
+    #[test]
     fn servers_become_optional_session_scoped_stdio_servers() {
         assert_eq!(session_config(&[]), None);
         let servers = [

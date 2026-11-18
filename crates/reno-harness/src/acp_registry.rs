@@ -126,6 +126,7 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("grok-build", "grok"),
     ("antigravity-acp", "antigravity"),
     ("pi-acp", "pi"),
+    ("muse-code", "muse"),
 ];
 
 /// The built-in harness slug for a registry id Reno drives itself.
@@ -1384,6 +1385,8 @@ mod tests {
         assert_eq!(built_in("grok-build"), Some("grok"));
         // Pi has a native driver: the registry's adapter copy is not offered beside it.
         assert_eq!(built_in("pi-acp"), Some("pi"));
+        // So has Muse Code: the registry's `muse-code` copy is not offered beside it.
+        assert_eq!(built_in("muse-code"), Some("muse"));
         assert_eq!(built_in("gemini"), None);
     }
 
