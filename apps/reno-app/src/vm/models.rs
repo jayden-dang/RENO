@@ -9,6 +9,7 @@ use reno_proto::{
     Effort, ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
 };
 
+use super::picker;
 use crate::summary;
 
 /// What the person chose: a harness, one of its models (`None`: the harness's default), and one
@@ -46,6 +47,19 @@ pub(crate) struct HarnessChoice {
     pub(crate) usable: bool,
     /// A running run's model can be changed (`ExecutorCaps::model_switch`).
     pub(crate) switches: bool,
+    /// Who is signed in, as the harness reported it.
+    pub(crate) account: Account,
+}
+
+/// The harness's login, for the picker's Account row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Account {
+    /// Signed in, as this account when the harness says who.
+    SignedIn(Option<String>),
+    /// Not signed in: a task sent to it would not start.
+    SignedOut,
+    /// The harness has no way to tell, or has not been checked.
+    NotReported,
 }
 
 fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
@@ -64,6 +78,11 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
             )
         },
     );
+    let account = match health.map(|h| &h.signed_in) {
+        Some(SignedIn::Yes { account }) => Account::SignedIn(account.clone()),
+        Some(SignedIn::No { .. }) => Account::SignedOut,
+        Some(SignedIn::Unknown) | None => Account::NotReported,
+    };
     Some(HarnessChoice {
         id: info.descriptor.id.clone(),
         name: summary::executor_name(info.descriptor.id.as_str()),
@@ -80,6 +99,7 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
         live,
         usable: !signed_out,
         switches: info.descriptor.caps.model_switch,
+        account,
     })
 }
 
@@ -126,16 +146,23 @@ pub(crate) fn model(state: &State, executor: &ExecutorId, model: &str) -> Option
     harness(state, executor).and_then(|h| h.models.into_iter().find(|m| m.id == model))
 }
 
-/// The chip's words for a pick: the model's name ("Opus 5.5"), or for a harness's default the
-/// harness name and a faint "default". The glyph beside them names the vendor.
-pub(crate) fn chip_words(state: &State, pick: &Pick) -> (String, Option<&'static str>) {
-    match &pick.model {
-        Some(model) => (model_name(state, &pick.executor, model), None),
-        None => (
+/// The chip's words for a pick: the model's name ("Opus 5.5") and, faint beside it, the effort
+/// ("Max", or "Default \u{b7} High" while none is chosen and the model has a default). For a
+/// harness's default model: the harness name and a faint "default". The glyph beside them names
+/// the vendor.
+pub(crate) fn chip_words(state: &State, pick: &Pick) -> (String, Option<String>) {
+    let Some(model) = &pick.model else {
+        return (
             summary::executor_name(pick.executor.as_str()),
-            Some("default"),
-        ),
-    }
+            Some("default".to_owned()),
+        );
+    };
+    let listed = self::model(state, &pick.executor, model);
+    let extra = match (pick.effort, listed.as_ref().and_then(|m| m.default_effort)) {
+        (None, None) => None,
+        (chosen, default) => Some(picker::effort_words(chosen, default)),
+    };
+    (model_name(state, &pick.executor, model), extra)
 }
 
 /// How many of a harness's models the picker lists before "More …" (in the CLI's order).
@@ -155,37 +182,6 @@ pub(crate) fn folded<'a>(
         .collect();
     let hidden = models.len() - shown.len();
     (shown, hidden)
-}
-
-/// One effort dot beside the chip.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EffortDot {
-    pub(crate) effort: Effort,
-    /// At or below the chosen level.
-    pub(crate) filled: bool,
-    /// The model's own level, shown when none is chosen.
-    pub(crate) default: bool,
-}
-
-/// The dots for a model's levels (least to most) and the chosen one (`None`: its default).
-pub(crate) fn effort_dots(
-    levels: &[Effort],
-    chosen: Option<Effort>,
-    default: Option<Effort>,
-) -> Vec<EffortDot> {
-    levels
-        .iter()
-        .map(|&effort| EffortDot {
-            effort,
-            filled: chosen.is_some_and(|c| effort <= c),
-            default: chosen.is_none() && default == Some(effort),
-        })
-        .collect()
-}
-
-/// The effort after clicking a dot: that level, or back to the default when it was chosen.
-pub(crate) fn next_effort(chosen: Option<Effort>, clicked: Effort) -> Option<Effort> {
-    (chosen != Some(clicked)).then_some(clicked)
 }
 
 #[cfg(test)]
@@ -291,11 +287,22 @@ mod tests {
         };
         assert_eq!(
             chip_words(&state, &pick(None)),
-            ("Claude Code".to_owned(), Some("default"))
+            ("Claude Code".to_owned(), Some("default".to_owned()))
         );
         assert_eq!(
             chip_words(&state, &pick(Some("claude-sonnet-5-5"))),
-            ("Sonnet 5.5".to_owned(), None)
+            ("Sonnet 5.5".to_owned(), Some("High".to_owned()))
+        );
+        let none = Pick {
+            effort: None,
+            ..pick(Some("claude-haiku-5-5"))
+        };
+        assert_eq!(
+            chip_words(&state, &none),
+            (
+                "Haiku 5.5".to_owned(),
+                Some("Default \u{b7} Medium".to_owned())
+            )
         );
         let haiku = model(&state, &claude, "claude-haiku-5-5").unwrap();
         assert_eq!(haiku.efforts, [Effort::Low, Effort::Medium, Effort::High]);
@@ -339,35 +346,6 @@ mod tests {
         assert_eq!(
             ids(folded(&all[..2], None)),
             (vec!["a".into(), "b".into()], 0)
-        );
-    }
-
-    #[test]
-    fn effort_dots_fill_to_the_choice_and_ring_the_default_when_none_is_chosen() {
-        use Effort::{High, Low, Max, Medium};
-        let levels = [Low, Medium, High, Max];
-        let filled = |dots: Vec<EffortDot>| dots.iter().map(|d| d.filled).collect::<Vec<_>>();
-        assert_eq!(
-            filled(effort_dots(&levels, Some(High), Some(Medium))),
-            [true, true, true, false]
-        );
-        let none = effort_dots(&levels, None, Some(Medium));
-        assert_eq!(filled(none.clone()), [false; 4]);
-        assert_eq!(
-            none.iter().map(|d| d.default).collect::<Vec<_>>(),
-            [false, true, false, false]
-        );
-        assert!(
-            effort_dots(&levels, Some(Low), Some(Medium))
-                .iter()
-                .all(|d| !d.default)
-        );
-        assert_eq!(next_effort(None, High), Some(High));
-        assert_eq!(next_effort(Some(Low), High), Some(High));
-        assert_eq!(
-            next_effort(Some(High), High),
-            None,
-            "the chosen dot again: back to default"
         );
     }
 }

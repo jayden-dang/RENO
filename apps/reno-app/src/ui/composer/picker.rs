@@ -8,8 +8,8 @@ use super::{Composer, Mode};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::theme::Theme;
-use crate::vm::models;
 use crate::vm::routing::{self, Preview};
+use crate::vm::{models, picker};
 
 impl Composer {
     /// Whether the chip opens the picker: on Home and on an ended run (the next task's harness
@@ -206,7 +206,7 @@ impl Composer {
         let Some(mut pick) = self.shown_pick(cx) else {
             return;
         };
-        pick.effort = models::next_effort(pick.effort, clicked);
+        pick.effort = picker::next_effort(pick.effort, clicked);
         self.pick = Some(pick);
         self.refresh_preview(cx);
         cx.notify();
@@ -227,7 +227,7 @@ impl Composer {
         }
         let editable = self.live_run(cx).is_none();
         let word = shown.effort.map_or("default", |e| e.as_str());
-        let dots = models::effort_dots(&model.efforts, shown.effort, model.default_effort);
+        let dots = picker::effort_cells(&model.efforts, shown.effort, model.default_effort);
         let (accent, ring) = (theme.accent, theme.text.opacity(0.28));
         Some(
             div()
