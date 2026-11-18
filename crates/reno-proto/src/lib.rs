@@ -65,6 +65,7 @@ pub mod rules;
 pub mod run;
 pub mod secrets;
 pub mod triggers;
+pub mod usage;
 pub mod workspace;
 
 pub use agent::*;
@@ -79,4 +80,5 @@ pub use rules::*;
 pub use run::*;
 pub use secrets::*;
 pub use triggers::*;
+pub use usage::*;
 pub use workspace::*;

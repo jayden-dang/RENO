@@ -33,7 +33,7 @@ fn signed_in() -> HealthProbe {
     installed(SignedIn::Yes { account: None }, VersionGate::Ok)
 }
 
-fn signed_out() -> HealthProbe {
+pub(super) fn signed_out() -> HealthProbe {
     installed(
         SignedIn::No {
             hint: "run `mock login`".into(),
@@ -45,7 +45,7 @@ fn signed_out() -> HealthProbe {
 /// An executor whose probe says what the test last set, counts its probes and starts, and can
 /// refuse to start as a harness that is not signed in does.
 #[derive(Clone)]
-struct Probed {
+pub(super) struct Probed {
     inner: MockExecutor,
     says: Arc<Mutex<HealthProbe>>,
     probes: Arc<AtomicUsize>,
@@ -59,7 +59,7 @@ struct Probed {
 }
 
 impl Probed {
-    fn new(says: HealthProbe) -> Self {
+    pub(super) fn new(says: HealthProbe) -> Self {
         Self::named("mock", says)
     }
 
@@ -81,6 +81,12 @@ impl Probed {
         *self.says.lock().unwrap() = says;
     }
 
+    /// Reads the usage of this executor's account from `source`.
+    pub(super) fn with_usage(mut self, source: Arc<dyn reno_harness::usage::UsageSource>) -> Self {
+        self.inner = self.inner.with_usage_source(source);
+        self
+    }
+
     fn probes(&self) -> usize {
         self.probes.load(Ordering::SeqCst)
     }
@@ -89,7 +95,7 @@ impl Probed {
         self.starts.load(Ordering::SeqCst)
     }
 
-    fn registry(&self) -> ExecutorRegistry {
+    pub(super) fn registry(&self) -> ExecutorRegistry {
         ExecutorRegistry::new().with(Arc::new(self.clone()))
     }
 }
@@ -102,6 +108,10 @@ impl Executor for Probed {
 
     fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
         self.frames.lock().unwrap().clone()
+    }
+
+    async fn plan_usage(&self) -> Option<reno_harness::usage::UsageReading> {
+        self.inner.plan_usage().await
     }
 
     async fn probe(&self) -> HealthProbe {

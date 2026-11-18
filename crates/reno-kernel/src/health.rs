@@ -32,7 +32,7 @@ use std::time::Duration;
 use futures::future::join_all;
 use reno_proto::{
     ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog,
-    NotInstalledReason, UnknownFrameKind,
+    NotInstalledReason, PlanUsage, UnknownFrameKind,
 };
 use tokio::sync::{Semaphore, watch};
 
@@ -50,6 +50,26 @@ pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(45);
 /// probe, unless the stored one is younger than this: a flood of runs against a signed-out
 /// executor is one probe, not one each.
 pub(crate) const RECHECK_FLOOR_MS: i64 = 5_000;
+
+/// Plan usage is read from the provider, so it is read at most this often per executor, whoever
+/// asks (zeron's `FORCE_MIN_INTERVAL`).
+pub(crate) const USAGE_MIN_INTERVAL_MS: i64 = 30_000;
+
+/// How long the last good reading stays shown when the next ones are unavailable (a rate limit
+/// or a blip must not blank the meters); its own `fetched_at_ms` tells how old it is.
+pub(crate) const USAGE_KEEP_MS: i64 = 30 * 60_000;
+
+/// The longest one usage read may take.
+pub(crate) const USAGE_DEADLINE: Duration = Duration::from_secs(20);
+
+/// What the board knows of one executor's plan usage. Memory only: it is not stored, since a
+/// restarted daemon would show an old meter as current.
+#[derive(Default)]
+struct UsageEntry {
+    last: Option<PlanUsage>,
+    /// When a read was last started, successful or not.
+    attempted_ms: Option<i64>,
+}
 
 struct Entry {
     health: ExecutorHealth,
@@ -69,6 +89,8 @@ pub(crate) struct HealthBoard {
     queued: Mutex<HashSet<ExecutorId>>,
     /// The unrecognised frame kinds seen so far, per executor (T1.14).
     frames: Mutex<HashMap<ExecutorId, FrameBook>>,
+    /// The plan usage of each executor, laid over its health when the list is published.
+    usage: Mutex<HashMap<ExecutorId, UsageEntry>>,
 }
 
 /// When each unrecognised frame kind of one executor was first seen under one CLI version. The
@@ -90,6 +112,7 @@ impl HealthBoard {
             gates: Mutex::new(HashMap::new()),
             queued: Mutex::new(HashSet::new()),
             frames: Mutex::new(HashMap::new()),
+            usage: Mutex::new(HashMap::new()),
         }
     }
 
@@ -111,6 +134,10 @@ impl HealthBoard {
             .get(id)
             .filter(|entry| entry.live)
             .map(|entry| entry.health.clone())
+    }
+
+    fn usage_map(&self) -> MutexGuard<'_, HashMap<ExecutorId, UsageEntry>> {
+        self.usage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn gate_of(&self, id: &ExecutorId) -> Arc<Gate> {
@@ -155,6 +182,12 @@ impl Shared {
             .iter()
             .map(|(id, entry)| (id.clone(), entry.health.clone()))
             .collect();
+        let mut health = health;
+        for (id, usage) in self.health.usage_map().iter() {
+            if let Some(health) = health.get_mut(id) {
+                health.plan_usage.clone_from(&usage.last);
+            }
+        }
         let mut ids: Vec<&ExecutorId> = self.executors.ids().collect();
         ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let list = ids
@@ -436,5 +469,80 @@ impl Shared {
     /// The health a probe of this process found for `id`, or `None` when it has not probed it.
     pub(crate) fn live_health(&self, id: &ExecutorId) -> Option<ExecutorHealth> {
         self.health.live(id)
+    }
+
+    /// Reads the plan usage of `ids` (every executor when `None`) from the executors' own
+    /// sources and publishes it with their health. Executors that are not installed or are
+    /// signed out are not asked, and no executor is asked twice within
+    /// [`USAGE_MIN_INTERVAL_MS`]. An executor with no health yet is probed first. `Err` only for
+    /// an id that is not registered.
+    pub(crate) async fn refresh_plan_usage(&self, ids: Option<&ExecutorId>) -> Result<()> {
+        let ids: Vec<ExecutorId> = match ids {
+            Some(id) => vec![id.clone()],
+            None => self.executors.ids().cloned().collect(),
+        };
+        for id in &ids {
+            if self.executors.get(id).is_none() {
+                return Err(KernelError::ExecutorNotFound(id.clone()));
+            }
+            if self.any_health(id).is_none() {
+                self.probe_executor(id, Probing::Shared).await?;
+            }
+        }
+        let changed = join_all(ids.iter().map(|id| self.read_plan_usage(id))).await;
+        if changed.into_iter().any(|changed| changed) {
+            self.publish_executors();
+        }
+        Ok(())
+    }
+
+    /// One executor's usage read; whether what is shown changed.
+    async fn read_plan_usage(&self, id: &ExecutorId) -> bool {
+        let Some(executor) = self.executors.get(id).cloned() else {
+            return false;
+        };
+        let asked = self.any_health(id).is_some_and(|health| {
+            matches!(
+                health.installed,
+                reno_proto::InstallStatus::Installed { .. }
+            ) && !matches!(health.signed_in, reno_proto::SignedIn::No { .. })
+        });
+        if !asked {
+            return false;
+        }
+        let now = self.db.now_ms();
+        {
+            let mut usage = self.health.usage_map();
+            let entry = usage.entry(id.clone()).or_default();
+            if entry
+                .attempted_ms
+                .is_some_and(|at| now.saturating_sub(at) < USAGE_MIN_INTERVAL_MS)
+            {
+                return false;
+            }
+            entry.attempted_ms = Some(now);
+        }
+        let reading = tokio::select! {
+            biased;
+            () = self.root.cancelled() => return false,
+            reading = tokio::time::timeout(USAGE_DEADLINE, executor.plan_usage()) => reading.ok().flatten(),
+        };
+        let fetched = self.db.now_ms();
+        let mut usage = self.health.usage_map();
+        let entry = usage.entry(id.clone()).or_default();
+        let next = match reading {
+            Some(reading) if !reading.windows.is_empty() => Some(PlanUsage {
+                plan_label: reading.plan_label,
+                windows: reading.windows,
+                fetched_at_ms: u64::try_from(fetched).unwrap_or(0),
+            }),
+            _ => entry.last.clone().filter(|last| {
+                fetched.saturating_sub(i64::try_from(last.fetched_at_ms).unwrap_or(0))
+                    < USAGE_KEEP_MS
+            }),
+        };
+        let changed = entry.last != next;
+        entry.last = next;
+        changed
     }
 }

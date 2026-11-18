@@ -1017,3 +1017,39 @@ async fn the_fake_keeps_a_remembered_answer_as_a_rule_that_can_be_listed_and_rev
     assert_eq!(bad.code(), Some(reno_proto::ErrorCode::InvalidParams));
     assert_eq!(client.list_approvals().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn the_fake_daemon_carries_plan_usage_for_claude_and_codex() {
+    use reno_proto::{ExecutorId, UsageLevel};
+    let daemon = FakeDaemon::start(FakeConfig::default()).unwrap();
+    let client = daemon.connect().await.unwrap();
+    assert!(client.supports(reno_proto::FEATURE_EXECUTOR_USAGE));
+
+    let listed = client.list_executors().await.unwrap();
+    let usage_of = |list: &[reno_proto::ExecutorInfo], id: &str| {
+        list.iter()
+            .find(|e| e.descriptor.id.as_str() == id)
+            .and_then(|e| e.health.clone())
+            .and_then(|h| h.plan_usage.map(|u| (u, h.checked_at_ms)))
+    };
+    let (claude, checked) = usage_of(&listed, "claude-code").expect("claude usage");
+    let windows: Vec<_> = claude
+        .windows
+        .iter()
+        .map(|w| (w.label.as_str(), w.used_permille))
+        .collect();
+    assert_eq!(windows, [("Session", 540), ("Week", 210)]);
+    assert_eq!(claude.level(), Some(UsageLevel::Normal));
+    let (codex, _) = usage_of(&listed, "codex").expect("codex usage");
+    assert_eq!(codex.windows[0].used_permille, 120);
+    assert!(usage_of(&listed, "mock").is_none());
+
+    // A usage-only refresh stamps the meters, not the probe.
+    let refreshed = client
+        .refresh_executor_usage(Some("claude-code".parse::<ExecutorId>().unwrap()))
+        .await
+        .unwrap();
+    let (after, checked_after) = usage_of(&refreshed, "claude-code").unwrap();
+    assert!(after.fetched_at_ms > claude.fetched_at_ms);
+    assert_eq!(checked_after, checked);
+}

@@ -40,6 +40,11 @@ impl Scripted {
         }
     }
 
+    fn with_usage(mut self, source: Arc<dyn reno_harness::usage::UsageSource>) -> Self {
+        self.inner = self.inner.with_usage_source(source);
+        self
+    }
+
     fn silent(mut self) -> Self {
         self.silent = true;
         self
@@ -58,6 +63,10 @@ impl Executor for Scripted {
 
     fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
         self.frames.lock().unwrap().clone()
+    }
+
+    async fn plan_usage(&self) -> Option<reno_harness::usage::UsageReading> {
+        self.inner.plan_usage().await
     }
 
     async fn probe(&self) -> HealthProbe {
@@ -178,6 +187,57 @@ daemon_test! {
         let all = within(fx.client.refresh_executors(None)).await.unwrap();
         assert_eq!(all.len(), 1);
         let error = within(fx.client.refresh_executors(Some(id("nowhere")))).await.unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::NotFound));
+        fx.stop().await;
+    }
+}
+
+/// A usage source that says one Session meter, and how many times it was asked.
+#[derive(Debug, Default)]
+struct Meter {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl reno_harness::usage::UsageSource for Meter {
+    async fn read(&self) -> Option<reno_harness::usage::UsageReading> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(reno_harness::usage::UsageReading {
+            plan_label: None,
+            windows: vec![reno_proto::UsageWindow::new("Session", 0.54, None)],
+        })
+    }
+}
+
+daemon_test! {
+    async fn plan_usage_rides_on_the_health_and_a_usage_only_refresh_is_throttled() {
+        let meter = Arc::new(Meter::default());
+        let claude = Scripted::new("mock", healthy()).with_usage(meter.clone());
+        let fx = Fixture::with(|c| c.executors = set(&[&claude])).await;
+        assert!(fx.client.supports(reno_proto::FEATURE_EXECUTOR_USAGE));
+
+        // The start-up probe reads the usage once; follow the watch until it shows.
+        let mut watch = within(fx.client.watch_executors()).await.unwrap();
+        let landed = within(async {
+            while let Some(snapshot) = watch.next().await {
+                let snapshot = snapshot.unwrap();
+                if health_of(&snapshot.executors, "mock").is_some_and(|h| h.plan_usage.is_some()) {
+                    return snapshot.executors;
+                }
+            }
+            panic!("the watch ended");
+        })
+        .await;
+        let usage = health_of(&landed, "mock").unwrap().plan_usage.clone().unwrap();
+        assert_eq!(usage.windows[0].label, "Session");
+        assert_eq!(usage.windows[0].used_permille, 540);
+
+        // Asking again inside 30 s answers from what is held: the source is not asked again.
+        let again = within(fx.client.refresh_executor_usage(Some(id("mock")))).await.unwrap();
+        assert_eq!(health_of(&again, "mock").unwrap().plan_usage, Some(usage));
+        within(fx.client.refresh_executors(None)).await.unwrap();
+        assert_eq!(meter.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let error = within(fx.client.refresh_executor_usage(Some(id("nowhere")))).await.unwrap_err();
         assert_eq!(error.code(), Some(ErrorCode::NotFound));
         fx.stop().await;
     }

@@ -21,6 +21,7 @@ fn health(at: u64, signed_in: SignedIn) -> ExecutorHealth {
         signed_in,
         models: ModelCatalog::curated(vec![]),
         checked_at_ms: at,
+        plan_usage: None,
     }
 }
 
@@ -50,6 +51,7 @@ async fn the_latest_health_of_each_executor_survives_a_reopen() {
                     signed_in: SignedIn::Unknown,
                     models: ModelCatalog::curated(vec![]),
                     checked_at_ms: 11,
+                    plan_usage: None,
                 },
                 11,
             )

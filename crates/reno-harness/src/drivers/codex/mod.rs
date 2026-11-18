@@ -264,6 +264,8 @@ pub struct CodexExecutor {
     models: Arc<Mutex<Option<Vec<ModelInfo>>>>,
     /// How long `probe` lets its short-lived app-server take in all.
     probe_budget: Duration,
+    /// Where `plan_usage` reads the account's meters; none until the daemon wires one.
+    usage: Option<Arc<dyn crate::usage::UsageSource>>,
     tracker: TaskTracker,
     /// Notifications and requests the wire layer does not know, counted across runs.
     unknown: UnknownFrames,
@@ -293,6 +295,7 @@ impl Default for CodexExecutor {
             cli_version: Arc::new(Mutex::new(None)),
             models: Arc::new(Mutex::new(None)),
             probe_budget: probe::WIRE_BUDGET,
+            usage: None,
             tracker: TaskTracker::new(),
             unknown: UnknownFrames::new(),
         }
@@ -304,6 +307,13 @@ impl CodexExecutor {
     /// location.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reads the signed-in account's plan usage from `source` (`Executor::plan_usage`).
+    #[must_use]
+    pub fn with_usage_source(mut self, source: Arc<dyn crate::usage::UsageSource>) -> Self {
+        self.usage = Some(source);
+        self
     }
 
     /// Use a fixed CLI binary instead of PATH/known-location resolution.
@@ -587,6 +597,10 @@ impl Executor for CodexExecutor {
     /// app-server, whether Codex holds a login (`account/read`, no refresh, no model call) and
     /// which models the account may use (`model/list`). When the app-server cannot be asked the
     /// sign-in is `Unknown` and the models are the last live list, else the curated one.
+    async fn plan_usage(&self) -> Option<crate::usage::UsageReading> {
+        self.usage.as_ref()?.read().await
+    }
+
     async fn probe(&self) -> HealthProbe {
         let overridden = self.executable.is_some()
             || std::env::var_os("CODEX_EXECUTABLE").is_some_and(|value| !value.is_empty());

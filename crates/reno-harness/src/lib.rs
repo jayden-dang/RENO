@@ -46,6 +46,7 @@ pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod proc;
 pub(crate) mod redact;
+pub mod usage;
 #[cfg(unix)]
 pub use proc::{
     DEFAULT_SWEEP_GRACE, ProcessRecord, SkipReason, SweepReport, sweep_orphans,

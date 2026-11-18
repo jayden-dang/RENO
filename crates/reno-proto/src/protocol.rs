@@ -165,6 +165,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_EFFORT,
     FEATURE_EXECUTOR_MAINTAIN,
     FEATURE_RUN_CHANGES,
+    crate::usage::FEATURE_EXECUTOR_USAGE,
 ];
 
 /// A request with a single reply.

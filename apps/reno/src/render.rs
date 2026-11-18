@@ -960,6 +960,7 @@ mod tests {
             },
             models: ModelCatalog::live(vec![]),
             checked_at_ms: 1,
+            plan_usage: None,
         };
         assert_eq!(
             executor_line(&executor(Some(health.clone()))),

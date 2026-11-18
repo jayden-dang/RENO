@@ -437,6 +437,22 @@ impl Kernel {
         self.shared
             .probe_executors(id, health::Probing::Fresh)
             .await?;
+        self.shared.refresh_plan_usage(id).await?;
+        Ok(self.executors())
+    }
+
+    /// Reads the plan usage of `id` (every executor when `None`) again and returns the list.
+    /// Does not probe an executor that already has health. Throttled to once per 30 s per
+    /// executor, so asking often is cheap. Errors with [`KernelError::ExecutorNotFound`] for an
+    /// id that is not registered.
+    pub async fn refresh_executor_usage(
+        &self,
+        id: Option<&ExecutorId>,
+    ) -> Result<Vec<ExecutorInfo>> {
+        if self.shared.root.is_cancelled() {
+            return Err(KernelError::ShuttingDown);
+        }
+        self.shared.refresh_plan_usage(id).await?;
         Ok(self.executors())
     }
 
@@ -457,6 +473,10 @@ impl Kernel {
         self.shared.spawn(async move {
             if let Err(error) = shared.probe_executors(None, health::Probing::Shared).await {
                 tracing::debug!(%error, "the start-up probe of the executors ended early");
+            }
+            // Once, with the probes: nothing reads usage on a timer (ARCH-10).
+            if let Err(error) = shared.refresh_plan_usage(None).await {
+                tracing::debug!(%error, "the start-up read of plan usage ended early");
             }
         });
     }

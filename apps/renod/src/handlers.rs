@@ -779,13 +779,14 @@ async fn executor_frames(ctx: Arc<Ctx>, p: ExecutorFramesParams) -> Reply<Execut
 
 /// Probes again and waits for the answer: the one call a person makes to say "I fixed it".
 async fn executor_refresh(ctx: Arc<Ctx>, p: ExecutorRefreshParams) -> Reply<ExecutorListResult> {
-    tracing::info!(executor = ?p.id, "executor refresh requested");
+    tracing::info!(executor = ?p.id, usage_only = p.usage_only, "executor refresh requested");
+    let executors = if p.usage_only {
+        ctx.kernel.refresh_executor_usage(p.id.as_ref()).await
+    } else {
+        ctx.kernel.refresh_executors(p.id.as_ref()).await
+    };
     Ok(ExecutorListResult {
-        executors: ctx
-            .kernel
-            .refresh_executors(p.id.as_ref())
-            .await
-            .map_err(|e| kernel_error(&e))?,
+        executors: executors.map_err(|e| kernel_error(&e))?,
     })
 }
 

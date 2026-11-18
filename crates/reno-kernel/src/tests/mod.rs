@@ -29,6 +29,7 @@ mod rules;
 mod runs;
 mod secrets;
 mod triggers;
+mod usage;
 mod workspaces;
 
 use std::path::PathBuf;
