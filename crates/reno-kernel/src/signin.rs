@@ -80,10 +80,14 @@ impl crate::Kernel {
             claim,
             tx,
         ));
+        // `Done` is the last item whatever still holds a sender (the agent's reader tasks may
+        // outlive its sign-in): the stream ends after it.
         Ok(
-            futures::stream::unfold((rx, guard), |(mut rx, guard)| async move {
+            futures::stream::unfold(Some((rx, guard)), |state| async move {
+                let (mut rx, guard) = state?;
                 let event = rx.recv().await?;
-                Some((event, (rx, guard)))
+                let last = matches!(event, SigninEvent::Done { .. });
+                Some((event, (!last).then_some((rx, guard))))
             })
             .boxed(),
         )

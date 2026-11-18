@@ -234,6 +234,11 @@ pub(crate) async fn start(shared: &Arc<Shared>, setup: DefsSetup) -> Result<()> 
     } else {
         context
     };
+    let context = if context.live.is_none() {
+        context.with_live(Arc::new(shared.executors.clone()))
+    } else {
+        context
+    };
     let stored = shared.db.current_definitions().await?;
     let known = versions_of(&stored);
 

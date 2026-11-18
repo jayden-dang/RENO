@@ -47,6 +47,9 @@ struct Scripted {
     methods: Arc<Mutex<Vec<Option<String>>>>,
     /// Methods a full probe's handshake saw; empty until then.
     seen: Arc<Mutex<Vec<AuthMethod>>>,
+    /// The sink of every call, kept for good: a reader task that outlives the sign-in (a
+    /// descendant of the agent holding its pipe) still holds one, and `done` must end the stream.
+    held: Arc<Mutex<Vec<SignInEvents>>>,
 }
 
 struct Marks(Arc<AtomicBool>);
@@ -68,6 +71,7 @@ impl Scripted {
             dropped: Arc::default(),
             methods: Arc::default(),
             seen: Arc::default(),
+            held: Arc::default(),
         }
     }
 }
@@ -137,6 +141,7 @@ impl Executor for Scripted {
     ) -> Result<(), HarnessError> {
         let _marks = Marks(self.dropped.clone());
         self.methods.lock().unwrap().push(method);
+        self.held.lock().unwrap().push(events.clone());
         for event in &self.events {
             events(event.clone());
         }

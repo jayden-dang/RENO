@@ -1,7 +1,8 @@
 //! Definitions: the bots, triggers and policy a person writes as TOML files (ARCHITECTURE
 //! sections 3.2, 4, 7, 8 and 9).
 //!
-//! Everything here is pure: text and values in, values out. Reading the files, watching them and
+//! Everything here is pure: text and values in, values out (a [`ValidationContext`] may hold a
+//! handle on the daemon's live executor set, which it only asks). Reading the files, watching them and
 //! storing versions belong to `renod`, the kernel and the store.
 //!
 //! # Layout of the definitions directory

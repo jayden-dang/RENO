@@ -104,6 +104,40 @@ impl Registry {
     }
 }
 
+/// The sign-in ways an agent's own handshake offered, as the list shows them: its `authenticate`
+/// methods together, each terminal command, each key. Methods Reno cannot use are left out.
+pub(crate) fn probed_sign_in(
+    methods: &[reno_proto::AuthMethod],
+) -> Vec<reno_proto::RegistrySignInOption> {
+    use reno_proto::{AuthMethodKind, RegistrySignInOption};
+    let mut ways = Vec::new();
+    let browser: Vec<String> = methods
+        .iter()
+        .filter(|m| m.kind == AuthMethodKind::Agent && m.unusable.is_none())
+        .map(|m| m.id.clone())
+        .collect();
+    if !browser.is_empty() {
+        ways.push(RegistrySignInOption::Browser { methods: browser });
+    }
+    for method in methods.iter().filter(|m| m.unusable.is_none()) {
+        match method.kind {
+            AuthMethodKind::Terminal => ways.push(RegistrySignInOption::Terminal {
+                command: method
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| method.name.clone()),
+            }),
+            AuthMethodKind::EnvVar if !method.vars.is_empty() => {
+                ways.push(RegistrySignInOption::Env {
+                    vars: method.vars.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    ways
+}
+
 /// `executor.registry.list`.
 pub(crate) async fn list(
     registry: &Registry,
@@ -148,8 +182,21 @@ pub(crate) async fn list(
             entries.push(view);
         }
     }
+    let live = kernel.executors();
     for entry in &mut entries {
         entry.adding = running.contains(&entry.executor);
+        // An added agent that has had a full probe says how it signs in itself: that wins over
+        // what the audit found.
+        let offered = live
+            .iter()
+            .find(|info| info.descriptor.id == entry.executor)
+            .map(|info| probed_sign_in(&info.auth_methods))
+            .filter(|ways| !ways.is_empty());
+        if let Some(ways) = offered {
+            entry.sign_in = ways;
+            entry.sign_in_from_probe = true;
+            entry.checked_version = None;
+        }
     }
     Ok(ExecutorRegistryListResult {
         entries,

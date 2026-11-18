@@ -1610,6 +1610,7 @@ pub fn entry_view(
     use reno_proto::{RegistryAdded, RegistryDistribution, RegistryReadiness};
     let choice = choose_for(entry, platform);
     let readiness = readiness_for(entry, platform, node, uv);
+    let known = crate::acp_known::facts(&entry.id, &entry.version);
     Some(reno_proto::RegistryEntry {
         id: entry.id.clone(),
         executor: format!("acp.{}", entry.id).parse().ok()?,
@@ -1651,6 +1652,10 @@ pub fn entry_view(
         adding: false,
         delisted: false,
         own: false,
+        sign_in: known.sign_in,
+        sign_in_from_probe: false,
+        status: known.status,
+        checked_version: known.checked_version,
     })
 }
 
@@ -1687,6 +1692,10 @@ pub fn record_view(record: &Record) -> Option<reno_proto::RegistryEntry> {
         adding: false,
         delisted: !own,
         own,
+        sign_in: Vec::new(),
+        sign_in_from_probe: false,
+        status: None,
+        checked_version: None,
     })
 }
 

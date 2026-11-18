@@ -58,6 +58,57 @@ pub enum RegistryReadiness {
     NoBuild,
 }
 
+/// One way an agent signs in, as the curated table or the agent's own handshake says it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum RegistrySignInOption {
+    /// It needs no sign-in.
+    None,
+    /// Keys the agent reads from its environment (all of `vars` are set together).
+    Env {
+        /// The variable names, upper case.
+        vars: Vec<String>,
+    },
+    /// A command to run in a terminal on the agent's device.
+    Terminal {
+        /// The exact command.
+        command: String,
+    },
+    /// The agent signs in itself, in the browser (ACP's `authenticate`).
+    Browser {
+        /// The `authenticate` method ids it offers.
+        methods: Vec<String>,
+    },
+    /// Set up by hand, in words.
+    Setup {
+        /// What to do.
+        text: String,
+    },
+}
+
+/// Whether an agent works, from Reno's own audit of the registry (at `checkedVersion`, or at the
+/// listed version when that is absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RegistryStatus {
+    /// It started and answered the handshake.
+    Ok,
+    /// It does not work, and the fault is the agent's. Only ever sent for the version audited.
+    BrokenUpstream {
+        /// Why, in words.
+        reason: String,
+    },
+    /// It does not work yet, and the fix is Reno's.
+    NeedsRenoFix {
+        /// Why, in words.
+        reason: String,
+    },
+}
+
 /// An entry that is added on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +181,22 @@ pub struct RegistryEntry {
     /// The person's own agent (`own.<slug>`): never installed or updated by Reno.
     #[serde(default)]
     pub own: bool,
+    /// How the agent signs in, best first: curated from Reno's audit of the registry, or, once the
+    /// agent is added and has had a full probe, what its own handshake offered
+    /// (`signInFromProbe`). Empty when nothing is known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign_in: Vec<RegistrySignInOption>,
+    /// `signIn` comes from the agent's own handshake, which wins over the curated facts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sign_in_from_probe: bool,
+    /// Whether the agent works, from the audit. Absent when it was audited at another version
+    /// (`checkedVersion`), when it is not in the audit, and for a person's own agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<RegistryStatus>,
+    /// Set when the curated `signIn` was checked at this version and the entry lists another: the
+    /// facts are likely, not certain ("checked on 1.3.0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_version: Option<String>,
 }
 
 /// Params of `executor.registry.list`.

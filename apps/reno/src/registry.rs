@@ -274,7 +274,11 @@ pub(crate) async fn signin(
                     "then check it again with: reno executor refresh {id}"
                 ));
             }
-            SigninEvent::Done { signed_in, message } => ended = Some((signed_in, message)),
+            SigninEvent::Done { signed_in, message } => {
+                // The last event: nothing follows, whoever still holds the stream open.
+                ended = Some((signed_in, message));
+                break;
+            }
         }
     }
     match ended {

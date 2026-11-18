@@ -33,6 +33,7 @@ pub enum HarnessError {
     NotSignedIn(String),
 }
 
+pub mod acp_known;
 pub mod acp_registry;
 mod agent_id;
 pub mod child_env;

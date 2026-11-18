@@ -216,3 +216,56 @@ async fn the_list_says_so_when_it_is_the_cached_copy() {
     assert!(list.offline && list.error.is_some());
     assert!(!list.entries.is_empty());
 }
+
+#[tokio::test(start_paused = true)]
+async fn entries_carry_the_audits_sign_in_facts_in_several_kinds() {
+    use reno_proto::{RegistrySignInOption as Way, RegistryStatus};
+    let (_daemon, client) = daemon().await;
+    // An agent not added: the curated facts, at the version audited, with a status.
+    let goose = entry(&client, "goose").await;
+    assert_eq!(goose.status, Some(RegistryStatus::Ok));
+    assert_eq!(goose.checked_version, None);
+    assert!(!goose.sign_in_from_probe);
+    assert!(matches!(&goose.sign_in[0], Way::Terminal { command } if command == "goose configure"));
+    assert!(
+        matches!(&goose.sign_in[1], Way::Env { vars } if vars == &["GOOSE_PROVIDER", "GOOSE_MODEL"])
+    );
+    let vtcode = entry(&client, "vtcode").await;
+    assert!(matches!(
+        vtcode.status,
+        Some(RegistryStatus::BrokenUpstream { .. })
+    ));
+    assert!(matches!(vtcode.sign_in[0], Way::Setup { .. }));
+    assert!(matches!(
+        entry(&client, "windows-only").await.sign_in[0],
+        Way::None
+    ));
+    let gemini = entry(&client, "gemini").await;
+    assert!(
+        matches!(&gemini.sign_in[0], Way::Browser { methods } if methods == &["oauth-personal"])
+    );
+    // An agent in no audit says nothing; a built-in one is not curated by the fake.
+    assert!(entry(&client, "codex-acp").await.sign_in.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_version_keeps_the_facts_and_drops_the_status_and_a_probe_wins() {
+    use reno_proto::RegistrySignInOption as Way;
+    let (_daemon, client) = daemon().await;
+    // cline: the index lists 1.1.0, the facts were checked at 3.0.74, and the added agent has
+    // had a full probe, whose own methods win.
+    let cline = entry(&client, "cline").await;
+    assert!(cline.sign_in_from_probe, "the agent's own handshake wins");
+    assert!(matches!(&cline.sign_in[0], Way::Browser { methods } if methods == &["browser"]));
+    assert!(matches!(&cline.sign_in[1], Way::Env { vars } if vars == &["CLINE_API_KEY"]));
+    assert_eq!(cline.checked_version, None, "nothing curated is shown");
+    // amp-acp: added and probed too, so its own methods win; its curated status stays.
+    let amp = entry(&client, "amp-acp").await;
+    assert!(amp.sign_in_from_probe);
+    assert!(matches!(
+        amp.status,
+        Some(reno_proto::RegistryStatus::NeedsRenoFix { .. })
+    ));
+    // fast-agent: not added, so the curated facts show.
+    assert!(!entry(&client, "fast-agent").await.sign_in_from_probe);
+}

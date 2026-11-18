@@ -112,7 +112,7 @@ pub enum SigninEvent {
         /// The exact command, shell-quoted.
         command: String,
     },
-    /// The sign-in ended.
+    /// The sign-in ended. The last event: the subscription ends after it.
     Done {
         /// The executor is signed in (the full probe at the end said so).
         signed_in: bool,

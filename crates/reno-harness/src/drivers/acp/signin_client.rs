@@ -27,8 +27,10 @@ const MAX_LINE: usize = 1024;
 /// Pages one sign-in may report; a loop that prints a new address forever is cut off.
 const MAX_PAGES: usize = 16;
 
-/// Output lines one sign-in may report.
-const MAX_LINES: usize = 200;
+/// Output lines one sign-in may report. With the pages, the command and the end this stays well
+/// inside the 256 items the server queues per subscription, so a reader that keeps up is never cut
+/// off (a cut-off subscription ends the sign-in).
+const MAX_LINES: usize = 100;
 
 /// The sign-in's own folder, removed when it is dropped.
 struct Folder(PathBuf);

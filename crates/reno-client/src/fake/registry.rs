@@ -26,8 +26,8 @@ use reno_proto::{
     AccessMode, AuthMethod, AuthMethodKind, AutoUpdate, ErrorCode, ErrorObject, ExecutorCaps,
     ExecutorDescriptor, ExecutorHealth, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
     ExecutorSource, InstallStatus, Maintenance, ModelCatalog, NotInstalledReason, RegistryAdded,
-    RegistryDistribution, RegistryEntry, RegistryReadiness, SandboxLevel, SignedIn, Steering,
-    UpdaterInfo, VersionGate, VersionRange,
+    RegistryDistribution, RegistryEntry, RegistryReadiness, RegistrySignInOption, RegistryStatus,
+    SandboxLevel, SignedIn, Steering, UpdaterInfo, VersionGate, VersionRange,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -348,7 +348,124 @@ fn index_entry(listed: &Listed) -> Result<RegistryEntry, reno_proto::IdError> {
         adding: false,
         delisted: false,
         own: false,
+        sign_in: curated(listed.id, listed.version).0,
+        sign_in_from_probe: false,
+        status: curated(listed.id, listed.version).1,
+        checked_version: curated(listed.id, listed.version).2,
     })
+}
+
+/// What the fake's audit table says of an agent at the version the index lists: how it signs in,
+/// whether it works, and the version the facts were checked at when that is another. The kinds
+/// the real table has, on a few agents:
+///
+/// | id | says |
+/// |---|---|
+/// | `goose` | a terminal command, then keys; `ok` |
+/// | `vtcode` | set up by hand; `broken_upstream` |
+/// | `cline` | browser methods, checked at 3.0.74 (the index lists 1.1.0), so no status |
+/// | `amp-acp` | a terminal command; `needs_reno_fix` |
+/// | `gemini` | browser, then a key; `ok` |
+/// | `fast-agent` | set up by hand; `ok` |
+/// | `windows-only` | needs no sign-in; `ok` |
+type Curated = (
+    Vec<RegistrySignInOption>,
+    Option<RegistryStatus>,
+    Option<String>,
+);
+
+fn curated(id: &str, listed: &str) -> Curated {
+    let env = |vars: &[&str]| RegistrySignInOption::Env {
+        vars: vars.iter().map(|v| (*v).to_owned()).collect(),
+    };
+    let terminal = |command: &str| RegistrySignInOption::Terminal {
+        command: command.to_owned(),
+    };
+    let browser = |methods: &[&str]| RegistrySignInOption::Browser {
+        methods: methods.iter().map(|m| (*m).to_owned()).collect(),
+    };
+    let setup = |text: &str| RegistrySignInOption::Setup {
+        text: text.to_owned(),
+    };
+    let (ways, status, audited) = match id {
+        "goose" => (
+            vec![
+                terminal("goose configure"),
+                env(&["GOOSE_PROVIDER", "GOOSE_MODEL"]),
+            ],
+            RegistryStatus::Ok,
+            "1.60.1",
+        ),
+        "vtcode" => (
+            vec![setup("provider keys come from the environment")],
+            RegistryStatus::BrokenUpstream {
+                reason: "exits before initialize (the demo's example of a broken agent)".to_owned(),
+            },
+            "0.9.0",
+        ),
+        "cline" => (
+            vec![browser(&["cline", "cline-pass", "openai-codex"])],
+            RegistryStatus::Ok,
+            "3.0.74",
+        ),
+        "amp-acp" => (
+            vec![terminal("amp-acp --setup")],
+            RegistryStatus::NeedsRenoFix {
+                reason: "needs a start Reno does not do yet (the demo's example)".to_owned(),
+            },
+            "0.7.0",
+        ),
+        "gemini" => (
+            vec![browser(&["oauth-personal"]), env(&["GEMINI_API_KEY"])],
+            RegistryStatus::Ok,
+            "0.9.0",
+        ),
+        "fast-agent" => (
+            vec![setup(
+                "keys in fast-agent.secrets.yaml, or the provider's environment variables",
+            )],
+            RegistryStatus::Ok,
+            "0.10.1",
+        ),
+        "windows-only" => (
+            vec![RegistrySignInOption::None],
+            RegistryStatus::Ok,
+            "2.0.0",
+        ),
+        _ => return (Vec::new(), None, None),
+    };
+    let same = audited == listed;
+    (
+        ways,
+        same.then_some(status),
+        (!same).then(|| audited.to_owned()),
+    )
+}
+
+/// The ways the agent's own handshake offered (as the daemon's list shows them).
+fn probed(methods: &[reno_proto::AuthMethod]) -> Vec<RegistrySignInOption> {
+    use reno_proto::AuthMethodKind;
+    let mut ways = Vec::new();
+    let browser: Vec<String> = methods
+        .iter()
+        .filter(|m| m.kind == AuthMethodKind::Agent)
+        .map(|m| m.id.clone())
+        .collect();
+    if !browser.is_empty() {
+        ways.push(RegistrySignInOption::Browser { methods: browser });
+    }
+    for m in methods {
+        match m.kind {
+            AuthMethodKind::Terminal => ways.push(RegistrySignInOption::Terminal {
+                command: m.command.clone().unwrap_or_else(|| m.name.clone()),
+            }),
+            AuthMethodKind::EnvVar => ways.push(RegistrySignInOption::Env {
+                vars: m.vars.clone(),
+            }),
+            AuthMethodKind::Agent => {}
+        }
+    }
+    ways
 }
 
 impl World {
@@ -392,6 +509,14 @@ impl World {
                     .job
                     .as_ref()
                     .is_some_and(|j| !matches!(j.phase, reno_proto::JobPhase::Failed { .. }));
+                // An added agent that has had a full probe says how it signs in itself, and that
+                // wins over the curated facts.
+                let ways = probed(&info.auth_methods);
+                if !ways.is_empty() {
+                    entry.sign_in = ways;
+                    entry.sign_in_from_probe = true;
+                    entry.checked_version = None;
+                }
             }
             entries.push(entry);
         }
@@ -444,6 +569,10 @@ impl World {
                     .is_some_and(|j| !matches!(j.phase, reno_proto::JobPhase::Failed { .. })),
                 delisted: !own,
                 own,
+                sign_in: Vec::new(),
+                sign_in_from_probe: false,
+                status: None,
+                checked_version: None,
             });
         }
         Ok(ExecutorRegistryListResult {
