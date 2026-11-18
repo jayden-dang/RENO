@@ -93,13 +93,10 @@ impl World {
         let owner = self.owner_of(&record.thread)?;
         let owner_status = self.run(&owner)?.summary.status;
         let mut info = changes::info(&owner, owner_status)?;
+        // The fake keeps what it always showed (a run that ended holds its worktree as `kept`);
+        // only a close that removed the worktree changes it.
         if self.threads.removed.contains(&record.thread) {
             info.status = WorkspaceStatus::Removed;
-        } else if info.status == WorkspaceStatus::Kept
-            && !self.threads.closed.contains(&record.thread)
-        {
-            // An open thread keeps its worktree in use, whatever its runs did.
-            info.status = WorkspaceStatus::Active;
         }
         // The owner may have ended while a follow-up runs.
         info.run_id = owner;

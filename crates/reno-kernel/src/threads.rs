@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reno_proto::{
-    CleanOutcome, ThreadCloseResult, ThreadId, ThreadInfo, ThreadStatus, WorkspaceStatus,
+    CleanOutcome, THREAD_LIST_DEFAULT_LIMIT, THREAD_LIST_MAX_LIMIT, ThreadCloseResult, ThreadId,
+    ThreadInfo, ThreadStatus, WorkspaceStatus,
 };
 
 use crate::error::{KernelError, Result};
@@ -57,11 +58,19 @@ pub(crate) async fn get(shared: &Shared, thread: &ThreadId) -> Result<ThreadInfo
         .ok_or_else(|| KernelError::ThreadNotFound(thread.clone()))
 }
 
-/// Threads in one of `statuses` (all when empty), most recently changed first.
-pub(crate) async fn list(shared: &Shared, statuses: &[ThreadStatus]) -> Result<Vec<ThreadInfo>> {
+/// Threads in one of `statuses` (all when empty), most recently changed first, at most `limit`
+/// (the protocol's default when `None`, and never above its maximum).
+pub(crate) async fn list(
+    shared: &Shared,
+    statuses: &[ThreadStatus],
+    limit: Option<u32>,
+) -> Result<Vec<ThreadInfo>> {
+    let limit = limit
+        .unwrap_or(THREAD_LIST_DEFAULT_LIMIT)
+        .clamp(1, THREAD_LIST_MAX_LIMIT);
     Ok(shared
         .db
-        .list_threads(statuses)
+        .list_threads(statuses, limit)
         .await?
         .into_iter()
         .map(|info| with_deadline(shared, info))

@@ -1134,10 +1134,15 @@ fn router(shared: &Arc<Shared>) -> Router {
             injected(&s, "thread.list")?;
             let wanted = p.status.unwrap_or_default();
             let threads = s.read(|w| w.thread_infos());
+            let limit = p
+                .limit
+                .unwrap_or(reno_proto::THREAD_LIST_DEFAULT_LIMIT)
+                .clamp(1, reno_proto::THREAD_LIST_MAX_LIMIT);
             Ok(reno_proto::ThreadListResult {
                 threads: threads
                     .into_iter()
                     .filter(|t| wanted.is_empty() || wanted.contains(&t.status))
+                    .take(usize::try_from(limit).unwrap_or(usize::MAX))
                     .collect(),
             })
         }

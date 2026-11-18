@@ -168,6 +168,10 @@ impl Client {
         if params.bot.is_some() {
             self.require(reno_proto::FEATURE_DEFS)?;
         }
+        // An older daemon would ignore `threadId` and start a thread of its own: refuse instead.
+        if params.thread_id.is_some() {
+            self.require(reno_proto::FEATURE_THREADS)?;
+        }
         if !params.attachments.is_empty() {
             self.require(reno_proto::FEATURE_ATTACHMENTS)?;
         }
@@ -645,10 +649,20 @@ impl Client {
         &self,
         status: Option<Vec<reno_proto::ThreadStatus>>,
     ) -> Result<Vec<reno_proto::ThreadInfo>, ClientError> {
+        self.list_threads_limited(status, None).await
+    }
+
+    /// [`Client::list_threads`], asking for at most `limit` threads (the daemon's default is
+    /// `THREAD_LIST_DEFAULT_LIMIT`, its ceiling `THREAD_LIST_MAX_LIMIT`).
+    pub async fn list_threads_limited(
+        &self,
+        status: Option<Vec<reno_proto::ThreadStatus>>,
+        limit: Option<u32>,
+    ) -> Result<Vec<reno_proto::ThreadInfo>, ClientError> {
         self.require(reno_proto::FEATURE_THREADS)?;
         Ok(self
             .rpc
-            .call::<reno_proto::ThreadList>(reno_proto::ThreadListParams { status })
+            .call::<reno_proto::ThreadList>(reno_proto::ThreadListParams { status, limit })
             .await?
             .threads)
     }
@@ -687,6 +701,9 @@ impl Client {
         force: bool,
     ) -> Result<Vec<reno_proto::CleanItem>, ClientError> {
         self.require(reno_proto::FEATURE_WORKSPACES)?;
+        if matches!(target, reno_proto::CleanTarget::Thread { .. }) {
+            self.require(reno_proto::FEATURE_THREADS)?;
+        }
         Ok(self
             .rpc
             .call::<reno_proto::WorkspaceClean>(reno_proto::WorkspaceCleanParams { target, force })

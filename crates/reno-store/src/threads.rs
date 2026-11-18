@@ -145,6 +145,46 @@ pub(crate) fn tx_attach(
     Ok((thread.clone(), parent))
 }
 
+/// A run of `thread` is queued again (a resume): the thread must have no other run queued or
+/// live ([`StoreError::ThreadBusy`]), and is open again if it had been closed, because a thread
+/// with a live run is never closed.
+pub(crate) fn tx_rejoin(conn: &Connection, thread: &ThreadId, run: &RunId, now: i64) -> Result<()> {
+    let other: Option<String> = conn
+        .prepare_cached(&format!(
+            "SELECT id FROM runs WHERE thread_id = ?1 AND id != ?2 AND status IN {LIVE} LIMIT 1"
+        ))
+        .db()?
+        .query_row(params![thread.as_str(), run.as_str()], |r| r.get(0))
+        .optional()
+        .db()?;
+    if let Some(other) = other {
+        return Err(StoreError::ThreadBusy {
+            thread: thread.clone(),
+            run: other
+                .parse()
+                .map_err(|_| StoreError::Corrupt(format!("bad run id {other:?}")))?,
+        });
+    }
+    let reopened = conn
+        .prepare_cached(
+            "UPDATE threads SET closed_at = NULL, updated_at = ?2 WHERE id = ?1 AND closed_at IS NOT NULL",
+        )
+        .db()?
+        .execute(params![thread.as_str(), now])
+        .db()?;
+    if reopened > 0 {
+        events::insert(
+            conn,
+            now,
+            "thread.reopened",
+            ("thread", thread.as_str()),
+            None,
+            &json!({ "run": run, "resumed": true }),
+        )?;
+    }
+    Ok(())
+}
+
 fn load_runs(conn: &Connection, thread: &ThreadId) -> Result<Vec<ThreadRun>> {
     let mut stmt = conn
         .prepare_cached(
@@ -236,16 +276,41 @@ impl Store {
             .await
     }
 
-    /// Threads in one of `statuses` (every one when empty), most recently changed first.
-    pub async fn list_threads(&self, statuses: &[ThreadStatus]) -> Result<Vec<ThreadInfo>> {
-        let statuses = statuses.to_vec();
+    /// Threads in one of `statuses` (every one when empty), most recently changed first, at most
+    /// `limit` of them. The status is decided in the query, so a long history of closed threads
+    /// costs nothing to skip.
+    pub async fn list_threads(
+        &self,
+        statuses: &[ThreadStatus],
+        limit: u32,
+    ) -> Result<Vec<ThreadInfo>> {
+        let wanted: Vec<String> = statuses
+            .iter()
+            .map(|status| match status {
+                ThreadStatus::Closed => "t.closed_at IS NOT NULL".to_owned(),
+                ThreadStatus::Active => format!(
+                    "(t.closed_at IS NULL AND EXISTS \
+                     (SELECT 1 FROM runs r WHERE r.thread_id = t.id AND r.status IN {LIVE}))"
+                ),
+                ThreadStatus::Idle => format!(
+                    "(t.closed_at IS NULL AND NOT EXISTS \
+                     (SELECT 1 FROM runs r WHERE r.thread_id = t.id AND r.status IN {LIVE}))"
+                ),
+            })
+            .collect();
+        let filter = if wanted.is_empty() {
+            "1 = 1".to_owned()
+        } else {
+            wanted.join(" OR ")
+        };
         self.read(move |c| {
             let ids: Vec<String> = c
-                .prepare_cached(
-                    "SELECT id FROM threads ORDER BY updated_at DESC, created_at DESC, id DESC",
-                )
+                .prepare(&format!(
+                    "SELECT t.id FROM threads t WHERE {filter}
+                     ORDER BY t.updated_at DESC, t.created_at DESC, t.id DESC LIMIT ?1"
+                ))
                 .db()?
-                .query_map([], |r| r.get(0))
+                .query_map([limit], |r| r.get(0))
                 .db()?
                 .collect::<std::result::Result<_, _>>()
                 .db()?;
@@ -254,9 +319,7 @@ impl Store {
                 let id: ThreadId = id
                     .parse()
                     .map_err(|_| StoreError::Corrupt(format!("bad thread id {id:?}")))?;
-                if let Some(info) = load_info(c, &id)?
-                    && (statuses.is_empty() || statuses.contains(&info.status))
-                {
+                if let Some(info) = load_info(c, &id)? {
                     out.push(info);
                 }
             }

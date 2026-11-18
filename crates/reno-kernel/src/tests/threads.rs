@@ -243,19 +243,18 @@ async fn an_idle_thread_closes_at_its_deadline_and_not_before() {
     fx.clock.advance(2_000);
     tokio::time::advance(Duration::from_secs(2)).await;
     until(async || {
-        let a = fx.kernel.thread(&clean_thread).await.unwrap().status;
-        let b = fx.kernel.thread(&worked_thread).await.unwrap().status;
-        (a == ThreadStatus::Closed && b == ThreadStatus::Closed).then_some(())
+        // A thread is marked closed first, and its worktree released after.
+        let a = fx.kernel.workspace(&clean).await.unwrap().status;
+        let b = fx.kernel.workspace(&worked).await.unwrap().status;
+        (a == WorkspaceStatus::Removed && b == WorkspaceStatus::Kept).then_some(())
     })
     .await;
-    assert_eq!(
-        fx.kernel.workspace(&clean).await.unwrap().status,
-        WorkspaceStatus::Removed
-    );
-    assert_eq!(
-        fx.kernel.workspace(&worked).await.unwrap().status,
-        WorkspaceStatus::Kept
-    );
+    for thread in [&clean_thread, &worked_thread] {
+        assert_eq!(
+            fx.kernel.thread(thread).await.unwrap().status,
+            ThreadStatus::Closed
+        );
+    }
     assert!(ws.exists(&worked) && ws.branch_exists(&worked));
 }
 
@@ -607,19 +606,45 @@ async fn threads_list_by_status_with_their_runs() {
     let closed = thread_of(&fx, &a).await;
     fx.kernel.close_thread(&closed, false).await.unwrap();
 
-    let all = fx.kernel.threads(None).await.unwrap();
+    let all = fx.kernel.threads(None, None).await.unwrap();
     assert_eq!(all.len(), 2);
     let idle = fx
         .kernel
-        .threads(Some(&[ThreadStatus::Idle]))
+        .threads(Some(&[ThreadStatus::Idle]), None)
         .await
         .unwrap();
     assert_eq!(idle.len(), 1);
     assert_eq!(idle[0].runs[0].run_id, b);
     let done = fx
         .kernel
-        .threads(Some(&[ThreadStatus::Closed]))
+        .threads(Some(&[ThreadStatus::Closed]), None)
         .await
         .unwrap();
     assert_eq!(done[0].thread_id, closed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_only_follow_up_still_works_in_the_threads_worktree() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let (fx, _m) = rig(&ws, vec![]).await;
+    let first = start(&fx, "/repo").await;
+    ended(&fx, &first, RunStatus::Succeeded).await;
+    let thread = thread_of(&fx, &first).await;
+    let shared = fx.kernel.shared();
+    let row = shared.run_record(&first).await.unwrap();
+
+    // A reviewer (read-only) continuing the thread reads what the first run committed.
+    let placed = crate::workspaces::place(
+        shared,
+        &row,
+        PathBuf::from("/repo"),
+        SandboxLevel::ReadOnly,
+        false,
+    )
+    .await
+    .unwrap();
+    let info = fx.kernel.workspace(&first).await.unwrap();
+    assert_eq!(placed.cwd(), info.cwd());
+    assert!(matches!(placed, crate::Placement::Isolated(_)));
+    assert!(info.cwd().ends_with(thread.as_str()), "{:?}", info.cwd());
 }

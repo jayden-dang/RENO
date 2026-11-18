@@ -116,8 +116,12 @@ impl Db {
         self.store.get_thread(thread).await
     }
 
-    pub(crate) async fn list_threads(&self, statuses: &[ThreadStatus]) -> Result<Vec<ThreadInfo>> {
-        self.store.list_threads(statuses).await
+    pub(crate) async fn list_threads(
+        &self,
+        statuses: &[ThreadStatus],
+        limit: u32,
+    ) -> Result<Vec<ThreadInfo>> {
+        self.store.list_threads(statuses, limit).await
     }
 
     pub(crate) async fn close_thread(

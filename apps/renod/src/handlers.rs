@@ -981,7 +981,7 @@ async fn thread_list(ctx: Arc<Ctx>, p: ThreadListParams) -> Reply<ThreadListResu
     Ok(ThreadListResult {
         threads: ctx
             .kernel
-            .threads(p.status.as_deref())
+            .threads(p.status.as_deref(), p.limit)
             .await
             .map_err(|e| kernel_error(&e))?,
     })

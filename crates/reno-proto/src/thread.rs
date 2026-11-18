@@ -105,6 +105,11 @@ impl ThreadInfo {
     }
 }
 
+/// Threads `thread.list` returns when `limit` is absent.
+pub const THREAD_LIST_DEFAULT_LIMIT: u32 = 200;
+/// The most threads one `thread.list` call returns; a larger `limit` is cut to this.
+pub const THREAD_LIST_MAX_LIMIT: u32 = 1000;
+
 /// Params of `thread.list`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -112,6 +117,10 @@ pub struct ThreadListParams {
     /// Only threads in one of these statuses; every thread when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<ThreadStatus>>,
+    /// At most this many, the most recently changed first: [`THREAD_LIST_DEFAULT_LIMIT`] when
+    /// absent, and never more than [`THREAD_LIST_MAX_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 /// Result of `thread.list`.

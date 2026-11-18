@@ -34,6 +34,7 @@ fn the_names_and_the_feature() {
     assert_eq!(ThreadClose::NAME, "thread.close");
     // The feature is appended: nothing earlier moved.
     assert_eq!(FEATURES.last(), Some(&FEATURE_THREADS));
+    assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT);
 }
 
 #[test]
@@ -112,8 +113,9 @@ fn the_thread_methods_params_and_results() {
     golden(
         &ThreadListParams {
             status: Some(vec![ThreadStatus::Active, ThreadStatus::Idle]),
+            limit: Some(50),
         },
-        json!({"status": ["active", "idle"]}),
+        json!({"status": ["active", "idle"], "limit": 50}),
     );
     golden(
         &ThreadGetParams {

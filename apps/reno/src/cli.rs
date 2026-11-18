@@ -211,6 +211,9 @@ pub(crate) struct ThreadList {
     /// Only threads in this status: active, idle or closed. Repeatable.
     #[arg(long, value_name = "STATUS", value_parser = parse_thread_status)]
     pub(crate) status: Vec<ThreadStatus>,
+    /// Show at most this many [default: 200; the daemon returns 1000 at most].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) limit: Option<u32>,
 }
 
 fn parse_thread_status(text: &str) -> Result<ThreadStatus, String> {

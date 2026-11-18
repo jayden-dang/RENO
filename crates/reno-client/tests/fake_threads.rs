@@ -290,3 +290,76 @@ async fn the_mirror_holds_the_threads_and_says_which_thread_a_run_is_in() {
     assert_eq!(state.thread(&t).unwrap().status, ThreadStatus::Closed);
     mirror.shutdown().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_daemon_without_threads_is_not_asked_for_them_and_the_mirror_says_so() {
+    let client = FakeDaemon::spawn_with(reno_client::fake::FakeConfig {
+        without_features: vec![reno_proto::FEATURE_THREADS.to_owned()],
+        ..reno_client::fake::FakeConfig::default()
+    })
+    .await
+    .unwrap();
+    assert!(!client.supports(reno_proto::FEATURE_THREADS));
+    // A follow-up would be a new thread on such a daemon, silently: the client refuses instead.
+    let mut follow = task("again");
+    follow.thread_id = Some(thread("builder1"));
+    let error = client.submit_task(follow).await.unwrap_err();
+    assert!(
+        matches!(&error, reno_client::ClientError::Protocol(m) if m.contains("feature `threads`")),
+        "{error:?}"
+    );
+    for refused in [
+        client.list_threads(None).await.map(|_| ()),
+        client.get_thread(thread("builder1")).await.map(|_| ()),
+        client
+            .close_thread(thread("builder1"), false)
+            .await
+            .map(|_| ()),
+        client
+            .workspace_diff_scoped(run("builder1"), None, DiffScope::Run)
+            .await
+            .map(|_| ()),
+        client
+            .clean_workspaces(
+                reno_proto::CleanTarget::Thread {
+                    thread_id: thread("builder1"),
+                },
+                false,
+            )
+            .await
+            .map(|_| ()),
+    ] {
+        assert!(
+            matches!(&refused, Err(reno_client::ClientError::Protocol(m)) if m.contains("threads")),
+            "{refused:?}"
+        );
+    }
+    // The mirror does not ask, and marks the feed unavailable.
+    let (mirror, mut rx, state) = mirrored(client).await;
+    let _ = &mut rx;
+    assert_eq!(state.feed(Feed::Threads), FeedState::Unavailable);
+    assert!(state.threads().is_empty());
+    mirror.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn thread_list_is_bounded() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    let two = client.list_threads_limited(None, Some(2)).await.unwrap();
+    assert_eq!(two.len(), 2);
+    let all = client.list_threads(None).await.unwrap();
+    assert_eq!(all.len(), 6);
+    assert_eq!(
+        two[0].thread_id, all[0].thread_id,
+        "the newest first, as the whole list"
+    );
+    // A zero limit is one, not an empty page that could never be paged.
+    assert_eq!(
+        client
+            .list_threads_limited(None, Some(0))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

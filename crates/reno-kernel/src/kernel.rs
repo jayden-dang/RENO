@@ -7,6 +7,7 @@
 //! |---|---|---|---|
 //! | dispatcher | 1 | the claim loop | `Notify` (no queue) and one deadline |
 //! | runs hub | 1 | the `watch_runs` list | `Notify`, coalescing |
+//! | thread reaper | 1 | the idle-thread deadline | `Notify`, the wake signal and one deadline |
 //! | definitions loader | 0 or 1 | the definitions in force | the port's watch, capacity 1 |
 //! | run supervisor | one per live run | stream, journal, subscribers | `mpsc` of 16 commands |
 //!
@@ -794,9 +795,14 @@ impl Kernel {
         crate::threads::get(&self.shared, thread).await
     }
 
-    /// Threads in one of `status` (all when `None` or empty), most recently changed first.
-    pub async fn threads(&self, status: Option<&[ThreadStatus]>) -> Result<Vec<ThreadInfo>> {
-        crate::threads::list(&self.shared, status.unwrap_or_default()).await
+    /// Threads in one of `status` (all when `None` or empty), most recently changed first, at
+    /// most `limit` (`THREAD_LIST_DEFAULT_LIMIT` when `None`).
+    pub async fn threads(
+        &self,
+        status: Option<&[ThreadStatus]>,
+        limit: Option<u32>,
+    ) -> Result<Vec<ThreadInfo>> {
+        crate::threads::list(&self.shared, status.unwrap_or_default(), limit).await
     }
 
     /// Closes a thread and releases its worktree: removed when it holds nothing unmerged, kept

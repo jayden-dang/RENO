@@ -645,7 +645,7 @@ async fn thread_list(env: &Env, args: ThreadList) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
     let status = (!args.status.is_empty()).then_some(args.status);
     let threads = client
-        .list_threads(status)
+        .list_threads_limited(status, args.limit)
         .await
         .map_err(|e| env.explain(e))?;
     if env.json {

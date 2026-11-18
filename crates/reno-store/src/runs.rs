@@ -673,6 +673,8 @@ pub(crate) fn tx_resume(
         .clone()
         .map(SessionRef)
         .ok_or_else(|| StoreError::InvalidArgument(format!("run {run} has no session")))?;
+    // A thread holds one live run: a run resumed beside a newer one would be a second.
+    crate::threads::tx_rejoin(conn, &rec.thread_id, run, now)?;
     let fence_i = to_i64(fence, "fence")?;
     // `started_at` is kept: the run is one run, however many attempts it takes.
     conn.prepare_cached(

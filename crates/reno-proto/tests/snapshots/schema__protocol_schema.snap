@@ -1523,6 +1523,15 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Params of `thread.list`.",
         "properties": {
+          "limit": {
+            "description": "At most this many, the most recently changed first: [`THREAD_LIST_DEFAULT_LIMIT`] when\nabsent, and never more than [`THREAD_LIST_MAX_LIMIT`].",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "status": {
             "description": "Only threads in one of these statuses; every thread when absent.",
             "items": {

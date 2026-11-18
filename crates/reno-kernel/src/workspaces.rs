@@ -85,23 +85,9 @@ pub(crate) async fn place(
     if named == Some(true) && !port.dir_exists(&cwd).await {
         return Err(WorkspaceError::DirMissing { dir: cwd });
     }
-    let decided = if sandbox == SandboxLevel::ReadOnly {
-        Some(InPlace::ReadOnly)
-    } else if shared
-        .config
-        .scratch_root
-        .as_ref()
-        .is_some_and(|root| cwd.starts_with(root))
-    {
-        Some(InPlace::Scratch)
-    } else {
-        None
-    };
-    if let Some(why) = decided {
-        record_in_place(shared, row, &cwd, why).await;
-        return Ok(in_place(why));
-    }
-
+    // A thread that has a worktree continues in it, whatever the access of this run: a read-only
+    // follow-up (a reviewer) must see what the runs before it committed, not the person's
+    // checkout.
     let previous = shared
         .db
         .get_workspace(&row.id)
@@ -117,6 +103,22 @@ pub(crate) async fn place(
                 .map_err(store_failed)?;
             return Ok(Placement::Isolated(info));
         }
+    }
+    let decided = if sandbox == SandboxLevel::ReadOnly {
+        Some(InPlace::ReadOnly)
+    } else if shared
+        .config
+        .scratch_root
+        .as_ref()
+        .is_some_and(|root| cwd.starts_with(root))
+    {
+        Some(InPlace::Scratch)
+    } else {
+        None
+    };
+    if let Some(why) = decided {
+        record_in_place(shared, row, &cwd, why).await;
+        return Ok(in_place(why));
     }
 
     let Some(mut plan) = port.plan(&row.thread_id, &row.id, &cwd).await? else {

@@ -314,12 +314,124 @@ async fn threads_list_newest_change_first_and_filter_by_status() {
     let a = queue(&store, 1, None, 10).await.unwrap();
     let _b = queue(&store, 2, None, 20).await.unwrap();
     finish(&store, &a, 30).await;
-    let all = store.list_threads(&[]).await.unwrap();
+    let all = store.list_threads(&[], 100).await.unwrap();
     assert_eq!(
         all.iter().map(|t| t.thread_id.as_str()).collect::<Vec<_>>(),
         ["thr_r1", "thr_r2"]
     );
-    let active = store.list_threads(&[ThreadStatus::Active]).await.unwrap();
+    let active = store
+        .list_threads(&[ThreadStatus::Active], 100)
+        .await
+        .unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].thread_id.as_str(), "thr_r2");
+}
+
+/// Interrupts `run` (claimed, with a session) so that it can be resumed.
+async fn interrupt(store: &Store, run: &RunId, now: i64) -> u64 {
+    let claim = store.claim_next("t", now, 60_000).await.unwrap().unwrap();
+    assert_eq!(&claim.run_id, run);
+    store
+        .transition(run, claim.fence, RunStatus::Running, now)
+        .await
+        .unwrap();
+    store
+        .record_session(run, claim.fence, &reno_proto::SessionRef("s".into()), now)
+        .await
+        .unwrap();
+    store
+        .transition(run, claim.fence, RunStatus::Interrupted, now)
+        .await
+        .unwrap();
+    store.thread_went_idle(run, now).await.unwrap();
+    claim.fence
+}
+
+#[tokio::test]
+async fn resuming_a_run_reopens_its_closed_thread() {
+    let (_dir, store) = open().await;
+    let run = queue(&store, 1, None, 10).await.unwrap();
+    let thread = store.get_run(&run).await.unwrap().unwrap().thread_id;
+    let fence = interrupt(&store, &run, 20).await;
+    store.close_thread(&thread, 30).await.unwrap();
+    store.resume_run(&run, fence, None, 40).await.unwrap();
+    let info = store.get_thread(&thread).await.unwrap().unwrap();
+    assert_eq!(
+        info.status,
+        ThreadStatus::Active,
+        "a live run is never in a closed thread"
+    );
+}
+
+#[tokio::test]
+async fn a_run_cannot_be_resumed_beside_a_newer_run_of_its_thread() {
+    let (_dir, store) = open().await;
+    let first = queue(&store, 1, None, 10).await.unwrap();
+    let thread = store.get_run(&first).await.unwrap().unwrap().thread_id;
+    let fence = interrupt(&store, &first, 20).await;
+    // The person followed up instead of resuming.
+    let second = queue(&store, 2, Some(&thread), 30).await.unwrap();
+    let refused = store.resume_run(&first, fence, None, 40).await.unwrap_err();
+    assert!(
+        matches!(&refused, StoreError::ThreadBusy { run, .. } if run == &second),
+        "{refused}"
+    );
+    // The refused resume changed nothing.
+    assert_eq!(
+        store.get_run(&first).await.unwrap().unwrap().status,
+        RunStatus::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn the_status_filter_and_the_limit_are_applied_in_the_query() {
+    let (_dir, store) = open().await;
+    let a = queue(&store, 1, None, 10).await.unwrap();
+    let b = queue(&store, 2, None, 20).await.unwrap();
+    let _live = queue(&store, 3, None, 30).await.unwrap();
+    finish(&store, &a, 40).await;
+    finish(&store, &b, 50).await;
+    let closed = store.get_run(&a).await.unwrap().unwrap().thread_id;
+    store.close_thread(&closed, 60).await.unwrap();
+
+    let names = |list: Vec<reno_proto::ThreadInfo>| -> Vec<String> {
+        list.into_iter().map(|t| t.thread_id.to_string()).collect()
+    };
+    assert_eq!(
+        names(
+            store
+                .list_threads(&[ThreadStatus::Active], 10)
+                .await
+                .unwrap()
+        ),
+        ["thr_r3"]
+    );
+    assert_eq!(
+        names(store.list_threads(&[ThreadStatus::Idle], 10).await.unwrap()),
+        ["thr_r2"]
+    );
+    assert_eq!(
+        names(
+            store
+                .list_threads(&[ThreadStatus::Closed], 10)
+                .await
+                .unwrap()
+        ),
+        ["thr_r1"]
+    );
+    // Two statuses at once, most recently changed first.
+    assert_eq!(
+        names(
+            store
+                .list_threads(&[ThreadStatus::Idle, ThreadStatus::Active], 10)
+                .await
+                .unwrap()
+        ),
+        ["thr_r2", "thr_r3"]
+    );
+    assert_eq!(
+        names(store.list_threads(&[], 2).await.unwrap()),
+        ["thr_r2", "thr_r1"],
+        "the limit keeps the most recently changed"
+    );
 }
