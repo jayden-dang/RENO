@@ -49,7 +49,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::defs::{
-    PolicyEffect, command_holds, lexical, locate_text, path_matches, pure_pipeline_head,
+    PolicyEffect, allow_form, command_holds, deny_forms, lexical, locate_text, path_matches,
+    pure_pipeline_head, unwrapped_command,
 };
 use crate::exec::{ActionClass, ApprovalSubject};
 use crate::ids::{ApprovalId, RuleId, RunId};
@@ -222,10 +223,14 @@ impl RuleMatcher {
         Self {
             action: subject.action,
             tool: subject.tool.clone(),
+            // A wrapped line is kept as the command it runs, so `zsh -lc 'git status'` and
+            // `git status` are one rule. Sudo, `env` and the like are kept (see `normalize`).
             command: subject
                 .command
                 .clone()
-                .map(|command| CommandPattern::Exact { command }),
+                .map(|command| CommandPattern::Exact {
+                    command: unwrapped_command(&command).unwrap_or(command),
+                }),
             paths,
         }
     }
@@ -241,10 +246,14 @@ impl RuleMatcher {
             (None, None) => true,
             (Some(CommandPattern::Exact { command }), Some(line)) => match effect {
                 PolicyEffect::Deny | PolicyEffect::Ask => {
-                    line == command || split_simple(line).any(|part| part == command.trim())
+                    line == command
+                        || split_simple(line).any(|part| part == command.trim())
+                        || deny_forms(line).iter().any(|form| form == command.trim())
                 }
                 PolicyEffect::Allow => {
-                    line == command || pure_pipeline_head(line) == Some(command.as_str())
+                    line == command
+                        || pure_pipeline_head(line) == Some(command.as_str())
+                        || allow_form(line).as_deref() == Some(command.as_str())
                 }
             },
             (Some(CommandPattern::Glob { pattern }), Some(line)) => {
@@ -409,6 +418,55 @@ mod tests {
 
     fn holds(m: &RuleMatcher, effect: StandingEffect, s: &ApprovalSubject) -> bool {
         m.matches(effect, Path::new(CWD), s)
+    }
+
+    #[test]
+    fn a_rule_kept_from_a_wrapped_approval_stores_the_inner_command() {
+        let wrapped = cmd("/usr/bin/zsh -lc 'git status'");
+        let m = derived(&wrapped);
+        assert_eq!(
+            m.command,
+            Some(CommandPattern::Exact {
+                command: "git status".to_owned()
+            })
+        );
+        for line in [
+            "git status",
+            "/usr/bin/zsh -lc 'git status'",
+            "bash -c \"sh -c 'git status'\"",
+            "timeout 5 git status",
+        ] {
+            assert!(holds(&m, StandingEffect::Allow, &cmd(line)), "{line}");
+        }
+        for line in [
+            "git status; rm x",
+            "zsh -lc 'git status; rm x'",
+            "sudo git status",
+            "git status --short",
+        ] {
+            assert!(!holds(&m, StandingEffect::Allow, &cmd(line)), "{line}");
+        }
+        // A rule stored by an older daemon with the wrapped text still matches that text.
+        let old = RuleMatcher {
+            command: Some(CommandPattern::Exact {
+                command: "/usr/bin/zsh -lc 'git status'".to_owned(),
+            }),
+            ..m.clone()
+        };
+        assert!(holds(&old, StandingEffect::Allow, &wrapped));
+        // A kept denial sees through every wrapper.
+        let deny = derived(&cmd("git push"));
+        for line in [
+            "zsh -lc 'git push'",
+            "sudo git push",
+            "env A=1 git push",
+            "x && /usr/bin/git push",
+        ] {
+            assert!(holds(&deny, StandingEffect::Deny, &cmd(line)), "{line}");
+        }
+        // `sudo` is kept as written: approving it does not approve the bare command.
+        let sudo = derived(&cmd("sudo git status"));
+        assert!(!holds(&sudo, StandingEffect::Allow, &cmd("git status")));
     }
 
     #[test]

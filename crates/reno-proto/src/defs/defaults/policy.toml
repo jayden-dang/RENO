@@ -9,6 +9,11 @@
 #         A path inside the run's worktree is matched relative to it (`src/**`); a path outside
 #         is matched as an absolute path, so "/**" means "anywhere outside the worktree".
 
+# Always on, whatever this file says: a run cannot edit `.git`, `.claude`, `.codex`, `.reno`,
+# `.mcp.json` or Reno's own data directory (so it cannot grant itself permissions or hooks), and
+# commands are matched by what they run, so `zsh -lc 'git push'`, `sudo git push` and
+# `env X=1 git push` are all `git push`. An `allow` rule never covers a command it cannot parse.
+
 # What happens when no rule matches.
 default = "ask"
 

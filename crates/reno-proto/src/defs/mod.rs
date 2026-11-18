@@ -56,8 +56,10 @@
 mod bot;
 mod eval;
 mod hash;
+mod normalize;
 mod pipeline;
 mod policy;
+mod protect;
 mod time;
 mod trigger;
 mod wire;
@@ -77,6 +79,8 @@ pub use bot::{BotDef, Budget, ResumePolicy};
 pub use eval::{DEFAULT_RULE, EvalContext, PolicyDecision, RuleRef, evaluate};
 pub(crate) use eval::{command_holds, lexical, locate_text, path_matches};
 pub use hash::{canonical_json, content_hash};
+pub(crate) use normalize::{allow_form, deny_forms};
+pub use normalize::{shell_join, unwrapped_command};
 pub(crate) use pipeline::pure_pipeline_head;
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
 pub use time::{
