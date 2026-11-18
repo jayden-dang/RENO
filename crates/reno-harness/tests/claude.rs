@@ -1613,6 +1613,22 @@ async fn probe_asks_the_cli_for_its_models_and_the_descriptor_follows() {
         health.models.models[0].display_name.as_deref(),
         Some("Opus 5.5")
     );
+    // The live rows carry the curated context-window option; a model not in the table, none.
+    let option_of = |id: &str| {
+        health
+            .models
+            .models
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.options.clone())
+            .unwrap()
+    };
+    let opus = option_of("claude-opus-5-5");
+    assert_eq!(
+        (opus[0].id.as_str(), opus[0].default_choice.as_str()),
+        ("contextWindow", "1m")
+    );
+    assert!(option_of("claude-sonnet-5-5").is_empty());
     // What validation reads is the live list, and `sonnet` (the keeper bot's model) stays a name
     // the CLI accepts, as do the documented aliases the list does not carry.
     let caps = executor.descriptor().caps;

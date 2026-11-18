@@ -70,5 +70,10 @@ pub(super) async fn live_models(
     };
     let found = tokio::time::timeout(budget, asked).await.ok().flatten();
     child.shutdown(kill_grace).await;
-    found
+    found.map(|mut live| {
+        for model in &mut live.models {
+            model.options = super::catalog::options_for(&model.id);
+        }
+        live
+    })
 }
