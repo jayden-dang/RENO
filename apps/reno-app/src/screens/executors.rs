@@ -18,6 +18,9 @@ use gpui::{
 };
 use reno_proto::{ExecutorId, JobKind};
 
+mod registry;
+
+use self::registry::RegistryUi;
 use super::ScreenEvent;
 use crate::store::Store;
 use crate::ui::icon::{Icon, icon};
@@ -46,6 +49,9 @@ pub(crate) struct ExecutorsScreen {
     terminal: BTreeSet<String>,
     /// Whether the once-a-second redraw for running jobs' clocks is going.
     ticking: bool,
+    /// The ACP registry group: filter, search, open lines, forms and the keys editors.
+    registry: RegistryUi,
+    scroll: gpui::ScrollHandle,
 }
 
 impl EventEmitter<ScreenEvent> for ExecutorsScreen {}
@@ -141,12 +147,18 @@ impl ExecutorsScreen {
             test_open: false,
             terminal: BTreeSet::new(),
             ticking: false,
+            registry: RegistryUi::new(cx),
+            scroll: gpui::ScrollHandle::new(),
         }
     }
 
     pub(crate) fn view(&self, cx: &gpui::App) -> ExecutorsView {
         let store = self.store.read(cx);
-        executors::build(store.state(), store.now_ms())
+        executors::build_with(
+            store.state(),
+            store.now_ms(),
+            store.registry().listing.as_ref(),
+        )
     }
 
     /// "Check again" for one executor, or for all of them.
@@ -408,6 +420,7 @@ impl ExecutorsScreen {
                                 ))
                             });
                     let kind = job.kind;
+                    let registry_id = row.registry.as_ref().map(|r| r.id.clone());
                     let retry = {
                         let id = id.clone();
                         kit::line_button(
@@ -419,7 +432,10 @@ impl ExecutorsScreen {
                             !starting,
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.start(&id, kind, false, cx);
+                            match &registry_id {
+                                Some(rid) => this.add_registry_agent(rid, cx),
+                                None => this.start(&id, kind, false, cx),
+                            }
                         }))
                     };
                     let dismiss = {
@@ -519,6 +535,7 @@ impl ExecutorsScreen {
         }
         if row.update {
             let id = id.clone();
+            let registry_id = row.registry.as_ref().map(|r| r.id.clone());
             line = line.child(
                 kit::line_button(
                     theme,
@@ -533,7 +550,29 @@ impl ExecutorsScreen {
                     !starting,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.start(&id, JobKind::Update, false, cx);
+                    match &registry_id {
+                        // A registry agent updates by adding it again.
+                        Some(rid) => this.add_registry_agent(rid, cx),
+                        None => this.start(&id, JobKind::Update, false, cx),
+                    }
+                })),
+            );
+        }
+        // A registry agent that needs a key has no command to run: its keys are one click away.
+        if row.registry.is_some() && row.need == Some(Need::SignIn) && row.sign_in.is_none() {
+            let id = id.clone();
+            line = line.child(
+                kit::line_button(
+                    theme,
+                    format!("add-key-{id}"),
+                    None,
+                    "Add key\u{2026}",
+                    Tone::Primary,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.expanded.insert(id.clone());
+                    cx.notify();
                 })),
             );
         }
@@ -567,6 +606,9 @@ impl ExecutorsScreen {
                     .child(icon(Icon::PhLock, 13.0, theme.faint))
                     .child("Updates with Reno"),
             );
+        }
+        if row.registry.is_some() && row.job.is_none() {
+            line = self.remove_controls(row, line, theme, cx);
         }
         line
     }
@@ -707,7 +749,7 @@ impl ExecutorsScreen {
                     ),
                     None => cell,
                 };
-                match &row.account {
+                let cell = match &row.account {
                     Some(account) => cell.child(
                         div()
                             .min_w_0()
@@ -719,7 +761,8 @@ impl ExecutorsScreen {
                             .child(div().truncate().child(SharedString::from(account.clone()))),
                     ),
                     None => cell,
-                }
+                };
+                cell.children(self.registry_note(row, theme))
             }
             Group::NeedsYou | Group::Unknown => match &row.middle {
                 Some(fact) => {
@@ -906,7 +949,17 @@ impl ExecutorsScreen {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        let id = row.id.parse::<ExecutorId>().ok()?;
+        self.log_block_for(&row.id, theme, cx)
+    }
+
+    /// The output of an executor's job, when its log is shown.
+    fn log_block_for(
+        &self,
+        executor: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let id = executor.parse::<ExecutorId>().ok()?;
         let store = self.store.read(cx);
         if !store.is_log_open(&id) {
             return None;
@@ -931,9 +984,9 @@ impl ExecutorsScreen {
         };
         Some(
             div()
-                .id(SharedString::from(format!("job-log-{}", row.id)))
+                .id(SharedString::from(format!("job-log-{executor}")))
                 .debug_selector({
-                    let id = row.id.clone();
+                    let id = executor.to_owned();
                     move || format!("job-log-{id}")
                 })
                 .max_h(px(140.0))
@@ -1015,7 +1068,7 @@ impl ExecutorsScreen {
     }
 
     /// What opens under a line.
-    fn expanded(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn expanded(&mut self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut body = div()
             .flex()
             .flex_col()
@@ -1083,6 +1136,7 @@ impl ExecutorsScreen {
         if let Some(auto) = &row.auto {
             body = body.child(self.auto_block(row, auto, theme, cx));
         }
+        body = body.children(self.registry_row_body(row, theme, cx));
         if row.maintain {
             body = body.child(
                 div()
@@ -1101,7 +1155,7 @@ impl ExecutorsScreen {
         body
     }
 
-    fn line(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn line(&mut self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let open = self.expanded.contains(&row.id)
             || (self.reviewing.contains(&row.id) && row.recipe.is_some());
         let running = row.job.as_ref().is_some_and(|j| j.running());
@@ -1160,6 +1214,7 @@ impl ExecutorsScreen {
                 .child(self.middle(row, theme))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
         };
+        let confirm = self.remove_confirm(row, theme, cx);
         div()
             .id(SharedString::from(format!("executor-{}", row.id)))
             .w_full()
@@ -1177,8 +1232,13 @@ impl ExecutorsScreen {
                     .items_center()
                     .gap(px(12.0))
                     .text_size(px(13.0))
-                    .child(toggle)
-                    .child(self.controls(row, theme, cx)),
+                    .children(match confirm {
+                        Some(dialog) => vec![dialog],
+                        None => vec![
+                            toggle.into_any_element(),
+                            self.controls(row, theme, cx).into_any_element(),
+                        ],
+                    }),
             )
             .when(open, |d| d.child(self.expanded(row, theme, cx)))
             .into_any_element()
@@ -1253,6 +1313,7 @@ impl Render for ExecutorsScreen {
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
         let rows = view.rows.rows();
+        self.prune_registry(&rows.iter().collect::<Vec<_>>());
 
         let checking_all = self.store.read(cx).is_checking(None);
         let check_all = kit::pill_button_enabled(
@@ -1282,6 +1343,13 @@ impl Render for ExecutorsScreen {
         };
         let update_all = (view.maintain && view.updates_waiting.len() > 1).then(|| {
             let ids = view.updates_waiting.clone();
+            let registry_ids: BTreeSet<String> = view
+                .rows
+                .rows()
+                .iter()
+                .filter(|r| r.registry.is_some())
+                .map(|r| r.id.clone())
+                .collect();
             kit::pill_button(
                 &theme,
                 "update-all",
@@ -1290,7 +1358,14 @@ impl Render for ExecutorsScreen {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 for id in &ids {
-                    this.start(id, JobKind::Update, false, cx);
+                    // A registry agent updates by adding it again.
+                    match id
+                        .strip_prefix("acp.")
+                        .filter(|_| registry_ids.contains(id))
+                    {
+                        Some(rid) => this.add_registry_agent(rid, cx),
+                        None => this.start(id, JobKind::Update, false, cx),
+                    }
                 }
             }))
         });
@@ -1336,6 +1411,9 @@ impl Render for ExecutorsScreen {
             .into_iter()
             .map(|(g, in_group)| self.group(g, &in_group, &theme, cx))
             .collect();
+        let registry_group = self
+            .registry_view(cx)
+            .map(|registry| self.registry_group(&registry, &theme, cx));
 
         let body = page::content(COLUMN)
             .gap(px(18.0))
@@ -1351,7 +1429,8 @@ impl Render for ExecutorsScreen {
                 ),
                 ParentElement::child,
             )
-            .children(groups);
+            .children(groups)
+            .children(registry_group);
 
         div()
             .id("executors")
@@ -1359,6 +1438,10 @@ impl Render for ExecutorsScreen {
             .flex()
             .flex_col()
             .child(page::header(&theme, "Executors", trailing))
-            .child(page::column("executors-scroll").child(body))
+            .child(
+                page::column("executors-scroll")
+                    .track_scroll(&self.scroll)
+                    .child(body),
+            )
     }
 }

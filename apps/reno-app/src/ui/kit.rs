@@ -2,11 +2,12 @@
 //!
 //! Icons are the bundled SVGs from [`super::icon`], coloured with `text_color`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString,
-    Stateful, Transformation, div, percentage, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, Div, ElementId, FontWeight, Hsla, ImageFormat, Role,
+    SharedString, Stateful, Toggled, Transformation, div, percentage, prelude::*, px,
 };
 use reno_proto::RunStatus;
 
@@ -105,18 +106,35 @@ pub(crate) fn icon_button(
     let hover = theme.raised;
     let id: SharedString = id.into();
     let selector = id.clone();
+    let label = id.clone();
     div()
         .id(id)
         .debug_selector(move || selector.to_string())
         .flex_none()
         .size(px(size))
+        .border_1()
+        .border_color(gpui::transparent_black())
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
+        .role(Role::Button)
+        .aria_label(label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(focus_ring(theme))
         .child(icon(glyph, 15.0, theme.muted))
+}
+
+/// The visible keyboard focus: the accent ring (a border colour, so nothing shifts). Mouse
+/// clicks do not show it.
+pub(crate) fn focus_ring(
+    theme: &Theme,
+) -> impl FnOnce(gpui::StyleRefinement) -> gpui::StyleRefinement {
+    let ring = theme.accent;
+    move |s| s.border_1().border_color(ring)
 }
 
 /// The send button: a `text`-coloured circle with a `canvas` arrow (UI brief amendment 6). With
@@ -213,6 +231,7 @@ fn pill(
     let label: SharedString = label.into();
     let id: SharedString = id.into();
     let selector = id.clone();
+    let spoken = label.clone();
     let ink = match tone {
         Tone::Primary => gpui::white(),
         Tone::Danger => theme.danger,
@@ -233,10 +252,27 @@ fn pill(
         .children(glyph.map(|g| icon(g, 13.0, ink)))
         .child(label)
         .when(enabled, |b| b.cursor_pointer())
-        .when(!enabled, |b| b.cursor_default().opacity(0.4));
+        .when(!enabled, |b| b.cursor_default().opacity(0.4))
+        .role(Role::Button)
+        .aria_label(spoken)
+        .when(enabled, |b| {
+            // Keyboard focus is a ring; on the accent fill it is the text colour.
+            let ring = if tone == Tone::Primary {
+                theme.text
+            } else {
+                theme.accent
+            };
+            b.focusable()
+                .tab_stop(true)
+                .focus_visible(move |s| s.border_1().border_color(ring))
+        });
     let hover = hover_fill(theme, tone, enabled);
     let base = match tone {
-        Tone::Primary => base.bg(theme.accent).text_color(gpui::white()),
+        Tone::Primary => base
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .bg(theme.accent)
+            .text_color(gpui::white()),
         Tone::Danger => base
             .border_1()
             .border_color(theme.danger.opacity(0.5))
@@ -276,6 +312,11 @@ pub(crate) fn switch(theme: &Theme, id: impl Into<SharedString>, on: bool) -> St
         .rounded(px(9.0))
         .bg(track)
         .cursor_pointer()
+        .role(Role::Switch)
+        .aria_toggled(if on { Toggled::True } else { Toggled::False })
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(focus_ring(theme))
         .child(div().size(px(14.0)).rounded(px(7.0)).bg(gpui::white()))
 }
 
@@ -297,6 +338,15 @@ pub(crate) fn checkbox(
         .cursor_pointer()
         .text_size(px(12.5))
         .text_color(theme.muted)
+        .role(Role::CheckBox)
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(focus_ring(theme))
         .child(
             div()
                 .flex_none()
@@ -382,5 +432,201 @@ mod tests {
         }
         assert!(hover_fill(&theme, Tone::Quiet, true).is_some());
         assert!(hover_fill(&theme, Tone::Danger, true).is_some());
+    }
+}
+
+/// One segment of a [`segmented`] filter: a button that is pressed or not. The id is the
+/// accessible label and the test selector; the caller adds `on_click`.
+pub(crate) fn segment(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    pressed: bool,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    let label: SharedString = label.into();
+    let hover = theme.raised;
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex_none()
+        .h(px(26.0))
+        .px(px(11.0))
+        .flex()
+        .items_center()
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .when(pressed, |d| d.bg(theme.raised).text_color(theme.text))
+        .when(!pressed, |d| {
+            d.text_color(theme.muted).hover(move |s| s.bg(hover))
+        })
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_toggled(if pressed {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(focus_ring(theme))
+        .child(label)
+}
+
+/// The segmented filter: a pill group of [`segment`]s.
+pub(crate) fn segmented(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded(px(999.0))
+        .bg(theme.surface)
+        .border_1()
+        .border_color(theme.hairline)
+}
+
+/// A numbered step card of an opened registry line: number, title and detail, and one control
+/// at the right. A step that is not yet its turn is dimmed.
+pub(crate) fn step_card(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    number: u8,
+    title: &'static str,
+    detail: impl Into<SharedString>,
+    control: Option<AnyElement>,
+    enabled: bool,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .w_full()
+        .flex()
+        .items_start()
+        .gap(px(12.0))
+        .p(px(12.0))
+        .rounded(px(10.0))
+        .bg(theme.surface)
+        .border_1()
+        .border_color(theme.hairline)
+        .child(
+            div()
+                .flex_none()
+                .size(px(22.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(11.0))
+                .bg(theme.accent.opacity(0.18))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.accent)
+                .child(format!("{number}")),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if enabled { theme.text } else { theme.muted })
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme.muted)
+                        .child(detail.into()),
+                ),
+        )
+        .children(control)
+}
+
+/// The mark of a registry agent: the registry's own one-ink SVG, drawn in the text colour, or a
+/// letter tile when it has none (or it does not draw).
+pub(crate) fn registry_icon(theme: &Theme, svg: Option<&str>, name: &str, size: f32) -> AnyElement {
+    let letter = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect());
+    let tile = {
+        let (bg, ink) = (theme.raised, theme.muted);
+        move || {
+            div()
+                .size(px(size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .bg(bg)
+                .text_size(px(size * 0.6))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(ink)
+                .child(letter.clone())
+                .into_any_element()
+        }
+    };
+    let frame = div().flex_none().size(px(size));
+    match svg.filter(|s| s.contains("<svg")) {
+        Some(svg) => {
+            let image = recolored_svg(svg, theme.muted);
+            frame
+                .child(
+                    gpui::img(Arc::new(gpui::Image::from_bytes(
+                        ImageFormat::Svg,
+                        image.into_bytes(),
+                    )))
+                    .size(px(size))
+                    .flex_none()
+                    .with_fallback(tile),
+                )
+                .into_any_element()
+        }
+        None => frame.child(tile()).into_any_element(),
+    }
+}
+
+/// The registry's icons paint with `currentColor`, which an image does not inherit: it is
+/// replaced with the colour they should have.
+pub(crate) fn recolored_svg(svg: &str, ink: Hsla) -> String {
+    let rgba = gpui::Rgba::from(ink);
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let hex = format!(
+        "#{:02x}{:02x}{:02x}",
+        byte(rgba.r),
+        byte(rgba.g),
+        byte(rgba.b)
+    );
+    svg.replace("currentColor", &hex)
+}
+
+#[cfg(test)]
+mod registry_icon_tests {
+    use super::*;
+    use crate::ui::theme::Appearance;
+
+    #[test]
+    fn a_registry_icon_is_drawn_in_the_theme_colour_not_black() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"currentColor\" d=\"M0 0\"/></svg>";
+        let dark = Theme::for_appearance(Appearance::Dark);
+        let light = Theme::for_appearance(Appearance::Light);
+        let on_dark = recolored_svg(svg, dark.muted);
+        let on_light = recolored_svg(svg, light.muted);
+        assert!(!on_dark.contains("currentColor") && on_dark.contains("fill=\"#"));
+        assert_ne!(on_dark, on_light, "each theme gets its own ink");
     }
 }

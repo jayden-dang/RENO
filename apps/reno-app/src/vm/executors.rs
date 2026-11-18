@@ -8,11 +8,14 @@
 //!
 //! Pure: callers pass `now_ms`, so the job clock and the "still running" notes are plain tests.
 
+use std::collections::BTreeSet;
+
 use reno_client::{Feed, State};
 use reno_proto::{
-    ExecutorHealth, ExecutorInfo, ExecutorJob, InstallStatus, JobFailure, JobKind, JobPhase,
-    Maintenance, NotInstalledReason, RunId, RunStatus, SignedIn, StartRefusal, StepRunner,
-    StopDetail, VersionGate, VersionRange, version_gate,
+    ExecutorHealth, ExecutorInfo, ExecutorJob, ExecutorRegistryListResult, ExecutorSource,
+    InstallStatus, JobFailure, JobKind, JobPhase, Maintenance, NotInstalledReason, RunId,
+    RunStatus, SignedIn, StartRefusal, StepRunner, StopDetail, VersionGate, VersionRange,
+    version_gate,
 };
 
 use super::{Banner, Section, banner};
@@ -249,6 +252,36 @@ impl JobView {
     }
 }
 
+/// Where an added registry agent stands against the index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RegistryNote {
+    FromRegistry,
+    /// Added, but the index no longer lists it: removable, not updatable.
+    Delisted,
+    /// The person's own agent: Reno never installs or updates it.
+    Own,
+}
+
+impl RegistryNote {
+    pub(crate) const fn words(self) -> &'static str {
+        match self {
+            Self::FromRegistry => "from the ACP registry",
+            Self::Delisted => "no longer in the registry",
+            Self::Own => "your own agent",
+        }
+    }
+}
+
+/// What a line of an added registry agent adds: where it came from and whether Remove can go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RegistryRow {
+    /// The registry's id (`kilo`, `own.mine`): what add and remove take.
+    pub(crate) id: String,
+    pub(crate) note: RegistryNote,
+    /// A run on it is queued or live: the daemon refuses Remove.
+    pub(crate) remove_blocked: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExecutorRow {
     pub(crate) id: String,
@@ -294,6 +327,8 @@ pub(crate) struct ExecutorRow {
     pub(crate) lock: bool,
     pub(crate) auto: Option<AutoView>,
     pub(crate) job: Option<JobView>,
+    /// Added from the ACP registry (feature `executor.registry`).
+    pub(crate) registry: Option<RegistryRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -450,16 +485,20 @@ fn is_newer(latest: &str, installed: &str) -> bool {
 
 /// What the daemon and the list know, passed to every row.
 #[derive(Clone, Copy)]
-struct Ctx {
+struct Ctx<'a> {
     installs: bool,
     maintain: bool,
     now_ms: u64,
+    /// The registry's answer, when there is one: names, delisted and own agents.
+    listing: Option<&'a ExecutorRegistryListResult>,
+    /// Executors with a run queued or live.
+    busy: &'a BTreeSet<String>,
 }
 
 fn group_of(
     info: &ExecutorInfo,
     need: Option<Need>,
-    ctx: Ctx,
+    ctx: Ctx<'_>,
     has_recipe: bool,
     managed: bool,
 ) -> Group {
@@ -556,7 +595,11 @@ fn clock(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-fn job_view(job: &ExecutorJob, now_ms: u64, maintenance: Option<&Maintenance>) -> JobView {
+pub(crate) fn job_view(
+    job: &ExecutorJob,
+    now_ms: u64,
+    maintenance: Option<&Maintenance>,
+) -> JobView {
     let managed = maintenance.is_some_and(|m| m.managed);
     let terminal_command = if managed {
         None
@@ -622,10 +665,24 @@ fn job_view(job: &ExecutorJob, now_ms: u64, maintenance: Option<&Maintenance>) -
     }
 }
 
-fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
+fn row(info: &ExecutorInfo, ctx: Ctx<'_>) -> ExecutorRow {
     let health = info.health.as_ref();
     let id = info.descriptor.id.as_str();
-    let name = summary::executor_name(id);
+    let from_registry = info.source == ExecutorSource::Registry;
+    let entry = ctx
+        .listing
+        .filter(|_| from_registry)
+        .and_then(|l| l.entries.iter().find(|e| e.executor.as_str() == id));
+    let name = entry.map_or_else(|| summary::executor_name(id), |e| e.name.clone());
+    let registry = from_registry.then(|| RegistryRow {
+        id: id.strip_prefix("acp.").unwrap_or(id).to_owned(),
+        note: match entry {
+            Some(e) if e.own => RegistryNote::Own,
+            Some(e) if e.delisted => RegistryNote::Delisted,
+            _ => RegistryNote::FromRegistry,
+        },
+        remove_blocked: ctx.busy.contains(id),
+    });
     let need = need_of(health);
     let maintenance = info.maintenance.as_ref().filter(|_| ctx.maintain);
     let maintain = maintenance.is_some();
@@ -706,11 +763,16 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
         None
     };
     let update_known = available.is_some() || need == Some(Need::Update);
+    // A registry agent shows Update whenever the index lists a newer version (the daemon applies
+    // it by itself too while auto-update is on); a delisted or own one has none to offer.
+    let registry_update = registry
+        .as_ref()
+        .is_some_and(|r| r.note == RegistryNote::FromRegistry && available.is_some());
     let update = maintain
         && installed_ok
         && !busy
         && updater.is_some()
-        && ((update_known && !auto_on) || need == Some(Need::Update));
+        && ((update_known && !auto_on) || need == Some(Need::Update) || registry_update);
     let sign_in = (need == Some(Need::SignIn) && !busy)
         .then(|| {
             maintenance
@@ -760,12 +822,12 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
         update,
         update_primary: update && need == Some(Need::Update),
         switch: maintenance
-            .filter(|m| updater.is_some() && !m.managed && installed_ok)
+            .filter(|m| updater.is_some() && (!m.managed || from_registry) && installed_ok)
             .map(|m| SwitchView {
                 on: m.auto_update.on,
                 label: format!("Auto-update {name}"),
             }),
-        lock: maintenance.is_some_and(|m| m.managed) && installed_ok,
+        lock: maintenance.is_some_and(|m| m.managed) && installed_ok && !from_registry,
         auto: maintenance.filter(|_| installed_ok).and_then(|m| {
             auto_view(
                 &name,
@@ -775,6 +837,7 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
             )
         }),
         job,
+        registry,
     }
 }
 
@@ -801,18 +864,58 @@ fn installable(rows: &[ExecutorRow]) -> Option<String> {
     }
 }
 
+/// Executors with a run queued or live: Remove is refused for them.
+fn busy_executors(state: &State) -> BTreeSet<String> {
+    state
+        .runs()
+        .iter()
+        .filter(|r| !r.status.is_terminal())
+        .map(|r| r.executor.to_string())
+        .collect()
+}
+
+/// A registry agent that is registered but not installed yet is being added: it is shown on its
+/// line of the registry group, not as a second line here. Only while that group has the entry.
+fn shown_in_registry_group(
+    info: &ExecutorInfo,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> bool {
+    info.source == ExecutorSource::Registry
+        && !matches!(
+            info.health.as_ref().map(|h| &h.installed),
+            Some(InstallStatus::Installed { .. })
+        )
+        && listing.is_some_and(|l| l.entries.iter().any(|e| e.executor == info.descriptor.id))
+}
+
 /// What the Executors screen shows.
+#[cfg(test)]
 pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
+    build_with(state, now_ms, None)
+}
+
+/// [`build`] with the registry's last answer: the names of added agents, which are delisted or
+/// the person's own, and which are still being added (those are on the registry group).
+pub(crate) fn build_with(
+    state: &State,
+    now_ms: u64,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> ExecutorsView {
     let installs = state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL);
     let maintain = state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN);
+    let busy = busy_executors(state);
+    let listing = listing.filter(|_| state.supports(reno_proto::FEATURE_EXECUTOR_REGISTRY));
     let ctx = Ctx {
         installs,
         maintain,
         now_ms,
+        listing,
+        busy: &busy,
     };
     let mut rows: Vec<ExecutorRow> = state
         .executors()
         .iter()
+        .filter(|info| !shown_in_registry_group(info, listing))
         .map(|info| row(info, ctx))
         .collect();
     // Groups in order; what needs the human first within Needs you, the rest by name.
@@ -915,47 +1018,29 @@ pub(crate) fn failed_executor(state: &State, run: &RunId, now_ms: u64) -> Option
         .executors()
         .iter()
         .find(|e| e.descriptor.id == summary.executor)?;
+    let busy = BTreeSet::new();
     let ctx = Ctx {
         installs: state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL),
         maintain: state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN),
         now_ms,
+        listing: None,
+        busy: &busy,
     };
     Some(FailedExecutor {
         row: row(info, ctx),
     })
 }
 
+/// The one executor fixture the view-model tests share.
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
-    use reno_client::{FeedState, Update};
+pub(crate) mod tests_support {
     use reno_proto::{
-        AccessMode, ExecutorCaps, ExecutorDescriptor, ModelCatalog, ModelInfo, SandboxLevel,
-        Steering,
+        AccessMode, ExecutorCaps, ExecutorDescriptor, ExecutorHealth, ExecutorInfo, ModelInfo,
+        SandboxLevel, Steering, VersionRange,
     };
 
-    use super::*;
-
-    const NOW: u64 = 1_000 * 3_600_000;
-    const MIN: u64 = 60_000;
-
-    fn healthy() -> ExecutorHealth {
-        ExecutorHealth {
-            installed: InstallStatus::Installed {
-                path: "/usr/local/bin/claude".into(),
-                version: Some("2.1.325".into()),
-            },
-            version_gate: VersionGate::Ok,
-            signed_in: SignedIn::Yes {
-                account: Some("ada@example.com".into()),
-            },
-            models: ModelCatalog::curated(vec![]),
-            checked_at_ms: NOW - 3 * MIN,
-            plan_usage: None,
-        }
-    }
-
-    fn info(id: &str, health: Option<ExecutorHealth>) -> ExecutorInfo {
+    pub(crate) fn info(id: &str, health: Option<ExecutorHealth>) -> ExecutorInfo {
         let models: Vec<ModelInfo> = health
             .as_ref()
             .map(|h| h.models.models.clone())
@@ -991,6 +1076,35 @@ mod tests {
             job: None,
             source: Default::default(),
             auth_methods: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use reno_client::{FeedState, Update};
+    use reno_proto::ModelCatalog;
+
+    use super::tests_support::info;
+    use super::*;
+
+    const NOW: u64 = 1_000 * 3_600_000;
+    const MIN: u64 = 60_000;
+
+    fn healthy() -> ExecutorHealth {
+        ExecutorHealth {
+            installed: InstallStatus::Installed {
+                path: "/usr/local/bin/claude".into(),
+                version: Some("2.1.325".into()),
+            },
+            version_gate: VersionGate::Ok,
+            signed_in: SignedIn::Yes {
+                account: Some("ada@example.com".into()),
+            },
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: NOW - 3 * MIN,
+            plan_usage: None,
         }
     }
 
@@ -2108,5 +2222,223 @@ mod roster_tests {
             Group::Ready,
             "untested and unknown are caveats, not blocks"
         );
+    }
+
+    // --- Registry agents ---------------------------------------------------------------------
+
+    fn registry_entry(id: &str, name: &str) -> reno_proto::RegistryEntry {
+        reno_proto::RegistryEntry {
+            id: id.to_owned(),
+            executor: format!("acp.{id}").parse().unwrap(),
+            name: name.to_owned(),
+            version: "7.8.27".to_owned(),
+            description: String::new(),
+            authors: vec![],
+            license: None,
+            website: None,
+            repository: None,
+            icon: None,
+            kind: Some(reno_proto::RegistryDistribution::Binary),
+            readiness: reno_proto::RegistryReadiness::Ready,
+            fix: None,
+            host: None,
+            checksum: None,
+            built_in: None,
+            added: None,
+            adding: false,
+            delisted: false,
+            own: false,
+        }
+    }
+
+    fn listing_of(
+        entries: Vec<reno_proto::RegistryEntry>,
+    ) -> reno_proto::ExecutorRegistryListResult {
+        reno_proto::ExecutorRegistryListResult {
+            entries,
+            fetched_at_ms: NOW,
+            offline: false,
+            error: None,
+        }
+    }
+
+    /// The fake daemon's shape for an added agent: source registry, managed, with an updater.
+    fn added(id: &str, version: &str, latest: Option<&str>) -> ExecutorInfo {
+        let mut m = maint(
+            Some(updater("reno executor add", false, false, latest)),
+            true,
+        );
+        m.managed = true;
+        let mut i = info(
+            id,
+            Some(health(version, SignedIn::Unknown, VersionGate::Unchecked)),
+            Some(m),
+            None,
+        );
+        i.source = reno_proto::ExecutorSource::Registry;
+        i
+    }
+
+    fn view_registry(
+        list: Vec<ExecutorInfo>,
+        listing: Option<reno_proto::ExecutorRegistryListResult>,
+        runs: Vec<(&str, RunStatus)>,
+    ) -> ExecutorsView {
+        let mut state = State::new();
+        state.apply(Update::Executors(list));
+        state.apply(Update::Daemon(reno_client::DaemonInfo {
+            hello: HelloResult {
+                server_version: "t".into(),
+                protocol_version: PROTOCOL_VERSION,
+                features: MAINTAIN
+                    .iter()
+                    .copied()
+                    .chain([reno_proto::FEATURE_EXECUTOR_REGISTRY])
+                    .map(str::to_owned)
+                    .collect(),
+                pid: 1,
+            },
+            status: None,
+        }));
+        state.apply(Update::Runs(
+            runs.into_iter()
+                .enumerate()
+                .map(|(n, (executor, status))| reno_proto::RunSummary {
+                    model_options: Default::default(),
+                    effort: None,
+                    run_id: RunId::from_suffix(&format!("r{n}")).unwrap(),
+                    task_id: "task_t1".parse().unwrap(),
+                    title: "x".into(),
+                    executor: executor.parse().unwrap(),
+                    status,
+                    attempt: 1,
+                    cwd: None,
+                    created_at_ms: NOW,
+                    updated_at_ms: NOW,
+                    model: None,
+                    prompt: None,
+                    bot: None,
+                    stop_reason: None,
+                    stop: None,
+                    report: None,
+                    not_resumed: None,
+                    session: None,
+                })
+                .collect(),
+        ));
+        build_with(&state, NOW, listing.as_ref())
+    }
+
+    #[test]
+    fn an_added_agent_is_an_ordinary_line_that_says_where_it_came_from() {
+        let v = view_registry(
+            vec![added("acp.kilo", "7.8.20", Some("7.8.27"))],
+            Some(listing_of(vec![registry_entry("kilo", "Kilo")])),
+            vec![],
+        );
+        let r = row(&v, "acp.kilo");
+        assert_eq!(r.group, Group::Ready);
+        assert_eq!(r.name, "Kilo", "the registry's own name");
+        let reg = r.registry.as_ref().unwrap();
+        assert_eq!(reg.id, "kilo");
+        assert_eq!(reg.note, RegistryNote::FromRegistry);
+        assert_eq!(reg.note.words(), "from the ACP registry");
+        assert_eq!(r.available.as_deref(), Some("7.8.27"));
+        // Update is on the line even with auto-update on, and the switch and Remove follow:
+        // the lock ("Updates with Reno") is for Reno's own adapters, not for these.
+        assert!(r.update && !r.lock);
+        assert!(r.switch.as_ref().is_some_and(|s| s.on));
+        assert!(!reg.remove_blocked);
+        // An up to date one offers no Update.
+        let v = view_registry(
+            vec![added("acp.kilo", "7.8.27", Some("7.8.27"))],
+            Some(listing_of(vec![registry_entry("kilo", "Kilo")])),
+            vec![],
+        );
+        assert!(!row(&v, "acp.kilo").update);
+        // A built-in executor has no registry facts.
+        let v = view(vec![info(
+            "codex",
+            Some(health("1", ok_in("a@b.c"), VersionGate::Ok)),
+            None,
+            None,
+        )]);
+        assert!(row(&v, "codex").registry.is_none());
+    }
+
+    #[test]
+    fn a_delisted_agent_can_be_removed_but_not_updated_and_an_own_one_is_never_updated() {
+        let mut old = registry_entry("old-agent", "Old Agent");
+        old.delisted = true;
+        let mut own = registry_entry("own.mine", "mine");
+        own.own = true;
+        let mut own_info = added("acp.own.mine", "0.0.0", None);
+        own_info.maintenance.as_mut().unwrap().updater = None;
+        own_info.maintenance.as_mut().unwrap().managed = false;
+        let v = view_registry(
+            vec![added("acp.old-agent", "0.3.0", Some("0.4.0")), own_info],
+            Some(listing_of(vec![old, own])),
+            vec![],
+        );
+        let old = row(&v, "acp.old-agent");
+        assert_eq!(old.registry.as_ref().unwrap().note, RegistryNote::Delisted);
+        assert_eq!(
+            old.registry.as_ref().unwrap().note.words(),
+            "no longer in the registry"
+        );
+        assert!(!old.update, "a delisted agent is not updated");
+        let own = row(&v, "acp.own.mine");
+        assert_eq!(own.registry.as_ref().unwrap().note, RegistryNote::Own);
+        assert!(!own.update && own.switch.is_none() && !own.lock);
+    }
+
+    #[test]
+    fn an_agent_being_added_is_on_its_registry_line_only() {
+        let not_installed = || {
+            let mut i = added("acp.cline", "1", None);
+            i.health = Some(not_found());
+            i
+        };
+        let v = view_registry(
+            vec![not_installed()],
+            Some(listing_of(vec![registry_entry("cline", "Cline")])),
+            vec![],
+        );
+        assert!(
+            v.rows.rows().is_empty(),
+            "not a second line in Not installed"
+        );
+        // With no registry answer to show it on, it stays on the roster.
+        let v = view_registry(vec![not_installed()], None, vec![]);
+        assert_eq!(v.rows.rows().len(), 1);
+    }
+
+    #[test]
+    fn remove_is_refused_while_a_run_on_the_agent_is_queued_or_live() {
+        let list = || vec![added("acp.kilo", "7.8.27", None)];
+        let entries = || Some(listing_of(vec![registry_entry("kilo", "Kilo")]));
+        for status in [RunStatus::Queued, RunStatus::Running] {
+            let v = view_registry(list(), entries(), vec![("acp.kilo", status)]);
+            assert!(
+                row(&v, "acp.kilo")
+                    .registry
+                    .as_ref()
+                    .unwrap()
+                    .remove_blocked
+            );
+        }
+        for runs in [
+            vec![("acp.kilo", RunStatus::Succeeded)],
+            vec![("codex", RunStatus::Running)],
+        ] {
+            let v = view_registry(list(), entries(), runs);
+            assert!(
+                !row(&v, "acp.kilo")
+                    .registry
+                    .as_ref()
+                    .unwrap()
+                    .remove_blocked
+            );
+        }
     }
 }

@@ -74,6 +74,10 @@ pub(crate) struct Options {
     /// `RENO_FOLLOW_UP=<text>`: with `RENO_OPEN=run_<id>`, send `text` from that run's box once it
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
+    /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
+    /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
+    /// state once it has loaded (screenshots, reviews).
+    pub(crate) registry_demo: Option<String>,
     /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
     /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
     /// data dir.
@@ -148,6 +152,7 @@ impl Options {
         options.files_search = env("RENO_FILES_SEARCH").filter(|v| !v.is_empty());
         options.terminal_input = env("RENO_TERMINAL_INPUT").filter(|v| !v.is_empty());
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
+        options.registry_demo = env("RENO_REGISTRY_DEMO").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
@@ -189,6 +194,10 @@ pub(crate) struct Start {
     pub(crate) terminal_input: Option<String>,
     /// A message to send from that run's box once it is open.
     pub(crate) follow_up: Option<String>,
+    /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
+    /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
+    /// state once it has loaded (screenshots, reviews).
+    pub(crate) registry_demo: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -233,6 +242,7 @@ pub(crate) fn run(options: Options) {
             files_search: options.files_search.clone(),
             terminal_input: options.terminal_input.clone(),
             follow_up: options.follow_up.clone(),
+            registry_demo: options.registry_demo.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -277,6 +287,7 @@ pub(crate) fn open_window(
         files_search,
         terminal_input,
         follow_up,
+        registry_demo,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -296,6 +307,20 @@ pub(crate) fn open_window(
                 root.focus_composer(window, cx);
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
+                }
+                if let Some(script) = registry_demo {
+                    // After the registry has been read.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        root.update_in(cx, |root, _, cx| {
+                            root.executors
+                                .update(cx, |screen, cx| screen.registry_demo(&script, cx));
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
                 if let Some(dir) = open_project {
                     cx.spawn_in(window, async move |view, cx| {
@@ -504,8 +529,15 @@ impl RootView {
                         kind,
                         version,
                         sign_in,
+                        registry,
                     } => {
                         let (label, message) = match kind {
+                            // An agent from the ACP registry is "added", and says whether it
+                            // can take runs now.
+                            reno_proto::JobKind::Install if *registry => (
+                                "Agent added",
+                                crate::vm::registry::added_words(name, *sign_in),
+                            ),
                             reno_proto::JobKind::Install => (
                                 "Executor installed",
                                 if *sign_in {
@@ -694,7 +726,10 @@ impl RootView {
                 Screen::Runs
             }
             Nav::Triggers => Screen::Triggers,
-            Nav::Executors => Screen::Executors,
+            Nav::Executors => {
+                self.executors.update(cx, |screen, cx| screen.shown(cx));
+                Screen::Executors
+            }
             Nav::Settings => {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Settings
@@ -1070,6 +1105,7 @@ mod tests {
                 files_search: None,
                 terminal_input: None,
                 follow_up: None,
+                registry_demo: None,
                 data_dir: None,
             })
         );
