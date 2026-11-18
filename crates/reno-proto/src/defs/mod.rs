@@ -118,6 +118,7 @@ pub const BUILTIN_EXECUTORS: &[&str] = &[
     "mock",
     "claude-code",
     "codex",
+    "pi",
     "acp.grok",
     "acp.devin",
     "acp.hermes",

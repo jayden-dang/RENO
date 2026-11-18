@@ -272,6 +272,9 @@ mod tests {
             logo_path("claude-code", false)
         );
         assert_eq!(logo_path("acp.fx", true), None);
+        // Pi has no mark of its own here (none is bundled): it gets the generic glyph.
+        assert_eq!(logo_path("pi", true), None);
+        assert_eq!(logo_path("pi", false), None);
         assert_eq!(logo_path("mock", false), None);
     }
 }

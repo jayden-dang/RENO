@@ -399,6 +399,29 @@ mod tests {
         assert_eq!(match_rank(" ", "anything"), Some(1));
     }
 
+    #[test]
+    fn pi_models_are_found_by_their_provider_named_in_the_description() {
+        // Pi's models are `provider/id`; the catalog puts the provider's name in the description.
+        let all = [harness(
+            "pi",
+            true,
+            vec![
+                model(
+                    "anthropic/claude-opus-4-8",
+                    "Claude Opus 4.8",
+                    Some("Anthropic"),
+                ),
+                model("openai-codex/gpt-5", "GPT-5", Some("Codex")),
+            ],
+        )];
+        let tab = Tab::Harness(id("pi"));
+        let found = listing("codex", &tab, &all, |_, _| false);
+        assert_eq!(ids(&found.rows), ["openai-codex/gpt-5"]);
+        let found = listing("anthropic", &tab, &all, |_, _| false);
+        assert_eq!(ids(&found.rows), ["anthropic/claude-opus-4-8"]);
+        assert_eq!(ids(&listing("", &tab, &all, |_, _| false).rows).len(), 2);
+    }
+
     fn fable_harnesses() -> [HarnessChoice; 2] {
         [
             harness("claude-code", true, vec![model("fable-5", "Fable 5", None)]),

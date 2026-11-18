@@ -27,6 +27,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     write_executable(&shell_bin.join("hermes"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("codex"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("claude"), "#!/bin/sh\nexit 0\n");
+    write_executable(&shell_bin.join("pi"), "#!/bin/sh\nexit 0\n");
 
     // A $SHELL whose init shapes PATH — the shape resolution must survive.
     let fake_shell = dir.path().join("fake-shell");
@@ -53,6 +54,7 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         std::env::remove_var("HERMES_EXECUTABLE");
         std::env::remove_var("CODEX_EXECUTABLE");
         std::env::remove_var("CLAUDE_CODE_EXECUTABLE");
+        std::env::remove_var("PI_EXECUTABLE");
         std::env::remove_var("RENO_NO_LOGIN_SHELL");
     }
 
@@ -83,4 +85,12 @@ async fn cli_on_login_shell_path_only_is_resolved() {
         reno_harness::CodexExecutor::new().installed(),
         "codex resolves via login-shell PATH"
     );
+    // Pi is also installed under /opt/homebrew/bin on some machines: the login-shell PATH
+    // comes first, so this proves the snapshot was consulted.
+    assert_eq!(
+        reno_harness::pi::resolve_pi_executable(),
+        Some(shell_bin.join("pi")),
+        "pi resolves via login-shell PATH"
+    );
+    assert!(reno_harness::PiExecutor::new().installed());
 }

@@ -3,8 +3,8 @@
 //! The built-in protection (`reno_proto::defs::protect`) refuses a write to `.reno` (Reno's own
 //! policy and definitions) or git internals when the harness **asks** first. A project's harness
 //! config (`.claude`, `.codex`, `.mcp.json`, `.cursor`, ...) is not protected and is never
-//! reverted or flagged here. A harness that cannot
-//! ask (Grok, Devin and Hermes, answered in-driver), or a run whose edits are accepted without
+//! reverted or flagged here. A harness that cannot ask (Grok, Devin and Hermes, answered
+//! in-driver, and Pi, which asks nothing), or a run whose edits are accepted without
 //! a question, would write them unseen. So the supervisor also looks at what the run did.
 //!
 //! # Two detectors

@@ -540,6 +540,34 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             }),
         )?,
         info(
+            "pi",
+            "Pi",
+            // Pi asks nothing before a tool call: full access, unrestricted.
+            &[AccessMode::FullAccess],
+            &unrestricted,
+            ("1.5.0", "1.5.0"),
+            ExecutorHealth {
+                installed: installed("/opt/homebrew/bin/pi", "1.5.0"),
+                version_gate: VersionGate::Ok,
+                signed_in: SignedIn::Yes { account: None },
+                models: ModelCatalog::live(models(&[
+                    ("anthropic/claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                    ("openai-codex/gpt-5", "GPT-5"),
+                ])),
+                checked_at_ms: at,
+                plan_usage: None,
+            },
+            // Pi on the owner's Mac is an npm global: no updater is declared (see
+            // `reno_harness::exec::maintenance`), and no sign-in command exists.
+            Some(Maintenance {
+                setup: None,
+                sign_in: None,
+                updater: None,
+                managed: false,
+                auto_update: auto,
+            }),
+        )?,
+        info(
             "acp.grok",
             "Grok",
             &all,

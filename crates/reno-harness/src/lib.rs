@@ -38,7 +38,7 @@ mod agent_id;
 pub mod child_env;
 pub use agent_id::{HarnessId, REGISTRY_SLUG_PREFIX, RegistryAgent};
 mod drivers;
-pub use drivers::{acp, claude, codex};
+pub use drivers::{acp, claude, codex, pi};
 #[cfg(all(feature = "conformance", unix))]
 pub mod conformance;
 pub mod exec;
@@ -325,6 +325,7 @@ pub(crate) fn crash_message(
 pub use acp::AcpExecutor;
 pub use claude::ClaudeExecutor;
 pub use codex::CodexExecutor;
+pub use pi::PiExecutor;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)
