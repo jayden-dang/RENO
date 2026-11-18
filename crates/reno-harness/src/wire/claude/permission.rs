@@ -19,7 +19,7 @@
 //!
 //! # What an access mode lets through
 //!
-//! See [`answered_here`] and [`permission_mode`]; the table lives on
+//! See [`permission_mode`]; the table lives on
 //! `ClaudeExecutor`, which applies them.
 
 use std::path::PathBuf;
@@ -94,16 +94,9 @@ pub(crate) fn subject(tool: &str, input: &Value, raw: &Value) -> ApprovalSubject
     }
 }
 
-/// Whether the driver itself answers every permission request that reaches it: full access
-/// asks nothing. Under the other two modes whatever the CLI's permission mode does not cover
-/// reaches Reno, edits included: under `acceptEdits` an `Edit` request is one the CLI did not
-/// accept itself.
-pub(crate) fn answered_here(access: AccessMode) -> bool {
-    access == AccessMode::FullAccess
-}
-
 /// The CLI `--permission-mode` a run launches in. Full access is `default` too: the run is
-/// answered here instead (see [`answered_here`]), so no run is launched with a
+/// answered by the kernel instead (every request is surfaced, and a full-access run's are
+/// allowed at once unless policy refuses them), so no run is launched with a
 /// skip-permissions flag, which the CLI refuses as root outside a sandbox.
 pub(crate) fn permission_mode(access: AccessMode) -> &'static str {
     match access {
@@ -298,15 +291,6 @@ mod tests {
         assert_eq!(odd.raw, json!(null));
         let odd = subject("Edit", &json!({"file_path": 7}), &json!({}));
         assert!(odd.paths.is_empty());
-    }
-
-    #[test]
-    fn only_full_access_is_answered_without_asking_reno() {
-        assert!(answered_here(AccessMode::FullAccess));
-        // Under acceptEdits the CLI accepts the edits it covers itself, so an edit request that
-        // arrives is one it did not cover: it is asked like the rest.
-        assert!(!answered_here(AccessMode::AutoAcceptEdits));
-        assert!(!answered_here(AccessMode::Supervised));
     }
 
     #[test]

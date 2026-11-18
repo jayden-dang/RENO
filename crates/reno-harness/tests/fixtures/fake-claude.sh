@@ -90,9 +90,9 @@ case "$first" in
   switches=0
   [ "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-}" = 1 ] && switches=$((switches + 1))
   [ "${ENABLE_CLAUDEAI_MCP_SERVERS:-}" = false ] && switches=$((switches + 1))
-  if [ "$sources" = "project,local" ] && [ "$switches" = 2 ]; then
+  if [ "$sources" = "" ] && [ "$switches" = 2 ]; then
     verdict=isolated
-  elif [ "$sources" = all ] && [ "$switches" = 0 ]; then
+  elif [ "$sources" = user ] && [ "$switches" = 0 ]; then
     verdict=inherited
   else
     verdict="partial(sources=$sources,switches=$switches)"
