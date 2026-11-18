@@ -1334,6 +1334,10 @@ async fn run_session(session: Session) {
     let mut prompt_seq: u64 = 1;
     let mut current_prompt_id = prompt_complete_extension.then(|| format!("reno-p{prompt_seq}"));
     let mut completed_prompts: VecDeque<String> = VecDeque::new();
+    // Whether the outstanding turn's usage went out: Grok settles it on `turn_completed` and
+    // again on the prompt's response `_meta`, and may replay it after the turn ended. Counted
+    // once, whichever comes first; reset when the next prompt goes out.
+    let mut turn_usage_counted = false;
     let mut prompt_stall_deadline: Option<tokio::time::Instant> =
         prompt_stall.map(|d| tokio::time::Instant::now() + d);
     // The prompt in flight (re-sent by a preempt when the agent drops an unstarted cancelled
@@ -1481,7 +1485,10 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                 }
+                // Not when `turn_completed` already counted it. The flag needs no setting here:
+                // the next prompt resets it, and nothing is read in between.
                 if !pump.interrupted
+                    && !turn_usage_counted
                     && let Ok(resp) = &res
                     && let Some(usage) = normalize::usage(resp)
                     && !pump.emit(usage).await
@@ -1524,6 +1531,7 @@ async fn run_session(session: Session) {
                 }
                 prompts.extend(queued_steers.drain(..));
                 prompt_seq += 1;
+                turn_usage_counted = false;
                 current_prompt_id =
                     prompt_complete_extension.then(|| format!("reno-p{prompt_seq}"));
                 prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);
@@ -1595,6 +1603,24 @@ async fn run_session(session: Session) {
                             }));
                         }
                     }
+                    // Grok's turn usage, counted once per turn (grok sends it just before the
+                    // turn settles); one naming an older, settled prompt is never counted into
+                    // the current turn.
+                    if let Some((prompt, usage)) =
+                        normalize::turn_completed_usage(&method, &params, &session_id)
+                    {
+                        let older = prompt.as_deref().is_some_and(|p| {
+                            completed_prompts.iter().any(|c| c == p)
+                                && (turn.is_some() || completed_prompts.back().map(String::as_str) != Some(p))
+                        });
+                        if !older
+                            && !pump.interrupted
+                            && !std::mem::replace(&mut turn_usage_counted, true)
+                            && !pump.emit(usage).await
+                        {
+                            break 'main;
+                        }
+                    }
                     // Other notifications (other sessions, agent noise) are tolerated by design.
                     for ev in pump.events_for(&method, &params) {
                         track_open_tools(&ev, &mut open_tools);
@@ -1626,7 +1652,8 @@ async fn run_session(session: Session) {
                         && let Ok(res @ Ok(_)) =
                             tokio::time::timeout(Duration::from_millis(50), &mut fut).await
                     {
-                        if let Ok(resp) = &res
+                        if !turn_usage_counted
+                            && let Ok(resp) = &res
                             && let Some(usage) = normalize::usage(resp)
                         {
                             let _ = pump.emit(usage).await;
@@ -1762,6 +1789,7 @@ async fn run_session(session: Session) {
                     break 'main;
                 }
                 prompt_seq += 1;
+                turn_usage_counted = false;
                 current_prompt_id =
                     prompt_complete_extension.then(|| format!("reno-p{prompt_seq}"));
                 prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);

@@ -167,9 +167,22 @@ case "$promptline" in
   # answered. The harness must settle off the notification.
   reqpid=$(printf '%s' "$promptline" | sed 's/.*"promptId":"\([^"]*\)".*/\1/')
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"pong"}}'
+  # grok 1.0.88 settles the turn's usage on its extension channel just before.
+  emit "{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"$reqpid\",\"stop_reason\":\"end_turn\",\"usage\":{\"inputTokens\":1200,\"outputTokens\":30,\"cachedReadTokens\":200,\"cacheCreationTokens\":0}}}}"
   emit "{\"method\":\"_x.ai/session/prompt_complete\",\"params\":{\"sessionId\":\"$SID\",\"promptId\":\"$reqpid\",\"stopReason\":\"end_turn\",\"agentResult\":null}}"
   # Hang the response forever (the wedge under test).
   exec sleep 60
+  ;;
+
+*scenario:turn-usage-twice*)
+  # Both channels carry the turn's usage (the RPC _meta and turn_completed), and a replay of the
+  # turn_completed arrives after the turn settled: the turn is counted once.
+  reqpid=$(printf '%s' "$promptline" | sed 's/.*"promptId":"\([^"]*\)".*/\1/')
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"pong"}}'
+  tc="{\"method\":\"_x.ai/session_notification\",\"params\":{\"sessionId\":\"$SID\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"$reqpid\",\"usage\":{\"inputTokens\":1200,\"outputTokens\":30,\"cachedReadTokens\":200,\"cacheCreationTokens\":0}}}}"
+  emit "$tc"
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\",\"_meta\":{\"inputTokens\":1200,\"outputTokens\":30,\"cachedReadTokens\":200}}}"
+  emit "$tc"
   ;;
 
 *scenario:prompt-complete-stale*)

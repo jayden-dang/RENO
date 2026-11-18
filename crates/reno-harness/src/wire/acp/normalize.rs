@@ -248,10 +248,25 @@ pub(crate) fn usage(response: &Value) -> Option<ExecEvent> {
     let input = count(&["inputTokens", "input_tokens"]);
     let output = count(&["outputTokens", "output_tokens"]);
     // The protocol's optional cache counts. It does not say whether `inputTokens` includes them;
-    // they are taken as separate from it, as Claude's adapters report them, so a reply that
-    // folded them into `inputTokens` is counted twice (the safer side for a budget).
+    // in a first-class `usage` they are taken as separate from it, as Claude's adapters report
+    // them. Grok's `_meta` folds them into `inputTokens` (verified live, grok 1.0.88: 26,338 =
+    // 24,162 fresh + 2,176 cached), so there they are taken off, as on its `turn_completed`.
     let cache_read = count(&["cachedReadTokens", "cached_read_tokens"]).unwrap_or(0);
-    let cache_write = count(&["cachedWriteTokens", "cached_write_tokens"]).unwrap_or(0);
+    let cache_write = count(&["cachedWriteTokens", "cached_write_tokens"])
+        .or_else(|| {
+            usage
+                .pointer("/usage/cacheCreationTokens")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let folded = response.get("usage").is_none();
+    let input = input.map(|n| {
+        if folded {
+            n.saturating_sub(cache_read + cache_write)
+        } else {
+            n
+        }
+    });
     (input.is_some() || output.is_some()).then(|| ExecEvent::Usage {
         input_tokens: input.unwrap_or(0),
         output_tokens: output.unwrap_or(0),
@@ -302,6 +317,47 @@ const KNOWN_METHODS: &[&str] = &[
     "_x.ai/session_notification",
     "_x.ai/models/update",
 ];
+
+/// A turn's usage as Grok settles it on `_x.ai/session_notification` (`turn_completed`, verified
+/// live on grok 1.0.88), with the prompt id it names. Grok's `inputTokens` counts the cached
+/// reads and writes too, so the fresh input is what remains once they are taken off, as
+/// [`ExecEvent::Usage`] counts it. `None` for anything else or another session's turn.
+pub(crate) fn turn_completed_usage(
+    method: &str,
+    params: &Value,
+    session_id: &str,
+) -> Option<(Option<String>, ExecEvent)> {
+    if method != "_x.ai/session_notification"
+        || params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != session_id)
+    {
+        return None;
+    }
+    let update = params.get("update")?;
+    if str_field(update, "sessionUpdate") != "turn_completed" {
+        return None;
+    }
+    let usage = update.get("usage")?;
+    let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let input = count("inputTokens")?;
+    let cache_read = count("cachedReadTokens").unwrap_or(0);
+    let cache_write = count("cacheCreationTokens").unwrap_or(0);
+    let prompt = update
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((
+        prompt,
+        ExecEvent::Usage {
+            input_tokens: input.saturating_sub(cache_read + cache_write),
+            output_tokens: count("outputTokens").unwrap_or(0),
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+        },
+    ))
+}
 
 /// The events of Grok's extension notifications (verified live, grok 1.0.88), which carry what
 /// `usage_update` would: a `response_completed` on `_x.ai/session_notification` ends each model
@@ -737,6 +793,47 @@ mod tests {
         for method in ["_x.ai/session_notification", "_x.ai/models/update"] {
             assert_eq!(unknown_kind(method, &call, "s"), None, "{method} is known");
         }
+    }
+
+    #[test]
+    fn grok_settles_a_turns_usage_on_turn_completed() {
+        // grok 1.0.88, live: `inputTokens` counts the cached reads too (24,162 fresh + 2,176
+        // cached = 26,338), so the fresh input is what remains once the cache is taken off.
+        let turn = json!({
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "turn_completed", "prompt_id": "reno-p1", "stop_reason": "end_turn",
+                "usage": {
+                    "inputTokens": 26_338, "outputTokens": 27, "totalTokens": 26_365,
+                    "cachedReadTokens": 2_176, "cacheCreationTokens": 10, "reasoningTokens": 25
+                }
+            }
+        });
+        assert_eq!(
+            turn_completed_usage("_x.ai/session_notification", &turn, "s"),
+            Some((
+                Some("reno-p1".to_owned()),
+                ExecEvent::Usage {
+                    input_tokens: 24_152,
+                    output_tokens: 27,
+                    cache_read_tokens: 2_176,
+                    cache_write_tokens: 10,
+                }
+            ))
+        );
+        assert_eq!(
+            turn_completed_usage("_x.ai/session_notification", &turn, "other"),
+            None
+        );
+        assert_eq!(turn_completed_usage("session/update", &turn, "s"), None);
+        let call = json!({
+            "sessionId": "s",
+            "update": { "sessionUpdate": "response_completed", "usage": { "input_tokens": 1 } }
+        });
+        assert_eq!(
+            turn_completed_usage("_x.ai/session_notification", &call, "s"),
+            None
+        );
     }
 
     #[test]

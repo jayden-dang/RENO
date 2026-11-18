@@ -1460,6 +1460,36 @@ async fn prompt_complete_extension_settles_a_hung_prompt_response() {
     let events = run_to_end(&grok(), spec("scenario:prompt-complete-hang")).await;
     assert!(events.contains(&text("pong")), "{events:?}");
     assert_completed(&events);
+    // The synthesized settle carries no usage; grok's turn_completed does.
+    assert_eq!(usages(&events), [(1_000, 30, 200, 0)], "{events:?}");
+}
+
+#[tokio::test]
+async fn a_turns_usage_is_counted_once_whichever_channel_carries_it() {
+    let events = run_to_end(&grok(), spec("scenario:turn-usage-twice")).await;
+    assert_completed(&events);
+    assert_eq!(usages(&events), [(1_000, 30, 200, 0)], "{events:?}");
+}
+
+/// The `Usage` events of a run: (input, output, cache read, cache write).
+fn usages(events: &[ExecEvent]) -> Vec<(u64, u64, u64, u64)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => Some((
+                *input_tokens,
+                *output_tokens,
+                *cache_read_tokens,
+                *cache_write_tokens,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]
