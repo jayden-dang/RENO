@@ -19,6 +19,7 @@ use std::sync::Arc;
 use reno_harness::RegistryAgent;
 use reno_harness::acp_registry::Record;
 use reno_harness::exec::{Executor, MockExecutor, MockStep};
+use reno_harness::usage::{ClaudeUsage, CodexUsage};
 use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ActionClass, ExecEvent, ExecutorId, IdError, StopReason, ToolCall};
@@ -107,6 +108,25 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
     steps
 }
 
+/// Claude Code, reading the plan usage of the login the CLI holds (read only, see
+/// `reno_harness::usage`).
+fn claude() -> ClaudeExecutor {
+    let executor = ClaudeExecutor::new();
+    match ClaudeUsage::from_env() {
+        Some(usage) => executor.with_usage_source(Arc::new(usage)),
+        None => executor,
+    }
+}
+
+/// Codex, likewise.
+fn codex() -> CodexExecutor {
+    let executor = CodexExecutor::new();
+    match CodexUsage::from_env() {
+        Some(usage) => executor.with_usage_source(Arc::new(usage)),
+        None => executor,
+    }
+}
+
 /// Builds the registry: `mock`, plus every harness Reno can drive, installed or not. Nothing is
 /// probed or started here: the kernel probes each executor when the daemon starts, and an
 /// executor that is not installed, too old or signed out stays listed (with the reason) and is
@@ -121,8 +141,8 @@ pub fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError
         return Ok(set);
     }
     let mut candidates: Vec<Arc<dyn Executor>> = vec![
-        Arc::new(ClaudeExecutor::new()),
-        Arc::new(CodexExecutor::new()),
+        Arc::new(claude()),
+        Arc::new(codex()),
         Arc::new(AcpExecutor::grok()),
         Arc::new(AcpExecutor::devin()),
         Arc::new(AcpExecutor::hermes()),

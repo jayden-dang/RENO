@@ -923,7 +923,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         let s = Arc::clone(&s);
         async move {
             injected(&s, "executor.refresh")?;
-            s.with(|w| w.refresh_executors(p.id.as_ref()))
+            s.with(|w| w.refresh_executors(p.id.as_ref(), p.usage_only))
                 .map_err(|()| not_found("executor"))?;
             Ok(reno_proto::ExecutorListResult {
                 executors: s.read(|w| w.executors.clone()),

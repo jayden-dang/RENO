@@ -2,6 +2,8 @@
 //! network, the real `~/.claude` / `~/.codex` or the Keychain (ARCH-16): a source built by
 //! `for_tests` has no Keychain, and the keychain cases name a stand-in `security` script.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::{Arc, Mutex};
 
 use reno_harness::exec::{Executor, MockExecutor};

@@ -405,6 +405,25 @@ impl Client {
             .executors)
     }
 
+    /// `executor.refresh` with `usageOnly`: reads the plan usage of `id` (every executor when
+    /// `None`) again without probing, and returns the whole list. The daemon reads each
+    /// executor's usage at most once per 30 s, so calling this often is cheap. Needs feature
+    /// `executor.usage`.
+    pub async fn refresh_executor_usage(
+        &self,
+        id: Option<reno_proto::ExecutorId>,
+    ) -> Result<Vec<reno_proto::ExecutorInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_USAGE)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorRefresh>(reno_proto::ExecutorRefreshParams {
+                id,
+                usage_only: true,
+            })
+            .await?
+            .executors)
+    }
+
     /// `executor.frames`: the frames each executor's wire layer did not recognise (every executor
     /// when `id` is `None`), by kind. Needs feature `executor.frames`.
     pub async fn executor_frames(

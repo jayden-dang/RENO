@@ -173,6 +173,7 @@ impl World {
     pub(super) fn refresh_executors(
         &mut self,
         id: Option<&reno_proto::ExecutorId>,
+        usage_only: bool,
     ) -> Result<(), ()> {
         if id.is_some_and(|id| !self.executors.iter().any(|e| &e.descriptor.id == id)) {
             return Err(());
@@ -182,7 +183,12 @@ impl World {
             if id.is_none_or(|id| id == &info.descriptor.id)
                 && let Some(health) = &mut info.health
             {
-                health.checked_at_ms = now;
+                if !usage_only {
+                    health.checked_at_ms = now;
+                }
+                if let Some(usage) = &mut health.plan_usage {
+                    usage.fetched_at_ms = now;
+                }
             }
         }
         Ok(())

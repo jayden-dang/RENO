@@ -7,8 +7,8 @@ use reno_proto::defs::{DefKind, DefRecord, DefSummary, DefsSnapshot};
 use reno_proto::{
     AccessMode, ApprovalId, ApprovalRecord, ApprovalStatus, ExecutorCaps, ExecutorDescriptor,
     ExecutorHealth, ExecutorInfo, IdError, InstallStatus, ModelCatalog, ModelInfo,
-    NotInstalledReason, ResolvedBy, RunId, SandboxLevel, SignedIn, Steering, TriggerInfo,
-    TriggerStatus, VersionGate, VersionRange,
+    NotInstalledReason, PlanUsage, ResolvedBy, RunId, SandboxLevel, SignedIn, Steering,
+    TriggerInfo, TriggerStatus, UsageWindow, VersionGate, VersionRange,
 };
 use reno_proto::{
     AutoUpdate, Maintenance, PersonStep, SetupRecipe, SetupStep, StepRunner, UpdaterInfo,
@@ -452,7 +452,14 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     ("claude-haiku-5-5", "Haiku 5.5"),
                 ])),
                 checked_at_ms: at,
-                plan_usage: None,
+                plan_usage: Some(PlanUsage {
+                    plan_label: None,
+                    windows: vec![
+                        UsageWindow::new("Session", 0.54, Some(NOW_MS + 2 * HOUR)),
+                        UsageWindow::new("Week", 0.21, Some(NOW_MS + 70 * HOUR)),
+                    ],
+                    fetched_at_ms: at,
+                }),
             },
             Some(Maintenance {
                 setup: None,
@@ -482,7 +489,13 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 },
                 models: ModelCatalog::live(models(&[("gpt-6-astra", "GPT-6-Astra")])),
                 checked_at_ms: at,
-                plan_usage: None,
+                // The fake keeps Codex signed out (the Sign in screens use it), so a real daemon
+                // would not show meters here; they are what a signed-in Plus account looks like.
+                plan_usage: Some(PlanUsage {
+                    plan_label: Some("ChatGPT Plus".to_owned()),
+                    windows: vec![UsageWindow::new("Session", 0.12, Some(NOW_MS + 4 * HOUR))],
+                    fetched_at_ms: at,
+                }),
             },
             Some(Maintenance {
                 setup: None,
