@@ -1146,3 +1146,30 @@ async fn a_live_fake_run_takes_run_configure_like_the_daemon() {
         .count();
     assert_eq!(changes, 2);
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_fake_resolves_an_alias_and_a_1m_spelling_like_the_daemon() {
+    use reno_proto::{Effort, EffortChange};
+    let client = FakeDaemon::spawn().await.unwrap();
+    client.hello().await.unwrap();
+    // The model a seeded run reports (`opus-5.5`) is the listed Opus 5.5.
+    let mut params = task("/long keep going");
+    params.model = Some("opus-5.5".into());
+    params.model_options = [("contextWindow".to_owned(), "1m".to_owned())].into();
+    let id = client.run_task(params).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let result = client
+        .configure_run(
+            &id,
+            Some(EffortChange::Set {
+                effort: Effort::Low,
+            }),
+            [("contextWindow".to_owned(), "200k".to_owned())].into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.effort, Some(Effort::Low));
+    let mut hinted = task("/long again");
+    hinted.model = Some("claude-opus-5-5[1m]".into());
+    assert!(client.run_task(hinted).await.is_ok());
+}

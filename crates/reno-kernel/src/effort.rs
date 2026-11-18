@@ -17,20 +17,46 @@ fn listed(candidate: &Candidate) -> &[ModelInfo] {
         .unwrap_or(candidate.descriptor.caps.models.as_slice())
 }
 
-/// The model of `candidate` that `model` names: a listed id (a `[1m]` suffix aside) or an alias
-/// (the first listed model whose id contains it). `None` when it names none.
+/// A model name as the app folds it for matching: lower case, `.`, `_` and spaces as `-`, no
+/// `claude-` prefix (`Opus 5.5` and `claude-opus-5-5` are one name).
+fn folded(name: &str) -> String {
+    let name: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if matches!(c, '.' | '_' | ' ') { '-' } else { c })
+        .collect();
+    name.strip_prefix("claude-").unwrap_or(&name).to_owned()
+}
+
+/// The model of `candidate` that `model` names: a listed id; the name without its context hint
+/// (`[1m]`, `-1m`); an alias of the executor (the first listed model whose id contains it); or a
+/// model whose folded id or display name is the folded name (`opus-5.5` is `claude-opus-5-5`).
+/// `None` when it names none.
 pub(crate) fn listed_model<'a>(candidate: &'a Candidate, model: &str) -> Option<&'a ModelInfo> {
     let caps = &candidate.descriptor.caps;
-    let base = caps.base_model(model);
     let models = listed(candidate);
-    models
-        .iter()
-        .find(|m| m.id == model || m.id == base)
-        .or_else(|| {
-            caps.is_model_alias(model)
-                .then(|| models.iter().find(|m| m.id.contains(base)))
-                .flatten()
+    let hintless = model
+        .strip_suffix("[1m]")
+        .or_else(|| model.strip_suffix("-1m"));
+    let base = caps.base_model(model);
+    for name in std::iter::once(model).chain(hintless) {
+        if let Some(found) = models.iter().find(|m| m.id == name) {
+            return Some(found);
+        }
+    }
+    if let Some(found) = models.iter().find(|m| m.id == base) {
+        return Some(found);
+    }
+    if caps.is_model_alias(model) {
+        return models.iter().find(|m| m.id.contains(base));
+    }
+    std::iter::once(model).chain(hintless).find_map(|name| {
+        let name = folded(name);
+        models.iter().find(|m| {
+            folded(&m.id) == name || m.display_name.as_deref().map(folded) == Some(name.clone())
         })
+    })
 }
 
 fn levels(efforts: &[Effort]) -> String {
@@ -74,13 +100,7 @@ pub(crate) fn check(
     let Some(model) = model else {
         return some_model();
     };
-    let base = caps.base_model(model);
-    let named = models.iter().find(|m| m.id == model || m.id == base);
-    let resolved = named.or_else(|| {
-        caps.is_model_alias(model)
-            .then(|| models.iter().find(|m| m.id.contains(base)))
-            .flatten()
-    });
+    let resolved = listed_model(candidate, model);
     match resolved {
         Some(info) if info.efforts.contains(&effort) => Ok(()),
         Some(info) => Err(format!(
@@ -154,13 +174,7 @@ pub(crate) fn check_options(
     let Some(model) = model else {
         return some_model();
     };
-    let base = caps.base_model(model);
-    let named = models.iter().find(|m| m.id == model || m.id == base);
-    let resolved = named.or_else(|| {
-        caps.is_model_alias(model)
-            .then(|| models.iter().find(|m| m.id.contains(base)))
-            .flatten()
-    });
+    let resolved = listed_model(candidate, model);
     match resolved {
         Some(info) => refusal(info).map_or(Ok(()), Err),
         None if caps.is_model_alias(model) => some_model(),

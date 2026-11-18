@@ -749,3 +749,118 @@ async fn switching_models_carries_the_window_choice_or_drops_what_the_model_lack
     assert_eq!(changes.len(), 1);
     assert!(changes[0].1.is_empty());
 }
+
+// ---- the model a run reports is resolved like the app does ---------------------------------
+
+fn named_windowed(id: &str, name: &str) -> ModelInfo {
+    ModelInfo {
+        display_name: Some(name.into()),
+        ..windowed(id)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn configure_resolves_an_alias_a_missing_model_and_a_1m_spelling() {
+    use reno_proto::{ConfigTiming, EffortChange};
+    // (a) the run started on a display-name alias (`opus-5.5`), (c) later reads `<id>[1m]`.
+    let m = configurable(
+        [
+            MockStep::started("s1", "claude-opus-5-5"),
+            MockStep::AwaitConfig,
+            MockStep::AwaitConfig,
+            MockStep::AwaitSteer,
+        ],
+        Some(ConfigTiming::Now),
+        Some(ConfigTiming::Now),
+    );
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
+    descriptor.caps.models = vec![named_windowed("claude-opus-5-5", "Opus 5.5")];
+    let m = m.with_descriptor(descriptor);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(
+            TaskRequest::new("go", PathBuf::from("/work"))
+                .executor(id("mock"))
+                .model(Some("opus-5.5".into())),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    fx.wait_status(&run, RunStatus::Running).await;
+    let low = Some(EffortChange::Set {
+        effort: Effort::Low,
+    });
+    let first = fx
+        .kernel
+        .configure_run(
+            &run,
+            low,
+            [("contextWindow".to_owned(), "1m".to_owned())].into(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("alias: {e:?}"));
+    assert_eq!(first.effort_applies, Some(ConfigTiming::Now));
+    // (c) a live switch to 1M makes the model read `<id>[1m]`; configuring again still resolves.
+    fx.store
+        .record_model(&run, 1, "claude-opus-5-5[1m]")
+        .await
+        .unwrap();
+    let second = fx
+        .kernel
+        .configure_run(
+            &run,
+            Some(EffortChange::Set {
+                effort: Effort::High,
+            }),
+            [("contextWindow".to_owned(), "200k".to_owned())].into(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[1m]: {e:?}"));
+    assert_eq!(second.effort, Some(Effort::High));
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn configure_with_no_model_uses_what_some_listed_model_takes_and_refuses_the_unknown() {
+    use reno_proto::EffortChange;
+    let m = configurable(
+        [MockStep::started("s1", "mock-1"), MockStep::AwaitSteer],
+        None,
+        None,
+    );
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(request("mock", None, None))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    // (b) no model named: the harness's default is not known, so a level some model lists is ok.
+    fx.kernel
+        .configure_run(
+            &run,
+            Some(EffortChange::Set {
+                effort: Effort::Low,
+            }),
+            Default::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    // ... and one no listed model takes is refused.
+    let why = invalid(
+        fx.kernel
+            .configure_run(
+                &run,
+                Some(EffortChange::Set {
+                    effort: Effort::Max,
+                }),
+                Default::default(),
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert!(why.contains("max"), "{why}");
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+}

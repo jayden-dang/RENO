@@ -364,14 +364,10 @@ impl World {
                     .any(|o| &o.id == option && o.choices.iter().any(|c| &c.id == choice))
             })
         };
-        let named = params.model.as_deref().and_then(|name| {
-            models.iter().find(|m| {
-                m.id == name
-                    || m.display_name
-                        .as_deref()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
-            })
-        });
+        let named = params
+            .model
+            .as_deref()
+            .and_then(|name| listed_model(models, name));
         let ok = match (&params.model, named) {
             (_, Some(model)) => takes(model),
             (None, None) => models.iter().any(takes),
@@ -575,14 +571,11 @@ impl World {
             .find(|e| e.descriptor.id == executor)
             .map(|e| e.descriptor.caps.models.clone())
             .unwrap_or_default();
-        let model = run.summary.model.as_deref().and_then(|name| {
-            models.iter().find(|m| {
-                m.id == name
-                    || m.display_name
-                        .as_deref()
-                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
-            })
-        });
+        let model = run
+            .summary
+            .model
+            .as_deref()
+            .and_then(|name| listed_model(&models, name));
         let invalid = |why: String| ErrorObject::new(ErrorCode::InvalidParams, why);
         if let Some(EffortChange::Set { effort }) = p.effort
             && !model.is_some_and(|m| m.efforts.contains(&effort))
@@ -1124,4 +1117,33 @@ impl World {
         let at = usize::try_from(seq.checked_sub(1)?).ok()?;
         run.journal.get(at).map(|e| (Seq(seq), e.clone()))
     }
+}
+
+/// The model a name stands for, as the kernel and the app resolve it: an id, the name without its
+/// `[1m]`/`-1m` hint, or a model whose folded id or display name is the folded name (`opus-5.5`
+/// is `claude-opus-5-5`).
+fn listed_model<'a>(
+    models: &'a [reno_proto::ModelInfo],
+    name: &str,
+) -> Option<&'a reno_proto::ModelInfo> {
+    fn folded(name: &str) -> String {
+        let name: String = name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| if matches!(c, '.' | '_' | ' ') { '-' } else { c })
+            .collect();
+        name.strip_prefix("claude-").unwrap_or(&name).to_owned()
+    }
+    let hintless = name
+        .strip_suffix("[1m]")
+        .or_else(|| name.strip_suffix("-1m"));
+    std::iter::once(name).chain(hintless).find_map(|name| {
+        models.iter().find(|m| m.id == name).or_else(|| {
+            let name = folded(name);
+            models.iter().find(|m| {
+                folded(&m.id) == name || m.display_name.as_deref().map(folded) == Some(name.clone())
+            })
+        })
+    })
 }
