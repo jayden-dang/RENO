@@ -14,10 +14,20 @@ use crate::vm::panel_home;
 impl RunScreen {
     pub(super) fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let run = self.summary(cx).cloned();
+        // The thread's title is what its first run asked; the dot and the state are the latest
+        // run's.
+        let first_title = {
+            let store = self.store.read(cx);
+            store
+                .thread_run_ids(&self.run)
+                .first()
+                .and_then(|first| store.state().run(first))
+                .map(|r| summary::parse_title(&r.title).what.to_owned())
+        };
         let (executor, what, status) = match &run {
             Some(r) => (
                 r.executor.as_str().to_owned(),
-                summary::parse_title(&r.title).what.to_owned(),
+                first_title.unwrap_or_else(|| summary::parse_title(&r.title).what.to_owned()),
                 Some((
                     kit::run_color(theme, r.status, summary::reported_problem(r)),
                     summary::run_status_label(r),

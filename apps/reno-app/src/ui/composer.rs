@@ -56,6 +56,7 @@ use crate::summary;
 use crate::vm::models;
 use crate::vm::picker::Tab;
 use crate::vm::routing::{self, Class, Preview};
+use crate::vm::threads;
 use menu::{check, menu, menu_row};
 
 actions!(
@@ -222,8 +223,13 @@ fn ended(how: &str) -> SteerState {
     SteerState::Ended(format!("This run {how}."))
 }
 
-/// The task a message to an ended run starts: the same folder and bot, a fresh session.
-pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunParams {
+/// The task a message to an ended run starts: the same folder and bot, a fresh session. With a
+/// `thread` it continues that thread (its worktree and branch); without, a new one starts.
+pub(crate) fn follow_up(
+    run: &reno_proto::RunSummary,
+    prompt: &str,
+    thread: Option<reno_proto::ThreadId>,
+) -> TaskRunParams {
     let bot = run.bot.as_ref().map(|pin| pin.name.clone());
     TaskRunParams {
         model_options: Default::default(),
@@ -234,10 +240,22 @@ pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunPa
         executor: Some(run.executor.clone()),
         bot,
         cwd: run.cwd.clone(),
-        thread_id: None,
+        thread_id: thread,
         model: run.model.clone(),
         in_place: false,
         attachments: Vec::new(),
+    }
+}
+
+/// The note above an ended run's box: what a message sent now does. On a daemon with threads it
+/// continues the thread, unless the thread's worktree is gone.
+pub(crate) fn ended_note(why: &str, project: &str, threads: bool, gone: bool) -> String {
+    match (threads, gone) {
+        (true, true) => format!(
+            "This thread is closed and its worktree is gone. What you send starts a new thread in {project}."
+        ),
+        (true, false) => format!("{why} What you send continues this thread in {project}."),
+        (false, _) => format!("{why} What you send starts a new run in {project}."),
     }
 }
 
@@ -279,6 +297,11 @@ pub(crate) struct Composer {
     selecting: bool,
     next_ticket: u64,
     sent: Option<Sent>,
+    /// The daemon refused a message to the thread: the note under the box says why, until the
+    /// next send or edit.
+    refusal: Option<threads::Refusal>,
+    /// The thread is gone (closed, worktree removed): the next message starts a new one.
+    thread_gone: bool,
     /// "Sent" shows until this task ends.
     sent_note: Option<Task<()>>,
     /// A [`Mode::Reason`] field's own placeholder and hint, when it is not a denial's reason.
@@ -334,8 +357,12 @@ impl Composer {
                 cx.notify();
             }),
             _events: cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
-                if let StoreEvent::SendFailed(ticket) = event {
-                    this.take_draft_back(*ticket, cx);
+                match event {
+                    StoreEvent::SendFailed(ticket) => this.take_draft_back(*ticket, cx),
+                    StoreEvent::SendRefused { ticket, why } if *ticket == this.next_ticket => {
+                        this.refuse(why, cx);
+                    }
+                    _ => {}
                 }
             }),
             store,
@@ -357,6 +384,8 @@ impl Composer {
             selecting: false,
             next_ticket: 0,
             sent: None,
+            refusal: None,
+            thread_gone: false,
             sent_note: None,
             labels: None,
             pick: None,
@@ -632,6 +661,7 @@ impl Composer {
             return;
         };
         self.next_ticket += 1;
+        self.refusal = None;
         let ticket = self.next_ticket;
         self.sent = Some(Sent {
             ticket,
@@ -650,13 +680,14 @@ impl Composer {
                     .update(cx, |store, cx| store.submit_task(params, ticket, cx));
             }
             Mode::Steer(run) => {
+                let thread = self.continuing(cx);
                 let ended = self
                     .store
                     .read(cx)
                     .state()
                     .run(&run)
                     .filter(|_| matches!(self.steer_state(cx), Some(SteerState::Ended(_))))
-                    .map(|summary| self.with_pick(follow_up(summary, &prompt)));
+                    .map(|summary| self.with_pick(follow_up(summary, &prompt, thread)));
                 match ended {
                     Some(params) => self
                         .store
@@ -672,6 +703,45 @@ impl Composer {
         }
         self.scroll = px(0.0);
         self.text_changed(window, cx);
+    }
+
+    /// The thread a message to this ended run continues: the run's own, while it has a worktree
+    /// to continue (or never had one) and the daemon has not said otherwise.
+    fn continuing(&self, cx: &App) -> Option<reno_proto::ThreadId> {
+        let Mode::Steer(run) = &self.mode else {
+            return None;
+        };
+        if self.thread_gone {
+            return None;
+        }
+        threads::continues(self.store.read(cx).state(), run)
+    }
+
+    /// Whether the daemon has threads and this run's is one that cannot be continued.
+    fn thread_is_gone(&self, cx: &App) -> bool {
+        let Mode::Steer(run) = &self.mode else {
+            return false;
+        };
+        let state = self.store.read(cx).state();
+        state.supports(reno_proto::FEATURE_THREADS)
+            && (self.thread_gone
+                || state
+                    .thread_of(run)
+                    .and_then(|t| state.thread(t))
+                    .is_some_and(threads::worktree_gone))
+    }
+
+    /// The daemon refused a send in words: a thread that is busy or gone says so under the box.
+    /// The draft is already back (`SendFailed` came first).
+    fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
+        let Some(refusal) = threads::refusal(why) else {
+            return;
+        };
+        if refusal == threads::Refusal::Gone {
+            self.thread_gone = true;
+        }
+        self.refusal = Some(refusal);
+        cx.notify();
     }
 
     /// "Sent" on a steer box, for a moment.
@@ -1712,10 +1782,15 @@ impl Render for Composer {
         // A run's note sits on one line above the box, so the foot never truncates.
         let note: Option<(SharedString, gpui::Hsla)> = match &self.mode {
             Mode::Steer(_) => match &self.steer_state(cx) {
+                _ if self.refusal.is_some() => self
+                    .refusal
+                    .map(|refusal| (refusal.note().into(), theme.warning)),
                 Some(SteerState::Ended(why)) => Some((
-                    format!(
-                        "{why} What you send starts a new run in {}.",
-                        self.project_name(cx)
+                    ended_note(
+                        why,
+                        &self.project_name(cx),
+                        self.store.read(cx).supports_threads(),
+                        self.thread_is_gone(cx),
                     )
                     .into(),
                     theme.muted,
