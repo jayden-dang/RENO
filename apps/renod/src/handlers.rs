@@ -983,9 +983,30 @@ async fn fs_list(ctx: Arc<Ctx>, p: FsListParams) -> Reply<FsListResult> {
         .map_err(|e| e.object())
 }
 
+/// A file may hold a value of the run's secrets (a `.env` the agent wrote, say): what the Files
+/// tab shows has them redacted like the journal and `workspace.diff`. When the values cannot be
+/// read now the text is withheld (an error), never shown raw. `content_hash` is of the bytes
+/// read, as is the size.
 async fn fs_read(ctx: Arc<Ctx>, p: FsReadParams) -> Reply<FsReadResult> {
     let tree = served(&ctx, &p.run_id).await?;
-    ctx.files.read(&tree, p.path).await.map_err(|e| e.object())
+    let mut read = ctx
+        .files
+        .read(&tree, p.path)
+        .await
+        .map_err(|e| e.object())?;
+    if let Some(text) = read.text.take() {
+        let redactor = ctx
+            .kernel
+            .run_redactor(&p.run_id)
+            .await
+            .map_err(|e| kernel_error(&e))?;
+        read.text = Some(if read.truncated {
+            redactor.redact_cut(&text)
+        } else {
+            redactor.redact(&text)
+        });
+    }
+    Ok(read)
 }
 
 async fn fs_read_image(ctx: Arc<Ctx>, p: FsReadImageParams) -> Reply<reno_proto::FsImageChunk> {
@@ -1009,10 +1030,24 @@ async fn fs_search_content(
     p: FsSearchContentParams,
 ) -> Reply<FsSearchContentResult> {
     let tree = served(&ctx, &p.run_id).await?;
-    ctx.files
+    let mut found = ctx
+        .files
         .search_content(&tree, &p.query, p.regex, p.ignore_case, p.limit)
         .await
-        .map_err(|e| e.object())
+        .map_err(|e| e.object())?;
+    if !found.matches.is_empty() {
+        // Redacted like `fs.read`; a line is cut at 500 characters, so a value cut in two at the
+        // end of one loses its fragment too.
+        let redactor = ctx
+            .kernel
+            .run_redactor(&p.run_id)
+            .await
+            .map_err(|e| kernel_error(&e))?;
+        for hit in &mut found.matches {
+            hit.text = redactor.redact_cut(&hit.text);
+        }
+    }
+    Ok(found)
 }
 
 async fn git_status(ctx: Arc<Ctx>, p: GitStatusParams) -> Reply<GitStatusResult> {

@@ -966,3 +966,103 @@ async fn a_queued_run_and_a_refused_run_have_no_folder_to_show() {
     );
     fx.stop().await;
 }
+
+const TOKEN: &str = "ghp_exampleExampleExample1234";
+
+/// A bot that holds on `mock-hold` and is given the secret `GITHUB_TOKEN`.
+async fn write_secret_bot(fx: &Fixture) {
+    let mut watch = within(fx.client.watch_defs()).await.unwrap();
+    let path = fx.paths.defs_dir.join("bots/keeper.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        "name = \"keeper\"\ninstructions = \"x\"\nexecutors = [\"mock-hold\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
+    )
+    .unwrap();
+    within(async {
+        while let Some(snapshot) = watch.next().await {
+            if snapshot
+                .unwrap()
+                .defs
+                .iter()
+                .any(|d| d.kind == reno_proto::defs::DefKind::Bot && d.name == "keeper")
+            {
+                return;
+            }
+        }
+        panic!("the watch ended");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_secret_in_a_worktree_file_is_redacted_in_read_search_and_diff() {
+    use renod::secrets::{KeychainSecrets, MemoryKeychain};
+    let secrets = Arc::new(KeychainSecrets::new(Arc::new(MemoryKeychain::new())));
+    let fx = Fixture::with(|c| c.secrets = Some(secrets)).await;
+    write_secret_bot(&fx).await;
+    within(fx.client.set_secret("GITHUB_TOKEN", TOKEN))
+        .await
+        .unwrap();
+    let repo = repo(&fx);
+    let mut spec = task(&repo, "mock-hold", false);
+    spec.executor = None;
+    spec.bot = Some("keeper".into());
+    let run = within(fx.client.run_task(spec)).await.unwrap();
+    until_running(&fx, &run).await;
+    let info = within(async {
+        loop {
+            if let Ok(info) = fx.client.get_workspace(run.clone()).await
+                && info.status == reno_proto::WorkspaceStatus::Active
+            {
+                return info;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    put(
+        &info.path,
+        "leak.env",
+        &format!("GITHUB_TOKEN={TOKEN}\nother=1\n"),
+    );
+
+    let file = within(fx.client.fs_read(read(&run, "leak.env")))
+        .await
+        .unwrap();
+    let text = file.text.unwrap();
+    assert!(!text.contains(TOKEN), "{text}");
+    assert_eq!(text, "GITHUB_TOKEN=[secret:GITHUB_TOKEN]\nother=1\n");
+
+    // git grep searches tracked files, so the file is tracked first.
+    git(&info.path, &["add", "leak.env"]);
+    let found = within(fx.client.fs_search_content(FsSearchContentParams {
+        run_id: run.clone(),
+        query: "GITHUB_TOKEN".into(),
+        regex: false,
+        ignore_case: false,
+        limit: None,
+    }))
+    .await
+    .unwrap();
+    let hit = found
+        .matches
+        .iter()
+        .find(|m| m.path == "leak.env")
+        .expect("a hit");
+    assert_eq!(hit.text, "GITHUB_TOKEN=[secret:GITHUB_TOKEN]");
+    assert!(!serde_json::to_string(&found).unwrap().contains(TOKEN));
+
+    let diff = within(
+        fx.client
+            .workspace_diff(run.clone(), Some("leak.env".into())),
+    )
+    .await
+    .unwrap();
+    let patch = diff.patch.unwrap();
+    assert!(
+        patch.contains("[secret:GITHUB_TOKEN]") && !patch.contains(TOKEN),
+        "{patch}"
+    );
+    fx.stop().await;
+}
