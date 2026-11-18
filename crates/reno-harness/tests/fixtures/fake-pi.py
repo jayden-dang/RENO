@@ -234,11 +234,13 @@ def play(cmd):
         assistant("got:%s|%s" % (one["message"], two["message"]))
         settle()
     elif prompt == "scenario:steer-after-settle":
-        # Pi went idle between the steer being sent and arriving: it starts a run of its own.
+        # Pi goes idle just as the steer arrives: the run settles first, and then Pi starts a run
+        # of its own for the message. The steer is read before the settle is sent, so the driver
+        # always has it in flight when the first settle reaches it.
         start(cmd)
         assistant("done-early")
-        settle()
         steer = wait_until(is_steer)
+        settle()
         start(steer)
         assistant("late-run:" + steer["message"])
         settle()

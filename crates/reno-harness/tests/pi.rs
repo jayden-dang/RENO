@@ -57,6 +57,17 @@ fn wrapped(dir: &Path, vars: &[(&str, &str)]) -> PathBuf {
     let path = dir.join("pi-wrapper");
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A script written while other tests fork can be "text file busy" (ETXTBSY) for a moment: a
+    // forked child holds the write descriptor until it execs. Wait that out here, so it is not
+    // taken for a Pi that cannot be run.
+    for _ in 0..200 {
+        match std::process::Command::new(&path).arg("--version").output() {
+            Err(error) if error.raw_os_error() == Some(26) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => break,
+        }
+    }
     path
 }
 
