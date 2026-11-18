@@ -830,9 +830,147 @@ impl Kernel {
                 record.executor
             )));
         }
+        // The run's option choices follow it to the new model: a 1M window is asked for in the
+        // model's own name (`<model>[1m]`), and a choice the new model does not list is dropped.
+        let options = crate::shared::requested_model_options(&record.spec);
+        let listing = effort::listed_model(&candidate, &model).cloned();
+        let one_m = options
+            .get(reno_proto::MODEL_OPTION_CONTEXT_WINDOW)
+            .map(String::as_str)
+            == Some(reno_proto::CONTEXT_WINDOW_1M);
+        let offers_window = listing.as_ref().is_some_and(|info| {
+            info.options
+                .iter()
+                .any(|o| o.id == reno_proto::MODEL_OPTION_CONTEXT_WINDOW)
+        });
+        // Only an executor that has aliases knows the suffix (see `ExecutorCaps::base_model`).
+        let knows_suffix = !candidate.descriptor.caps.model_aliases.is_empty();
+        let sent = if one_m && offers_window && knows_suffix && !model.ends_with("[1m]") {
+            format!("{model}[1m]")
+        } else {
+            model
+        };
         let (reply, answer) = oneshot::channel();
         commands
-            .send(SupCmd::SetModel { model, reply })
+            .send(SupCmd::SetModel { model: sent, reply })
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))?;
+        let resolved = answer
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))??;
+        if let Some(info) = listing {
+            let kept: BTreeMap<String, String> = options
+                .iter()
+                .filter(|(id, choice)| {
+                    info.options
+                        .iter()
+                        .any(|o| &o.id == *id && o.choices.iter().any(|c| &c.id == *choice))
+                })
+                .map(|(id, choice)| (id.clone(), choice.clone()))
+                .collect();
+            if kept.len() != options.len() {
+                let (reply, answer) = oneshot::channel();
+                let plan = crate::shared::ConfigPlan {
+                    effort: None,
+                    options: BTreeMap::new(),
+                    full_effort: crate::shared::requested_effort(&record.spec),
+                    full_options: kept,
+                    live_effort: false,
+                    live_options: false,
+                };
+                // Best effort: the run may have ended meanwhile; the switch itself took.
+                if commands
+                    .send(SupCmd::Configure { plan, reply })
+                    .await
+                    .is_ok()
+                {
+                    let _ = answer.await;
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Change a live run's reasoning effort or model options (`run.configure`). `effort` sets
+    /// or clears it, `options` sets the named choices; what the run's model does not list is
+    /// refused. The executor's caps say which parts it applies to the live process; the rest is
+    /// stored on the run and used when it is next launched (a resume). Returns the run's
+    /// configuration after the change and when each part takes hold; a change that is no
+    /// change journals nothing.
+    pub async fn configure_run(
+        &self,
+        run: &RunId,
+        effort: Option<reno_proto::EffortChange>,
+        options: BTreeMap<String, String>,
+    ) -> Result<reno_proto::RunConfigureResult> {
+        use reno_proto::EffortChange;
+        if effort.is_none() && options.is_empty() {
+            return Err(KernelError::Invalid("there is nothing to change".into()));
+        }
+        let record = self.shared.run_record(run).await?;
+        let commands = self
+            .shared
+            .live_commands(run)
+            .ok_or_else(|| KernelError::RunEnded(run.clone()))?;
+        let descriptor = self
+            .shared
+            .executors
+            .get(&record.executor)
+            .ok_or_else(|| KernelError::ExecutorNotFound(record.executor.clone()))?
+            .descriptor();
+        let (live_effort, live_options) = (
+            descriptor.caps.live_effort.is_some(),
+            descriptor.caps.live_model_options.is_some(),
+        );
+        let candidate = Candidate {
+            descriptor,
+            health: self.shared.live_health(&record.executor),
+            busy: None,
+        };
+        let model = record
+            .model
+            .clone()
+            .or_else(|| crate::shared::requested_model(&record.spec));
+        if let Some(EffortChange::Set { effort }) = &effort {
+            effort::check(&candidate, model.as_deref(), *effort).map_err(KernelError::Invalid)?;
+        }
+        if !options.is_empty() {
+            effort::check_options(&candidate, model.as_deref(), &options)
+                .map_err(KernelError::Invalid)?;
+        }
+        let current_effort = crate::shared::requested_effort(&record.spec);
+        let current_options = crate::shared::requested_model_options(&record.spec);
+        let wanted_effort = effort.map(|change| match change {
+            EffortChange::Set { effort } => Some(effort),
+            EffortChange::Clear => None,
+        });
+        // What really changes: a request for what the run already has is no change.
+        let plan = crate::shared::ConfigPlan {
+            effort: wanted_effort.filter(|wanted| *wanted != current_effort),
+            options: options
+                .iter()
+                .filter(|(id, choice)| current_options.get(*id) != Some(*choice))
+                .map(|(id, choice)| (id.clone(), choice.clone()))
+                .collect(),
+            full_effort: wanted_effort.unwrap_or(current_effort),
+            full_options: current_options
+                .into_iter()
+                .chain(options)
+                .collect::<BTreeMap<_, _>>(),
+            live_effort,
+            live_options,
+        };
+        if plan.effort.is_none() && plan.options.is_empty() {
+            return Ok(reno_proto::RunConfigureResult {
+                effort: plan.full_effort,
+                model_options: plan.full_options,
+                effort_applies: None,
+                options_apply: None,
+            });
+        }
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(SupCmd::Configure { plan, reply })
             .await
             .map_err(|_| KernelError::RunEnded(run.clone()))?;
         answer
@@ -1327,6 +1465,14 @@ pub(crate) fn plan_route(
             .find(|candidate| candidate.descriptor.id == executor)
     {
         effort::check(candidate, model.as_deref(), effort).map_err(KernelError::Invalid)?;
+    }
+    if !model_options.is_empty() && model.is_none() {
+        // The harness's default model is not named, and a choice such as the 1M window is
+        // spelled in the model's name: it could not be honoured.
+        return Err(KernelError::Invalid(
+            "name the model to choose its options: the executor's default model has none that can be set"
+                .into(),
+        ));
     }
     if !model_options.is_empty()
         && let Some(candidate) = candidates

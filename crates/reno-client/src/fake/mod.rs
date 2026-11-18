@@ -517,9 +517,6 @@ fn router(shared: &Arc<Shared>) -> Router {
             let mut p = p;
             p.prompt
                 .push_str(&reno_proto::Attachment::prompt_suffix(&p.attachments));
-            if let Some(why) = s.read(|w| w.refuse_model_options(&p)) {
-                return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
-            }
             let routing = s.read(|w| w.route(&p));
             let Some(executor) = routing.chosen.clone().or_else(|| p.executor.clone()) else {
                 return Err(ErrorObject::new(
@@ -527,6 +524,11 @@ fn router(shared: &Arc<Shared>) -> Router {
                     "the fake daemon has no executor for this task",
                 ));
             };
+            let mut routed = p.clone();
+            routed.executor = Some(executor.clone());
+            if let Some(why) = s.read(|w| w.refuse_model_options(&routed)) {
+                return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
+            }
             let run_id = s
                 .with(|w| w.create_run(&p, executor, routing.clone(), &s.cancel))
                 .map_err(internal)?;
@@ -774,6 +776,12 @@ fn router(shared: &Arc<Shared>) -> Router {
             let model = s.with(|w| w.set_model(&p.run_id, &p.model))?;
             Ok(reno_proto::RunSetModelResult { model })
         }
+    };
+
+    let s = Arc::clone(shared);
+    let run_configure = move |p: reno_proto::RunConfigureParams, _| {
+        let s = Arc::clone(&s);
+        async move { s.with(|w| w.configure(&p)) }
     };
 
     let s = Arc::clone(shared);
@@ -1142,6 +1150,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::RunResume, _, _>(run_resume)
         .method::<RunSteer, _, _>(run_steer)
         .method::<reno_proto::RunSetModel, _, _>(run_set_model)
+        .method::<reno_proto::RunConfigure, _, _>(run_configure)
         .method::<ApprovalList, _, _>(approval_list)
         .method::<ApprovalDecide, _, _>(approval_decide)
         .subscription::<RunEvents, _, _, _>(run_events)

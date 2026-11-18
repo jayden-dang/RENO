@@ -351,6 +351,7 @@ async fn a_resumed_attempt_keeps_the_runs_effort() {
 fn windowed(id: &str) -> ModelInfo {
     ModelInfo {
         options: vec![reno_proto::ModelOption {
+            settable: true,
             id: "contextWindow".into(),
             label: "Context window".into(),
             choices: ["200k", "1m"]
@@ -430,6 +431,22 @@ async fn an_unknown_option_or_choice_is_refused_naming_the_model_and_what_it_lis
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_read_only_option_is_listed_but_cannot_be_set() {
+    let mut read_only = windowed("mock-1");
+    read_only.options[0].settable = false;
+    let m = lister("mock", vec![read_only], &[]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let why = invalid(
+        fx.kernel
+            .submit_task(with_window(request("mock", Some("mock-1"), None), "200k"))
+            .await
+            .unwrap_err(),
+    );
+    assert!(why.contains("read-only"), "{why}");
+    assert!(m.log().specs.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_attempt_that_resumes_keeps_the_runs_model_options() {
     let m = lister("mock", vec![windowed("mock-1")], &[]);
     let mut d = reno_harness::exec::Executor::descriptor(&m);
@@ -467,4 +484,268 @@ async fn an_attempt_that_resumes_keeps_the_runs_model_options() {
         fx.kernel.get_run(&run).await.unwrap().model_options,
         specs[1].model_options
     );
+}
+
+// ---- run.configure ------------------------------------------------------------------------
+
+/// A mock that lists a windowed model and applies effort `effort` and options `options` live.
+fn configurable(
+    steps: impl IntoIterator<Item = MockStep>,
+    effort: Option<reno_proto::ConfigTiming>,
+    options: Option<reno_proto::ConfigTiming>,
+) -> MockExecutor {
+    let m = MockExecutor::new(id("mock")).with_steps(steps);
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
+    descriptor.caps.models = vec![windowed("mock-1")];
+    descriptor.caps.live_effort = effort;
+    descriptor.caps.live_model_options = options;
+    m.with_descriptor(descriptor)
+}
+
+fn journal_changes(
+    fx: &Fx,
+    run: &RunId,
+) -> Vec<(Option<Effort>, std::collections::BTreeMap<String, String>)> {
+    fx.journal(run)
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            ExecEvent::ConfigChanged {
+                effort,
+                model_options,
+            } => Some((effort, model_options)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_run_takes_a_new_effort_and_options_and_says_when() {
+    use reno_proto::{ConfigTiming, EffortChange};
+    let m = configurable(
+        [
+            MockStep::started("s1", "mock-1"),
+            MockStep::AwaitConfig,
+            MockStep::AwaitConfig,
+            MockStep::AwaitSteer,
+        ],
+        Some(ConfigTiming::NextTurn),
+        Some(ConfigTiming::Now),
+    );
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(request("mock", Some("mock-1"), Some(Effort::High)))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    let window = [("contextWindow".to_owned(), "200k".to_owned())];
+
+    let first = fx
+        .kernel
+        .configure_run(
+            &run,
+            Some(EffortChange::Set {
+                effort: Effort::Low,
+            }),
+            window.clone().into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.effort, Some(Effort::Low));
+    assert_eq!(first.model_options["contextWindow"], "200k");
+    assert_eq!(first.effort_applies, Some(ConfigTiming::NextTurn));
+    assert_eq!(first.options_apply, Some(ConfigTiming::Now));
+    // The reply is after the change is stored: the summary shows it.
+    let summary = fx.kernel.get_run(&run).await.unwrap();
+    assert_eq!(summary.effort, Some(Effort::Low));
+    assert_eq!(summary.model_options["contextWindow"], "200k");
+
+    // A clear goes back to the model's own default; options not named keep their choice.
+    let second = fx
+        .kernel
+        .configure_run(&run, Some(EffortChange::Clear), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(second.effort, None);
+    assert_eq!(second.model_options["contextWindow"], "200k");
+    assert_eq!(fx.kernel.get_run(&run).await.unwrap().effort, None);
+
+    // What the executor was asked: only the changed parts.
+    assert_eq!(
+        m.log().config_requests,
+        vec![
+            (Some(Some(Effort::Low)), window.clone().into()),
+            (Some(None), Default::default()),
+        ]
+    );
+    // A change that is no change is answered and journals nothing.
+    let same = fx
+        .kernel
+        .configure_run(&run, None, window.clone().into())
+        .await
+        .unwrap();
+    assert_eq!((same.effort_applies, same.options_apply), (None, None));
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert_eq!(
+        journal_changes(&fx, &run),
+        vec![
+            (Some(Effort::Low), window.clone().into()),
+            (None, window.into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_the_executor_cannot_do_live_is_stored_for_the_next_launch() {
+    use reno_proto::{ConfigTiming, EffortChange};
+    let m = configurable(
+        [MockStep::started("s1", "mock-1"), MockStep::AwaitSteer],
+        None,
+        None,
+    );
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(request("mock", Some("mock-1"), None))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    let result = fx
+        .kernel
+        .configure_run(
+            &run,
+            Some(EffortChange::Set {
+                effort: Effort::Medium,
+            }),
+            [("contextWindow".to_owned(), "1m".to_owned())].into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.effort_applies, Some(ConfigTiming::AfterRestart));
+    assert_eq!(result.options_apply, Some(ConfigTiming::AfterRestart));
+    assert!(
+        m.log().config_requests.is_empty(),
+        "the executor was not asked"
+    );
+    let summary = fx.kernel.get_run(&run).await.unwrap();
+    assert_eq!(summary.effort, Some(Effort::Medium));
+    assert_eq!(summary.model_options["contextWindow"], "1m");
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_configure_refuses_what_the_model_does_not_list_or_a_run_that_ended() {
+    use reno_proto::EffortChange;
+    let m = configurable(
+        [MockStep::started("s1", "mock-1"), MockStep::AwaitSteer],
+        Some(reno_proto::ConfigTiming::NextTurn),
+        None,
+    );
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(request("mock", Some("mock-1"), None))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    let why = invalid(
+        fx.kernel
+            .configure_run(
+                &run,
+                Some(EffortChange::Set {
+                    effort: Effort::XHigh,
+                }),
+                Default::default(),
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert!(
+        why.contains("xhigh") && why.contains("low, medium, high"),
+        "{why}"
+    );
+    let why = invalid(
+        fx.kernel
+            .configure_run(
+                &run,
+                None,
+                [("contextWindow".to_owned(), "2m".to_owned())].into(),
+            )
+            .await
+            .unwrap_err(),
+    );
+    assert!(why.contains("2m"), "{why}");
+    assert!(matches!(
+        fx.kernel
+            .configure_run(&run, None, Default::default())
+            .await,
+        Err(KernelError::Invalid(_))
+    ));
+    assert!(m.log().config_requests.is_empty());
+    assert!(journal_changes(&fx, &run).is_empty());
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    assert!(matches!(
+        fx.kernel
+            .configure_run(
+                &run,
+                Some(EffortChange::Set {
+                    effort: Effort::Low
+                }),
+                Default::default()
+            )
+            .await,
+        Err(KernelError::RunEnded(_))
+    ));
+}
+
+// ---- set_model and the run's options ------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn switching_models_carries_the_window_choice_or_drops_what_the_model_lacks() {
+    let m = lister(
+        "mock",
+        vec![windowed("mock-1"), windowed("mock-3"), model("plain", &LMH)],
+        &["fast"],
+    );
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
+    descriptor.caps.model_switch = true;
+    let m = m.with_descriptor(descriptor).with_steps([
+        MockStep::started("s1", "mock-1"),
+        MockStep::AwaitModel,
+        MockStep::AwaitModel,
+        MockStep::AwaitSteer,
+    ]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(with_window(request("mock", Some("mock-1"), None), "1m"))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    // To a model that offers the window: its 1M is asked for in the model's name.
+    fx.kernel.set_model(&run, "mock-3").await.unwrap();
+    assert_eq!(m.log().model_requests, ["mock-3[1m]"]);
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model_options["contextWindow"],
+        "1m"
+    );
+    // To one that does not: the choice no longer exists, and the run says so.
+    fx.kernel.set_model(&run, "plain").await.unwrap();
+    assert_eq!(m.log().model_requests[1], "plain");
+    assert!(
+        fx.kernel
+            .get_run(&run)
+            .await
+            .unwrap()
+            .model_options
+            .is_empty()
+    );
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let changes = journal_changes(&fx, &run);
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].1.is_empty());
 }

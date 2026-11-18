@@ -532,6 +532,18 @@ pub enum ExecEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<u64>,
     },
+    /// The run's effort or model options were changed while it ran (`run.configure`): the
+    /// configuration in force after the change, whether or not the harness applies it yet (see
+    /// `RunConfigureResult` for when). Only daemons that negotiate the `run.configure` feature
+    /// emit it; older clients skip it.
+    ConfigChanged {
+        /// The effort now asked for; absent: the model's own default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<Effort>,
+        /// Every per-model option choice now asked for (option id to choice id).
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        model_options: BTreeMap<String, String>,
+    },
     /// A message from the human, added by `run.steer`. Only daemons that negotiate the
     /// `run.steer` feature emit it.
     UserMessage {
@@ -600,6 +612,38 @@ pub struct ModelInfo {
     pub options: Vec<ModelOption>,
 }
 
+/// When a changed configuration of a running run (`run.configure`) takes hold.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigTiming {
+    /// On the live process, from its next model call, inside the turn that runs.
+    Now,
+    /// From the next turn of the run (a steering message or a new prompt starts one).
+    NextTurn,
+    /// Not on the live process: stored on the run, and used the next time it is launched (a
+    /// resume).
+    AfterRestart,
+}
+
+/// A request to change a run's effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum EffortChange {
+    /// Ask for `effort`, one the run's model lists.
+    Set {
+        /// The level.
+        effort: Effort,
+    },
+    /// Go back to the model's own default.
+    Clear,
+}
+
 /// The id of the context-window option of a model ([`ModelOption::id`]), whose choices are
 /// [`CONTEXT_WINDOW_200K`] and [`CONTEXT_WINDOW_1M`].
 pub const MODEL_OPTION_CONTEXT_WINDOW: &str = "contextWindow";
@@ -618,8 +662,21 @@ pub struct ModelOption {
     pub label: String,
     /// The values it takes.
     pub choices: Vec<ModelOptionChoice>,
-    /// The choice id used when none is asked for.
+    /// The choice id used when none is asked for. For a read-only option, the choice in force.
     pub default_choice: String,
+    /// Whether `task.run` and `run.configure` may set it. False: the harness reports the value
+    /// (Grok's context window) but offers no way to change it, so `choices` only say what
+    /// sizes exist and a request for it is refused. Absent means true.
+    #[serde(default = "settable_default", skip_serializing_if = "is_settable")]
+    pub settable: bool,
+}
+
+fn settable_default() -> bool {
+    true
+}
+
+fn is_settable(settable: &bool) -> bool {
+    *settable
 }
 
 /// One value of a [`ModelOption`].
@@ -798,6 +855,18 @@ pub struct ExecutorCaps {
     /// model per turn and an ACP agent's `session/set_model` is unproven mid-prompt.
     #[serde(default)]
     pub model_switch: bool,
+    /// When a change of a running run's effort (`run.configure`) takes hold on this executor,
+    /// as a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does
+    /// live; a changed effort is stored and used the next time the run is launched
+    /// (`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286
+    /// only: no run of this build has been checked against a live CLI (ARCH-15).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_effort: Option<ConfigTiming>,
+    /// Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window
+    /// switches with its model (`now`); a changed 200K limit is a launch environment variable
+    /// and is always `after_restart`, whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_model_options: Option<ConfigTiming>,
     /// Names the CLI accepts for a model besides the ids in `models`: short aliases that
     /// resolve on the CLI's side (`sonnet`, `opus`), so they are never reported as unknown.
     /// Empty when the harness has none.

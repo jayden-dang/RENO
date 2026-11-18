@@ -230,3 +230,32 @@ async fn a_model_switch_is_the_runs_model_and_the_next_attempts() {
         Some("claude-sonnet-5-5")
     );
 }
+
+#[tokio::test]
+async fn a_configuration_change_is_the_tasks_own_and_the_next_attempts() {
+    let (_d, store) = running().await;
+    let options: std::collections::BTreeMap<String, String> =
+        [("contextWindow".to_owned(), "200k".to_owned())].into();
+    store
+        .record_config(&run(), 1, Some("high"), &options)
+        .await
+        .unwrap();
+    let row = record(&store).await;
+    assert_eq!(row.spec["effort"], "high");
+    assert_eq!(row.spec["modelOptions"]["contextWindow"], "200k");
+    // Cleared: the effort is null (the model's own), the options gone.
+    store
+        .record_config(&run(), 1, None, &Default::default())
+        .await
+        .unwrap();
+    let row = record(&store).await;
+    assert!(row.spec["effort"].is_null());
+    assert!(row.spec.get("modelOptions").is_none());
+    // A stale attempt cannot change it.
+    assert!(
+        store
+            .record_config(&run(), 7, Some("low"), &options)
+            .await
+            .is_err()
+    );
+}

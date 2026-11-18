@@ -716,6 +716,7 @@ expression: protocol_schema()
     "run.model",
     "run.effort",
     "run.context",
+    "run.configure",
     "executor.maintain",
     "run.changes",
     "executor.usage"
@@ -4726,6 +4727,224 @@ expression: protocol_schema()
       }
     },
     {
+      "name": "run.configure",
+      "params": {
+        "$defs": {
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
+          "EffortChange": {
+            "description": "A request to change a run's effort.",
+            "oneOf": [
+              {
+                "description": "Ask for `effort`, one the run's model lists.",
+                "properties": {
+                  "effort": {
+                    "$ref": "#/$defs/Effort",
+                    "description": "The level."
+                  },
+                  "type": {
+                    "const": "set",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "effort"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Go back to the model's own default.",
+                "properties": {
+                  "type": {
+                    "const": "clear",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `run.configure`.",
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortChange"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set or clear the reasoning effort. Absent: unchanged."
+          },
+          "modelOptions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Option choices to set (option id to choice id), each one the run's model lists\n(`ModelInfo::options`). Options not named keep their choice.",
+            "type": "object"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run to change; live, or one that ended and may be resumed (the change then holds for\nits next launch)."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "RunConfigureParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `run.configure`.",
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Effort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The effort the run now asks for; absent: the model's own default."
+          },
+          "effortApplies": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ConfigTiming"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the effort change takes hold. Absent when the request did not change the effort."
+          },
+          "modelOptions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Every option choice the run now asks for.",
+            "type": "object"
+          },
+          "optionsApply": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ConfigTiming"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the option changes take hold: the latest of them. Absent when the request changed\nnone."
+          }
+        },
+        "title": "RunConfigureResult",
+        "type": "object"
+      }
+    },
+    {
       "name": "approval.list",
       "params": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7279,6 +7498,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -7332,6 +7571,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -7890,7 +8151,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -7900,6 +8161,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -8467,6 +8732,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -8520,6 +8805,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -9078,7 +9385,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -9088,6 +9395,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -9647,6 +9958,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -9700,6 +10031,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -10258,7 +10611,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -10268,6 +10621,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -10848,6 +11205,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -10901,6 +11278,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -11459,7 +11858,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -11469,6 +11868,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -12025,6 +12428,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -12078,6 +12501,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -12636,7 +13081,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -12646,6 +13091,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -13202,6 +13651,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -13255,6 +13724,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -13813,7 +14304,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -13823,6 +14314,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -14436,6 +14931,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -14489,6 +15004,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -15047,7 +15584,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -15057,6 +15594,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -16261,6 +16802,41 @@ expression: protocol_schema()
               }
             ]
           },
+          "Effort": {
+            "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
+            "oneOf": [
+              {
+                "const": "minimal",
+                "description": "Barely any reasoning (Codex `minimal`).",
+                "type": "string"
+              },
+              {
+                "const": "low",
+                "description": "Fastest, least reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "medium",
+                "description": "Balanced default.",
+                "type": "string"
+              },
+              {
+                "const": "high",
+                "description": "More reasoning.",
+                "type": "string"
+              },
+              {
+                "const": "xhigh",
+                "description": "Extra high (Claude Code and Codex `xhigh`).",
+                "type": "string"
+              },
+              {
+                "const": "max",
+                "description": "The most the model offers (Claude Code `max`).",
+                "type": "string"
+              }
+            ]
+          },
           "ExecEvent": {
             "description": "One event from a running executor. A failing harness yields `Done { stop: Error }`; the\nstream itself never errors mid-run.",
             "oneOf": [
@@ -16570,6 +17146,37 @@ expression: protocol_schema()
                       "integer",
                       "null"
                     ]
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run's effort or model options were changed while it ran (`run.configure`): the\nconfiguration in force after the change, whether or not the harness applies it yet (see\n`RunConfigureResult` for when). Only daemons that negotiate the `run.configure` feature\nemit it; older clients skip it.",
+                "properties": {
+                  "effort": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Effort"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The effort now asked for; absent: the model's own default."
+                  },
+                  "modelOptions": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Every per-model option choice now asked for (option id to choice id).",
+                    "type": "object"
+                  },
+                  "type": {
+                    "const": "config_changed",
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -18492,6 +19099,26 @@ expression: protocol_schema()
             ],
             "type": "object"
           },
+          "ConfigTiming": {
+            "description": "When a changed configuration of a running run (`run.configure`) takes hold.",
+            "oneOf": [
+              {
+                "const": "now",
+                "description": "On the live process, from its next model call, inside the turn that runs.",
+                "type": "string"
+              },
+              {
+                "const": "next_turn",
+                "description": "From the next turn of the run (a steering message or a new prompt starts one).",
+                "type": "string"
+              },
+              {
+                "const": "after_restart",
+                "description": "Not on the live process: stored on the run, and used the next time it is launched (a\nresume).",
+                "type": "string"
+              }
+            ]
+          },
           "Effort": {
             "description": "Requested reasoning effort, least to most. Which levels a model takes is what its harness\nreports (`ModelInfo::efforts`); a level a model does not list is refused before the run\nstarts. Ordered, so `Low < High`.",
             "oneOf": [
@@ -18545,6 +19172,28 @@ expression: protocol_schema()
                 "default": false,
                 "description": "Whether a run is kept from loading the owner's personal configuration for that harness\n(its user-level settings, hooks, plugins, memory and instructions) unless the bot opts in\n(`inherit_user_config`). Only claimed where the driver enforces it; false means a run\nloads whatever the owner's own CLI would (ARCH-15).",
                 "type": "boolean"
+              },
+              "liveEffort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "When a change of a running run's effort (`run.configure`) takes hold on this executor,\nas a person would see it: `now` (inside the turn), `next_turn`. Absent: it never does\nlive; a changed effort is stored and used the next time the run is launched\n(`after_restart`). Claude Code's `apply_flag_settings` is upstream-verified on 2.1.286\nonly: no run of this build has been checked against a live CLI (ARCH-15)."
+              },
+              "liveModelOptions": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ConfigTiming"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Likewise for the per-model options (`ModelInfo::options`). Claude Code's `[1m]` window\nswitches with its model (`now`); a changed 200K limit is a launch environment variable\nand is always `after_restart`, whatever this says."
               },
               "mcpInjection": {
                 "description": "False means it cannot join a team or use boards.",
@@ -19103,7 +19752,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -19113,6 +19762,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [

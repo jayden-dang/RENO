@@ -931,6 +931,44 @@ impl Store {
         .await
     }
 
+    /// Records the effort and per-model option choices a `run.configure` put the run on. Fenced.
+    /// They are the task's own (`effort`: a word or null, `modelOptions`: an object, absent when
+    /// empty), so the next attempt starts with them.
+    pub async fn record_config(
+        &self,
+        run: &RunId,
+        fence: u64,
+        effort: Option<&str>,
+        model_options: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        let (run, effort, options) = (
+            run.clone(),
+            effort.map(str::to_owned),
+            model_options.clone(),
+        );
+        self.write(Durability::Normal, move |c| {
+            let rec = load_fenced(c, &run, fence)?;
+            let mut spec = rec.spec;
+            if let Some(map) = spec.as_object_mut() {
+                map.insert(
+                    "effort".into(),
+                    effort.map_or(serde_json::Value::Null, serde_json::Value::String),
+                );
+                if options.is_empty() {
+                    map.remove("modelOptions");
+                } else {
+                    map.insert("modelOptions".into(), serde_json::json!(options));
+                }
+            }
+            c.prepare_cached("UPDATE tasks SET spec = ?2 WHERE id = ?1")
+                .db()?
+                .execute(params![rec.task_id.as_str(), spec.to_string()])
+                .db()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Records the agent's last report on its run. Fenced.
     pub async fn set_report(&self, run: &RunId, fence: u64, report: &RunReport) -> Result<()> {
         let (run, report) = (run.clone(), serde_json::to_string(report)?);

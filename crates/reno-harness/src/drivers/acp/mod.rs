@@ -499,11 +499,13 @@ impl AcpExecutor {
             return None;
         }
         let models = (live.parse)(&String::from_utf8_lossy(&stdout));
+        let models = config::fold_context_variants((live.enrich)(models));
         (!models.is_empty()).then(|| ModelCatalog::live(models))
     }
 
     fn known_models(&self) -> Vec<ModelInfo> {
-        self.spec
+        let listed: Vec<ModelInfo> = self
+            .spec
             .models
             .iter()
             .map(|(id, name)| ModelInfo {
@@ -514,7 +516,8 @@ impl AcpExecutor {
                 display_name: Some((*name).to_owned()),
                 description: None,
             })
-            .collect()
+            .collect();
+        config::fold_context_variants(listed)
     }
 }
 
@@ -579,6 +582,8 @@ impl Executor for AcpExecutor {
                 verified: verified.into(),
             },
             caps: ExecutorCaps {
+                live_effort: None,
+                live_model_options: None,
                 steering: self.spec.steering,
                 resume: true,
                 access_modes: self.access_modes.clone(),

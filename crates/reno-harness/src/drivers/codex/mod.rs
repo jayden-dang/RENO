@@ -568,6 +568,9 @@ impl Executor for CodexExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
             caps: ExecutorCaps {
+                // `turn/start` carries the effort: a change applies from the next turn.
+                live_effort: Some(reno_proto::ConfigTiming::NextTurn),
+                live_model_options: None,
                 // `turn/steer` lands in the running turn; a steer that misses it starts the next
                 // turn.
                 steering: Steering::StepBoundary,
@@ -706,6 +709,7 @@ impl Executor for CodexExecutor {
             steering,
             cancel,
             answers,
+            config,
             processes,
             // Neither can switch a run's model (`model_switch: false`): requests are not read.
             ..
@@ -738,6 +742,7 @@ impl Executor for CodexExecutor {
             steering,
             cancel,
             answers,
+            config,
             processes,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -1147,6 +1152,24 @@ impl TurnParams {
         }
     }
 
+    /// A change of effort (`run.configure`). `turn/start` carries the effort and it sticks to the
+    /// thread, so a new one applies from the next turn; going back to the model's default
+    /// cannot be said on a turn, so it waits for a restart. Codex has no per-model options.
+    fn configure(&mut self, request: crate::exec::ConfigRequest) {
+        use reno_proto::ConfigTiming::{AfterRestart, NextTurn};
+        let effort = request.effort.map(|change| match change {
+            Some(level) => {
+                self.effort = Some(catalog::effort(level));
+                NextTurn
+            }
+            None => AfterRestart,
+        });
+        let options = (!request.model_options.is_empty()).then_some(AfterRestart);
+        let _ = request
+            .reply
+            .send(Ok(crate::exec::ConfigApplied { effort, options }));
+    }
+
     fn build(&self, text: &str) -> Value {
         let mut p = serde_json::Map::new();
         p.insert("threadId".into(), Value::String(self.thread_id.clone()));
@@ -1357,6 +1380,7 @@ struct Session {
     steering: mpsc::Receiver<String>,
     cancel: CancellationToken,
     answers: mpsc::Receiver<ExecAnswer>,
+    config: mpsc::Receiver<crate::exec::ConfigRequest>,
     processes: ProcessSink,
     interrupt_grace: Duration,
     kill_grace: Duration,
@@ -2052,6 +2076,7 @@ async fn run_session(mut session: Session, mut app: AppServer) {
 
     let mut steering_open = true;
     let mut answers_open = true;
+    let mut config_open = true;
     let mut interrupt_sent = false;
     'main: while !ended && !cancelled {
         let step = tokio::select! {
@@ -2077,6 +2102,17 @@ async fn run_session(mut session: Session, mut app: AppServer) {
                 // ends with its `Done`.
                 None => {
                     steering_open = false;
+                    Step::Continue
+                }
+            },
+
+            request = session.config.recv(), if config_open => match request {
+                Some(request) => {
+                    run.turn_params.configure(request);
+                    Step::Continue
+                }
+                None => {
+                    config_open = false;
                     Step::Continue
                 }
             },

@@ -78,6 +78,9 @@ pub(super) struct AcpAgentSpec {
 pub(super) struct LiveModels {
     /// Arguments after the executable.
     pub args: &'static [&'static str],
+    /// What the CLI's own files add to the list it printed (a model's effort levels and context
+    /// window), read after it; the identity when there is nothing to add.
+    pub enrich: fn(Vec<ModelInfo>) -> Vec<ModelInfo>,
     /// The models in what it printed, the CLI's default first; empty when nothing was readable.
     pub parse: fn(&str) -> Vec<ModelInfo>,
 }
@@ -170,6 +173,7 @@ pub(super) fn grok() -> AcpAgentSpec {
         live_models: Some(LiveModels {
             args: &["--no-auto-update", "models"],
             parse: grok_models,
+            enrich: grok_enriched,
         }),
     }
 }
@@ -443,6 +447,90 @@ pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
     models
 }
 
+/// `grok models` names no efforts or windows; the CLI's own cache (`~/.grok/models_cache.json`,
+/// what `grok models` itself reads) does. Read-only: nothing is written there.
+fn grok_enriched(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let cache = crate::executable::home_dir()
+        .map(|home| home.join(".grok").join("models_cache.json"))
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    grok_with_cache(models, cache.as_deref())
+}
+
+/// The id of a context window of `tokens`: `256k`, `500k`, `1m`.
+fn window_id(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
+        format!("{}m", tokens / 1_000_000)
+    } else {
+        format!("{}k", tokens / 1000)
+    }
+}
+
+/// Adds to each model the effort levels and context window the cache (`models_cache.json`'s
+/// text) holds for it: `reasoning_efforts` (ids `xhigh`, `high`, `medium`, `low`, the entry
+/// marked `default` or else `reasoning_effort` being the default) and `context_windows` (with
+/// `context_window` the one in force). Grok's ACP rejects setting a context window
+/// (`session/set_config_option` answers "unknown config option"; only its TUI or
+/// `config.toml` change it), so the window is a read-only option: the sizes exist, the run's
+/// is the default. A model the cache does not know, or an unreadable cache, is left as listed.
+pub(super) fn grok_with_cache(mut models: Vec<ModelInfo>, cache: Option<&str>) -> Vec<ModelInfo> {
+    let Some(cache) = cache.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+    else {
+        return models;
+    };
+    for model in &mut models {
+        let Some(info) = cache.pointer(&format!("/models/{}/info", model.id.replace('/', "~1")))
+        else {
+            continue;
+        };
+        let rows = info
+            .get("reasoning_efforts")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut efforts: Vec<Effort> = rows
+            .iter()
+            .filter_map(|row| Effort::from_word(row.get("id")?.as_str()?))
+            .collect();
+        efforts.sort();
+        efforts.dedup();
+        model.default_effort = rows
+            .iter()
+            .find(|row| row.get("default").and_then(serde_json::Value::as_bool) == Some(true))
+            .and_then(|row| Effort::from_word(row.get("id")?.as_str()?))
+            .or_else(|| Effort::from_word(info.get("reasoning_effort")?.as_str()?))
+            .filter(|default| efforts.contains(default));
+        model.efforts = efforts;
+        let in_force = info
+            .get("context_window")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|n| *n > 0);
+        let mut windows: Vec<u64> = info
+            .get("context_windows")
+            .and_then(serde_json::Value::as_array)
+            .map(|all| all.iter().filter_map(serde_json::Value::as_u64).collect())
+            .unwrap_or_default();
+        windows.extend(in_force);
+        windows.sort_unstable();
+        windows.dedup();
+        if let (Some(in_force), false) = (in_force, windows.is_empty()) {
+            model.options.push(reno_proto::ModelOption {
+                id: reno_proto::MODEL_OPTION_CONTEXT_WINDOW.to_owned(),
+                label: "Context window".to_owned(),
+                choices: windows
+                    .iter()
+                    .map(|n| reno_proto::ModelOptionChoice {
+                        id: window_id(*n),
+                        label: window_id(*n).to_uppercase(),
+                    })
+                    .collect(),
+                default_choice: window_id(in_force),
+                settable: false,
+            });
+        }
+    }
+    models
+}
+
 /// `grok-4.7-build-fast` → "Grok 4.7 Build Fast".
 fn grok_name(id: &str) -> String {
     id.split('-')
@@ -459,7 +547,7 @@ fn grok_name(id: &str) -> String {
 
 #[cfg(test)]
 mod grok_models_tests {
-    use super::grok_models;
+    use super::{grok_models, grok_with_cache};
 
     /// What grok 1.0.88 printed on the owner's Mac, 2026-11-18.
     const REAL: &str = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.6\n  - grok-4.5\n  - zroute/grok-4.5\n  - zroute/grok-4.6\n  - zroute/grok-4.7\n  - zroute/grok-4.7-build-fast\n";
@@ -507,5 +595,48 @@ mod grok_models_tests {
         assert!(grok_models("").is_empty());
         assert!(grok_models("Error: not logged in\n").is_empty());
         assert!(grok_models("Available models:\n").is_empty());
+    }
+
+    /// The shape of `~/.grok/models_cache.json` (grok 1.0.88), cut to what is read.
+    const CACHE: &str = r#"{"grok_version":"1.0.88","models":{
+        "grok-4.7":{"info":{"id":"grok-4.7","context_window":256000,"context_windows":[256000,500000],
+            "reasoning_effort":"high","supports_reasoning_effort":true,
+            "reasoning_efforts":[{"id":"xhigh","default":false},{"id":"high","default":true},
+                                 {"id":"medium","default":false},{"id":"low","default":false}]}},
+        "grok-4.5":{"info":{"id":"grok-4.5","context_window":256000,
+            "reasoning_effort":"medium",
+            "reasoning_efforts":[{"id":"high"},{"id":"medium"},{"id":"low"}]}}}}"#;
+
+    #[test]
+    fn the_cache_adds_efforts_a_default_and_a_read_only_window() {
+        use reno_proto::Effort::{High, Low, Medium, XHigh};
+        let models = grok_with_cache(grok_models(REAL), Some(CACHE));
+        let sol = &models[0];
+        assert_eq!(sol.id, "grok-4.7");
+        assert_eq!(sol.efforts, [Low, Medium, High, XHigh]);
+        assert_eq!(sol.default_effort, Some(High));
+        let window = &sol.options[0];
+        assert_eq!(window.id, "contextWindow");
+        assert!(!window.settable);
+        let choices: Vec<&str> = window.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(choices, ["256k", "500k"]);
+        assert_eq!(window.choices[1].label, "500K");
+        assert_eq!(window.default_choice, "256k");
+        // `reasoning_effort` is the default when no entry says; a lone window still shows.
+        let old = models.iter().find(|m| m.id == "grok-4.5").unwrap();
+        assert_eq!(old.efforts, [Low, Medium, High]);
+        assert_eq!(old.default_effort, Some(Medium));
+        assert_eq!(old.options[0].choices.len(), 1);
+        // A model the cache lacks (a provider's copy) stays as `grok models` listed it.
+        let routed = models.iter().find(|m| m.id == "zroute/grok-4.7").unwrap();
+        assert!(routed.efforts.is_empty() && routed.options.is_empty());
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_cache_leaves_the_list_as_it_was() {
+        let plain = grok_models(REAL);
+        assert_eq!(grok_with_cache(plain.clone(), None), plain);
+        assert_eq!(grok_with_cache(plain.clone(), Some("not json")), plain);
+        assert_eq!(grok_with_cache(plain.clone(), Some("{}")), plain);
     }
 }

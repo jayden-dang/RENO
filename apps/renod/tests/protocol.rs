@@ -545,6 +545,15 @@ daemon_test! {
         let e = within(fx.client.set_run_model(&done, " ".into())).await.unwrap_err();
         assert_eq!(code(&e), ErrorCode::InvalidParams);
 
+        // run.configure on a run that does not exist, one that is over, and with nothing to change.
+        let clear = Some(reno_proto::EffortChange::Clear);
+        let e = within(fx.client.configure_run(&missing, clear, Default::default())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::NotFound);
+        let e = within(fx.client.configure_run(&done, clear, Default::default())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::Conflict);
+        let e = within(fx.client.configure_run(&done, None, Default::default())).await.unwrap_err();
+        assert_eq!(code(&e), ErrorCode::InvalidParams);
+
         // approval.decide on an approval that is not there.
         let nothing = reno_proto::ApprovalId::from_suffix("nothere").unwrap();
         let e = within(fx.client.decide(&nothing, ApprovalDecision::Deny)).await.unwrap_err();

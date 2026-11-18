@@ -68,6 +68,12 @@ pub(crate) enum SupCmd {
         model: String,
         reply: oneshot::Sender<Result<String>>,
     },
+    /// Change the run's effort or option choices: the live parts go to the executor, the rest
+    /// is stored for the next launch.
+    Configure {
+        plan: ConfigPlan,
+        reply: oneshot::Sender<Result<reno_proto::RunConfigureResult>>,
+    },
     /// Journal a structured report the run made through Reno's MCP server.
     Report {
         event: ExecEvent,
@@ -79,6 +85,21 @@ pub(crate) enum SupCmd {
         subject: ApprovalSubject,
         reply: oneshot::Sender<AgentDecision>,
     },
+}
+
+/// A change of a run's configuration, worked out by the kernel from what the run has now.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigPlan {
+    /// The effort to change to (`Some(None)` is the model's default); `None`: not changed.
+    pub(crate) effort: Option<Option<reno_proto::Effort>>,
+    /// The option choices that change.
+    pub(crate) options: std::collections::BTreeMap<String, String>,
+    /// The run's whole configuration once the change is made.
+    pub(crate) full_effort: Option<reno_proto::Effort>,
+    pub(crate) full_options: std::collections::BTreeMap<String, String>,
+    /// What the executor says it applies to a live run.
+    pub(crate) live_effort: bool,
+    pub(crate) live_options: bool,
 }
 
 /// How an approval the run asked for itself ended.
@@ -484,12 +505,12 @@ fn requested_cwd(spec: &serde_json::Value) -> Option<PathBuf> {
 }
 
 /// The model a task asked for, from its spec (`{"cwd": .., "model": ..}`, written by `submit`).
-fn requested_model(spec: &serde_json::Value) -> Option<String> {
+pub(crate) fn requested_model(spec: &serde_json::Value) -> Option<String> {
     spec.get("model")?.as_str().map(str::to_owned)
 }
 
 /// The effort a task asked for, from its spec (a word, written by `submit`).
-fn requested_effort(spec: &serde_json::Value) -> Option<reno_proto::Effort> {
+pub(crate) fn requested_effort(spec: &serde_json::Value) -> Option<reno_proto::Effort> {
     reno_proto::Effort::from_word(spec.get("effort")?.as_str()?)
 }
 

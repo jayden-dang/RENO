@@ -9,7 +9,7 @@
 //! session mode is strict the other way: a run that asks must never be left in a mode that
 //! approves on its own.
 
-use reno_proto::{AccessMode, Effort, ExecSpec};
+use reno_proto::{AccessMode, Effort, ExecSpec, ModelInfo};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -48,11 +48,40 @@ fn context_hint_1m(id: &str) -> bool {
     id.contains("[1m]") || id.ends_with("-1m")
 }
 
+/// The id with a trailing long-context hint removed; `None` when it carries none.
+fn strip_context_hint(id: &str) -> Option<&str> {
+    id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
+}
+
+/// A display name with its trailing parenthetical removed ("Opus (1M context)" to "Opus"): a
+/// folded base row must not keep the variant tag.
+fn strip_trailing_parenthetical(name: &str) -> &str {
+    match name.rfind(" (") {
+        Some(at) if name.ends_with(')') => name[..at].trim_end(),
+        _ => name,
+    }
+}
+
 /// Pick the advertised model value for a requested model id. Agents differ in what they
 /// advertise: full ids (`claude-opus-5`), SDK aliases (`opus`, `sonnet`, `haiku`) and
-/// long-context variants in either hint spelling. Exact match first, then a family-token
-/// fallback that prefers a variant without the long-context hint.
-fn pick_model_value(requested: &str, available: &[&str]) -> Option<String> {
+/// long-context variants in either hint spelling. The chosen context window's variant first
+/// (`<model>[1m]`, `<model>-1m`; the default window has none and runs the model itself), then an
+/// exact match, then a family-token fallback that prefers a variant matching the window.
+fn pick_model_value(requested: &str, available: &[&str], window: Option<&str>) -> Option<String> {
+    if let Some(window) = window
+        .map(str::to_ascii_lowercase)
+        .filter(|w| !w.is_empty())
+    {
+        for composed in [
+            format!("{requested}[{window}]"),
+            format!("{requested}-{window}"),
+        ] {
+            if available.contains(&composed.as_str()) {
+                return Some(composed);
+            }
+        }
+    }
+    let context_1m = window.is_some_and(|w| w.eq_ignore_ascii_case("1m"));
     if available.contains(&requested) {
         return Some(requested.to_owned());
     }
@@ -66,9 +95,48 @@ fn pick_model_value(requested: &str, available: &[&str]) -> Option<String> {
         .collect();
     candidates
         .iter()
-        .find(|v| !context_hint_1m(v))
+        .find(|v| context_hint_1m(v) == context_1m)
         .or_else(|| candidates.first())
         .map(|v| (**v).to_owned())
+}
+
+/// Fold an agent's long-context variants into one row each, with a context-window choice. A
+/// `<id>[1m]` (or `<id>-1m`) whose bare base is listed too becomes the base's `1m` choice
+/// (default: the plain model's window); one with no base listed (the CLI pins the 1M window)
+/// is presented AS the base, defaulting to 1M. Sending recomposes the advertised id
+/// ([`pick_model_value`]).
+pub(super) fn fold_context_variants(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    models
+        .into_iter()
+        .filter_map(|mut model| {
+            if let Some(base) = strip_context_hint(&model.id).map(str::to_owned) {
+                if ids.contains(&base) {
+                    return None;
+                }
+                let mut window = crate::drivers::claude::catalog::context_window();
+                window.default_choice = "1m".into();
+                model.options.push(window);
+                model.display_name = model
+                    .display_name
+                    .as_deref()
+                    .map(strip_trailing_parenthetical)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned);
+                model.id = base;
+                return Some(model);
+            }
+            if ids
+                .iter()
+                .any(|id| strip_context_hint(id) == Some(&model.id))
+            {
+                model
+                    .options
+                    .push(crate::drivers::claude::catalog::context_window());
+            }
+            Some(model)
+        })
+        .collect()
 }
 
 fn is_model_select(option: &Value) -> bool {
@@ -142,7 +210,7 @@ fn validate_config_model_selection(
         .iter()
         .filter_map(|choice| choice.get("value").and_then(Value::as_str))
         .collect();
-    if pick_model_value(requested, &available).is_some() {
+    if pick_model_value(requested, &available, None).is_some() {
         return Ok(());
     }
     Err(HarnessError::Protocol(format!(
@@ -210,9 +278,21 @@ fn current_no_prompt_mode(session_response: &Value) -> Option<&str> {
 ///
 /// Matched against advertised values and skipped when already current. Pure so it's testable;
 /// the returned value is the request's flattened `value` payload (`{"value": id}`).
+#[cfg(test)]
 fn config_option_sets(
     session_response: &Value,
     model: Option<&str>,
+    efforts: &[&'static str],
+    access: AccessMode,
+) -> Vec<(String, Value)> {
+    config_option_sets_with_window(session_response, model, None, efforts, access)
+}
+
+/// [`config_option_sets`] for a run that chose a context window (`window`, a choice id).
+fn config_option_sets_with_window(
+    session_response: &Value,
+    model: Option<&str>,
+    window: Option<&str>,
     efforts: &[&'static str],
     access: AccessMode,
 ) -> Vec<(String, Value)> {
@@ -243,7 +323,7 @@ fn config_option_sets(
 
         let wanted: Option<&str> = match category {
             Some("model") => model
-                .and_then(|m| pick_model_value(m, &available))
+                .and_then(|m| pick_model_value(m, &available, window))
                 .and_then(|picked| available.iter().copied().find(|a| *a == picked)),
             // Full access: the no-prompts mode when the agent offers one. claude-agent-acp
             // calls it `bypassPermissions`, codex-acp `agent-full-access`, Devin `bypass`.
@@ -458,9 +538,14 @@ pub(super) async fn select_session_config(
     }
     let efforts = (rules.effort_values)(spec.effort);
     let mut options_snapshot = session_response;
-    let mut sets = config_option_sets(
+    let window = spec
+        .model_options
+        .get(reno_proto::MODEL_OPTION_CONTEXT_WINDOW)
+        .map(String::as_str);
+    let mut sets = config_option_sets_with_window(
         &options_snapshot,
         requested_model.as_deref(),
+        window,
         &efforts,
         rules.access,
     );
@@ -537,9 +622,10 @@ pub(super) async fn select_session_config(
         if !deferred || pass > 1 {
             break;
         }
-        sets = config_option_sets(
+        sets = config_option_sets_with_window(
             &options_snapshot,
             requested_model.as_deref(),
+            window,
             &efforts,
             rules.access,
         );
@@ -621,15 +707,128 @@ mod tests {
     fn a_family_name_picks_the_advertised_variant_without_the_long_context_hint() {
         let available = ["opus[1m]", "opus", "sonnet"];
         assert_eq!(
-            pick_model_value("claude-opus-5", &available),
+            pick_model_value("claude-opus-5", &available, None),
             Some("opus".into())
         );
         assert_eq!(
-            pick_model_value("claude-opus-5", &["opus[1m]"]),
+            pick_model_value("claude-opus-5", &["opus[1m]"], None),
             Some("opus[1m]".into())
         );
-        assert_eq!(pick_model_value("opus", &available), Some("opus".into()));
-        assert_eq!(pick_model_value("grok-9", &available), None);
+        assert_eq!(
+            pick_model_value("opus", &available, None),
+            Some("opus".into())
+        );
+        assert_eq!(pick_model_value("grok-9", &available, None), None);
+    }
+
+    #[test]
+    fn the_chosen_window_picks_the_advertised_variant_and_the_default_the_plain_model() {
+        let available = ["claude-sonnet-5", "claude-sonnet-5[1m]", "opus[1m]", "opus"];
+        assert_eq!(
+            pick_model_value("claude-sonnet-5", &available, Some("1m")),
+            Some("claude-sonnet-5[1m]".into())
+        );
+        assert_eq!(
+            pick_model_value("claude-sonnet-5", &available, Some("200k")),
+            Some("claude-sonnet-5".into())
+        );
+        // The family fallback follows the window too.
+        assert_eq!(
+            pick_model_value("claude-opus-5", &available, Some("1m")),
+            Some("opus[1m]".into())
+        );
+        assert_eq!(
+            pick_model_value("claude-opus-5", &available, None),
+            Some("opus".into())
+        );
+    }
+
+    fn row(id: &str, name: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            display_name: Some(name.into()),
+            ..plain_model()
+        }
+    }
+
+    fn plain_model() -> ModelInfo {
+        ModelInfo {
+            id: String::new(),
+            display_name: None,
+            description: None,
+            efforts: vec![],
+            default_effort: None,
+            options: vec![],
+        }
+    }
+
+    #[test]
+    fn model_1m_variants_collapse_into_a_context_window_choice() {
+        let models = fold_context_variants(vec![
+            row("claude-sonnet-5", "Sonnet 5"),
+            row("claude-sonnet-5[1m]", "Sonnet 5 (1M)"),
+            // The SDK-id hint spelling collapses too.
+            row("claude-opus-4-6", "Opus 4.6"),
+            row("claude-opus-4-6-1m", "Opus 4.6 (1M)"),
+            row("claude-haiku-4-5", "Haiku 4.5"),
+        ]);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["claude-sonnet-5", "claude-opus-4-6", "claude-haiku-4-5"]
+        );
+        for folded in &models[..2] {
+            let window = &folded.options[0];
+            assert_eq!(window.id, "contextWindow");
+            assert_eq!(window.default_choice, "200k");
+            assert!(window.settable);
+        }
+        assert!(models[2].options.is_empty());
+    }
+
+    #[test]
+    fn an_orphan_1m_variant_is_its_base_with_the_window_defaulting_to_1m() {
+        let models = fold_context_variants(vec![
+            row("opus[1m]", "Opus (1M context)"),
+            row("claude-fable-5[1m]", "Fable 5"),
+            row("sonnet", "Sonnet"),
+        ]);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["opus", "claude-fable-5", "sonnet"]);
+        // The variant tag leaves the name.
+        assert_eq!(models[0].display_name.as_deref(), Some("Opus"));
+        for pinned in &models[..2] {
+            assert_eq!(pinned.options[0].default_choice, "1m");
+        }
+        assert!(models[2].options.is_empty());
+    }
+
+    #[test]
+    fn grok_shaped_config_options_apply_the_chosen_effort_through_thought_level() {
+        // `session/new` of grok 1.0.88: a `reasoning_effort` select of category `thought_level`.
+        let response = session_with(json!([
+            {
+                "id": "model", "category": "model", "type": "select", "currentValue": "grok-4.7",
+                "options": [{ "value": "grok-4.7" }, { "value": "grok-4.6" }],
+            },
+            {
+                "id": "reasoning_effort", "category": "thought_level", "type": "select",
+                "currentValue": "high",
+                "options": [
+                    { "value": "xhigh" }, { "value": "high" }, { "value": "medium" },
+                    { "value": "low" },
+                ],
+            },
+        ]));
+        let full = AccessMode::FullAccess;
+        assert_eq!(
+            config_option_sets(&response, Some("grok-4.7"), &["low"], full),
+            vec![("reasoning_effort".to_owned(), json!({ "value": "low" }))]
+        );
+        assert_eq!(
+            config_option_sets(&response, None, &["xhigh", "high"], full),
+            vec![("reasoning_effort".to_owned(), json!({ "value": "xhigh" }))]
+        );
     }
 
     #[test]
