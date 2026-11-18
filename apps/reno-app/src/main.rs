@@ -12,6 +12,7 @@ mod attach;
 mod banners;
 mod desktop;
 mod lifecycle;
+mod links;
 mod local;
 mod nav;
 mod notify;

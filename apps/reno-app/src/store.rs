@@ -44,6 +44,9 @@ use reno_proto::{
     SignedIn, TaskRunParams, ThreadId, WorkspaceDiffResult, WorkspaceInfo,
 };
 
+mod signin;
+pub(crate) use signin::{SigninPhase, SigninView};
+
 use crate::summary;
 use crate::vm;
 use crate::vm::changes::{Loaded, Patch, ReviewScope};
@@ -102,10 +105,6 @@ pub(crate) enum RunRouting {
     Ready(Option<RoutingDecision>),
     Failed(String),
 }
-
-/// The daemon feature for signing an agent in in the browser (`executor.signin.start`). The name
-/// is the one branch `registry-signin` defines; until that lands no daemon offers it.
-const BROWSER_SIGN_IN_FEATURE: &str = "executor.signin";
 
 /// The last lines of output of an executor's job, as `executor.job.log` answered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -226,6 +225,10 @@ pub(crate) struct Store {
     registry_removing: BTreeSet<String>,
     /// Why a removal was refused, shown on the agent's line until the next try.
     registry_refused: BTreeMap<String, String>,
+    /// Sign-ins of added agents (`executor.signin.start`) that run or failed, by executor.
+    signins: BTreeMap<ExecutorId, signin::SigninRun>,
+    /// Executors with a sign-in command open in Terminal, looked at again when the person is back.
+    signin_terminals: BTreeSet<ExecutorId>,
     /// Filters whose page request is in flight.
     paging: BTreeSet<Vec<RunStatus>>,
     /// Runs being fetched with `run.get`.
@@ -310,6 +313,8 @@ impl Store {
             registry_wanted: false,
             registry_removing: BTreeSet::new(),
             registry_refused: BTreeMap::new(),
+            signins: BTreeMap::new(),
+            signin_terminals: BTreeSet::new(),
             paging: BTreeSet::new(),
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
@@ -1326,11 +1331,10 @@ impl Store {
         self.state.supports(reno_proto::FEATURE_EXECUTOR_REGISTRY)
     }
 
-    /// Whether the daemon can sign an agent in in the browser: the agent's own ACP
-    /// `authenticate`. Branch `registry-signin` adds `executor.signin.start`; until its feature
-    /// is negotiated nothing offers the button.
+    /// Whether the daemon can sign an agent in itself (`executor.signin.start`): the agent's own
+    /// ACP `authenticate`, in the browser. Until the feature is negotiated nothing offers it.
     pub(crate) fn supports_browser_sign_in(&self) -> bool {
-        self.state.supports(BROWSER_SIGN_IN_FEATURE)
+        self.state.supports(reno_proto::FEATURE_EXECUTOR_SIGNIN)
     }
 
     pub(crate) fn registry(&self) -> &RegistryData {

@@ -15,16 +15,17 @@ use gpui::{
 };
 
 use super::{ExecutorsScreen, info_color, mono};
+use crate::store::{SigninPhase, SigninView};
 use crate::ui::field::{Field, Look};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
 use crate::ui::theme::Theme;
-use crate::ui::toast;
 use crate::vm::executors::{ExecutorRow, RegistryNote};
 use crate::vm::registry::{
     self, Control, FactRow, FactTone, Filter, ListState, Phase, RegistryLine, RegistryView,
-    StepCard,
+    SignInChoice, StepCard,
 };
+use reno_proto::ExecutorId;
 
 /// Where an agent's environment editor is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,15 +283,24 @@ impl ExecutorsScreen {
     // --- The keys editor ----------------------------------------------------------------------
 
     /// Opens an added agent's keys editor, reading its environment once.
-    pub(super) fn open_env(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn open_env(&mut self, id: &str, vars: &[String], cx: &mut Context<Self>) {
         if self.registry.env.contains_key(id) {
             return;
         }
+        // What the agent names is the placeholder: one KEY= line per variable.
+        let placeholder = if vars.is_empty() {
+            "KEY=VALUE, one per line".to_owned()
+        } else {
+            vars.iter()
+                .map(|v| format!("{v}="))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let field = cx.new(|cx| {
             Field::new(
                 format!("env-{id}"),
                 "Environment, KEY=VALUE lines",
-                "KEY=VALUE, one per line",
+                placeholder,
                 Look::ENV,
                 cx,
             )
@@ -994,9 +1004,7 @@ impl ExecutorsScreen {
                     .text_size(px(13.0))
                     .text_color(theme.danger)
                     .child(icon(Icon::PhX, 14.0, theme.danger))
-                    .child(SharedString::from(format!(
-                        "{why}. Add stays off until this Mac has it."
-                    ))),
+                    .child(SharedString::from(why.clone())),
             );
         }
         if let Phase::Failed(_) | Phase::Adding(_) = line.phase
@@ -1467,85 +1475,252 @@ impl ExecutorsScreen {
                     .into_any_element(),
             );
         }
-        // Sign in, in Terminal (the agent's own command), when the daemon has one.
-        if let Some(command) = row.sign_in.clone() {
-            let label = format!("Sign in to {}", row.name);
-            let (id, run) = (row.id.clone(), command.clone());
-            let open = kit::line_button(
+        let choices = reg.choices.clone();
+        let mut env_vars: Option<(Vec<String>, Option<String>)> = None;
+        let mut browsers = 0;
+        for choice in &choices {
+            match choice {
+                SignInChoice::Terminal { command } => {
+                    out.push(self.terminal_card(row, command, theme, cx));
+                }
+                SignInChoice::Browser { method, .. } => {
+                    // The agent's own sign-in needs the daemon to run it.
+                    if self.store.read(cx).supports_browser_sign_in() {
+                        out.push(self.browser_card(row, method.clone(), browsers, theme, cx));
+                        browsers += 1;
+                    }
+                }
+                SignInChoice::Keys { vars, link } => {
+                    env_vars.get_or_insert_with(|| (vars.clone(), link.clone()));
+                }
+                SignInChoice::Nothing => out.push(
+                    kit::step_card(
+                        theme,
+                        format!("registry-signin-card-{}", row.id),
+                        2,
+                        "Nothing to sign in",
+                        format!("{} starts without an account or a key.", row.name),
+                        None,
+                        false,
+                    )
+                    .into_any_element(),
+                ),
+                SignInChoice::Setup(text) => out.push(
+                    kit::step_card(
+                        theme,
+                        format!("registry-signin-card-{}", row.id),
+                        2,
+                        "Set it up by hand",
+                        text.clone(),
+                        None,
+                        false,
+                    )
+                    .into_any_element(),
+                ),
+            }
+        }
+        // No facts about how it signs in: the generic command of the maintenance record when
+        // it has one, and always the keys.
+        if choices.is_empty()
+            && let Some(command) = row.sign_in.clone()
+        {
+            out.push(self.terminal_card(row, &command, theme, cx));
+        }
+        // The keys are one click away on any agent that does not say it needs nothing.
+        if !choices.iter().all(|c| *c == SignInChoice::Nothing) || choices.is_empty() {
+            out.push(self.env_card(row, env_vars, theme, cx));
+        }
+        out
+    }
+
+    /// "Sign in, in Terminal": the agent's own command and [Open Terminal].
+    fn terminal_card(
+        &mut self,
+        row: &ExecutorRow,
+        command: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = format!("Sign in to {}", row.name);
+        let (id, run) = (row.id.clone(), command.to_owned());
+        let open = kit::line_button(
+            theme,
+            format!("registry-open-terminal-{}", row.id),
+            Some(Icon::PhTerminal),
+            "Open Terminal",
+            Tone::Quiet,
+            true,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.open_terminal(&id, &label, &run, cx);
+        }));
+        div()
+            .flex()
+            .flex_col()
+            .child(kit::step_card(
                 theme,
-                format!("registry-open-terminal-{}", row.id),
-                Some(Icon::PhTerminal),
-                "Open Terminal",
+                format!("registry-signin-card-{}", row.id),
+                2,
+                "Sign in, in Terminal",
+                "Reno opens Terminal with the agent's own command.",
+                Some(open.into_any_element()),
+                true,
+            ))
+            .child(
+                mono(command.to_owned())
+                    .ml(px(46.0))
+                    .mt(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .bg(theme.raised)
+                    .self_start(),
+            )
+            .into_any_element()
+    }
+
+    /// "Sign in, in your browser": the agent's own ACP `authenticate`, run by the daemon
+    /// (`executor.signin.start`). The page opens here, the code it prints shows under the card.
+    fn browser_card(
+        &mut self,
+        row: &ExecutorRow,
+        method: Option<String>,
+        n: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Ok(executor) = row.id.parse::<ExecutorId>() else {
+            return div().into_any_element();
+        };
+        let view = self.store.read(cx).signin(&executor).cloned();
+        let running = view.as_ref().is_some_and(SigninView::running);
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
+        let button = if running {
+            let stop = executor.clone();
+            kit::line_button(
+                theme,
+                format!("registry-browser-cancel-{}{suffix}", row.id),
+                None,
+                "Cancel",
                 Tone::Quiet,
                 true,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_terminal(&id, &label, &run, cx);
-            }));
-            out.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(kit::step_card(
-                        theme,
-                        format!("registry-signin-card-{}", row.id),
-                        2,
-                        "Sign in, in Terminal",
-                        "Reno opens Terminal with the agent's own command.",
-                        Some(open.into_any_element()),
-                        true,
-                    ))
-                    .child(
-                        mono(command)
-                            .ml(px(46.0))
-                            .mt(px(6.0))
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(5.0))
-                            .bg(theme.raised)
-                            .self_start(),
-                    )
-                    .into_any_element(),
-            );
-        }
-        // Sign in, in the browser: the agent's own ACP `authenticate`. The call goes here, to
-        // `executor.signin.start` (branch `registry-signin`), once the daemon offers it.
-        if self.store.read(cx).supports_browser_sign_in() {
-            let button = kit::line_button(
+                let stop = stop.clone();
+                this.store
+                    .update(cx, |store, cx| store.cancel_signin(&stop, cx));
+            }))
+        } else {
+            let (start, name) = (executor.clone(), row.name.clone());
+            kit::line_button(
                 theme,
-                format!("registry-browser-signin-{}", row.id),
+                format!("registry-browser-signin-{}{suffix}", row.id),
                 None,
                 "Sign in\u{2026}",
                 Tone::Quiet,
                 true,
             )
-            .on_click(cx.listener(|_, _, _, cx| {
-                toast::not_yet(cx, "Signing in in your browser");
-            }));
-            out.push(
-                kit::step_card(
-                    theme,
-                    format!("registry-browser-card-{}", row.id),
-                    2,
-                    "Sign in, in your browser",
-                    "The agent's own sign-in opens in your browser.",
-                    Some(button.into_any_element()),
-                    true,
-                )
-                .into_any_element(),
-            );
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let (start, name, method) = (start.clone(), name.clone(), method.clone());
+                this.store
+                    .update(cx, |store, cx| store.start_signin(start, name, method, cx));
+            }))
+        };
+        let card = kit::step_card(
+            theme,
+            format!("registry-browser-card-{}{suffix}", row.id),
+            2,
+            "Sign in, in your browser",
+            "The agent's own sign-in opens in your browser.",
+            Some(button.into_any_element()),
+            true,
+        );
+        let mut col = div().flex().flex_col().gap(px(6.0)).child(card);
+        if let Some(view) = view {
+            let mut notes = div().flex().flex_col().gap(px(4.0)).ml(px(46.0));
+            if view.page {
+                notes = notes.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted)
+                        .child("Opened the page in your browser. Type this code there:")
+                        .when(view.lines.is_empty(), |d| {
+                            d.child(" waiting for the agent\u{2026}")
+                        }),
+                );
+            } else if view.running() {
+                notes = notes.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted)
+                        .child("Starting the sign-in\u{2026}"),
+                );
+            }
+            if !view.lines.is_empty() {
+                notes = notes.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "registry-signin-lines-{}",
+                            row.id
+                        )))
+                        .debug_selector({
+                            let id = row.id.clone();
+                            move || format!("registry-signin-lines-{id}")
+                        })
+                        .flex()
+                        .flex_col()
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(5.0))
+                        .bg(theme.raised)
+                        .self_start()
+                        .children(view.lines.iter().map(|l| mono(l.clone()))),
+                );
+            }
+            if let Some(command) = &view.terminal {
+                notes = notes.child(div().text_size(px(12.5)).text_color(theme.muted).child(
+                    SharedString::from(format!("Opened Terminal to run {command}.")),
+                ));
+            }
+            if let SigninPhase::Failed(why) = &view.phase {
+                notes = notes.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "registry-signin-failed-{}",
+                            row.id
+                        )))
+                        .debug_selector({
+                            let id = row.id.clone();
+                            move || format!("registry-signin-failed-{id}")
+                        })
+                        .text_size(px(12.5))
+                        .text_color(theme.danger)
+                        .child(SharedString::from(why.clone())),
+                );
+            }
+            col = col.child(notes);
         }
-        out.push(self.env_card(row, theme, cx));
-        out
+        col.into_any_element()
     }
 
     /// "Give it its keys": the environment editor of an added agent.
-    fn env_card(&mut self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn env_card(
+        &mut self,
+        row: &ExecutorRow,
+        named: Option<(Vec<String>, Option<String>)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(reg) = &row.registry else {
             return div().into_any_element();
         };
         let id = reg.id.clone();
-        self.open_env(&id, cx);
+        let (vars, link) = named.unzip();
+        self.open_env(&id, vars.as_deref().unwrap_or_default(), cx);
         let Some(editor) = self.registry.env.get(&id) else {
             return div().into_any_element();
         };
@@ -1604,6 +1779,7 @@ impl ExecutorsScreen {
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap(px(3.0))
@@ -1618,7 +1794,12 @@ impl ExecutorsScreen {
                                     .text_size(px(12.5))
                                     .line_height(px(18.0))
                                     .text_color(theme.muted)
-                                    .child("KEY=VALUE lines. Kept in Reno's environment for this agent only, never in the agent's config, never logged."),
+                                    .child(SharedString::from(match link.flatten() {
+                                        Some(link) => format!(
+                                            "KEY=VALUE lines. Get a key at {link}. Kept in Reno's environment for this agent only, never in the agent's config, never logged."
+                                        ),
+                                        None => "KEY=VALUE lines. Kept in Reno's environment for this agent only, never in the agent's config, never logged.".to_owned(),
+                                    })),
                             ),
                     )
                     .child(save),

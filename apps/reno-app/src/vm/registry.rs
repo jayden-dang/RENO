@@ -15,8 +15,9 @@
 
 use reno_client::State;
 use reno_proto::{
-    ExecutorInfo, ExecutorRegistryListResult, ExecutorSource, InstallStatus, JobPhase,
-    RegistryDistribution, RegistryEntry, RegistryReadiness,
+    AuthMethod, AuthMethodKind, ExecutorInfo, ExecutorRegistryListResult, ExecutorSource,
+    InstallStatus, JobPhase, RegistryDistribution, RegistryEntry, RegistryReadiness,
+    RegistrySignInOption, RegistryStatus,
 };
 
 use super::executors::{JobState, JobView, job_view};
@@ -64,13 +65,10 @@ impl Filter {
     }
 }
 
-/// How an agent signs in, once its own `initialize` has said so.
+/// How an agent signs in: the first of the entry's `signIn` options, best first.
 #[derive(Clone, Debug, PartialEq, Eq)]
-// The index entry carries none of this yet: only `Unknown` is produced until the daemon passes
-// the agent's auth methods along (branch `registry-signin`, see `sign_in_of`).
-#[allow(dead_code)]
 pub(crate) enum SignIn {
-    /// Not known before the agent is added and asked.
+    /// The entry carries no `signIn`: known after the agent is added and asked.
     Unknown,
     /// Nothing to sign in to.
     Nothing,
@@ -80,13 +78,123 @@ pub(crate) enum SignIn {
     Terminal(String),
     /// The agent's own ACP `authenticate`, in the browser.
     Browser,
+    /// Set up by hand, in words.
+    Setup(String),
 }
 
-/// The one place the sign-in kind of a registry agent is decided. Today the index entry has no
-/// such fact, so it is always [`SignIn::Unknown`]; `registry-signin` extends this with the
-/// agent's auth methods.
-pub(crate) fn sign_in_of(_entry: &RegistryEntry) -> SignIn {
-    SignIn::Unknown
+impl SignIn {
+    fn of(option: &RegistrySignInOption) -> Self {
+        match option {
+            RegistrySignInOption::None => Self::Nothing,
+            RegistrySignInOption::Env { vars } => Self::Keys(vars.clone()),
+            RegistrySignInOption::Terminal { command } => Self::Terminal(command.clone()),
+            RegistrySignInOption::Browser { .. } => Self::Browser,
+            RegistrySignInOption::Setup { text } => Self::Setup(text.clone()),
+        }
+    }
+
+    /// What the faint column says: "then run `auggie login` in Terminal", "needs a key \u{b7}
+    /// ANTHROPIC_API_KEY", "then signs in in your browser", "no sign-in", the setup words
+    /// shortened. `None` while it is not known.
+    pub(crate) fn needs_words(&self) -> Option<String> {
+        Some(match self {
+            Self::Unknown => return None,
+            Self::Nothing => "no sign-in".to_owned(),
+            Self::Keys(vars) => format!("needs a key \u{b7} {}", vars.join(", ")),
+            Self::Terminal(command) => format!("then run `{command}` in Terminal"),
+            Self::Browser => "then signs in in your browser".to_owned(),
+            Self::Setup(text) => shorten(text, 48),
+        })
+    }
+}
+
+fn shorten(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}\u{2026}", cut.trim_end())
+}
+
+/// The one place the sign-in kind of a registry agent is decided: the first of its `signIn`
+/// options (best first; from the agent's own handshake once it has had a full probe, else from
+/// Reno's curated audit). No option is [`SignIn::Unknown`].
+pub(crate) fn sign_in_of(entry: &RegistryEntry) -> SignIn {
+    entry.sign_in.first().map_or(SignIn::Unknown, SignIn::of)
+}
+
+/// "Runs once added": the entry's `signIn` is exactly `[{kind: none}]`.
+pub(crate) fn runs_once_added(entry: &RegistryEntry) -> bool {
+    matches!(entry.sign_in.as_slice(), [RegistrySignInOption::None])
+}
+
+/// One way an added agent's opened line offers to sign in. From the agent's own `authMethods`
+/// when it has had a full probe; else from the first `signIn` option of its registry entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SignInChoice {
+    Nothing,
+    /// Keys the agent reads from its environment, with where to get one when it says.
+    Keys {
+        vars: Vec<String>,
+        link: Option<String>,
+    },
+    /// The agent's own command, run in Terminal (its exact text).
+    Terminal {
+        command: String,
+    },
+    /// The agent signs itself in, in the browser: `executor.signin.start` with this method (the
+    /// agent's first when `None`).
+    Browser {
+        method: Option<String>,
+        name: Option<String>,
+    },
+    Setup(String),
+}
+
+/// What an added agent's opened line offers. Its own `authMethods` win (the ones Reno can use);
+/// else the first `signIn` option of its entry; empty while nothing is known.
+pub(crate) fn choices_of(
+    entry: Option<&RegistryEntry>,
+    methods: &[AuthMethod],
+) -> Vec<SignInChoice> {
+    let from_methods: Vec<SignInChoice> = methods
+        .iter()
+        .filter(|m| m.unusable.is_none())
+        .filter_map(|m| match m.kind {
+            AuthMethodKind::Agent => Some(SignInChoice::Browser {
+                method: Some(m.id.clone()),
+                name: Some(m.name.clone()),
+            }),
+            AuthMethodKind::Terminal => m
+                .command
+                .clone()
+                .map(|command| SignInChoice::Terminal { command }),
+            AuthMethodKind::EnvVar => Some(SignInChoice::Keys {
+                vars: m.vars.clone(),
+                link: m.link.clone(),
+            }),
+        })
+        .collect();
+    if !from_methods.is_empty() {
+        return from_methods;
+    }
+    match entry.and_then(|e| e.sign_in.first()) {
+        None => vec![],
+        Some(RegistrySignInOption::None) => vec![SignInChoice::Nothing],
+        Some(RegistrySignInOption::Env { vars }) => vec![SignInChoice::Keys {
+            vars: vars.clone(),
+            link: None,
+        }],
+        Some(RegistrySignInOption::Terminal { command }) => vec![SignInChoice::Terminal {
+            command: command.clone(),
+        }],
+        Some(RegistrySignInOption::Browser { .. }) => vec![SignInChoice::Browser {
+            method: None,
+            name: None,
+        }],
+        Some(RegistrySignInOption::Setup { text }) => vec![SignInChoice::Setup(text.clone())],
+    }
 }
 
 /// Why an agent cannot be added on this Mac.
@@ -95,10 +203,31 @@ pub(crate) enum CantRun {
     NeedsNode(Option<String>),
     NeedsUv(Option<String>),
     NoBuild,
+    /// The audit found it does not start, and the fault is the agent's.
+    BrokenUpstream(String),
+    /// The audit found it does not start yet, and the fix is Reno's.
+    NeedsRenoFix(String),
 }
 
 impl CantRun {
-    /// "needs uv: brew install uv", "needs Node.js", "no build for this Mac".
+    /// The danger line of an opened line: "broken upstream \u{2014} can't start. <reason>. Add
+    /// stays off until a new version is published." or the readiness words.
+    pub(crate) fn danger(&self) -> String {
+        match self {
+            Self::BrokenUpstream(reason) => format!(
+                "broken upstream \u{2014} can't start. {}. Add stays off until a new version is published.",
+                reason.trim().trim_end_matches('.')
+            ),
+            Self::NeedsRenoFix(reason) => format!(
+                "needs a Reno fix \u{2014} can't start yet. {}. Add stays off until Reno is fixed.",
+                reason.trim().trim_end_matches('.')
+            ),
+            _ => format!("{}. Add stays off until this Mac has it.", self.words()),
+        }
+    }
+
+    /// "needs uv: brew install uv", "needs Node.js", "no build for this Mac", "broken upstream
+    /// \u{2014} can't start".
     pub(crate) fn words(&self) -> String {
         let with = |what: &str, fix: &Option<String>| match fix {
             Some(fix) => format!("needs {what}: {fix}"),
@@ -108,6 +237,8 @@ impl CantRun {
             Self::NeedsNode(fix) => with("Node.js", fix),
             Self::NeedsUv(fix) => with("uv", fix),
             Self::NoBuild => "no build for this Mac".to_owned(),
+            Self::BrokenUpstream(_) => "broken upstream \u{2014} can't start".to_owned(),
+            Self::NeedsRenoFix(_) => "needs a Reno fix \u{2014} can't start yet".to_owned(),
         }
     }
 }
@@ -187,7 +318,7 @@ pub(crate) fn steps_of(name: &str, sign_in: &SignIn, added: bool, adding: bool) 
         SignIn::Unknown => (
             "Sign in or give it keys",
             format!(
-                "Reno asks {name} how it signs in once it is added, and the step shows here and on its line."
+                "Sign-in known after it's added: Reno asks {name} how it signs in then, and the step shows on its line."
             ),
             None,
             Control::None,
@@ -219,6 +350,7 @@ pub(crate) fn steps_of(name: &str, sign_in: &SignIn, added: bool, adding: bool) 
             None,
             Control::SignInBrowser,
         ),
+        SignIn::Setup(text) => ("Set it up by hand", text.clone(), None, Control::None),
     };
     let sign = StepCard {
         number: 2,
@@ -254,6 +386,8 @@ pub(crate) struct RegistryLine {
     pub(crate) icon: Option<String>,
     pub(crate) phase: Phase,
     pub(crate) sign_in: SignIn,
+    /// "Runs once added": its `signIn` is exactly none.
+    pub(crate) runs_once: bool,
     /// What it needs, in faint at the right of the line.
     pub(crate) needs: String,
     pub(crate) facts: Vec<FactRow>,
@@ -287,24 +421,22 @@ impl RegistryLine {
     }
 }
 
-/// How an agent's fit reads for the filter and the finding.
+/// How an agent's fit reads for the filter and the finding. An agent whose sign-in is not known
+/// before it is added counts as needing one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fit {
     Runs,
     NeedsSignIn,
     CantRun,
-    /// Can be added, but how it signs in is not known before it is added.
-    Unknown,
 }
 
 fn fit_of(line: &RegistryLine) -> Option<Fit> {
     if line.built_in() {
         return None;
     }
-    Some(match (&line.phase, &line.sign_in) {
-        (Phase::CantRun(_), _) => Fit::CantRun,
-        (_, SignIn::Nothing) => Fit::Runs,
-        (_, SignIn::Unknown) => Fit::Unknown,
+    Some(match &line.phase {
+        Phase::CantRun(_) => Fit::CantRun,
+        _ if line.runs_once => Fit::Runs,
         _ => Fit::NeedsSignIn,
     })
 }
@@ -367,17 +499,6 @@ fn kind_words(entry: &RegistryEntry) -> String {
         (Some(RegistryDistribution::Npx), _) => "an npm package, run with Node.js".to_owned(),
         (Some(RegistryDistribution::Uvx), _) => "a Python package, run with uv".to_owned(),
         (None, _) => "no build for this Mac".to_owned(),
-    }
-}
-
-/// The short form for the faint column: "npm package", "download \u{b7} github.com".
-fn kind_short(entry: &RegistryEntry) -> String {
-    match (entry.kind, &entry.host) {
-        (Some(RegistryDistribution::Binary), Some(host)) => format!("download from {host}"),
-        (Some(RegistryDistribution::Binary), None) => "download".to_owned(),
-        (Some(RegistryDistribution::Npx), _) => "npm package".to_owned(),
-        (Some(RegistryDistribution::Uvx), _) => "Python package".to_owned(),
-        (None, _) => String::new(),
     }
 }
 
@@ -444,6 +565,9 @@ fn facts_of(entry: &RegistryEntry) -> Vec<FactRow> {
     if !by.is_empty() {
         facts.push(plain("By", by));
     }
+    if let (Some(checked), Some(how)) = (&entry.checked_version, sign_in_of(entry).needs_words()) {
+        facts.push(plain("Sign-in", format!("{how} (checked on {checked})")));
+    }
     if entry.kind.is_some() {
         facts.push(FactRow {
             mono: true,
@@ -497,10 +621,12 @@ fn line_of(state: &State, entry: &RegistryEntry, now_ms: u64) -> Option<Registry
     let needs = match &phase {
         Phase::CantRun(why) => why.words(),
         Phase::BuiltIn { .. } => String::new(),
-        _ => kind_short(entry),
+        _ => sign_in
+            .needs_words()
+            .unwrap_or_else(|| "sign-in known after it's added".to_owned()),
     };
     let cant_run = match &phase {
-        Phase::CantRun(why) => Some(why.words()),
+        Phase::CantRun(why) => Some(why.danger()),
         _ => None,
     };
     let steps = if matches!(
@@ -525,6 +651,7 @@ fn line_of(state: &State, entry: &RegistryEntry, now_ms: u64) -> Option<Registry
         icon: entry.icon.clone(),
         phase,
         sign_in,
+        runs_once: runs_once_added(entry),
         needs,
         facts: facts_of(entry),
         steps,
@@ -534,7 +661,16 @@ fn line_of(state: &State, entry: &RegistryEntry, now_ms: u64) -> Option<Registry
 
 fn available_or_cant_run(entry: &RegistryEntry) -> Phase {
     match entry.readiness {
-        RegistryReadiness::Ready => Phase::Available,
+        // Ready on this Mac, but the audit found it does not start.
+        RegistryReadiness::Ready => match &entry.status {
+            Some(RegistryStatus::BrokenUpstream { reason }) => {
+                Phase::CantRun(CantRun::BrokenUpstream(reason.clone()))
+            }
+            Some(RegistryStatus::NeedsRenoFix { reason }) => {
+                Phase::CantRun(CantRun::NeedsRenoFix(reason.clone()))
+            }
+            Some(RegistryStatus::Ok) | None => Phase::Available,
+        },
         RegistryReadiness::NeedsNode => Phase::CantRun(CantRun::NeedsNode(entry.fix.clone())),
         RegistryReadiness::NeedsUv => Phase::CantRun(CantRun::NeedsUv(entry.fix.clone())),
         RegistryReadiness::NoBuild => Phase::CantRun(CantRun::NoBuild),
@@ -549,8 +685,10 @@ fn segments(lines: &[RegistryLine], active: Filter) -> Vec<Segment> {
         count(Fit::NeedsSignIn),
         count(Fit::CantRun),
     );
-    // The sign-in segments exist only when the index says how agents sign in.
-    let known = runs + needs > 0;
+    // The sign-in segments exist only when some entry says how it signs in.
+    let known = lines
+        .iter()
+        .any(|l| !l.built_in() && l.sign_in != SignIn::Unknown);
     let mut out = vec![Segment {
         filter: Filter::All,
         count: all,
@@ -583,9 +721,16 @@ fn finding(lines: &[RegistryLine]) -> String {
         "{total} {} in the registry",
         if total == 1 { "agent" } else { "agents" }
     );
+    // The sign-in counts say something only when some entry says how it signs in.
+    let known = lines
+        .iter()
+        .any(|l| !l.built_in() && l.sign_in != SignIn::Unknown);
     for (n, what) in [
         (count(Fit::Runs), "run once added"),
-        (count(Fit::NeedsSignIn), "need a sign-in or a key"),
+        (
+            if known { count(Fit::NeedsSignIn) } else { 0 },
+            "need a sign-in or a key",
+        ),
         (count(Fit::CantRun), "can't run on this Mac"),
     ] {
         if n > 0 {
@@ -738,6 +883,10 @@ mod tests {
             adding: false,
             delisted: false,
             own: false,
+            sign_in: Vec::new(),
+            sign_in_from_probe: false,
+            status: None,
+            checked_version: None,
         }
     }
 
@@ -923,9 +1072,9 @@ mod tests {
         assert_eq!(
             words,
             [
-                "needs uv: brew install uv",
-                "needs Node.js",
-                "no build for this Mac"
+                "needs uv: brew install uv. Add stays off until this Mac has it.",
+                "needs Node.js. Add stays off until this Mac has it.",
+                "no build for this Mac. Add stays off until this Mac has it."
             ]
         );
         let cant = build(&state, &data, Filter::CantRun, "", NOW).unwrap();
@@ -946,6 +1095,7 @@ mod tests {
         // With the facts, all four segments and the finding of the brief.
         let line = |id: &str, sign_in: SignIn, cant: bool| {
             let mut l = line_of(&state, &entry(id, id), NOW).unwrap();
+            l.runs_once = sign_in == SignIn::Nothing;
             l.sign_in = sign_in;
             if cant {
                 l.phase = Phase::CantRun(CantRun::NoBuild);
@@ -958,6 +1108,7 @@ mod tests {
             line("c", SignIn::Terminal("c login".into()), false),
             line("d", SignIn::Browser, false),
             line("e", SignIn::Unknown, true),
+            line("f", SignIn::Unknown, false),
         ];
         let labels: Vec<String> = segments(&lines, Filter::NeedsSignIn)
             .iter()
@@ -966,15 +1117,15 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "All 5",
+                "All 6",
                 "Runs once added 1",
-                "Needs a sign-in 3",
+                "Needs a sign-in 4",
                 "Can't run here 1"
             ]
         );
         assert_eq!(
             finding(&lines),
-            "5 agents in the registry \u{b7} 1 run once added \u{b7} 3 need a sign-in or a key \u{b7} 1 can't run on this Mac"
+            "6 agents in the registry \u{b7} 1 run once added \u{b7} 4 need a sign-in or a key \u{b7} 1 can't run on this Mac"
         );
     }
 
@@ -1154,12 +1305,228 @@ mod tests {
         assert_eq!(two(SignIn::Browser).control, Control::SignInBrowser);
         // Before the agent says how it signs in, step 2 says so and offers nothing.
         let unknown = two(SignIn::Unknown);
-        assert!(unknown.detail.contains("once it is added") && !unknown.enabled);
+        assert!(unknown.detail.contains("known after it's added") && !unknown.enabled);
     }
 
     #[test]
-    fn the_index_entry_alone_never_claims_a_sign_in_kind() {
-        assert_eq!(sign_in_of(&entry("a", "A")), SignIn::Unknown);
+    fn an_entry_without_sign_in_facts_is_unknown_and_never_claims_a_kind() {
+        let e = entry("a", "A");
+        assert_eq!(sign_in_of(&e), SignIn::Unknown);
+        assert!(!runs_once_added(&e));
+        let line = line_of(&with_registry(), &e, NOW).unwrap();
+        assert_eq!(line.needs, "sign-in known after it's added");
+    }
+
+    fn with_sign_in(id: &str, ways: Vec<RegistrySignInOption>) -> RegistryEntry {
+        RegistryEntry {
+            sign_in: ways,
+            ..entry(id, id)
+        }
+    }
+
+    #[test]
+    fn the_first_sign_in_option_decides_the_kind_and_the_needs_column() {
+        let needs = |ways: Vec<RegistrySignInOption>| {
+            let e = with_sign_in("a", ways);
+            let line = line_of(&with_registry(), &e, NOW).unwrap();
+            (line.sign_in, line.needs)
+        };
+        let terminal = RegistrySignInOption::Terminal {
+            command: "auggie login".into(),
+        };
+        let env = RegistrySignInOption::Env {
+            vars: vec!["ANTHROPIC_API_KEY".into()],
+        };
+        assert_eq!(
+            needs(vec![terminal.clone(), env.clone()]),
+            (
+                SignIn::Terminal("auggie login".into()),
+                "then run `auggie login` in Terminal".to_owned()
+            )
+        );
+        assert_eq!(needs(vec![env]).1, "needs a key \u{b7} ANTHROPIC_API_KEY");
+        assert_eq!(
+            needs(vec![RegistrySignInOption::Browser {
+                methods: vec!["oauth".into()]
+            }])
+            .1,
+            "then signs in in your browser"
+        );
+        assert_eq!(needs(vec![RegistrySignInOption::None]).1, "no sign-in");
+        let long = "keys in fast-agent.secrets.yaml, or the provider's environment variables";
+        let setup = needs(vec![RegistrySignInOption::Setup { text: long.into() }]).1;
+        assert!(
+            setup.chars().count() <= 48 && setup.ends_with('\u{2026}'),
+            "{setup}"
+        );
+    }
+
+    #[test]
+    fn runs_once_added_means_exactly_none_and_unknown_counts_as_needing_a_sign_in() {
+        let state = with_registry();
+        let data = listing(vec![
+            with_sign_in("a", vec![RegistrySignInOption::None]),
+            with_sign_in(
+                "b",
+                vec![
+                    RegistrySignInOption::None,
+                    RegistrySignInOption::Env {
+                        vars: vec!["K".into()],
+                    },
+                ],
+            ),
+            with_sign_in(
+                "c",
+                vec![RegistrySignInOption::Terminal {
+                    command: "c login".into(),
+                }],
+            ),
+            entry("d", "d"),
+            RegistryEntry {
+                readiness: RegistryReadiness::NeedsUv,
+                ..with_sign_in("e", vec![RegistrySignInOption::None])
+            },
+        ]);
+        let v = view(&state, &data);
+        let labels: Vec<String> = v.segments.iter().map(Segment::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "All 5",
+                "Runs once added 1",
+                "Needs a sign-in 3",
+                "Can't run here 1"
+            ]
+        );
+        let runs = build(&state, &data, Filter::RunsOnceAdded, "", NOW).unwrap();
+        assert_eq!(names(&runs), ["a"]);
+        let needs = build(&state, &data, Filter::NeedsSignIn, "", NOW).unwrap();
+        assert_eq!(names(&needs), ["b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_broken_or_unfixed_agent_cannot_run_here_and_says_why() {
+        let state = with_registry();
+        let broken = RegistryEntry {
+            status: Some(RegistryStatus::BrokenUpstream {
+                reason: "exits before initialize".into(),
+            }),
+            ..with_sign_in("vt", vec![RegistrySignInOption::None])
+        };
+        let fix = RegistryEntry {
+            status: Some(RegistryStatus::NeedsRenoFix {
+                reason: "needs a start Reno does not do yet".into(),
+            }),
+            ..entry("amp", "amp")
+        };
+        let ok = RegistryEntry {
+            status: Some(RegistryStatus::Ok),
+            ..entry("ok", "ok")
+        };
+        let v = view(&state, &listing(vec![broken, fix, ok]));
+        let line = |name: &str| v.lines.iter().find(|l| l.name == name).unwrap();
+        assert_eq!(line("vt").needs, "broken upstream \u{2014} can't start");
+        assert_eq!(
+            line("vt").cant_run.as_deref(),
+            Some(
+                "broken upstream \u{2014} can't start. exits before initialize. Add stays off until a new version is published."
+            )
+        );
+        assert!(line("vt").steps.is_empty());
+        assert_eq!(
+            line("amp").cant_run.as_deref(),
+            Some(
+                "needs a Reno fix \u{2014} can't start yet. needs a start Reno does not do yet. Add stays off until Reno is fixed."
+            )
+        );
+        assert!(matches!(line("ok").phase, Phase::Available));
+        assert!(
+            v.finding.contains("2 can't run on this Mac"),
+            "{}",
+            v.finding
+        );
+        // A readiness fault wins over the status, with its own words.
+        let both = RegistryEntry {
+            readiness: RegistryReadiness::NeedsUv,
+            fix: Some("brew install uv".into()),
+            status: Some(RegistryStatus::BrokenUpstream { reason: "x".into() }),
+            ..entry("b", "b")
+        };
+        let v = view(&state, &listing(vec![both]));
+        assert_eq!(
+            v.lines[0].cant_run.as_deref(),
+            Some("needs uv: brew install uv. Add stays off until this Mac has it.")
+        );
+    }
+
+    #[test]
+    fn the_version_the_facts_were_checked_on_is_said_in_the_facts() {
+        let state = with_registry();
+        let e = RegistryEntry {
+            checked_version: Some("3.0.74".into()),
+            ..with_sign_in(
+                "cline",
+                vec![RegistrySignInOption::Browser {
+                    methods: vec!["cline".into()],
+                }],
+            )
+        };
+        let line = line_of(&state, &e, NOW).unwrap();
+        let fact = line.facts.iter().find(|f| f.key == "Sign-in").unwrap();
+        assert_eq!(
+            fact.value,
+            "then signs in in your browser (checked on 3.0.74)"
+        );
+        let plain = line_of(&state, &entry("x", "x"), NOW).unwrap();
+        assert!(plain.facts.iter().all(|f| f.key != "Sign-in"));
+    }
+
+    #[test]
+    fn an_added_agents_own_auth_methods_win_over_the_entry() {
+        use reno_proto::AuthMethod;
+        let method = |id: &str, kind, command: Option<&str>, vars: &[&str]| AuthMethod {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+            kind,
+            vars: vars.iter().map(|v| (*v).to_owned()).collect(),
+            link: None,
+            command: command.map(str::to_owned),
+            unusable: None,
+        };
+        let e = with_sign_in("a", vec![RegistrySignInOption::None]);
+        assert_eq!(choices_of(Some(&e), &[]), [SignInChoice::Nothing]);
+        assert!(choices_of(Some(&entry("a", "a")), &[]).is_empty());
+        let methods = [
+            method(
+                "login",
+                AuthMethodKind::Terminal,
+                Some("x login --pro"),
+                &[],
+            ),
+            method("web", AuthMethodKind::Agent, None, &[]),
+            method("key", AuthMethodKind::EnvVar, None, &["X_KEY"]),
+            AuthMethod {
+                unusable: Some("needs a tty".into()),
+                ..method("tty", AuthMethodKind::Agent, None, &[])
+            },
+        ];
+        assert_eq!(
+            choices_of(Some(&e), &methods),
+            [
+                SignInChoice::Terminal {
+                    command: "x login --pro".into()
+                },
+                SignInChoice::Browser {
+                    method: Some("web".into()),
+                    name: Some("web".into())
+                },
+                SignInChoice::Keys {
+                    vars: vec!["X_KEY".into()],
+                    link: None
+                },
+            ]
+        );
     }
 
     #[test]

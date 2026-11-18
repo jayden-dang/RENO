@@ -280,6 +280,9 @@ pub(crate) struct RegistryRow {
     pub(crate) note: RegistryNote,
     /// A run on it is queued or live: the daemon refuses Remove.
     pub(crate) remove_blocked: bool,
+    /// How the opened line offers to sign in: the agent's own `authMethods` once a full probe
+    /// has listed them, else the first `signIn` option of its registry entry; empty while unknown.
+    pub(crate) choices: Vec<super::registry::SignInChoice>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -682,6 +685,7 @@ fn row(info: &ExecutorInfo, ctx: Ctx<'_>) -> ExecutorRow {
             _ => RegistryNote::FromRegistry,
         },
         remove_blocked: ctx.busy.contains(id),
+        choices: super::registry::choices_of(entry, &info.auth_methods),
     });
     let need = need_of(health);
     let maintenance = info.maintenance.as_ref().filter(|_| ctx.maintain);
@@ -773,11 +777,21 @@ fn row(info: &ExecutorInfo, ctx: Ctx<'_>) -> ExecutorRow {
         && !busy
         && updater.is_some()
         && ((update_known && !auto_on) || need == Some(Need::Update) || registry_update);
+    // A registry agent signs in with its own command, not the generic one of the maintenance
+    // record.
+    let own_command = registry.as_ref().and_then(|r| {
+        r.choices.iter().find_map(|c| match c {
+            super::registry::SignInChoice::Terminal { command } => Some(command.clone()),
+            _ => None,
+        })
+    });
     let sign_in = (need == Some(Need::SignIn) && !busy)
         .then(|| {
-            maintenance
-                .and_then(|m| m.sign_in.as_ref())
-                .map(|s| s.command.clone())
+            own_command.or_else(|| {
+                maintenance
+                    .and_then(|m| m.sign_in.as_ref())
+                    .map(|s| s.command.clone())
+            })
         })
         .flatten();
     let dot = if job.as_ref().is_some_and(JobView::running) {
@@ -2248,6 +2262,10 @@ mod roster_tests {
             adding: false,
             delisted: false,
             own: false,
+            sign_in: Vec::new(),
+            sign_in_from_probe: false,
+            status: None,
+            checked_version: None,
         }
     }
 

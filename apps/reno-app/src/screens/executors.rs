@@ -235,18 +235,25 @@ impl ExecutorsScreen {
 
     /// Probes the executors that had a command in Terminal, and stops waiting for them.
     pub(crate) fn check_back(&mut self, cx: &mut Context<Self>) {
-        for id in std::mem::take(&mut self.terminal) {
-            if let Ok(id) = id.parse::<ExecutorId>() {
-                self.store
-                    .update(cx, |store, cx| store.recheck_after_sign_in(id, cx));
-            }
+        // What the person ran in Terminal from a line, and what a sign-in sent them to.
+        let mut ids: std::collections::BTreeSet<ExecutorId> = std::mem::take(&mut self.terminal)
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        ids.extend(
+            self.store
+                .update(cx, |store, _| store.take_signin_terminals()),
+        );
+        for id in ids {
+            self.store
+                .update(cx, |store, cx| store.recheck_after_sign_in(id, cx));
         }
         cx.notify();
     }
 
     /// The window came back to the front: look again at what the person did in Terminal.
     pub(crate) fn on_window_activated(&mut self, cx: &mut Context<Self>) {
-        if !self.terminal.is_empty() {
+        if !self.terminal.is_empty() || self.store.read(cx).waiting_on_signin_terminal() {
             self.check_back(cx);
         }
     }

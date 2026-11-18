@@ -1243,7 +1243,7 @@ fn the_registry_group_lists_what_can_be_added_after_the_roster(cx: &mut TestAppC
     assert_eq!(view.count, 5);
     assert_eq!(
         view.finding,
-        "5 agents in the registry \u{b7} 3 can't run on this Mac"
+        "5 agents in the registry \u{b7} 1 need a sign-in or a key \u{b7} 4 can't run on this Mac"
     );
     assert_eq!(view.checked.as_deref(), Some("registry checked just now"));
     for id in ["claude-acp", "codex-acp", "devin"] {
@@ -1297,7 +1297,7 @@ fn search_and_the_filter_narrow_the_list_and_nothing_matches_says_so(cx: &mut Te
     let view = registry_of(vcx, &root).unwrap();
     assert_eq!(
         line_names(&view),
-        ["fast-agent", "Gemini CLI", "Windows Only"]
+        ["fast-agent", "Gemini CLI", "VT Code", "Windows Only"]
     );
     assert!(
         view.segments
@@ -1344,7 +1344,10 @@ fn an_opened_line_shows_the_facts_and_the_three_steps_and_cannot_run_shows_why(
         .into_iter()
         .find(|l| l.id == "fast-agent")
         .unwrap();
-    assert_eq!(line.cant_run.as_deref(), Some("needs uv: brew install uv"));
+    assert_eq!(
+        line.cant_run.as_deref(),
+        Some("needs uv: brew install uv. Add stays off until this Mac has it.")
+    );
 }
 
 #[gpui::test]
@@ -1495,6 +1498,8 @@ fn the_keys_editor_reads_and_saves_an_agents_environment_and_never_shows_it_else
     wait_registry(vcx);
     click(vcx, "line-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "env-card-acp.cline"));
+    // Its environment is read once; typing before that would be overwritten by the answer.
+    wait_drawn(vcx, |vcx| !painted(vcx, "env-status-acp.cline"));
     let field = root.read_with(vcx, |r, cx| {
         r.executors().read(cx).env_field("cline").cloned()
     });
@@ -1568,35 +1573,209 @@ fn an_added_agent_that_needs_a_sign_in_opens_terminal_with_its_own_command_throu
     let recording = Rc::new(crate::terminal::fake::Recording::default());
     vcx.update(|_, cx| crate::terminal::install(cx, recording.clone()));
     wait_registry(vcx);
-    // The agent said it is signed out, and the daemon has its command.
+    // The agent offers a terminal method (its `authMethods`); the daemon's generic maintenance
+    // step says another command, which must not be the one that runs.
     let mut list = store.read_with(vcx, |s, _| s.state().executors().to_vec());
-    let cline = list
+    let old = list
         .iter_mut()
-        .find(|e| e.descriptor.id.as_str() == "acp.cline")
+        .find(|e| e.descriptor.id.as_str() == "acp.old-agent")
         .unwrap();
-    cline.health.as_mut().unwrap().signed_in = reno_proto::SignedIn::No {
-        hint: "run `cline auth`".into(),
+    old.health.as_mut().unwrap().signed_in = reno_proto::SignedIn::No {
+        hint: "run its login".into(),
     };
-    cline.maintenance.as_mut().unwrap().sign_in = Some(reno_proto::PersonStep {
+    old.maintenance.as_mut().unwrap().sign_in = Some(reno_proto::PersonStep {
         label: "Sign in".into(),
-        command: "cline auth".into(),
+        command: "generic login".into(),
     });
     daemon(vcx, &store).set_executors(list);
-    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-acp.cline"));
-    assert_eq!(row_of(vcx, &root, "acp.cline").group, Group::NeedsYou);
-    click(vcx, "sign-in-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-acp.old-agent"));
+    assert_eq!(row_of(vcx, &root, "acp.old-agent").group, Group::NeedsYou);
+    click(vcx, "sign-in-acp.old-agent");
+    let own = "/fake/agents/old-agent/bin login".to_owned();
     assert_eq!(
         recording.opened.borrow().as_slice(),
+        [("Sign in to Old Agent".to_owned(), own.clone())]
+    );
+    // The opened line has the same step with the same command, and no browser sign-in: the
+    // agent offers none.
+    wait_drawn(vcx, |vcx| painted(vcx, "check-now-acp.old-agent"));
+    click(vcx, "wait-cancel-acp.old-agent");
+    click(vcx, "line-acp.old-agent");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "registry-open-terminal-acp.old-agent")
+    });
+    click(vcx, "registry-open-terminal-acp.old-agent");
+    assert_eq!(recording.opened.borrow().len(), 2);
+    assert_eq!(recording.opened.borrow()[1].1, own);
+    assert!(!painted(vcx, "registry-browser-signin-acp.old-agent"));
+}
+
+// --- Signing an added agent in, in the browser ---------------------------------------------------
+
+/// The Executors page with Cline's opened line, both openers recording, and its sign-in scripted.
+fn browser_signin_page(
+    cx: &mut TestAppContext,
+    script: Vec<reno_proto::SigninEvent>,
+) -> (
+    Entity<Store>,
+    &mut VisualTestContext,
+    Rc<crate::links::fake::Recording>,
+    Rc<crate::terminal::fake::Recording>,
+) {
+    let (store, _root, vcx) = registry_page(cx, registry_config(60));
+    let pages = Rc::new(crate::links::fake::Recording::default());
+    let terminals = Rc::new(crate::terminal::fake::Recording::default());
+    vcx.update(|_, cx| {
+        crate::links::install(cx, pages.clone());
+        crate::terminal::install(cx, terminals.clone());
+    });
+    wait_registry(vcx);
+    daemon(vcx, &store).script_signin(&"acp.cline".parse().unwrap(), script);
+    click(vcx, "line-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-browser-signin-acp.cline"));
+    (store, vcx, pages, terminals)
+}
+
+fn cline() -> reno_proto::ExecutorId {
+    "acp.cline".parse().unwrap()
+}
+
+#[gpui::test]
+fn browser_sign_in_opens_the_page_shows_the_code_and_ends_signed_in(cx: &mut TestAppContext) {
+    use reno_proto::SigninEvent;
+    let (store, vcx, pages, terminals) = browser_signin_page(
+        cx,
+        vec![
+            SigninEvent::Page {
+                url: "https://example.com/device".into(),
+            },
+            SigninEvent::Output {
+                line: "Your code: ABCD-1234".into(),
+            },
+        ],
+    );
+    click(vcx, "registry-browser-signin-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-signin-lines-acp.cline"));
+    // The page went to the opener, the code is on the line, and the button became Cancel.
+    assert_eq!(
+        pages.opened.borrow().as_slice(),
+        ["https://example.com/device"]
+    );
+    assert!(painted(vcx, "registry-browser-cancel-acp.cline"));
+    assert!(!painted(vcx, "registry-browser-signin-acp.cline"));
+    assert!(store.read_with(vcx, |s, _| {
+        s.signin(&cline())
+            .is_some_and(|v| v.running() && v.lines == ["Your code: ABCD-1234"])
+    }));
+    // The agent's own first method was asked for by name.
+    assert_eq!(
+        daemon(vcx, &store).signins_started(),
+        [(cline(), Some("browser".to_owned()))]
+    );
+    assert!(terminals.opened.borrow().is_empty());
+    assert!(daemon(vcx, &store).finish_signin(&cline(), true, None));
+    wait_drawn(vcx, |vcx| {
+        toasts(vcx).iter().any(|m| m == "Cline signed in")
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-browser-signin-acp.cline"));
+    assert!(!painted(vcx, "registry-signin-lines-acp.cline"));
+    assert!(store.read_with(vcx, |s, _| s.signin(&cline()).is_none()));
+}
+
+#[gpui::test]
+fn browser_sign_in_never_opens_a_page_that_is_not_a_web_link(cx: &mut TestAppContext) {
+    use reno_proto::SigninEvent;
+    let (store, vcx, pages, _terminals) = browser_signin_page(
+        cx,
+        vec![
+            SigninEvent::Page {
+                url: "file:///Applications/Calculator.app".into(),
+            },
+            SigninEvent::Output {
+                line: "still going".into(),
+            },
+        ],
+    );
+    click(vcx, "registry-browser-signin-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-signin-lines-acp.cline"));
+    assert!(pages.opened.borrow().is_empty());
+    assert!(store.read_with(vcx, |s, _| s.signin(&cline()).is_some_and(|v| !v.page)));
+}
+
+#[gpui::test]
+fn browser_sign_in_that_needs_a_terminal_opens_it_with_the_command_and_says_so(
+    cx: &mut TestAppContext,
+) {
+    use reno_proto::SigninEvent;
+    let (_store, vcx, pages, terminals) = browser_signin_page(
+        cx,
+        vec![
+            SigninEvent::NeedsTerminal {
+                command: "cline auth".into(),
+            },
+            SigninEvent::Done {
+                signed_in: false,
+                message: Some("Finish signing in in Terminal.".into()),
+            },
+        ],
+    );
+    click(vcx, "registry-browser-signin-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-signin-failed-acp.cline"));
+    assert_eq!(
+        terminals.opened.borrow().as_slice(),
         [("Sign in to Cline".to_owned(), "cline auth".to_owned())]
     );
-    // The opened line has the same step, and no browser sign-in: the daemon has none.
-    wait_drawn(vcx, |vcx| painted(vcx, "check-now-acp.cline"));
-    click(vcx, "wait-cancel-acp.cline");
-    click(vcx, "line-acp.cline");
-    wait_drawn(vcx, |vcx| painted(vcx, "registry-open-terminal-acp.cline"));
-    click(vcx, "registry-open-terminal-acp.cline");
-    assert_eq!(recording.opened.borrow().len(), 2);
-    assert!(!painted(vcx, "registry-browser-signin-acp.cline"));
+    assert!(pages.opened.borrow().is_empty());
+    assert!(toasts(vcx).iter().all(|m| !m.contains("signed in")));
+    // It can be tried again: the button is back.
+    assert!(painted(vcx, "registry-browser-signin-acp.cline"));
+}
+
+#[gpui::test]
+fn a_browser_sign_in_that_fails_says_why_on_the_line(cx: &mut TestAppContext) {
+    use reno_proto::SigninEvent;
+    let (store, vcx, pages, _terminals) = browser_signin_page(
+        cx,
+        vec![
+            SigninEvent::Page {
+                url: "http://localhost:8123/cb".into(),
+            },
+            SigninEvent::Done {
+                signed_in: false,
+                message: Some("the code expired".into()),
+            },
+        ],
+    );
+    click(vcx, "registry-browser-signin-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-signin-failed-acp.cline"));
+    assert_eq!(
+        pages.opened.borrow().as_slice(),
+        ["http://localhost:8123/cb"]
+    );
+    assert!(store.read_with(vcx, |s, _| {
+        s.signin(&cline()).is_some_and(|v| {
+            v.phase == crate::store::SigninPhase::Failed("the code expired".to_owned())
+        })
+    }));
+}
+
+#[gpui::test]
+fn cancel_stops_a_browser_sign_in_and_leaves_nothing_on_the_line(cx: &mut TestAppContext) {
+    use reno_proto::SigninEvent;
+    let (store, vcx, _pages, _terminals) = browser_signin_page(
+        cx,
+        vec![SigninEvent::Output {
+            line: "Your code: WXYZ-9876".into(),
+        }],
+    );
+    click(vcx, "registry-browser-signin-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-browser-cancel-acp.cline"));
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-signin-lines-acp.cline"));
+    click(vcx, "registry-browser-cancel-acp.cline");
+    wait_drawn(vcx, |vcx| painted(vcx, "registry-browser-signin-acp.cline"));
+    assert!(store.read_with(vcx, |s, _| s.signin(&cline()).is_none()));
+    assert!(!painted(vcx, "registry-signin-failed-acp.cline"));
+    assert!(toasts(vcx).iter().all(|m| !m.contains("signed in")));
 }
 
 #[gpui::test]
