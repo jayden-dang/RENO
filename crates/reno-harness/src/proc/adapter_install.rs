@@ -299,13 +299,9 @@ pub(crate) fn is_installed_in(root: &Path, pin: &NpmPin) -> bool {
 
 /// A Reno-owned shim script materialized INSIDE a managed install dir, for SDK packages with no
 /// bin entry (`@cursor/sdk`): the shim resolves the SDK from the sibling `node_modules`. Returns
-/// the shim path when the install is complete, and `None` when it is not (nothing is installed
-/// here). Each build's shim source has its own immutable filename.
-pub(crate) fn installed_shim(pin: &NpmPin, shim_name: &str, contents: &str) -> Option<PathBuf> {
-    installed_shim_in(&adapters_root()?, pin, shim_name, contents)
-}
-
-/// [`installed_shim`] under an explicit managed root.
+/// the shim path when the install under `root` (see [`adapters_root`]) is complete, and `None`
+/// when it is not (nothing is installed here). Each build's shim source has its own immutable
+/// filename.
 pub(crate) fn installed_shim_in(
     root: &Path,
     pin: &NpmPin,
@@ -343,22 +339,10 @@ fn materialize_shim(dir: &Path, name: &str, contents: &str) -> std::io::Result<P
 }
 
 /// Like [`ensure_installed`], for a package consumed as a LIBRARY by a Reno-owned shim rather
-/// than through a bin entry. Installs the pin once (the explicit install step: a run never
-/// calls this), writes `contents` to a content-addressed sibling of `shim_name`, and returns the
-/// shim path (spawn it via [`launch_for_entry`]). The package's install scripts never run.
-pub(crate) async fn ensure_installed_shim(
-    pin: NpmPin,
-    display_name: &str,
-    shim_name: &str,
-    contents: &str,
-) -> Result<PathBuf, HarnessError> {
-    let root = adapters_root().ok_or_else(|| {
-        HarnessError::Install("cannot locate a platform data directory for managed adapters".into())
-    })?;
-    ensure_installed_shim_in(&root, find_npm(), pin, display_name, shim_name, contents).await
-}
-
-/// [`ensure_installed_shim`] under an explicit managed root and npm.
+/// than through a bin entry. Installs the pin once under `root` (the explicit install step: a
+/// run never calls this), writes `contents` to a content-addressed sibling of `shim_name`, and
+/// returns the shim path (spawn it via [`launch_for_entry`]). The package's install scripts
+/// never run. `npm` is [`find_npm`]'s answer, passed in so a test can stand its own.
 pub(crate) async fn ensure_installed_shim_in(
     root: &Path,
     npm: Option<PathBuf>,
@@ -816,10 +800,7 @@ mod shim_tests {
         assert!(matches!(error, HarnessError::NotInstalled(_)), "{error}");
 
         let failing = dir.path().join("failing-npm");
-        executable(
-            &failing,
-            "#!/bin/sh\necho 'registry down' >&2\nexit 1\n",
-        );
+        executable(&failing, "#!/bin/sh\necho 'registry down' >&2\nexit 1\n");
         let error = ensure_installed_shim_in(&root, Some(failing), pin, "Sdk", "shim.mjs", "x")
             .await
             .unwrap_err();

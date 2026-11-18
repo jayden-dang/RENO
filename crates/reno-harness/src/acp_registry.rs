@@ -126,6 +126,7 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("grok-build", "grok"),
     ("antigravity-acp", "antigravity"),
     ("pi-acp", "pi"),
+    ("cursor", "cursor"),
 ];
 
 /// The built-in harness slug for a registry id Reno drives itself.

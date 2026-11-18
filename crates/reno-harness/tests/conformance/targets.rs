@@ -13,7 +13,9 @@ use reno_harness::conformance::{
     UserConfigPlan,
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
-use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, PiExecutor, RegistryAgent};
+use reno_harness::{
+    AcpExecutor, ClaudeExecutor, CodexExecutor, CursorExecutor, PiExecutor, RegistryAgent,
+};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorId,
     HealthProbe, McpServerSpec, Question, StopReason, ToolCall,
@@ -672,6 +674,88 @@ pub(crate) fn pi_target() -> Target {
         "pi",
         Arc::new(executor),
         Profile::driver(),
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(plan)
+}
+
+// -- Cursor ------------------------------------------------------------------------------------
+
+/// Cursor over its fake shim. The SDK runs its tools with approvals ignored, so it claims full
+/// access only and the suite skips every approval case; it has no way to take an answer back, so
+/// `askQuestion` is not offered and the input case is skipped; it isolates the owner's settings
+/// by telling the SDK to load none, which the fake reports. Its conversation stores live in a
+/// temp directory of their own.
+pub(crate) fn cursor_target() -> Target {
+    let root = tempfile::tempdir().expect("a temp dir").keep();
+    let executor = CursorExecutor::new()
+        .with_executable(fixture("fake-cursor-shim.py"))
+        .with_adapters_root(root.join("adapters"));
+    let plan = Plan {
+        lifecycle: Some(
+            Scenario::new("scenario:conf-happy")
+                .expect(Expect::TextContains("conf-hello".into()))
+                .expect(Expect::ResultContains("conf-hello".into()))
+                .expect(Expect::Tool {
+                    name: "shell".into(),
+                    class: ActionClass::Command,
+                })
+                .expect(Expect::Tool {
+                    name: "edit".into(),
+                    class: ActionClass::Edit,
+                }),
+        ),
+        approval: None,
+        input: None,
+        steer: Some(Scenario::new("scenario:steer").expect(Expect::TextContains("steered".into()))),
+        cancel: Some(Scenario::new("scenario:interrupt")),
+        crash: Some(Scenario::new("scenario:conf-crash")),
+        resume: Some(
+            Scenario::new("scenario:resumed")
+                .resume_lifecycle_session()
+                .expect(Expect::TextContains("back again".into())),
+        ),
+        mcp: Some(
+            Scenario::new("scenario:mcp-config")
+                .mcp(vec![
+                    McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/reno".into(),
+                        args: vec!["mcp".into()],
+                        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+                    },
+                    McpServerSpec {
+                        name: "plugin-focus".into(),
+                        command: "/opt/focus/server".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                ])
+                .expect(Expect::TextContains(
+                    "mcp configured:reno,plugin-focus".into(),
+                )),
+        ),
+        output_schema: None,
+        mode_runs: Vec::new(),
+        unknown_frames: Some(UnknownFramePlan {
+            scenario: Scenario::new("scenario:conf-unknown")
+                .expect(Expect::ResultContains("unknown-done".into())),
+            keys: vec!["ev:hologram".into(), "tool:teleport".into()],
+        }),
+        user_config: Some(UserConfigPlan {
+            scenario: Scenario::new("scenario:user-config"),
+            isolated: vec![Expect::TextContains("user-config:isolated".into())],
+            inherited: vec![Expect::TextContains("user-config:inherited".into())],
+        }),
+    };
+    Target::new(
+        "cursor",
+        Arc::new(executor),
+        Profile {
+            asks_questions: false,
+            ..Profile::driver()
+        },
         cwd(),
         Limits::fake(),
     )

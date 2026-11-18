@@ -348,6 +348,19 @@ pub fn declaration(id: &HarnessId) -> Option<MaintenanceDecl> {
             }),
             ..none
         },
+        // Cursor is a MANAGED install, like Antigravity: Reno owns it, so none of the guesses
+        // above apply. Its runtime is the pinned `@cursor/sdk` that `Executor::install` fetches
+        // into Reno's own adapter directory (npm, scripts off); nothing of Cursor's is on the
+        // owner's PATH, and `cursor-agent` is not used. It declares NO updater and no setup
+        // recipe, so the daemon's live auto-update has nothing to run that could move the SDK
+        // past the version this build was read against: the pin moves with a Reno release (the
+        // managed job only re-runs the idempotent install). No sign-in command either: the SDK's
+        // credential is `CURSOR_API_KEY` in the daemon's environment, or a login the SDK stores
+        // itself, and Reno never starts that browser login on its own.
+        HarnessId::Cursor => MaintenanceDecl {
+            managed: true,
+            ..none
+        },
         HarnessId::Registry(_) => return None,
     })
 }
@@ -486,6 +499,23 @@ mod tests {
         assert_eq!(setup.steps[0].runner, StepRunner::Reno);
         assert_eq!(setup.steps[1].runner, StepRunner::Person);
         assert!(pi.sign_in.is_none());
+    }
+
+    #[test]
+    fn cursor_is_a_managed_install_with_no_updater_that_could_outrun_the_pin() {
+        let cursor = declaration(&HarnessId::Cursor).unwrap();
+        assert!(cursor.managed);
+        assert!(cursor.updaters.is_empty());
+        for path in ["/opt/homebrew/bin/cursor-agent", "/anywhere/node"] {
+            assert!(
+                cursor.updater_for(Some(Path::new(path))).is_none(),
+                "{path}"
+            );
+        }
+        assert!(cursor.updater_for(None).is_none());
+        // No recipe to run (the install is `Executor::install`), and no sign-in command to
+        // offer: the SDK's browser login is a person's step Reno never starts.
+        assert!(cursor.setup.is_none() && cursor.sign_in.is_none());
     }
 
     #[test]

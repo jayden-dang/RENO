@@ -286,11 +286,13 @@ impl Normalizer {
         let name = Some(string(frame, "name"))
             .filter(|n| !n.is_empty())
             .unwrap_or("tool");
-        if !known::is_known_tool(name) {
-            self.unknown.push(format!("tool:{name}"));
-        }
         let args = frame.get("args").cloned().unwrap_or(Value::Null);
         self.reply_open = false;
+        let announced = self.open.contains(&id);
+        // Counted once per call: at its start, or at its end when it never announced itself.
+        if !known::is_known_tool(name) && (string(frame, "phase") == "start" || !announced) {
+            self.unknown.push(format!("tool:{name}"));
+        }
         match string(frame, "phase") {
             "start" => {
                 self.open.insert(id.clone());
@@ -514,10 +516,7 @@ mod tests {
             map(&mut n, json!({"ev":"fatal","message":"not signed in"})).signal,
             Signal::Fatal("not signed in".into())
         );
-        assert_eq!(
-            map(&mut n, json!({"ev":"steered"})).signal,
-            Signal::Steered
-        );
+        assert_eq!(map(&mut n, json!({"ev":"steered"})).signal, Signal::Steered);
     }
 
     #[test]

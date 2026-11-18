@@ -108,6 +108,9 @@ impl Cx<'_> {
             CaseId::DenyMessage if !self.target.profile.deny_message_on_wire => {
                 Some("its wire has no place for a deny message")
             }
+            CaseId::Input if !self.target.profile.asks_questions => {
+                Some("its wire has no way to take a question's answer back")
+            }
             CaseId::Steer if caps.steering == Steering::None => Some("claims no steering"),
             CaseId::Resume if !caps.resume => Some("claims no resume"),
             CaseId::Mcp if !caps.mcp_injection => Some("claims no MCP injection"),

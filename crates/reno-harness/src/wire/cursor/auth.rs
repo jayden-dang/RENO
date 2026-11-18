@@ -87,7 +87,9 @@ pub(crate) fn credential(api_key_set: bool, file: Option<&[u8]>, now_ms: u64) ->
 /// What to tell a person whose Cursor is not signed in: the fix, naming the variable.
 pub(crate) fn sign_in_hint(credential: &Credential) -> String {
     let why = match credential {
-        Credential::ExpiredLogin => "The Cursor SDK's stored login (~/.cursor/sdk/auth.json) has expired",
+        Credential::ExpiredLogin => {
+            "The Cursor SDK's stored login (~/.cursor/sdk/auth.json) has expired"
+        }
         _ => "Cursor has no API key for its SDK",
     };
     format!(
@@ -100,9 +102,16 @@ pub(crate) fn sign_in_hint(credential: &Credential) -> String {
 /// Whether an error message from the SDK or the shim says the credential was refused.
 pub(crate) fn is_auth_failure(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    ["api key", "not authenticated", "unauthorized", "unauthenticated", "not logged in", "not connected"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "api key",
+        "not authenticated",
+        "unauthorized",
+        "unauthenticated",
+        "not logged in",
+        "not connected",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
