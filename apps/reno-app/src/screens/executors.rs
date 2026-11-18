@@ -51,6 +51,7 @@ pub(crate) struct ExecutorsScreen {
     ticking: bool,
     /// The ACP registry group: filter, search, open lines, forms and the keys editors.
     registry: RegistryUi,
+    scroll: gpui::ScrollHandle,
 }
 
 impl EventEmitter<ScreenEvent> for ExecutorsScreen {}
@@ -147,6 +148,7 @@ impl ExecutorsScreen {
             terminal: BTreeSet::new(),
             ticking: false,
             registry: RegistryUi::new(cx),
+            scroll: gpui::ScrollHandle::new(),
         }
     }
 
@@ -1436,6 +1438,10 @@ impl Render for ExecutorsScreen {
             .flex()
             .flex_col()
             .child(page::header(&theme, "Executors", trailing))
-            .child(page::column("executors-scroll").child(body))
+            .child(
+                page::column("executors-scroll")
+                    .track_scroll(&self.scroll)
+                    .child(body),
+            )
     }
 }

@@ -219,6 +219,9 @@ pub(crate) struct Store {
     /// Executors screen opens, on Refresh, after a reconnect and when a registry executor
     /// appears, goes or ends a job (ARCH-10: nothing polls).
     registry: RegistryData,
+    /// The Executors screen has been opened: the list is read as soon as a daemon with the
+    /// registry is connected, and again after a reconnect.
+    registry_wanted: bool,
     /// Registry removals in flight, by registry id.
     registry_removing: BTreeSet<String>,
     /// Why a removal was refused, shown on the agent's line until the next try.
@@ -304,6 +307,7 @@ impl Store {
             log_open: BTreeSet::new(),
             log_fetching: BTreeSet::new(),
             registry: RegistryData::default(),
+            registry_wanted: false,
             registry_removing: BTreeSet::new(),
             registry_refused: BTreeMap::new(),
             paging: BTreeSet::new(),
@@ -406,6 +410,14 @@ impl Store {
         self.socket.as_deref()
     }
 
+    /// `RENO_REGISTRY_DEMO=offline`: the fake daemon serves its cached registry copy. Does
+    /// nothing against a real daemon.
+    pub(crate) fn demo_registry_offline(&self) {
+        if let Some(fake) = &self.fake {
+            fake.set_registry_offline(true);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn fake(&self) -> Option<&Arc<FakeDaemon>> {
         self.fake.as_ref()
@@ -495,6 +507,10 @@ impl Store {
         }
         if changed.daemon {
             self.status_seen_at_ms = self.now_ms();
+            // The daemon's features are known now: a registry list that was waiting can go.
+            if self.registry_wanted && self.registry.listing.is_none() {
+                self.load_registry(false, cx);
+            }
         }
         let open_run_changed = self.open.as_ref().is_some_and(|run| {
             changed.run(run) || self.thread_run_ids(run).iter().any(|r| changed.run(r))
@@ -985,7 +1001,7 @@ impl Store {
             self.load_history(cx);
         }
         self.ensure_def_records(cx);
-        if self.registry.listing.is_some() || self.registry.failure.is_some() {
+        if self.registry_wanted {
             self.registry.fetching = false;
             self.load_registry(false, cx);
         }
@@ -1377,6 +1393,7 @@ impl Store {
 
     /// The Executors screen opened: reads the list once if it has none.
     pub(crate) fn ensure_registry(&mut self, cx: &mut Context<Self>) {
+        self.registry_wanted = true;
         if self.registry.listing.is_none() {
             self.load_registry(false, cx);
         }

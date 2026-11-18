@@ -56,6 +56,9 @@ pub(crate) enum OwnState {
 pub(super) struct RegistryUi {
     pub(super) filter: Filter,
     pub(super) search: Entity<Field>,
+    /// `RENO_REGISTRY_DEMO=signin:<kind>`: how every opened line says its agent signs in. The
+    /// index does not say yet, so this is the only way to look at steps 2 of each kind.
+    pub(super) demo_sign_in: Option<registry::SignIn>,
     /// Registry lines that are open, by registry id.
     pub(super) open: BTreeSet<String>,
     /// Added agents whose Remove is being confirmed, by executor id.
@@ -115,6 +118,7 @@ impl RegistryUi {
             .collect();
         Self {
             filter: Filter::All,
+            demo_sign_in: None,
             search,
             open: BTreeSet::new(),
             removing: BTreeSet::new(),
@@ -138,13 +142,84 @@ fn is_web_link(link: &str) -> bool {
 impl ExecutorsScreen {
     pub(crate) fn registry_view(&self, cx: &gpui::App) -> Option<RegistryView> {
         let store = self.store.read(cx);
-        registry::build(
+        let mut view = registry::build(
             store.state(),
             store.registry(),
             self.registry.filter,
             self.registry.search.read(cx).text(),
             store.now_ms(),
-        )
+        )?;
+        if let Some(sign_in) = &self.registry.demo_sign_in {
+            for line in view
+                .lines
+                .iter_mut()
+                .filter(|l| matches!(l.phase, Phase::Available))
+            {
+                line.sign_in = sign_in.clone();
+                line.steps = registry::steps_of(&line.name, sign_in, false, false);
+            }
+        }
+        Some(view)
+    }
+
+    /// Puts the registry group in a state for a screenshot: comma-separated steps like
+    /// `open:goose`, `filter:cant-run`, `search:go`, `signin:terminal|browser|keys|nothing`,
+    /// `add:goose`, `remove:acp.cline`, `expand:acp.cline`, `offline` and `own`.
+    pub(crate) fn registry_demo(&mut self, script: &str, cx: &mut Context<Self>) {
+        for step in script.split(',') {
+            let (verb, arg) = step.split_once(':').unwrap_or((step, ""));
+            match verb {
+                "open" => {
+                    self.registry.open.insert(arg.to_owned());
+                }
+                "expand" => {
+                    self.expanded.insert(arg.to_owned());
+                }
+                "filter" => {
+                    self.registry.filter = [
+                        Filter::All,
+                        Filter::RunsOnceAdded,
+                        Filter::NeedsSignIn,
+                        Filter::CantRun,
+                    ]
+                    .into_iter()
+                    .find(|f| f.key() == arg)
+                    .unwrap_or(Filter::All);
+                }
+                "search" => {
+                    let text = arg.to_owned();
+                    self.registry
+                        .search
+                        .update(cx, |f, cx| f.set_text(&text, cx));
+                }
+                "signin" => {
+                    self.registry.demo_sign_in = Some(match arg {
+                        "terminal" => registry::SignIn::Terminal("auggie login".to_owned()),
+                        "browser" => registry::SignIn::Browser,
+                        "keys" => registry::SignIn::Keys(vec![
+                            "ANTHROPIC_API_KEY".to_owned(),
+                            "OPENAI_API_KEY".to_owned(),
+                        ]),
+                        _ => registry::SignIn::Nothing,
+                    });
+                }
+                "add" => self.add_registry_agent(arg, cx),
+                "remove" => self.ask_remove(arg, cx),
+                "offline" => {
+                    self.store.read(cx).demo_registry_offline();
+                    self.refresh_registry(cx);
+                }
+                "own" => self.registry.own_open = true,
+                "scroll" if arg == "end" => self.scroll.scroll_to_bottom(),
+                "scroll" => {
+                    if let Ok(y) = arg.parse::<f32>() {
+                        self.scroll.set_offset(gpui::point(px(0.0), px(-y)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        cx.notify();
     }
 
     /// The screen was opened: read the registry once.
@@ -1069,7 +1144,7 @@ impl ExecutorsScreen {
                 .child(
                     mono(command.clone())
                         .ml(px(46.0))
-                        .mt(px(-6.0))
+                        .mt(px(6.0))
                         .px(px(8.0))
                         .py(px(3.0))
                         .rounded(px(5.0))
@@ -1341,6 +1416,7 @@ impl ExecutorsScreen {
                     move || format!("remove-dialog-{executor}")
                 })
                 .role(gpui::Role::AlertDialog)
+                .px(px(8.0))
                 .aria_label(SharedString::from(words.clone()))
                 .flex_1()
                 .min_w_0()
@@ -1422,7 +1498,7 @@ impl ExecutorsScreen {
                     .child(
                         mono(command)
                             .ml(px(46.0))
-                            .mt(px(-6.0))
+                            .mt(px(6.0))
                             .px(px(8.0))
                             .py(px(3.0))
                             .rounded(px(5.0))
