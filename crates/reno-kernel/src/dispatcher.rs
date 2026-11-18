@@ -1045,7 +1045,7 @@ async fn conclude(
     .await
     {
         Ok(_) => {
-            workspaces::run_ended(shared, run);
+            workspaces::run_ended(shared, run).await;
             let done = ExecEvent::Done {
                 stop,
                 result: None,

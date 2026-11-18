@@ -719,7 +719,8 @@ expression: protocol_schema()
     "run.configure",
     "executor.maintain",
     "run.changes",
-    "executor.usage"
+    "executor.usage",
+    "threads"
   ],
   "methods": [
     {
@@ -947,6 +948,10 @@ expression: protocol_schema()
           "ExecutorId": {
             "pattern": "^[A-Za-z0-9._-]{1,64}$",
             "type": "string"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1016,6 +1021,17 @@ expression: protocol_schema()
           "prompt": {
             "description": "The task prompt.",
             "type": "string"
+          },
+          "threadId": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ThreadId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Continue this thread: the run works in the thread's worktree on its branch, so it sees\nwhat the thread's earlier runs committed, and its `cwd` is the thread's. Refused\n(`Conflict`) while a run of the thread is live (send to it instead, which steers), and for\na thread whose worktree was removed. Absent: a new thread. Needs feature `threads`."
           }
         },
         "required": [
@@ -1436,6 +1452,10 @@ expression: protocol_schema()
                 "type": "string"
               }
             ]
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1455,12 +1475,745 @@ expression: protocol_schema()
           "runId": {
             "$ref": "#/$defs/RunId",
             "description": "The new run."
+          },
+          "threadId": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ThreadId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The thread the run belongs to: the one it continues, or the new one. Absent from\ndaemons that predate threads."
           }
         },
         "required": [
           "runId"
         ],
         "title": "TaskRunResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "thread.list",
+      "params": {
+        "$defs": {
+          "ThreadStatus": {
+            "description": "Where a thread stands.",
+            "oneOf": [
+              {
+                "const": "active",
+                "description": "One of its runs is queued or live.",
+                "type": "string"
+              },
+              {
+                "const": "idle",
+                "description": "No run is live; a follow-up may continue it. It closes by itself after the idle limit.",
+                "type": "string"
+              },
+              {
+                "const": "closed",
+                "description": "A person closed it, or it sat idle for the limit, and its worktree was released (or kept\nfor the work it holds). A follow-up may still reopen a closed thread whose worktree was\nkept; one whose worktree was removed is refused.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `thread.list`.",
+        "properties": {
+          "status": {
+            "description": "Only threads in one of these statuses; every thread when absent.",
+            "items": {
+              "$ref": "#/$defs/ThreadStatus"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "ThreadListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadInfo": {
+            "description": "One thread.",
+            "properties": {
+              "baseSha": {
+                "description": "The commit the branch was cut from.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "description": "The branch, `reno/<thread id>` (a thread of an older run keeps that run's branch name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAtMs": {
+                "description": "When it was created.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cwd": {
+                "description": "The working directory its first run asked for; a follow-up uses it too.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "idleExpiresAtMs": {
+                "description": "When an idle thread closes by itself. Absent unless the thread is idle.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project: the root of the repository the worktree was cut from. Absent while the\nthread has no worktree.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runs": {
+                "description": "Its runs, oldest first.",
+                "items": {
+                  "$ref": "#/$defs/ThreadRun"
+                },
+                "type": "array"
+              },
+              "status": {
+                "$ref": "#/$defs/ThreadStatus",
+                "description": "Where it stands."
+              },
+              "threadId": {
+                "$ref": "#/$defs/ThreadId",
+                "description": "The thread."
+              },
+              "updatedAtMs": {
+                "description": "When it last changed: a run was added, or its last run ended.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "workspace": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Where the worktree stands, when there is one."
+              },
+              "worktree": {
+                "description": "The worktree's root. Absent for a thread with no worktree.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "threadId",
+              "status",
+              "runs",
+              "createdAtMs",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          },
+          "ThreadRun": {
+            "description": "One run of a thread.",
+            "properties": {
+              "parentRun": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run it follows, when it is a follow-up: the thread's previous run."
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              },
+              "startSha": {
+                "description": "The commit the branch stood at when the run started. A run is judged by what it changed\nsince then (`workspace.diff` with scope `run`, and the protected-path guard). Absent for\na run with no worktree and for a run that has not started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "runId"
+            ],
+            "type": "object"
+          },
+          "ThreadStatus": {
+            "description": "Where a thread stands.",
+            "oneOf": [
+              {
+                "const": "active",
+                "description": "One of its runs is queued or live.",
+                "type": "string"
+              },
+              {
+                "const": "idle",
+                "description": "No run is live; a follow-up may continue it. It closes by itself after the idle limit.",
+                "type": "string"
+              },
+              {
+                "const": "closed",
+                "description": "A person closed it, or it sat idle for the limit, and its worktree was released (or kept\nfor the work it holds). A follow-up may still reopen a closed thread whose worktree was\nkept; one whose worktree was removed is refused.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `thread.list`.",
+        "properties": {
+          "threads": {
+            "description": "The threads, most recently changed first.",
+            "items": {
+              "$ref": "#/$defs/ThreadInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "threads"
+        ],
+        "title": "ThreadListResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "thread.get",
+      "params": {
+        "$defs": {
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `thread.get`.",
+        "properties": {
+          "threadId": {
+            "$ref": "#/$defs/ThreadId",
+            "description": "The thread."
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadGetParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadRun": {
+            "description": "One run of a thread.",
+            "properties": {
+              "parentRun": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run it follows, when it is a follow-up: the thread's previous run."
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              },
+              "startSha": {
+                "description": "The commit the branch stood at when the run started. A run is judged by what it changed\nsince then (`workspace.diff` with scope `run`, and the protected-path guard). Absent for\na run with no worktree and for a run that has not started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "runId"
+            ],
+            "type": "object"
+          },
+          "ThreadStatus": {
+            "description": "Where a thread stands.",
+            "oneOf": [
+              {
+                "const": "active",
+                "description": "One of its runs is queued or live.",
+                "type": "string"
+              },
+              {
+                "const": "idle",
+                "description": "No run is live; a follow-up may continue it. It closes by itself after the idle limit.",
+                "type": "string"
+              },
+              {
+                "const": "closed",
+                "description": "A person closed it, or it sat idle for the limit, and its worktree was released (or kept\nfor the work it holds). A follow-up may still reopen a closed thread whose worktree was\nkept; one whose worktree was removed is refused.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One thread.",
+        "properties": {
+          "baseSha": {
+            "description": "The commit the branch was cut from.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "description": "The branch, `reno/<thread id>` (a thread of an older run keeps that run's branch name).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtMs": {
+            "description": "When it was created.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cwd": {
+            "description": "The working directory its first run asked for; a follow-up uses it too.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idleExpiresAtMs": {
+            "description": "When an idle thread closes by itself. Absent unless the thread is idle.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "The project: the root of the repository the worktree was cut from. Absent while the\nthread has no worktree.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runs": {
+            "description": "Its runs, oldest first.",
+            "items": {
+              "$ref": "#/$defs/ThreadRun"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/$defs/ThreadStatus",
+            "description": "Where it stands."
+          },
+          "threadId": {
+            "$ref": "#/$defs/ThreadId",
+            "description": "The thread."
+          },
+          "updatedAtMs": {
+            "description": "When it last changed: a run was added, or its last run ended.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WorkspaceStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the worktree stands, when there is one."
+          },
+          "worktree": {
+            "description": "The worktree's root. Absent for a thread with no worktree.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "threadId",
+          "status",
+          "runs",
+          "createdAtMs",
+          "updatedAtMs"
+        ],
+        "title": "ThreadInfo",
+        "type": "object"
+      }
+    },
+    {
+      "name": "thread.close",
+      "params": {
+        "$defs": {
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `thread.close`.",
+        "properties": {
+          "force": {
+            "default": false,
+            "description": "Remove the worktree even when it holds unmerged commits or uncommitted changes, deleting\nits branch. The only way to lose work.",
+            "type": "boolean"
+          },
+          "threadId": {
+            "$ref": "#/$defs/ThreadId",
+            "description": "The thread to close."
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadCloseParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "CleanOutcome": {
+            "description": "What `workspace.clean` did with one workspace.",
+            "oneOf": [
+              {
+                "const": "removed",
+                "description": "The worktree and the branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Left as it was: see `reason`.",
+                "type": "string"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadInfo": {
+            "description": "One thread.",
+            "properties": {
+              "baseSha": {
+                "description": "The commit the branch was cut from.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "description": "The branch, `reno/<thread id>` (a thread of an older run keeps that run's branch name).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAtMs": {
+                "description": "When it was created.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "cwd": {
+                "description": "The working directory its first run asked for; a follow-up uses it too.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "idleExpiresAtMs": {
+                "description": "When an idle thread closes by itself. Absent unless the thread is idle.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "project": {
+                "description": "The project: the root of the repository the worktree was cut from. Absent while the\nthread has no worktree.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "runs": {
+                "description": "Its runs, oldest first.",
+                "items": {
+                  "$ref": "#/$defs/ThreadRun"
+                },
+                "type": "array"
+              },
+              "status": {
+                "$ref": "#/$defs/ThreadStatus",
+                "description": "Where it stands."
+              },
+              "threadId": {
+                "$ref": "#/$defs/ThreadId",
+                "description": "The thread."
+              },
+              "updatedAtMs": {
+                "description": "When it last changed: a run was added, or its last run ended.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "workspace": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WorkspaceStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Where the worktree stands, when there is one."
+              },
+              "worktree": {
+                "description": "The worktree's root. Absent for a thread with no worktree.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "threadId",
+              "status",
+              "runs",
+              "createdAtMs",
+              "updatedAtMs"
+            ],
+            "type": "object"
+          },
+          "ThreadRun": {
+            "description": "One run of a thread.",
+            "properties": {
+              "parentRun": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run it follows, when it is a follow-up: the thread's previous run."
+              },
+              "runId": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run."
+              },
+              "startSha": {
+                "description": "The commit the branch stood at when the run started. A run is judged by what it changed\nsince then (`workspace.diff` with scope `run`, and the protected-path guard). Absent for\na run with no worktree and for a run that has not started.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "runId"
+            ],
+            "type": "object"
+          },
+          "ThreadStatus": {
+            "description": "Where a thread stands.",
+            "oneOf": [
+              {
+                "const": "active",
+                "description": "One of its runs is queued or live.",
+                "type": "string"
+              },
+              {
+                "const": "idle",
+                "description": "No run is live; a follow-up may continue it. It closes by itself after the idle limit.",
+                "type": "string"
+              },
+              {
+                "const": "closed",
+                "description": "A person closed it, or it sat idle for the limit, and its worktree was released (or kept\nfor the work it holds). A follow-up may still reopen a closed thread whose worktree was\nkept; one whose worktree was removed is refused.",
+                "type": "string"
+              }
+            ]
+          },
+          "WorkspaceStatus": {
+            "description": "Where a workspace stands.",
+            "oneOf": [
+              {
+                "const": "preparing",
+                "description": "Recorded, and being created. A workspace found in this state at start-up is a crash\nleftover and is reconciled.",
+                "type": "string"
+              },
+              {
+                "const": "active",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
+                "type": "string"
+              },
+              {
+                "const": "kept",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
+                "type": "string"
+              },
+              {
+                "const": "removed",
+                "description": "Its worktree and branch were removed.",
+                "type": "string"
+              },
+              {
+                "const": "lost",
+                "description": "Its directory vanished and was pruned; the branch may remain.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `thread.close`.",
+        "properties": {
+          "reason": {
+            "description": "Why the worktree was kept, in words.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread": {
+            "$ref": "#/$defs/ThreadInfo",
+            "description": "The thread, closed."
+          },
+          "workspace": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CleanOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What became of its worktree; absent for a thread that had none (or whose worktree was\nalready released)."
+          }
+        },
+        "required": [
+          "thread"
+        ],
+        "title": "ThreadCloseResult",
         "type": "object"
       }
     },
@@ -2884,12 +3637,27 @@ expression: protocol_schema()
               "prompt": {
                 "description": "The task prompt.",
                 "type": "string"
+              },
+              "threadId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ThreadId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Continue this thread: the run works in the thread's worktree on its branch, so it sees\nwhat the thread's earlier runs committed, and its `cwd` is the thread's. Refused\n(`Conflict`) while a run of the thread is live (send to it instead, which steers), and for\na thread whose worktree was removed. Absent: a new thread. Needs feature `threads`."
               }
             },
             "required": [
               "prompt"
             ],
             "type": "object"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
+            "type": "string"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6144,12 +6912,12 @@ expression: protocol_schema()
               },
               {
                 "const": "active",
-                "description": "Created, and its run has not ended (or may be resumed).",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
                 "type": "string"
               },
               {
                 "const": "kept",
-                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
                 "type": "string"
               },
               {
@@ -6209,14 +6977,14 @@ expression: protocol_schema()
             "type": "object"
           },
           "WorkspaceInfo": {
-            "description": "One run's workspace.",
+            "description": "One thread's workspace.",
             "properties": {
               "baseSha": {
                 "description": "The commit the branch was cut from.",
                 "type": "string"
               },
               "branch": {
-                "description": "The branch, `reno/<run id>`.",
+                "description": "The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that\nrun's own branch name).",
                 "type": "string"
               },
               "changes": {
@@ -6228,7 +6996,7 @@ expression: protocol_schema()
                     "type": "null"
                   }
                 ],
-                "description": "What it held when its run last ended."
+                "description": "What it held when it was last released or checked."
               },
               "createdAtMs": {
                 "description": "When it was recorded.",
@@ -6250,7 +7018,7 @@ expression: protocol_schema()
               },
               "runId": {
                 "$ref": "#/$defs/RunId",
-                "description": "The run it belongs to."
+                "description": "The run that made the worktree: the first run of its thread. A follow-up run of the\nthread has this same workspace."
               },
               "status": {
                 "$ref": "#/$defs/WorkspaceStatus",
@@ -6290,12 +7058,12 @@ expression: protocol_schema()
               },
               {
                 "const": "active",
-                "description": "Created, and its run has not ended (or may be resumed).",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
                 "type": "string"
               },
               {
                 "const": "kept",
-                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
                 "type": "string"
               },
               {
@@ -6388,12 +7156,12 @@ expression: protocol_schema()
               },
               {
                 "const": "active",
-                "description": "Created, and its run has not ended (or may be resumed).",
+                "description": "Created, and its thread is open: a run is working in it, or the thread is idle and may be\ncontinued by a follow-up.",
                 "type": "string"
               },
               {
                 "const": "kept",
-                "description": "Its run ended and it holds commits or uncommitted changes, so the worktree and the branch\nare kept for a later integration step.",
+                "description": "Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so\nthe worktree and the branch are kept for a later integration step.",
                 "type": "string"
               },
               {
@@ -6410,14 +7178,14 @@ expression: protocol_schema()
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "One run's workspace.",
+        "description": "One thread's workspace.",
         "properties": {
           "baseSha": {
             "description": "The commit the branch was cut from.",
             "type": "string"
           },
           "branch": {
-            "description": "The branch, `reno/<run id>`.",
+            "description": "The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that\nrun's own branch name).",
             "type": "string"
           },
           "changes": {
@@ -6429,7 +7197,7 @@ expression: protocol_schema()
                 "type": "null"
               }
             ],
-            "description": "What it held when its run last ended."
+            "description": "What it held when it was last released or checked."
           },
           "createdAtMs": {
             "description": "When it was recorded.",
@@ -6451,7 +7219,7 @@ expression: protocol_schema()
           },
           "runId": {
             "$ref": "#/$defs/RunId",
-            "description": "The run it belongs to."
+            "description": "The run that made the worktree: the first run of its thread. A follow-up run of the\nthread has this same workspace."
           },
           "status": {
             "$ref": "#/$defs/WorkspaceStatus",
@@ -6484,6 +7252,222 @@ expression: protocol_schema()
       }
     },
     {
+      "name": "workspace.diff",
+      "params": {
+        "$defs": {
+          "DiffScope": {
+            "description": "What `workspace.diff` compares.",
+            "oneOf": [
+              {
+                "description": "Everything the thread holds against its base commit: committed, staged, unstaged and\nuntracked. What the method did before threads, and the default.",
+                "properties": {
+                  "type": {
+                    "const": "thread",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "What the run changed: the worktree against the commit the branch stood at when the run\nstarted (`start_sha`). Needs feature `threads`.",
+                "properties": {
+                  "type": {
+                    "const": "run",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "One commit of the thread's branch against its parent. Needs feature `threads`.",
+                "properties": {
+                  "sha": {
+                    "description": "The commit (a hexadecimal object name, at least 7 characters).",
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "commit",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "sha"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `workspace.diff`.",
+        "properties": {
+          "path": {
+            "description": "One file (repository-relative) whose patch to return too; none: the list only.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose workspace (the worktree of its thread) to compare."
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DiffScope"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What to compare; the thread against its base commit when absent."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "WorkspaceDiffParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "ChangeKind": {
+            "description": "How a file differs from the base commit.",
+            "oneOf": [
+              {
+                "const": "added",
+                "description": "New file.",
+                "type": "string"
+              },
+              {
+                "const": "modified",
+                "description": "Changed file.",
+                "type": "string"
+              },
+              {
+                "const": "deleted",
+                "description": "Removed file.",
+                "type": "string"
+              },
+              {
+                "const": "renamed",
+                "description": "Moved, possibly edited.",
+                "type": "string"
+              }
+            ]
+          },
+          "ChangedFile": {
+            "description": "One changed file.",
+            "properties": {
+              "additions": {
+                "description": "Lines added; 0 for a binary file.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "binary": {
+                "description": "Whether git treats the file as binary (no patch).",
+                "type": "boolean"
+              },
+              "deletions": {
+                "description": "Lines removed; 0 for a binary file.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "from": {
+                "description": "The old path of a rename.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "$ref": "#/$defs/ChangeKind",
+                "description": "How it changed."
+              },
+              "path": {
+                "description": "Repository-relative path (the new one for a rename).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "kind",
+              "additions",
+              "deletions"
+            ],
+            "type": "object"
+          },
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `workspace.diff`: everything the run changed against its base commit, committed or\nnot, untracked files included. Computed on request from the worktree; empty once the\nworkspace has been removed.",
+        "properties": {
+          "baseSha": {
+            "description": "The commit the branch was cut from.",
+            "type": "string"
+          },
+          "branch": {
+            "description": "The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that\nrun's own branch name).",
+            "type": "string"
+          },
+          "commits": {
+            "description": "Commits on the branch beyond the base.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "description": "The changed files, by path.",
+            "items": {
+              "$ref": "#/$defs/ChangedFile"
+            },
+            "type": "array"
+          },
+          "patch": {
+            "description": "The patch of the requested file, cut at 256 KiB; none when no file was asked for or the\nfile is binary or unchanged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patchTruncated": {
+            "description": "Whether `patch` was cut.",
+            "type": "boolean"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run."
+          }
+        },
+        "required": [
+          "runId",
+          "branch",
+          "baseSha",
+          "commits",
+          "files"
+        ],
+        "title": "WorkspaceDiffResult",
+        "type": "object"
+      }
+    },
+    {
       "name": "workspace.clean",
       "params": {
         "$defs": {
@@ -6491,7 +7475,7 @@ expression: protocol_schema()
             "description": "Which workspaces `workspace.clean` looks at.",
             "oneOf": [
               {
-                "description": "One run's workspace.",
+                "description": "One run's workspace: the worktree of the run's thread.",
                 "properties": {
                   "runId": {
                     "$ref": "#/$defs/RunId",
@@ -6505,6 +7489,24 @@ expression: protocol_schema()
                 "required": [
                   "type",
                   "runId"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "One thread's workspace. Needs feature `threads`.",
+                "properties": {
+                  "threadId": {
+                    "$ref": "#/$defs/ThreadId",
+                    "description": "The thread."
+                  },
+                  "type": {
+                    "const": "thread",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "threadId"
                 ],
                 "type": "object"
               },
@@ -6538,6 +7540,10 @@ expression: protocol_schema()
           },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "ThreadId": {
+            "pattern": "^thr_[A-Za-z0-9]{1,64}$",
             "type": "string"
           }
         },

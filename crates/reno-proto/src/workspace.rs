@@ -2,8 +2,10 @@
 //! `workspace.get` and `workspace.clean` carry.
 //!
 //! A write run never works in the user's checkout. It works in a Reno-managed git worktree on a
-//! branch `reno/<run id>` cut from the repository's `HEAD` commit when the run was claimed. All
-//! times are milliseconds since the Unix epoch.
+//! branch `reno/<thread id>` cut from the repository's `HEAD` commit when the thread's first run
+//! was claimed. The worktree belongs to the thread (see [`crate::thread`]): a follow-up run
+//! reuses it, and it is released when the thread closes. All times are milliseconds since the
+//! Unix epoch.
 
 use std::path::PathBuf;
 
@@ -19,10 +21,11 @@ pub enum WorkspaceStatus {
     /// Recorded, and being created. A workspace found in this state at start-up is a crash
     /// leftover and is reconciled.
     Preparing,
-    /// Created, and its run has not ended (or may be resumed).
+    /// Created, and its thread is open: a run is working in it, or the thread is idle and may be
+    /// continued by a follow-up.
     Active,
-    /// Its run ended and it holds commits or uncommitted changes, so the worktree and the branch
-    /// are kept for a later integration step.
+    /// Its thread was closed (or was cleaned) while it held commits or uncommitted changes, so
+    /// the worktree and the branch are kept for a later integration step.
     Kept,
     /// Its worktree and branch were removed.
     Removed,
@@ -58,11 +61,12 @@ impl WorkspaceChanges {
     }
 }
 
-/// One run's workspace.
+/// One thread's workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceInfo {
-    /// The run it belongs to.
+    /// The run that made the worktree: the first run of its thread. A follow-up run of the
+    /// thread has this same workspace.
     pub run_id: RunId,
     /// The repository's working tree root the task targeted.
     pub repo: PathBuf,
@@ -74,13 +78,14 @@ pub struct WorkspaceInfo {
     /// root. The run's working directory is `path` joined with it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub subdir: String,
-    /// The branch, `reno/<run id>`.
+    /// The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that
+    /// run's own branch name).
     pub branch: String,
     /// The commit the branch was cut from.
     pub base_sha: String,
     /// Where it stands.
     pub status: WorkspaceStatus,
-    /// What it held when its run last ended.
+    /// What it held when it was last released or checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<WorkspaceChanges>,
     /// When it was recorded.
@@ -274,7 +279,8 @@ fn is_false(b: &bool) -> bool {
 pub struct WorkspaceDiffResult {
     /// The run.
     pub run_id: RunId,
-    /// The branch, `reno/<run id>`.
+    /// The branch, `reno/<thread id>` (the thread of a run that predates threads keeps that
+    /// run's own branch name).
     pub branch: String,
     /// The commit the branch was cut from.
     pub base_sha: String,

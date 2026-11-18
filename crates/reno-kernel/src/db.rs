@@ -113,11 +113,11 @@ impl Db {
     }
 
     pub(crate) async fn get_thread(&self, thread: &ThreadId) -> Result<Option<ThreadInfo>> {
-        Ok(self.store.get_thread(thread).await?)
+        self.store.get_thread(thread).await
     }
 
     pub(crate) async fn list_threads(&self, statuses: &[ThreadStatus]) -> Result<Vec<ThreadInfo>> {
-        Ok(self.store.list_threads(statuses).await?)
+        self.store.list_threads(statuses).await
     }
 
     pub(crate) async fn close_thread(
@@ -130,30 +130,29 @@ impl Db {
 
     pub(crate) async fn thread_went_idle(&self, run: &RunId) -> Result<()> {
         self.wrote();
-        Ok(self.store.thread_went_idle(run, self.now_ms()).await?)
+        self.store.thread_went_idle(run, self.now_ms()).await
     }
 
     pub(crate) async fn oldest_idle_since(&self) -> Result<Option<i64>> {
-        Ok(self.store.oldest_idle_since().await?)
+        self.store.oldest_idle_since().await
     }
 
     pub(crate) async fn idle_threads_since(&self, cutoff: i64) -> Result<Vec<ThreadId>> {
-        Ok(self.store.idle_threads_since(cutoff).await?)
+        self.store.idle_threads_since(cutoff).await
     }
 
     pub(crate) async fn record_start_sha(&self, run: &RunId, fence: u64, sha: &str) -> Result<()> {
         self.wrote();
-        Ok(self
-            .store
+        self.store
             .record_start_sha(run, fence, sha, self.now_ms())
-            .await?)
+            .await
     }
 
     pub(crate) async fn get_thread_workspace(
         &self,
         thread: &ThreadId,
     ) -> Result<Option<WorkspaceInfo>> {
-        Ok(self.store.get_thread_workspace(thread).await?)
+        self.store.get_thread_workspace(thread).await
     }
 
     pub(crate) async fn reroute_run(

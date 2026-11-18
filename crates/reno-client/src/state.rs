@@ -1184,7 +1184,7 @@ mod tests {
 
         // A thread missing from the next list is gone, with its runs' mapping.
         let c = s.apply(Update::Threads(vec![thread("t2", &["c"], 9)]));
-        assert!(c.threads && c.run(&run_id("a")) == false);
+        assert!(c.threads && !c.run(&run_id("a")));
         assert_eq!(s.thread_of(&run_id("a")), None);
         assert!(s.thread(&t1).is_none());
         // Only the runs the mirror knows are listed.

@@ -1014,7 +1014,8 @@ mod tests {
                 ("run_queued".into(), "thr_queued".into(), None, None),
             ]
         );
-        let threads: Vec<(String, Option<String>, Option<i64>, i64, i64)> = conn
+        type Thread = (String, Option<String>, Option<i64>, i64, i64);
+        let threads: Vec<Thread> = conn
             .prepare("SELECT id, cwd, closed_at, created_at, updated_at FROM threads ORDER BY id")
             .unwrap()
             .query_map([], |r| {

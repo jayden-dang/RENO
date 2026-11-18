@@ -169,18 +169,43 @@ async fn record_in_place(shared: &Shared, row: &RunRecord, cwd: &Path, why: InPl
 }
 
 /// A run ended: its thread's idle clock starts. The worktree stays, for the next run of the
-/// thread. Never fails the caller: a problem is logged.
+/// thread, except for a run a trigger started (see [`close_if_unattended`]). Never fails the
+/// caller: a problem is logged.
 ///
-/// It runs as a task of its own: the run's slot is freed, and its `Done` published, without
-/// waiting for a store write that only starts a clock.
-pub(crate) fn run_ended(shared: &Arc<Shared>, run: &RunId) {
-    let (task, run) = (Arc::clone(shared), run.clone());
+/// The clock starts on a task of its own: the run's slot is freed, and its `Done` published,
+/// without waiting for a store write that only starts a clock.
+pub(crate) async fn run_ended(shared: &Arc<Shared>, run: &RunId) {
+    let (task, id) = (Arc::clone(shared), run.clone());
     shared.spawn(async move {
-        if let Err(error) = task.db.thread_went_idle(&run).await {
-            tracing::warn!(%run, %error, "could not record that the run's thread went idle");
+        if let Err(error) = task.db.thread_went_idle(&id).await {
+            tracing::warn!(run = %id, %error, "could not record that the run's thread went idle");
         }
         task.thread_idle.notify_one();
     });
+    close_if_unattended(shared, run).await;
+}
+
+/// A run a trigger started is not a conversation: nobody sends a follow-up to a nightly job, and
+/// a worktree kept for a week per firing would pile up. When such a run has ended for good, its
+/// thread closes with it, releasing its worktree as a run's end always did: removed when it
+/// holds nothing, kept (and listed) when it holds work. An `interrupted` run may still be
+/// resumed, so it keeps its worktree.
+async fn close_if_unattended(shared: &Shared, run: &RunId) {
+    let row = match shared.run_record(run).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%run, %error, "could not read the run that ended");
+            return;
+        }
+    };
+    if row.spec.get("trigger").is_none() || !row.status.is_terminal() {
+        return;
+    }
+    if let Err(error) =
+        crate::threads::close_with(shared, &row.thread_id, ReleasePolicy::IfClean).await
+    {
+        tracing::warn!(%run, %error, "could not close the thread of a run a trigger started");
+    }
 }
 
 /// Records where the run's branch stood when it started, for its guard and its "this run" diff.

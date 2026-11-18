@@ -146,7 +146,11 @@ async fn a_trigger_with_a_cwd_works_in_a_worktree_and_the_checkout_is_untouched(
     let info = fx.client.get_workspace(run.clone()).await.unwrap();
     assert_eq!(info.repo, repo);
     assert_eq!(info.base_sha, head);
-    assert_eq!(info.branch, format!("reno/{run}"));
+    // The worktree and branch are the thread's, and a run a trigger started closes it at its end.
+    let thread = fx.client.list_threads(None).await.unwrap()[0]
+        .thread_id
+        .clone();
+    assert_eq!(info.branch, format!("reno/{thread}"));
     assert!(
         info.path.starts_with(fx.paths.worktrees()),
         "{:?}",

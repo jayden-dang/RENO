@@ -74,6 +74,20 @@ pub(crate) async fn close(
     thread: &ThreadId,
     force: bool,
 ) -> Result<ThreadCloseResult> {
+    let policy = if force {
+        ReleasePolicy::Force
+    } else {
+        ReleasePolicy::IfMerged
+    };
+    close_with(shared, thread, policy).await
+}
+
+/// [`close`] under an explicit release policy.
+pub(crate) async fn close_with(
+    shared: &Shared,
+    thread: &ThreadId,
+    policy: ReleasePolicy,
+) -> Result<ThreadCloseResult> {
     let before = get(shared, thread).await?;
     if before.status == ThreadStatus::Active
         && let Some(run) = before.latest_run()
@@ -97,11 +111,6 @@ pub(crate) async fn close(
         && let Some(info) = shared.db.get_thread_workspace(thread).await?
         && OPEN.contains(&info.status)
     {
-        let policy = if force {
-            ReleasePolicy::Force
-        } else {
-            ReleasePolicy::IfMerged
-        };
         match workspaces::release(shared, port, &info, policy).await? {
             Released::Removed => outcome = Some(CleanOutcome::Removed),
             Released::Kept(changes) => {

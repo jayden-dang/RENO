@@ -617,7 +617,7 @@ impl Kernel {
                         .await
                     {
                         Ok(()) => {
-                            workspaces::run_ended(&self.shared, run);
+                            workspaces::run_ended(&self.shared, run).await;
                             self.shared.notify_status_changed();
                             self.shared.mark_runs_dirty();
                             return Ok(RunStatus::Cancelled);

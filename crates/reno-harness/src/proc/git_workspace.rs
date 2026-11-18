@@ -702,7 +702,7 @@ impl GitWorktrees {
         let full = resolved.stdout.trim().to_owned();
         let range = format!("{}..HEAD", loc.base_sha);
         let own = self.names(&loc.path, &["rev-list", "-z", &range]).await?;
-        if !own.iter().any(|c| *c == full) {
+        if !own.contains(&full) {
             return Err(GitError::Unsafe(format!(
                 "{sha} is not a commit of this thread's branch"
             )));
