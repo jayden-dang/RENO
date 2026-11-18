@@ -34,7 +34,7 @@ fn the_names_and_the_feature() {
     assert_eq!(ThreadClose::NAME, "thread.close");
     // The feature is appended: nothing earlier moved.
     assert_eq!(FEATURES.last(), Some(&FEATURE_THREADS));
-    assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT);
+    const { assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT) };
 }
 
 #[test]
