@@ -19,6 +19,7 @@ use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
 use crate::actions::{self, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
+use crate::lifecycle;
 use crate::nav::Nav;
 use crate::screens::ScreenEvent;
 use crate::screens::executors::ExecutorsScreen;
@@ -119,8 +120,19 @@ fn register_fonts(cx: &mut App) {
     }
 }
 
+/// Where the first window opens (screenshots, reviews); a window opened later opens on Home.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Start {
+    pub(crate) open: Option<Nav>,
+    pub(crate) open_run: Option<RunId>,
+    pub(crate) open_project: Option<PathBuf>,
+}
+
 pub(crate) fn run(options: Options) {
-    application().with_assets(Assets).run(move |cx: &mut App| {
+    let app = application().with_assets(Assets);
+    // A Dock click with no window open: build a new one around the running store.
+    app.on_reopen(lifecycle::reopen);
+    app.run(move |cx: &mut App| {
         gpui_tokio::init(cx);
         register_fonts(cx);
         let preference = if options.reduce_motion {
@@ -143,75 +155,18 @@ pub(crate) fn run(options: Options) {
             }
             store
         });
+        // The store, the toasts and the notifier outlive the window: closing it does not quit.
+        lifecycle::install(cx, store.clone(), toasts.clone(), &options);
 
-        let bounds = default_bounds(cx);
-        let appearance = options.appearance;
-        let open = options.open;
-        let open_run = options.open_run;
-        let open_project = options.open_project;
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(900.0), px(600.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Reno".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
-                }),
-                window_background: WindowBackgroundAppearance::Opaque,
-                ..Default::default()
-            },
-            |window, cx| {
-                let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
-                root.update(cx, |root, cx| {
-                    root.focus_composer(window, cx);
-                    if let Some(nav) = open {
-                        root.navigate(nav, window, cx);
-                    }
-                    if let Some(dir) = open_project {
-                        cx.spawn_in(window, async move |view, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1500))
-                                .await;
-                            view.update_in(cx, |view, window, cx| {
-                                view.open_project(
-                                    crate::vm::projects::FolderKey::Repo(dir),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
-                    if let Some(run) = open_run {
-                        // After the store has connected, so the run's transcript is followed.
-                        cx.spawn_in(window, async move |root, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(1500))
-                                .await;
-                            root.update_in(cx, |root, window, cx| {
-                                root.open_run(run, window, cx);
-                            })
-                            .ok();
-                        })
-                        .detach();
-                    }
-                });
-                root
-            },
-        );
-        if opened.is_err() {
+        let start = Start {
+            open: options.open,
+            open_run: options.open_run.clone(),
+            open_project: options.open_project.clone(),
+        };
+        if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
             return;
         }
-
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
 
         if let Some(after) = options.quit_after {
             cx.spawn(async move |cx| {
@@ -222,6 +177,75 @@ pub(crate) fn run(options: Options) {
         }
         cx.activate(true);
     });
+}
+
+/// Opens a Reno window on `store`. `None` when the platform would not.
+pub(crate) fn open_window(
+    store: Entity<Store>,
+    toasts: Entity<Toasts>,
+    appearance: Option<Appearance>,
+    start: Start,
+    cx: &mut App,
+) -> Option<gpui::WindowHandle<RootView>> {
+    let bounds = default_bounds(cx);
+    let Start {
+        open,
+        open_run,
+        open_project,
+    } = start;
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(900.0), px(600.0))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Reno".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(14.0), px(14.0))),
+            }),
+            window_background: WindowBackgroundAppearance::Opaque,
+            ..Default::default()
+        },
+        |window, cx| {
+            let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
+            root.update(cx, |root, cx| {
+                root.focus_composer(window, cx);
+                if let Some(nav) = open {
+                    root.navigate(nav, window, cx);
+                }
+                if let Some(dir) = open_project {
+                    cx.spawn_in(window, async move |view, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        view.update_in(cx, |view, window, cx| {
+                            view.open_project(
+                                crate::vm::projects::FolderKey::Repo(dir),
+                                window,
+                                cx,
+                            );
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                if let Some(run) = open_run {
+                    // After the store has connected, so the run's transcript is followed.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.open_run(run, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            });
+            root
+        },
+    )
+    .ok()
 }
 
 /// The window's opening size: most of the visible screen, within a range that keeps the
