@@ -20,7 +20,8 @@ use reno_proto::{
 };
 
 use super::ScreenEvent;
-use super::executors::health_lines;
+use crate::panel::saved::Saved;
+use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self, Built, Facts, Key, Resolution, Row, ToolEntry};
@@ -29,23 +30,23 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
-use crate::ui::toast;
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane};
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 use crate::vm::rules;
-use crate::vm::runs as run_facts;
 
 mod changes;
 mod output;
+mod panel;
+mod session;
+
+pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
-/// Width of the details pane.
-const DETAILS: f32 = 330.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
 
@@ -59,17 +60,24 @@ pub(crate) struct RunScreen {
     markdown: HashMap<Key, Streaming>,
     /// Tool groups and reasoning rows the user opened.
     open: HashSet<Key>,
-    details_open: bool,
     /// Tool calls whose output shows (in a group of more than one), and those showing all of it.
     outputs_open: HashSet<String>,
     outputs_full: HashSet<String>,
-    /// The Changes view is showing in place of the transcript, and the file it has picked.
-    showing_changes: bool,
-    selected: Option<String>,
-    diff_scroll: ScrollHandle,
-    /// The patch rows of the picked file, with the answer they were made from.
-    patch_key: Option<(String, Loaded<Patch>)>,
-    patch_pane: PatchPane,
+    /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
+    panel_key: PanelKey,
+    panel: PanelState,
+    /// Whether the first tabs were chosen from what the run turned out to have, and whether the
+    /// person has opened or closed a tab since (which stops that choice).
+    panel_seeded: bool,
+    panel_touched: bool,
+    /// Focus for the panel, so its letters and its keys do not reach the steer input.
+    panel_focus: FocusHandle,
+    /// Review's files the person folded, and whether the many-files default was applied.
+    review_folded: HashSet<String>,
+    review_default_applied: bool,
+    review_scroll: ScrollHandle,
+    /// The patch rows of each file Review shows, with the answer they were made from.
+    patch_panes: HashMap<String, (Loaded<Patch>, PatchPane)>,
     /// The line under the Done row naming the branch and what it holds.
     result: Option<String>,
     /// Whether the changes were asked for, the run's status and tool calls when they were last
@@ -93,6 +101,12 @@ impl RunScreen {
     pub(crate) fn new(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
         store.update(cx, |store, cx| store.open_run(run.clone(), cx));
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
+        let key = PanelKey(run.to_string());
+        let (panel, panel_seeded) = match Saved::get(&key, cx) {
+            // What the person left: the first-tabs choice must not undo it.
+            Some(saved) => (PanelState::restore(&saved), true),
+            None => (PanelState::default(), false),
+        };
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         let mut screen = Self {
@@ -101,20 +115,23 @@ impl RunScreen {
                 cx.notify();
             }),
             store,
-            run,
+            run: run.clone(),
             list,
             rows: Vec::new(),
             facts: Facts::default(),
             markdown: HashMap::new(),
             open: HashSet::new(),
-            details_open: true,
             outputs_open: HashSet::new(),
             outputs_full: HashSet::new(),
-            showing_changes: false,
-            selected: None,
-            diff_scroll: ScrollHandle::new(),
-            patch_key: None,
-            patch_pane: PatchPane::Loading,
+            panel_key: key,
+            panel,
+            panel_seeded,
+            panel_touched: false,
+            panel_focus: cx.focus_handle(),
+            review_folded: HashSet::new(),
+            review_default_applied: false,
+            review_scroll: ScrollHandle::new(),
+            patch_panes: HashMap::new(),
             result: None,
             asked_changes: false,
             last_status: None,
@@ -169,11 +186,6 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn is_following_tail(&self) -> bool {
         self.list.is_following_tail()
-    }
-
-    pub(crate) fn toggle_details(&mut self, cx: &mut Context<Self>) {
-        self.details_open = !self.details_open;
-        cx.notify();
     }
 
     fn toggle(&mut self, key: Key, cx: &mut Context<Self>) {
@@ -247,8 +259,9 @@ impl RunScreen {
             self.last_status = status;
             self.last_writes = writes;
         }
-        self.ensure_selection(cx);
         self.update_result(cx);
+        self.seed_panel(cx);
+        self.ensure_patches(cx);
     }
 
     /// Reads the changes in a second, once however many calls finish meanwhile.
@@ -429,15 +442,12 @@ impl RunScreen {
                 )
             })
             .child(div().flex_1())
-            .children(self.changes_button(theme, cx))
+            .children(self.stop_button(theme, cx))
+            .children(self.usage_chip(theme, cx))
             .child(
                 kit::icon_button(theme, "details-toggle", Icon::Sidebar, 30.0)
                     .debug_selector(|| "details-toggle".to_owned())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_details(cx))),
-            )
-            .child(
-                kit::icon_button(theme, "search-run", Icon::Search, 30.0)
-                    .on_click(|_, _, cx| toast::not_yet(cx, "Search in a run")),
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
             )
     }
 
@@ -925,207 +935,6 @@ impl RunScreen {
             .into_any_element()
     }
 
-    // --- details --------------------------------------------------------------------------
-
-    fn details(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = self.store.read(cx);
-        let run = store.state().run(&self.run);
-        let now = store.now_ms();
-        // A run its executor could not take shows that executor's health, as the daemon has it
-        // now, so the reason and the way out are on the same screen.
-        let failed = executor_facts::failed_executor(store.state(), &self.run, now);
-
-        let section = |title: &'static str| {
-            div()
-                .text_size(px(12.0))
-                .text_color(theme.faint)
-                .pb(px(4.0))
-                .child(title)
-        };
-        let kv = |label: &'static str, value: AnyElement| {
-            div()
-                .flex()
-                .items_start()
-                .gap(px(12.0))
-                .py(px(6.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(86.0))
-                        .text_size(px(13.5))
-                        .text_color(theme.muted)
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().text_size(px(13.5)).child(value))
-        };
-        let text = |s: String| div().child(s).into_any_element();
-
-        let mut pane = div()
-            .id("details")
-            .debug_selector(|| "details".to_owned())
-            .w(px(DETAILS))
-            .flex_none()
-            .h_full()
-            .overflow_y_scroll()
-            .border_l_1()
-            .border_color(theme.hairline)
-            .px(px(26.0))
-            .py(px(22.0))
-            .flex()
-            .flex_col()
-            .child(section("RUN"));
-
-        let Some(run) = run else {
-            return pane.child(kv("State", text("starting".to_owned())));
-        };
-        // The model in use as the harness reported it (a mid-run switch included), by name.
-        let model = {
-            let state = self.store.read(cx).state();
-            crate::vm::models::in_use(state, &run.run_id)
-                .or_else(|| self.facts.model.clone())
-                .map(|id| {
-                    let name = crate::vm::models::model_name(state, &run.executor, &id);
-                    if name == id {
-                        id
-                    } else {
-                        format!("{name} \u{b7} {id}")
-                    }
-                })
-        };
-        let end = if run.status.is_terminal() {
-            run.updated_at_ms
-        } else {
-            now
-        };
-        // The access mode is the bot's: a run without a bot has none to show, and a bot whose
-        // definition is not read yet shows an ellipsis.
-        let access = run.bot.as_ref().map(|_| {
-            run_facts::access_label(store.state(), &self.run)
-                .unwrap_or("\u{2026}")
-                .to_owned()
-        });
-
-        let problem = summary::reported_problem(run);
-        let state_color = kit::run_color(theme, run.status, problem);
-        pane = pane
-            .child(kv(
-                "State",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(kit::dot(state_color, 7.0))
-                    .child(
-                        div()
-                            .text_color(state_color)
-                            .child(summary::run_status_label(run)),
-                    )
-                    .into_any_element(),
-            ))
-            .when_some(
-                run.report.as_ref().filter(|_| problem.is_some()),
-                |p, report| {
-                    p.child(kv(
-                        "Report",
-                        div()
-                            .id("details-report")
-                            .debug_selector(|| "details-report".to_owned())
-                            .child(report.summary.clone())
-                            .into_any_element(),
-                    ))
-                },
-            )
-            .when_some(summary::run_bot(run), |p, bot| {
-                p.child(kv("Bot", text(bot.to_owned())))
-            })
-            .child(kv(
-                "Executor",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(kit::exec_glyph(theme, run.executor.as_str(), 14.0))
-                    .child(summary::executor_name(run.executor.as_str()))
-                    .when(
-                        run.executor.as_str() != summary::executor_name(run.executor.as_str()),
-                        |d| {
-                            d.child(
-                                div()
-                                    .text_color(theme.faint)
-                                    .child(SharedString::from(run.executor.as_str().to_owned())),
-                            )
-                        },
-                    )
-                    .into_any_element(),
-            ))
-            .when_some(access, |p, access| p.child(kv("Access", text(access))))
-            .when_some(model, |p, model| p.child(kv("Model", text(model))))
-            .when_some(run.effort, |p, effort| {
-                p.child(kv("Effort", text(effort.as_str().to_owned())))
-            })
-            .when_some(summary::run_repo(run), |p, repo| {
-                // The folder's name, with the whole path under it when the daemon gave one.
-                p.child(kv(
-                    "Repository",
-                    div()
-                        .id("details-repository")
-                        .debug_selector(|| "details-repository".to_owned())
-                        .child(repo.name)
-                        .when_some(repo.path, |d, path| {
-                            d.child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.faint)
-                                    .child(SharedString::from(path)),
-                            )
-                        })
-                        .into_any_element(),
-                ))
-            })
-            .when(run.attempt > 1, |p| {
-                p.child(kv("Attempt", text(run.attempt.to_string())))
-            })
-            .child(kv(
-                "Started",
-                text(format!(
-                    "{} \u{b7} {}",
-                    summary::clock_utc(run.created_at_ms),
-                    summary::duration_label(end.saturating_sub(run.created_at_ms))
-                )),
-            ));
-
-        let usage = match self.facts.usage {
-            Some(u) => div()
-                .child(format!("{} tokens", group_digits(u.total())))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.faint)
-                        .child(format!(
-                            "{} in \u{b7} {} out",
-                            group_digits(u.input),
-                            group_digits(u.output)
-                        )),
-                )
-                .into_any_element(),
-            None => div()
-                .text_color(theme.faint)
-                .child("none yet")
-                .into_any_element(),
-        };
-        if let Some(failed) = failed {
-            pane = pane
-                .child(div().h(px(14.0)))
-                .child(section("EXECUTOR HEALTH"))
-                .child(health_lines(theme, &failed.row))
-                .child(self.executor_actions(&failed.row, theme, cx));
-        }
-        pane = pane.children(self.changes_section(theme, cx));
-        pane.child(div().h(px(14.0)))
-            .child(section("USAGE"))
-            .child(kv("Tokens", usage))
-    }
-
     /// Open the Executors screen, or check this executor again.
     fn executor_actions(
         &self,
@@ -1174,19 +983,6 @@ impl RunScreen {
             .child(check_button)
             .into_any_element()
     }
-}
-
-/// 12345 becomes "12,345".
-fn group_digits(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// A user message: right-aligned bubble.
@@ -1432,7 +1228,7 @@ fn done_line(
 }
 
 impl Render for RunScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
         let transcript = div()
             .id("transcript")
@@ -1454,36 +1250,40 @@ impl Render for RunScreen {
             .pb(px(20.0))
             .pt(px(6.0))
             .child(self.steer.clone());
-        let main = div()
+        let chat = div()
+            .id("chat-canvas")
+            .debug_selector(|| "chat-canvas".to_owned())
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
             .flex_col()
-            .items_center()
-            .px(px(24.0))
-            .child(transcript)
-            .child(dock);
-        let main = if self.showing_changes {
-            self.changes_view(&theme, cx)
-        } else {
-            main.into_any_element()
-        };
-
-        div()
-            .id("run")
-            .size_full()
-            .flex()
-            .flex_col()
+            .rounded(px(14.0))
+            .bg(theme.canvas)
+            .border_1()
+            .border_color(theme.hairline)
+            .overflow_hidden()
             .child(self.header(&theme, cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(main)
-                    .when(self.details_open, |d| d.child(self.details(&theme, cx))),
-            )
+                    .flex_col()
+                    .items_center()
+                    .px(px(24.0))
+                    .child(transcript)
+                    .child(dock),
+            );
+
+        let stage = div()
+            .id("run")
+            .key_context("Run")
+            .size_full()
+            .relative()
+            .flex()
+            .child(chat);
+        self.with_panel(stage, &theme, window, cx)
     }
 }
 
@@ -1492,3 +1292,8 @@ mod question_card_tests;
 
 #[cfg(test)]
 mod changes_tests;
+
+#[cfg(test)]
+mod panel_tests;
+#[cfg(test)]
+mod persist_tests;

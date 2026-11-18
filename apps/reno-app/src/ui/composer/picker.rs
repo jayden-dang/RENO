@@ -253,6 +253,7 @@ impl Composer {
         self.picker_cursor = None;
         self.picker_keyboard = false;
         self.class_open = false;
+        self.sync_overlay(cx);
         window.focus(&self.picker_focus, cx);
         cx.notify();
     }
@@ -264,6 +265,7 @@ impl Composer {
             self.picker_window_open = false;
             // The next frame gives the keyboard back to the text.
             self.refocus = true;
+            self.sync_overlay(cx);
             cx.notify();
         }
     }

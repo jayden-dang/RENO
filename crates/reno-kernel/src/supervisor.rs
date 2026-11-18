@@ -206,6 +206,11 @@ pub(crate) struct Supervisor {
     model_answers_ahead: u32,
     /// Requests whose answer has not come back; an event with none open is the harness's own.
     model_requests_open: u32,
+    /// Text that could be the start of a secret value split across events, held back until the
+    /// next piece decides it (see `ValueRedactor::push`). Never set for a run without secrets.
+    held: Option<reno_harness::Held>,
+    /// Fires when `held` has waited [`HOLD_QUIET`] for more text.
+    hold: Option<Pin<Box<Sleep>>>,
     /// Last field: the slot is freed after everything else is dropped.
     _slot: Slot,
 }
@@ -234,6 +239,18 @@ fn journal_form(event: ExecEvent) -> ExecEvent {
             output: output.map(reno_proto::ToolOutput::recut),
         },
         other => other,
+    }
+}
+
+/// How long a held possible start of a secret waits for more text before it is journaled as it
+/// is (it is only a partial prefix: nothing matched).
+const HOLD_QUIET: Duration = Duration::from_millis(300);
+
+/// Pending until the held-text timer is armed and elapses.
+async fn hold_elapsed(hold: &mut Option<Pin<Box<Sleep>>>) {
+    match hold {
+        Some(sleep) => sleep.await,
+        None => std::future::pending().await,
     }
 }
 
@@ -270,16 +287,6 @@ impl Supervisor {
         let records = Records::take(&handle);
         let (model_answers_tx, model_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
         let (config_answers_tx, config_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
-        // Redact first, cut second: the executors hand over tool output cut at a generous raw
-        // limit, so a secret value is whole in the text the redactor sees; the journal's cut
-        // falls on text that is already clean.
-        let redactor = info.redactor.clone();
-        let stream = stream
-            .map(move |event| match &redactor {
-                Some(redactor) => journal_form(redactor.redact_event(event)),
-                None => journal_form(event),
-            })
-            .boxed();
         Self {
             shared,
             run,
@@ -315,6 +322,8 @@ impl Supervisor {
             model_events_ahead: 0,
             model_answers_ahead: 0,
             model_requests_open: 0,
+            held: None,
+            hold: None,
             _slot: slot,
         }
     }
@@ -351,6 +360,7 @@ impl Supervisor {
                     beat.set(sleep(period));
                 }
                 () = expiry_elapsed(&mut self.expiry) => self.expire_due().await,
+                () = hold_elapsed(&mut self.hold) => self.flush_held(),
                 () = grace_elapsed(&mut self.wall) => self.wall_time_up(),
                 () = grace_elapsed(&mut grace) => {
                     // The executor ignored the cancel. Dropping its stream is what ends a
@@ -368,24 +378,75 @@ impl Supervisor {
                 () = self.cancel.cancelled(), if grace.is_none() => {
                     grace = Some(Box::pin(sleep(self.shared.config.cancel_grace)));
                 }
-                event = self.stream.next() => match event {
-                    Some(ExecEvent::Done { stop, result, diagnostic, .. }) => {
-                        break End { stop, result, diagnostic };
+                event = self.stream.next() => {
+                    if let Some(end) = self.ingest(event).await {
+                        break end;
                     }
-                    Some(event) => self.event(event).await,
-                    None => {
-                        break End {
-                            stop: StopReason::Error,
-                            result: None,
-                            diagnostic: Some(
-                                "the executor's stream ended without a Done".to_owned(),
-                            ),
-                        };
-                    }
-                },
+                }
             }
         };
         self.finish(end).await;
+    }
+
+    /// One event from the executor, redacted. `Some` when it ends the run.
+    ///
+    /// A text piece that may begin a secret value split across events is held back; whatever
+    /// else arrives flushes it first, so the journal keeps the executor's order.
+    async fn ingest(&mut self, event: Option<ExecEvent>) -> Option<End> {
+        let Some(event) = event else {
+            return Some(End {
+                stop: StopReason::Error,
+                result: None,
+                diagnostic: Some("the executor's stream ended without a Done".to_owned()),
+            });
+        };
+        // Redact first, cut second: the executors hand over tool output cut at a generous raw
+        // limit, so a secret value is whole in the text the redactor sees; the journal's cut
+        // falls on text that is already clean.
+        let Some(redactor) = self.info.redactor.clone() else {
+            return self.accept(journal_form(event)).await;
+        };
+        // Taken out while the pieces are handled, so nothing journaled meanwhile flushes the
+        // tail that this very event leaves.
+        let (events, held) = redactor.push(self.held.take(), event);
+        self.hold = None;
+        for event in events {
+            if let Some(end) = self.accept(journal_form(event)).await {
+                return Some(end);
+            }
+        }
+        if held.is_some() {
+            self.hold = Some(Box::pin(sleep(HOLD_QUIET)));
+        }
+        self.held = held;
+        None
+    }
+
+    async fn accept(&mut self, event: ExecEvent) -> Option<End> {
+        match event {
+            ExecEvent::Done {
+                stop,
+                result,
+                diagnostic,
+                ..
+            } => Some(End {
+                stop,
+                result,
+                diagnostic,
+            }),
+            event => {
+                self.event(event).await;
+                None
+            }
+        }
+    }
+
+    /// Journals the held text, as it is: it never completed a secret value.
+    fn flush_held(&mut self) {
+        self.hold = None;
+        if let (Some(held), Some(redactor)) = (self.held.take(), self.info.redactor.clone()) {
+            self.publish_now(&redactor.flush(held));
+        }
     }
 
     async fn open_journal(&mut self) {
@@ -409,6 +470,12 @@ impl Supervisor {
 
     /// Append to the journal, flush, and offer to subscribers. No `.await`: see the module doc.
     fn publish(&mut self, event: &ExecEvent) {
+        // Whatever is journaled, held text came before it.
+        self.flush_held();
+        self.publish_now(event);
+    }
+
+    fn publish_now(&mut self, event: &ExecEvent) {
         let Some(journal) = self.journal.as_mut() else {
             return;
         };
@@ -652,10 +719,13 @@ impl Supervisor {
             tracing::warn!(run = %self.run, %error, "could not record the run's configuration");
         }
         self.shared.mark_runs_dirty();
-        self.publish(&ExecEvent::ConfigChanged {
+        // Like everything the run says, through the redactor (the values are listed choices, so
+        // nothing changes in practice).
+        let changed = self.redacted(ExecEvent::ConfigChanged {
             effort: plan.full_effort,
             model_options: plan.full_options.clone(),
         });
+        self.publish(&changed);
         let _ = reply.send(Ok(reno_proto::RunConfigureResult {
             effort: plan.full_effort,
             model_options: plan.full_options,

@@ -21,6 +21,7 @@ reno-rpc = { path = "crates/reno-rpc" }
 reno-client = { path = "crates/reno-client" }
 reno-markdown = { path = "crates/reno-markdown" }
 reno-syntax = { path = "crates/reno-syntax" }
+reno-notify = { path = "crates/reno-notify" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -71,6 +72,13 @@ mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 
 # Secrets (T1.13): the macOS Keychain, behind renod's `Keychain` trait. MIT OR Apache-2.0.
 security-framework = { version = "3", default-features = false }
+
+# Native macOS layer of reno-notify (the only crate that names them): the Objective-C runtime and
+# the two frameworks it needs, versions the GPUI closure already resolves. Features are exactly
+# the classes used.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSDictionary", "NSObject", "NSString", "NSURL", "NSUserNotification"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
 
 # Harness layer (imported).
 async-trait = "0.1"

@@ -7,6 +7,7 @@ pub(crate) mod kit;
 pub(crate) mod markdown_view;
 pub(crate) mod motion;
 pub(crate) mod notice;
+pub(crate) mod overlay;
 pub(crate) mod page;
 pub(crate) mod palette;
 pub(crate) mod ring;

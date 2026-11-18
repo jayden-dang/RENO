@@ -1208,3 +1208,78 @@ fn a_live_opus_runs_effort_changes_too(cx: &mut TestAppContext) {
         })
     });
 }
+
+// --- the app-wide overlay signal ---------------------------------------------------------------
+
+fn overlay_open(vcx: &mut gpui::VisualTestContext) -> bool {
+    vcx.update(|_, cx| crate::ui::overlay::is_open(cx))
+}
+
+#[gpui::test]
+fn the_overlay_signal_follows_the_palette_and_the_menus(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    assert!(!overlay_open(vcx), "nothing is open at the start");
+
+    root.update_in(vcx, |r, window, cx| r.open_palette(window, cx));
+    assert!(overlay_open(vcx), "the palette raises it");
+    root.update_in(vcx, |r, window, cx| r.close_palette(window, cx));
+    assert!(!overlay_open(vcx), "and clears it");
+
+    click(vcx, "class-menu");
+    assert!(overlay_open(vcx), "a composer menu raises it");
+    // Two owners: the palette closing leaves the menu's signal alone.
+    root.update_in(vcx, |r, window, cx| r.open_palette(window, cx));
+    root.update_in(vcx, |r, window, cx| r.close_palette(window, cx));
+    assert!(overlay_open(vcx));
+    click(vcx, "class-menu");
+    assert!(
+        !overlay_open(vcx),
+        "the toggle closes the menu and the signal"
+    );
+}
+
+#[gpui::test]
+fn a_composer_dropped_with_its_menu_open_clears_the_signal(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(crate::tests::run_id("keeper1"), window, cx);
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    assert!(overlay_open(vcx));
+    root.update_in(vcx, |r, window, cx| {
+        r.navigate(crate::nav::Nav::Runs, window, cx);
+    });
+    draw(vcx);
+    assert!(!overlay_open(vcx), "the run's composer went with its menu");
+}
+
+#[gpui::test]
+fn the_model_picker_and_the_context_card_raise_the_overlay_signal(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(overlay_open(vcx), "the model picker raises it");
+    click(vcx, "model-chip");
+    assert!(!overlay_open(vcx), "closing the picker clears it");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-ring"));
+    click(vcx, "context-ring");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-card"));
+    assert!(overlay_open(vcx), "the context card raises it");
+    click(vcx, "context-ring");
+    assert!(!overlay_open(vcx), "and clears it");
+}

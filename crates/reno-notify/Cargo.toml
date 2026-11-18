@@ -1,0 +1,20 @@
+[package]
+name = "reno-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# macOS desktop banners and the Dock badge for the app. Ported from zeron's `crates/notify`
+# (docs/internal/UPSTREAM.md). The only crate that talks to AppKit directly; the unsafe code lives
+# here, behind a safe API (lib.rs).
+[dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+
+[lints]
+workspace = true

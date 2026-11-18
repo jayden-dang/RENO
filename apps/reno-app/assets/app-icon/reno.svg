@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#17171c"/>
+      <stop offset="1" stop-color="#060606"/>
+    </linearGradient>
+    <linearGradient id="mark" gradientUnits="userSpaceOnUse" x1="330" y1="230" x2="760" y2="760">
+      <stop offset="0" stop-color="#a79cfa"/>
+      <stop offset="1" stop-color="#8b7cf6"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS app icon grid: an 824 px rounded square centred on the 1024 canvas. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#ground)"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" ry="184" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+  <!-- The R: stem, bowl and leg as one stroked shape. -->
+  <g fill="none" stroke="url(#mark)" stroke-width="112" stroke-linejoin="round" stroke-linecap="butt">
+    <path d="M388 740 V284 H566 A136 136 0 0 1 566 556 H388"/>
+    <path d="M540 556 L676 740"/>
+  </g>
+</svg>

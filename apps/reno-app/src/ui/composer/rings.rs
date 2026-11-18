@@ -47,6 +47,7 @@ impl Composer {
                 this.context_card_open = !this.context_card_open;
                 this.class_open = false;
                 this.close_picker(cx);
+                this.sync_overlay(cx);
                 cx.notify();
             })),
         )
@@ -70,6 +71,7 @@ impl Composer {
             content,
             |this, cx| {
                 this.context_card_open = false;
+                this.sync_overlay(cx);
                 cx.notify();
             },
             None,

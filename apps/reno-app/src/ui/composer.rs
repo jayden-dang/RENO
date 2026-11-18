@@ -45,6 +45,7 @@ mod rings;
 
 use super::icon::{Icon, icon};
 use super::kit;
+use super::overlay;
 use super::text_area::{TextArea, TextLayout};
 use super::text_model::{EnterOutcome, TextModel};
 use super::theme::{self, Theme};
@@ -374,8 +375,20 @@ impl Composer {
             class_bounds: Rc::default(),
             picker_for_live: false,
         };
+        // A composer that goes away with a menu open takes its signal with it.
+        let owner = cx.entity_id();
+        cx.on_release(move |_, cx| overlay::release(cx, owner))
+            .detach();
         composer.refresh_preview(cx);
         composer
+    }
+
+    /// Tells the app-wide overlay signal whether any of this composer's menus, pickers or cards
+    /// is open. Called wherever one opens or closes, so the two always agree.
+    pub(super) fn sync_overlay(&self, cx: &mut Context<Self>) {
+        let open = self.picker_open || self.class_open || self.context_card_open;
+        let owner = cx.entity_id();
+        overlay::set(cx, owner, open);
     }
 
     /// The small reason input of a denial.
@@ -741,6 +754,7 @@ impl Composer {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.class_open = !this.class_open;
                 this.close_picker(cx);
+                this.sync_overlay(cx);
                 cx.notify();
             }))
     }
@@ -752,6 +766,7 @@ impl Composer {
                 .when(class == self.class, |r| r.child(check(theme)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.class_open = false;
+                    this.sync_overlay(cx);
                     this.set_class(class, cx);
                 }))
         });
@@ -942,7 +957,9 @@ impl Composer {
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         if self.picker_open || self.class_open {
             self.class_open = false;
+            self.context_card_open = false;
             self.close_picker(cx);
+            self.sync_overlay(cx);
             cx.notify();
         } else if self.mode == Mode::Reason {
             self.model.set_text("");
@@ -1765,6 +1782,7 @@ impl Render for Composer {
                     content,
                     |this, cx| {
                         this.class_open = false;
+                        this.sync_overlay(cx);
                         cx.notify();
                     },
                     None,

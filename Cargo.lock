@@ -5122,6 +5122,7 @@ dependencies = [
  "mimalloc",
  "reno-client",
  "reno-markdown",
+ "reno-notify",
  "reno-proto",
  "reno-syntax",
  "serde",
@@ -5201,6 +5202,15 @@ name = "reno-markdown"
 version = "0.0.0"
 dependencies = [
  "pulldown-cmark",
+]
+
+[[package]]
+name = "reno-notify"
+version = "0.0.0"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
