@@ -3,6 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::rc::Rc;
+
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::{ConnectionStatus, Feed, FeedState, RunPage};
@@ -15,6 +17,7 @@ use crate::screens::settings::Tab;
 use crate::store::Store;
 use crate::tests::{click, draw, fake_store, painted, wait_drawn, wait_until, window};
 use crate::ui::theme::Appearance;
+use crate::vm::executors::Group;
 use crate::vm::runs::RunFilter;
 use crate::vm::{Section, settings, triggers};
 
@@ -327,36 +330,40 @@ fn executors_load_before_the_daemon_answers(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn executors_lead_with_what_needs_you_and_check_again_probes(cx: &mut TestAppContext) {
+fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     executors_live(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     go(vcx, &root, Nav::Executors);
-    wait_drawn(vcx, |vcx| painted(vcx, "check-codex"));
+    wait_drawn(vcx, |vcx| painted(vcx, "line-codex"));
     let view = executor_view(vcx, &root);
-    let order: Vec<&str> = view.rows.rows().iter().map(|r| r.id.as_str()).collect();
+    let ids = |g: Group| -> Vec<String> { view.group(g).iter().map(|r| r.id.clone()).collect() };
+    assert_eq!(ids(Group::NeedsYou), ["codex", "acp.grok"]);
+    assert_eq!(ids(Group::Ready), ["acp.antigravity", "claude-code"]);
     assert_eq!(
-        order,
-        [
-            "codex",
-            "acp.grok",
-            "acp.hermes",
-            "acp.devin",
-            "acp.fx",
-            "acp.antigravity",
-            "claude-code",
-            "mock"
-        ],
-        "signed out, too old, needs install or not found, then the ready ones"
+        ids(Group::NotInstalled),
+        ["acp.devin", "acp.fx", "acp.hermes"]
     );
-    assert_eq!(view.lede, "5 executors need you");
-    assert!(
-        painted(vcx, "install-acp.hermes"),
-        "only one can be installed"
-    );
-    assert!(!painted(vcx, "install-codex"));
+    assert_eq!(ids(Group::Test), ["mock"]);
+    assert_eq!(view.lede, "2 executors can't take runs");
+    assert_eq!(view.detail, "Codex is signed out \u{b7} Grok is too old");
+    // The mock is collapsed until its group is opened.
+    assert!(!painted(vcx, "line-mock"));
+    click(vcx, "group-Test executors");
+    wait_drawn(vcx, |vcx| painted(vcx, "line-mock"));
 
-    // "Check again" probes that executor and nothing else.
+    // What fixes each line is on the line: Sign in… for Codex, Update for the too-old Grok,
+    // Install… for a first install; the Auto-update switch where there is an updater.
+    assert!(painted(vcx, "sign-in-codex"));
+    assert!(painted(vcx, "update-acp.grok"));
+    assert!(painted(vcx, "install-acp.devin"));
+    assert!(painted(vcx, "auto-claude-code") && painted(vcx, "auto-codex"));
+    assert!(!painted(vcx, "auto-acp.antigravity"), "managed: no switch");
+    assert!(!painted(vcx, "update-codex"), "auto-update is on");
+
+    // "Check again" is in the opened line and probes that executor and nothing else.
+    click(vcx, "line-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "check-codex"));
     let stamp = |vcx: &mut VisualTestContext, id: &str| {
         store.read_with(vcx, |s, _| {
             s.state()
@@ -374,41 +381,341 @@ fn executors_lead_with_what_needs_you_and_check_again_probes(cx: &mut TestAppCon
     wait_drawn(vcx, |vcx| {
         !store.read_with(vcx, |s, _| s.is_checking(Some(&"codex".parse().unwrap())))
     });
-
-    // "Check all again" probes every one.
     click(vcx, "check-all");
     wait_drawn(vcx, |vcx| stamp(vcx, "mock") > mock);
     wait_drawn(vcx, |vcx| !store.read_with(vcx, |s, _| s.is_checking(None)));
 }
 
+fn slow_jobs(cx: &mut TestAppContext, millis: u64) -> Entity<Store> {
+    store_with(
+        cx,
+        FakeConfig {
+            job_duration: std::time::Duration::from_millis(millis),
+            ..FakeConfig::default()
+        },
+    )
+}
+
+fn row_of(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+    id: &str,
+) -> crate::vm::executors::ExecutorRow {
+    executor_view(vcx, root)
+        .rows
+        .rows()
+        .iter()
+        .find(|r| r.id == id)
+        .cloned()
+        .unwrap()
+}
+
 #[gpui::test]
-fn installing_an_executor_fetches_its_adapter_and_it_leaves_the_needs_list(
+fn a_first_install_is_reviewed_then_runs_then_the_executor_moves_to_ready(cx: &mut TestAppContext) {
+    let store = slow_jobs(cx, 600);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "install-acp.devin"));
+
+    // [Install…] shows what will run and runs nothing.
+    click(vcx, "install-acp.devin");
+    wait_drawn(vcx, |vcx| painted(vcx, "run-acp.devin"));
+    assert!(row_of(vcx, &root, "acp.devin").job.is_none());
+    assert!(painted(vcx, "review-cancel-acp.devin"));
+    click(vcx, "review-cancel-acp.devin");
+    wait_drawn(vcx, |vcx| !painted(vcx, "run-acp.devin"));
+    assert!(row_of(vcx, &root, "acp.devin").job.is_none());
+
+    click(vcx, "install-acp.devin");
+    wait_drawn(vcx, |vcx| painted(vcx, "run-acp.devin"));
+    click(vcx, "run-acp.devin");
+    // Running: the dot is hollow, the line offers Show log and Cancel, never Install.
+    wait_drawn(vcx, |vcx| {
+        row_of(vcx, &root, "acp.devin")
+            .job
+            .is_some_and(|j| j.running())
+    });
+    assert_eq!(
+        row_of(vcx, &root, "acp.devin").dot,
+        crate::vm::executors::Dot::Running
+    );
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "cancel-acp.devin") && painted(vcx, "log-acp.devin")
+    });
+    assert!(!painted(vcx, "install-acp.devin"));
+    assert_eq!(executor_view(vcx, &root).jobs_running, 1);
+
+    // Show log reads executor.job.log and opens the block.
+    click(vcx, "log-acp.devin");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "job-log-acp.devin")
+            && store.read_with(vcx, |s, _| {
+                s.job_log(&"acp.devin".parse().unwrap())
+                    .is_some_and(|l| !l.lines.is_empty())
+            })
+    });
+
+    // Done: Reno probed again, so the executor is installed and listed as Ready; the toast says so.
+    wait_drawn(vcx, |vcx| row_of(vcx, &root, "acp.devin").job.is_none());
+    let devin = row_of(vcx, &root, "acp.devin");
+    assert_eq!(devin.group, Group::Ready);
+    assert_eq!(devin.version_text.as_deref(), Some("1.0.0"));
+    wait_drawn(vcx, |vcx| {
+        vcx.update(|_, cx| crate::ui::toast::shown(cx))
+            .iter()
+            .any(|(_, m)| m == "Devin installed.")
+    });
+}
+
+#[gpui::test]
+fn a_queued_update_waits_for_runs_until_update_now_anyway(cx: &mut TestAppContext) {
+    let store = slow_jobs(cx, 300);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "auto-codex"));
+    assert!(row_of(vcx, &root, "codex").available.as_deref() == Some("0.171.0"));
+    assert!(!painted(vcx, "update-codex"));
+
+    // Turning auto-update off is the switch: Update appears.
+    click(vcx, "auto-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "update-codex"));
+    assert!(!row_of(vcx, &root, "codex").switch.unwrap().on);
+
+    // The executor has a run in flight: the update queues.
+    click(vcx, "update-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "force-codex"));
+    let job = row_of(vcx, &root, "codex").job.unwrap();
+    assert_eq!(
+        job.words("Codex"),
+        "Update queued \u{2014} waits for 1 running task on Codex"
+    );
+    assert!(painted(vcx, "cancel-codex"));
+
+    // Update now anyway starts it at once and it finishes on the new version.
+    click(vcx, "force-codex");
+    wait_drawn(vcx, |vcx| {
+        row_of(vcx, &root, "codex").version_text.as_deref() == Some("0.171.0")
+    });
+    assert!(row_of(vcx, &root, "codex").job.is_none());
+    wait_drawn(vcx, |vcx| {
+        vcx.update(|_, cx| crate::ui::toast::shown(cx))
+            .iter()
+            .any(|(_, m)| m == "Codex updated to 0.171.0.")
+    });
+}
+
+#[gpui::test]
+fn cancelling_a_queued_update_leaves_it_stopped_and_dismissable(cx: &mut TestAppContext) {
+    let store = slow_jobs(cx, 300);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "auto-codex"));
+    click(vcx, "auto-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "update-codex"));
+    click(vcx, "update-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "cancel-codex"));
+    click(vcx, "cancel-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "retry-codex"));
+    let job = row_of(vcx, &root, "codex").job.unwrap();
+    assert_eq!(job.words("Codex"), "Stopped");
+    assert!(
+        !painted(vcx, "terminal-codex"),
+        "a stopped job is not an error to rerun"
+    );
+    click(vcx, "dismiss-codex");
+    wait_drawn(vcx, |vcx| row_of(vcx, &root, "codex").job.is_none());
+}
+
+#[gpui::test]
+fn a_failed_install_says_why_and_retry_runs_it_again(cx: &mut TestAppContext) {
+    let store = slow_jobs(cx, 60);
+    executors_live(cx, &store);
+    daemon(cx, &store).fail_next_job(
+        reno_proto::JobFailure::NeedsPassword,
+        "brew asked for your password (sudo). Reno never types a password for you.",
+    );
+    let recording = Rc::new(crate::terminal::fake::Recording::default());
+    cx.update(|cx| crate::terminal::install(cx, recording.clone()));
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "install-acp.devin"));
+    click(vcx, "install-acp.devin");
+    wait_drawn(vcx, |vcx| painted(vcx, "run-acp.devin"));
+    click(vcx, "run-acp.devin");
+    wait_drawn(vcx, |vcx| painted(vcx, "retry-acp.devin"));
+    let job = row_of(vcx, &root, "acp.devin").job.unwrap();
+    assert_eq!(job.words("Devin"), "Install failed");
+    assert!(job.failed());
+    assert_eq!(row_of(vcx, &root, "acp.devin").group, Group::NotInstalled);
+    assert!(painted(vcx, "log-acp.devin") && painted(vcx, "terminal-acp.devin"));
+
+    // Run in Terminal hands the Reno-run steps to the opener, which is the fake: nothing real.
+    click(vcx, "terminal-acp.devin");
+    assert_eq!(
+        recording.opened.borrow().as_slice(),
+        [(
+            "Run in Terminal: Devin".to_owned(),
+            "brew install --cask devin-cli".to_owned()
+        )]
+    );
+    wait_drawn(vcx, |vcx| painted(vcx, "check-now-acp.devin"));
+    click(vcx, "wait-cancel-acp.devin");
+    wait_drawn(vcx, |vcx| painted(vcx, "retry-acp.devin"));
+
+    // Retry starts the install again (the next one succeeds).
+    click(vcx, "retry-acp.devin");
+    wait_drawn(vcx, |vcx| {
+        row_of(vcx, &root, "acp.devin").group == Group::Ready
+    });
+    assert!(row_of(vcx, &root, "acp.devin").job.is_none());
+}
+
+#[gpui::test]
+fn the_switch_stores_auto_update_and_the_verified_only_box_follows_the_updater(
     cx: &mut TestAppContext,
 ) {
     let store = fake_store(cx);
     executors_live(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Light);
     go(vcx, &root, Nav::Executors);
-    wait_drawn(vcx, |vcx| painted(vcx, "install-acp.hermes"));
-    click(vcx, "install-acp.hermes");
+    wait_drawn(vcx, |vcx| painted(vcx, "auto-claude-code"));
+    assert!(row_of(vcx, &root, "claude-code").switch.unwrap().on);
+    click(vcx, "auto-claude-code");
     wait_drawn(vcx, |vcx| {
-        let view = executor_view(vcx, &root);
-        view.needing == 4 && !painted(vcx, "install-acp.hermes")
+        !row_of(vcx, &root, "claude-code").switch.unwrap().on
     });
-    let view = executor_view(vcx, &root);
-    let hermes = view
-        .rows
-        .rows()
-        .iter()
-        .find(|r| r.id == "acp.hermes")
-        .unwrap();
-    assert_eq!(hermes.installed.text, "Installed");
-    assert!(!store.read_with(vcx, |s, _| s.is_installing(&"acp.hermes".parse().unwrap())));
+    let auto = |vcx: &mut VisualTestContext| {
+        store.read_with(vcx, |s, _| {
+            s.state()
+                .executors()
+                .iter()
+                .find(|e| e.descriptor.id.as_str() == "claude-code")
+                .and_then(|e| e.maintenance.as_ref())
+                .map(|m| m.auto_update)
+        })
+    };
+    assert_eq!(auto(vcx).map(|a| a.on), Some(false), "the daemon stored it");
+
+    // Expanded, Claude Code (which can pin) offers "Only versions Reno has verified"; Codex does not.
+    click(vcx, "line-claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "verified-claude-code"));
+    click(vcx, "verified-claude-code");
+    wait_drawn(vcx, |vcx| auto(vcx).is_some_and(|a| a.verified_only));
+    assert_eq!(
+        auto(vcx).map(|a| a.on),
+        Some(false),
+        "the box does not turn the switch"
+    );
+    click(vcx, "line-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "check-codex"));
+    assert!(!painted(vcx, "verified-codex"));
 }
 
 #[gpui::test]
-fn a_failed_install_keeps_the_screen_and_its_button_usable(cx: &mut TestAppContext) {
+fn sign_in_opens_terminal_through_the_injected_opener_and_checking_back_probes(
+    cx: &mut TestAppContext,
+) {
     let store = fake_store(cx);
+    executors_live(cx, &store);
+    let recording = Rc::new(crate::terminal::fake::Recording::default());
+    cx.update(|cx| crate::terminal::install(cx, recording.clone()));
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-codex"));
+    click(vcx, "sign-in-codex");
+    assert_eq!(
+        recording.opened.borrow().as_slice(),
+        [("Sign in to Codex".to_owned(), "codex login".to_owned())]
+    );
+    // The line waits and offers Check now.
+    wait_drawn(vcx, |vcx| painted(vcx, "check-now-codex"));
+    let stamp = |vcx: &mut VisualTestContext| {
+        store.read_with(vcx, |s, _| {
+            s.state()
+                .executors()
+                .iter()
+                .find(|e| e.descriptor.id.as_str() == "codex")
+                .and_then(|e| e.health.as_ref())
+                .map(|h| h.checked_at_ms)
+        })
+    };
+    let before = stamp(vcx);
+    click(vcx, "check-now-codex");
+    wait_drawn(vcx, |vcx| stamp(vcx) > before);
+    // The fake is still signed out there: the line is back to Sign in…, and the toast says so.
+    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-codex"));
+    wait_drawn(vcx, |vcx| {
+        vcx.update(|_, cx| crate::ui::toast::shown(cx))
+            .iter()
+            .any(|(_, m)| m == "Codex is still signed out.")
+    });
+
+    // Coming back to the window checks too.
+    click(vcx, "sign-in-codex");
+    wait_drawn(vcx, |vcx| painted(vcx, "check-now-codex"));
+    let before = stamp(vcx);
+    root.update(vcx, |r, cx| {
+        r.executors()
+            .update(cx, |screen, cx| screen.on_window_activated(cx));
+    });
+    wait_drawn(vcx, |vcx| stamp(vcx) > before);
+    assert_eq!(recording.opened.borrow().len(), 2);
+}
+
+#[gpui::test]
+#[should_panic(expected = "a test reached the real Terminal opener")]
+fn a_test_that_forgets_to_inject_a_terminal_opener_fails(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "sign-in-codex"));
+    click(vcx, "sign-in-codex");
+}
+
+#[gpui::test]
+fn an_older_daemon_keeps_check_again_and_the_managed_install_and_hides_the_rest(
+    cx: &mut TestAppContext,
+) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_EXECUTOR_MAINTAIN.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    go(vcx, &root, Nav::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "check-codex"));
+    assert!(!executor_view(vcx, &root).maintain);
+    assert!(!painted(vcx, "auto-codex"), "no switch");
+    assert!(!painted(vcx, "update-acp.grok"), "no Update");
+    assert!(!painted(vcx, "sign-in-codex"));
+    assert!(
+        painted(vcx, "install-acp.hermes"),
+        "the daemon's own install stays"
+    );
+    assert!(!painted(vcx, "run-acp.hermes"));
+
+    // Install is `executor.install`, at once, with no review.
+    click(vcx, "install-acp.hermes");
+    wait_drawn(vcx, |vcx| !painted(vcx, "install-acp.hermes"));
+    assert_eq!(row_of(vcx, &root, "acp.hermes").installed.text, "Installed");
+}
+
+#[gpui::test]
+fn a_failed_legacy_install_keeps_the_screen_and_its_button_usable(cx: &mut TestAppContext) {
+    let store = store_with(
+        cx,
+        FakeConfig {
+            without_features: vec![reno_proto::FEATURE_EXECUTOR_MAINTAIN.to_owned()],
+            ..FakeConfig::default()
+        },
+    );
     executors_live(cx, &store);
     daemon(cx, &store).fail(
         "executor.install",
@@ -422,9 +729,8 @@ fn a_failed_install_keeps_the_screen_and_its_button_usable(cx: &mut TestAppConte
         !store.read_with(vcx, |s, _| s.is_installing(&"acp.hermes".parse().unwrap()))
     });
     assert_eq!(
-        executor_view(vcx, &root).needing,
-        5,
-        "nothing was installed"
+        row_of(vcx, &root, "acp.hermes").installed.text,
+        "Needs install"
     );
     assert!(painted(vcx, "install-acp.hermes"));
 }

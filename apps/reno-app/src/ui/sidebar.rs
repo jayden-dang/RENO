@@ -169,7 +169,7 @@ fn folder_view(
             12.0,
             theme.faint,
         ))
-        .child(icon(Icon::Folder, 15.0, theme.muted))
+        .child(icon(Icon::PhFolder, 15.0, theme.muted))
         .child(
             div()
                 .flex_1()

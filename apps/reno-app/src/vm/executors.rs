@@ -322,7 +322,11 @@ pub(crate) struct ExecutorsView {
 impl ExecutorsView {
     /// The rows of one group, in order.
     pub(crate) fn group(&self, group: Group) -> Vec<&ExecutorRow> {
-        self.rows.rows().iter().filter(|r| r.group == group).collect()
+        self.rows
+            .rows()
+            .iter()
+            .filter(|r| r.group == group)
+            .collect()
     }
 }
 
@@ -448,7 +452,13 @@ struct Ctx {
     now_ms: u64,
 }
 
-fn group_of(info: &ExecutorInfo, need: Option<Need>, ctx: Ctx, has_recipe: bool, managed: bool) -> Group {
+fn group_of(
+    info: &ExecutorInfo,
+    need: Option<Need>,
+    ctx: Ctx,
+    has_recipe: bool,
+    managed: bool,
+) -> Group {
     if info.descriptor.id.as_str() == "mock" {
         return Group::Test;
     }
@@ -505,9 +515,9 @@ fn auto_view(
             "Reno runs `{}` once a day, only when {name} has no runs.",
             updater.command
         ),
-        (false, true) => format!(
-            "Reno turns off {name}'s own updater; {stays} until you press Update."
-        ),
+        (false, true) => {
+            format!("Reno turns off {name}'s own updater; {stays} until you press Update.")
+        }
         (false, false) => match version {
             Some(v) => format!("{name} stays on {v}."),
             None => format!("{name} stays on its current version."),
@@ -522,7 +532,9 @@ fn auto_view(
         Some(VersionGate::Untested { verified })
             if auto.verified_only && updater.can_pin && verified != "unverified" =>
         {
-            Some(format!("{name} is past the verified version and goes back to {verified}."))
+            Some(format!(
+                "{name} is past the verified version and goes back to {verified}."
+            ))
         }
         _ => None,
     };
@@ -540,11 +552,7 @@ fn clock(ms: u64) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
-fn job_view(
-    job: &ExecutorJob,
-    now_ms: u64,
-    maintenance: Option<&Maintenance>,
-) -> JobView {
+fn job_view(job: &ExecutorJob, now_ms: u64, maintenance: Option<&Maintenance>) -> JobView {
     let managed = maintenance.is_some_and(|m| m.managed);
     let terminal_command = if managed {
         None
@@ -581,7 +589,8 @@ fn job_view(
                 clock: (elapsed >= CLOCK_AFTER_MS).then(|| clock(elapsed)),
                 last_line: last_line.clone(),
                 long: elapsed >= STILL_RUNNING_AFTER_MS,
-                quiet_minutes: quiet_since_ms.map(|since| (now_ms.saturating_sub(since) / 60_000).max(1)),
+                quiet_minutes: quiet_since_ms
+                    .map(|since| (now_ms.saturating_sub(since) / 60_000).max(1)),
             }
         }
         JobPhase::Failed {
@@ -699,7 +708,11 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
         && updater.is_some()
         && ((update_known && !auto_on) || need == Some(Need::Update));
     let sign_in = (need == Some(Need::SignIn) && !busy)
-        .then(|| maintenance.and_then(|m| m.sign_in.as_ref()).map(|s| s.command.clone()))
+        .then(|| {
+            maintenance
+                .and_then(|m| m.sign_in.as_ref())
+                .map(|s| s.command.clone())
+        })
         .flatten();
     let dot = if job.as_ref().is_some_and(JobView::running) {
         Dot::Running
@@ -749,9 +762,14 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
                 label: format!("Auto-update {name}"),
             }),
         lock: maintenance.is_some_and(|m| m.managed) && installed_ok,
-        auto: maintenance
-            .filter(|_| installed_ok)
-            .and_then(|m| auto_view(&name, m, health.and_then(|h| h.installed.version()), health.map(|h| &h.version_gate))),
+        auto: maintenance.filter(|_| installed_ok).and_then(|m| {
+            auto_view(
+                &name,
+                m,
+                health.and_then(|h| h.installed.version()),
+                health.map(|h| &h.version_gate),
+            )
+        }),
         job,
     }
 }
@@ -797,7 +815,11 @@ pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
     rows.sort_by(|a, b| {
         a.group
             .cmp(&b.group)
-            .then_with(|| a.need.cmp(&b.need))
+            .then_with(|| {
+                // Only what needs the person is ranked by how pressing it is.
+                let rank = |r: &ExecutorRow| r.need.filter(|_| r.group == Group::NeedsYou);
+                rank(a).cmp(&rank(b))
+            })
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -822,8 +844,9 @@ pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
         ),
         (0, n, _) => (
             format!("{n} ready to run"),
-            installable
-                .unwrap_or_else(|| "A run goes only to one that is installed, supported and signed in.".to_owned()),
+            installable.unwrap_or_else(|| {
+                "A run goes only to one that is installed, supported and signed in.".to_owned()
+            }),
         ),
         (1, _, _) => ("1 executor can't take runs".to_owned(), blockers(&rows)),
         (n, _, _) => (format!("{n} executors can't take runs"), blockers(&rows)),
@@ -1207,7 +1230,10 @@ mod tests {
         );
         assert_eq!(view.needing, 3);
         assert_eq!(view.lede, "3 executors can't take runs");
-        assert_eq!(view.detail, "Codex is signed out \u{b7} Grok is too old \u{b7} Hermes needs an install");
+        assert_eq!(
+            view.detail,
+            "Codex is signed out \u{b7} Grok is too old \u{b7} Hermes needs an install"
+        );
     }
 
     #[test]
@@ -1311,5 +1337,740 @@ mod tests {
         state.apply(Update::Runs(vec![run(RunStatus::Failed, refusal)]));
         state.apply(Update::Executors(vec![]));
         assert!(shown(&state).is_none());
+    }
+}
+
+/// The roster: groups, the headline, what a line says and offers, and the job states.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod roster_tests {
+    use reno_client::Update;
+    use reno_proto::{
+        AccessMode, AutoUpdate, ExecutorCaps, ExecutorDescriptor, ExecutorHealth, ExecutorInfo,
+        ExecutorJob, HelloResult, InstallStatus, JobFailure, JobKind, JobPhase, Maintenance,
+        ModelCatalog, NotInstalledReason, PROTOCOL_VERSION, PersonStep, SandboxLevel, SetupRecipe,
+        SetupStep, SignedIn, Steering, StepRunner, UpdaterInfo, VersionGate, VersionRange,
+    };
+
+    use super::*;
+
+    const NOW: u64 = 1_000 * 3_600_000;
+
+    fn health(version: &str, signed_in: SignedIn, gate: VersionGate) -> ExecutorHealth {
+        ExecutorHealth {
+            installed: InstallStatus::Installed {
+                path: "/usr/local/bin/x".into(),
+                version: Some(version.into()),
+            },
+            version_gate: gate,
+            signed_in,
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: NOW - 12 * 60_000,
+        }
+    }
+
+    fn ok_in(email: &str) -> SignedIn {
+        SignedIn::Yes {
+            account: Some(email.into()),
+        }
+    }
+
+    fn not_found() -> ExecutorHealth {
+        ExecutorHealth {
+            installed: InstallStatus::NotInstalled {
+                why: NotInstalledReason::NotFound {
+                    hint: "install it".into(),
+                },
+            },
+            version_gate: VersionGate::Unchecked,
+            signed_in: SignedIn::Unknown,
+            models: ModelCatalog::curated(vec![]),
+            checked_at_ms: NOW - 12 * 60_000,
+        }
+    }
+
+    fn updater(cmd: &str, self_updating: bool, can_pin: bool, latest: Option<&str>) -> UpdaterInfo {
+        UpdaterInfo {
+            command: cmd.into(),
+            self_updating,
+            can_pin,
+            latest: latest.map(str::to_owned),
+            checked_at_ms: None,
+        }
+    }
+
+    fn maint(updater: Option<UpdaterInfo>, auto: bool) -> Maintenance {
+        Maintenance {
+            setup: None,
+            sign_in: Some(PersonStep {
+                label: "Sign in".into(),
+                command: "x login".into(),
+            }),
+            updater,
+            managed: false,
+            auto_update: AutoUpdate {
+                on: auto,
+                verified_only: false,
+            },
+        }
+    }
+
+    fn recipe() -> SetupRecipe {
+        let step = |label: &str, command: &str, runner| SetupStep {
+            label: label.into(),
+            command: command.into(),
+            runner,
+        };
+        SetupRecipe {
+            source: "Homebrew cask devin-cli".into(),
+            steps: vec![
+                step("Install", "brew install --cask devin-cli", StepRunner::Reno),
+                step("Sign in", "devin auth login", StepRunner::Person),
+            ],
+        }
+    }
+
+    fn info(
+        id: &str,
+        health: Option<ExecutorHealth>,
+        maintenance: Option<Maintenance>,
+        job: Option<ExecutorJob>,
+    ) -> ExecutorInfo {
+        ExecutorInfo {
+            descriptor: ExecutorDescriptor {
+                id: id.parse().unwrap(),
+                contract_version: 1,
+                adapter_version: "t".into(),
+                cli_verified: VersionRange {
+                    min: "0".into(),
+                    verified: "9".into(),
+                },
+                caps: ExecutorCaps {
+                    steering: Steering::None,
+                    resume: false,
+                    access_modes: vec![AccessMode::Supervised],
+                    sandbox_levels: vec![SandboxLevel::ReadOnly],
+                    mcp_injection: false,
+                    structured_output: false,
+                    deterministic_turn_end: false,
+                    plan_mode: false,
+                    models: vec![],
+                    model_switch: false,
+                    isolates_user_config: false,
+                    model_aliases: vec![],
+                },
+            },
+            health,
+            maintenance,
+            job,
+        }
+    }
+
+    fn job(kind: JobKind, phase: JobPhase) -> ExecutorJob {
+        ExecutorJob {
+            id: "job-1".into(),
+            kind,
+            phase,
+            started_at_ms: NOW,
+        }
+    }
+
+    fn running(step: u32, steps: u32) -> JobPhase {
+        JobPhase::Running {
+            step,
+            steps,
+            last_line: Some("downloading".into()),
+            quiet_since_ms: None,
+        }
+    }
+
+    fn view_with(list: Vec<ExecutorInfo>, features: &[&str], now: u64) -> ExecutorsView {
+        let mut state = State::new();
+        state.apply(Update::Executors(list));
+        state.apply(Update::Daemon(reno_client::DaemonInfo {
+            hello: HelloResult {
+                server_version: "t".into(),
+                protocol_version: PROTOCOL_VERSION,
+                features: features.iter().map(|f| (*f).to_owned()).collect(),
+                pid: 1,
+            },
+            status: None,
+        }));
+        build(&state, now)
+    }
+
+    const MAINTAIN: &[&str] = &["executors", "executor.install", "executor.maintain"];
+
+    fn view(list: Vec<ExecutorInfo>) -> ExecutorsView {
+        view_with(list, MAINTAIN, NOW)
+    }
+
+    fn row<'a>(view: &'a ExecutorsView, id: &str) -> &'a ExecutorRow {
+        view.rows.rows().iter().find(|r| r.id == id).unwrap()
+    }
+
+    #[test]
+    fn executors_are_grouped_by_what_a_person_can_do_and_the_headline_counts_the_ready() {
+        let v = view(vec![
+            info(
+                "mock",
+                Some(health("1", SignedIn::Unknown, VersionGate::Ok)),
+                None,
+                None,
+            ),
+            info(
+                "claude-code",
+                Some(health("2.1.327", ok_in("a@b.c"), VersionGate::Ok)),
+                Some(maint(
+                    Some(updater("claude update", true, true, None)),
+                    true,
+                )),
+                None,
+            ),
+            info(
+                "codex",
+                Some(health("0.169.0", ok_in("a@b.c"), VersionGate::Ok)),
+                None,
+                None,
+            ),
+            info(
+                "acp.devin",
+                Some(not_found()),
+                Some(Maintenance {
+                    setup: Some(recipe()),
+                    ..maint(None, true)
+                }),
+                None,
+            ),
+            info("acp.fx", None, None, None),
+        ]);
+        let groups: Vec<(Group, Vec<&str>)> = Group::ALL
+            .iter()
+            .map(|g| (*g, v.group(*g).iter().map(|r| r.id.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (Group::NeedsYou, vec![]),
+                (Group::Ready, vec!["claude-code", "codex"]),
+                (Group::Unknown, vec!["acp.fx"]),
+                (Group::NotInstalled, vec!["acp.devin"]),
+                (Group::Test, vec!["mock"]),
+            ]
+        );
+        assert_eq!(v.lede, "2 ready to run");
+        assert_eq!(v.detail, "Devin can be installed from here.");
+        assert_eq!(v.checked.as_deref(), Some("checked 12m ago"));
+        // The rows come in group order.
+        let order: Vec<&str> = v.rows.rows().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            order,
+            ["claude-code", "codex", "acp.fx", "acp.devin", "mock"]
+        );
+    }
+
+    #[test]
+    fn a_blocked_executor_turns_the_headline_into_what_is_wrong() {
+        let v = view(vec![
+            info(
+                "claude-code",
+                Some(health(
+                    "2.1.327",
+                    SignedIn::No {
+                        hint: "login".into(),
+                    },
+                    VersionGate::Ok,
+                )),
+                Some(maint(
+                    Some(updater("claude update", true, true, None)),
+                    true,
+                )),
+                None,
+            ),
+            info(
+                "codex",
+                Some(health(
+                    "0.1.0",
+                    ok_in("a@b.c"),
+                    VersionGate::TooOld {
+                        min: "0.146.0".into(),
+                    },
+                )),
+                Some(maint(
+                    Some(updater("codex update", false, false, Some("0.171.0"))),
+                    true,
+                )),
+                None,
+            ),
+        ]);
+        assert_eq!(v.lede, "2 executors can't take runs");
+        assert_eq!(
+            v.detail,
+            "Claude Code is signed out \u{b7} Codex is too old"
+        );
+        assert_eq!(v.needing, 2);
+        assert!(v.group(Group::Ready).is_empty());
+        let signed_out = row(&v, "claude-code");
+        assert_eq!(signed_out.dot, Dot::Blocked);
+        assert_eq!(signed_out.sign_in.as_deref(), Some("x login"));
+        assert!(!signed_out.update);
+        // Too old: Update is the primary control, even with auto-update on.
+        let old = row(&v, "codex");
+        assert!(old.update && old.update_primary);
+        assert_eq!(old.middle.as_ref().unwrap().text, "Version too old");
+    }
+
+    #[test]
+    fn a_ready_line_says_the_version_the_update_and_the_full_account_and_nothing_else() {
+        let latest = |latest: &str| {
+            let v = view(vec![info(
+                "codex",
+                Some(health(
+                    "0.170.0",
+                    ok_in("betty.rodriguez+077@googlemail.com"),
+                    VersionGate::Untested {
+                        verified: "0.169.0".into(),
+                    },
+                )),
+                Some(maint(
+                    Some(updater("codex update", false, false, Some(latest))),
+                    true,
+                )),
+                None,
+            )]);
+            row(&v, "codex").clone()
+        };
+        let r = latest("0.171.0");
+        assert_eq!(r.version_text.as_deref(), Some("0.170.0"));
+        assert_eq!(r.available.as_deref(), Some("0.171.0"));
+        assert_eq!(
+            r.account.as_deref(),
+            Some("betty.rodriguez+077@googlemail.com")
+        );
+        // Untested is not on the line: only the expanded line says it.
+        assert_eq!(r.group, Group::Ready);
+        assert_eq!(r.version.as_ref().unwrap().text, "Version untested");
+        assert!(r.middle.is_none());
+        // Only a newer version is "available".
+        assert_eq!(latest("0.170.0").available, None);
+        assert_eq!(latest("0.169.9").available, None);
+        assert_eq!(latest("0.170.1").available.as_deref(), Some("0.170.1"));
+        assert_eq!(
+            latest("nightly").available,
+            None,
+            "not a version: not newer"
+        );
+        // Signed in without an account says so; an unknown sign-in shows no check mark.
+        let unknown = view(vec![info(
+            "acp.grok",
+            Some(health("1.0.0", SignedIn::Unknown, VersionGate::Ok)),
+            None,
+            None,
+        )]);
+        assert_eq!(row(&unknown, "acp.grok").account, None);
+    }
+
+    #[test]
+    fn the_right_side_offers_update_only_with_auto_update_off_and_the_switch_where_there_is_an_updater()
+     {
+        let codex = |auto: bool, latest: Option<&str>| {
+            let v = view(vec![info(
+                "codex",
+                Some(health("0.170.0", ok_in("a@b.c"), VersionGate::Ok)),
+                Some(maint(
+                    Some(updater("codex update", false, false, latest)),
+                    auto,
+                )),
+                None,
+            )]);
+            row(&v, "codex").clone()
+        };
+        let on = codex(true, Some("0.171.0"));
+        assert!(!on.update, "auto-update will do it");
+        assert_eq!(on.switch.as_ref().unwrap().label, "Auto-update Codex");
+        assert!(on.switch.as_ref().unwrap().on);
+        let off = codex(false, Some("0.171.0"));
+        assert!(off.update && !off.update_primary);
+        assert!(!off.switch.as_ref().unwrap().on);
+        assert!(!codex(false, None).update, "no update is known");
+        assert!(!codex(false, Some("0.170.0")).update, "already on it");
+
+        // A managed adapter updates with Reno: a lock, no switch, no Update.
+        let managed = view(vec![info(
+            "acp.antigravity",
+            Some(health("1.2.1", SignedIn::Unknown, VersionGate::Ok)),
+            Some(Maintenance {
+                managed: true,
+                ..maint(None, true)
+            }),
+            None,
+        )]);
+        let m = row(&managed, "acp.antigravity");
+        assert!(m.lock && m.switch.is_none() && !m.update);
+        // No updater: nothing at all.
+        let none = view(vec![info(
+            "acp.hermes",
+            Some(health("1.0.0", SignedIn::Unknown, VersionGate::Ok)),
+            Some(maint(None, true)),
+            None,
+        )]);
+        let n = row(&none, "acp.hermes");
+        assert!(!n.lock && n.switch.is_none() && !n.update && n.install.is_none());
+    }
+
+    #[test]
+    fn a_first_install_is_reviewed_first_and_a_managed_one_runs_at_once() {
+        let devin = |maintenance: Maintenance, health: ExecutorHealth| {
+            let v = view(vec![info(
+                "acp.devin",
+                Some(health),
+                Some(maintenance),
+                None,
+            )]);
+            row(&v, "acp.devin").clone()
+        };
+        let r = devin(
+            Maintenance {
+                setup: Some(recipe()),
+                ..maint(None, true)
+            },
+            not_found(),
+        );
+        assert_eq!(r.group, Group::NotInstalled);
+        assert_eq!(r.dot, Dot::NotInstalled);
+        assert_eq!(r.install, Some(InstallOffer::Review));
+        assert_eq!(
+            r.source.as_deref(),
+            Some("Homebrew cask devin-cli \u{b7} then sign in")
+        );
+        let recipe = r.recipe.unwrap();
+        assert_eq!(recipe.reno_steps(), 1);
+        assert!(!recipe.steps[1].reno);
+
+        let mut needs_install = not_found();
+        needs_install.installed = InstallStatus::NotInstalled {
+            why: NotInstalledReason::NeedsInstall {
+                what: "the adapter".into(),
+            },
+        };
+        let managed = devin(
+            Maintenance {
+                managed: true,
+                ..maint(None, true)
+            },
+            needs_install.clone(),
+        );
+        assert_eq!(
+            managed.group,
+            Group::NeedsYou,
+            "a managed adapter is a need, not optional"
+        );
+        assert_eq!(managed.install, Some(InstallOffer::Now));
+        // With no recipe and no managed adapter there is nothing Reno can run.
+        let nothing = devin(maint(None, true), not_found());
+        assert_eq!(nothing.install, None);
+    }
+
+    #[test]
+    fn a_daemon_without_executor_maintain_gets_check_again_and_the_managed_install_only() {
+        let mut needs_install = not_found();
+        needs_install.installed = InstallStatus::NotInstalled {
+            why: NotInstalledReason::NeedsInstall {
+                what: "the adapter".into(),
+            },
+        };
+        let v = view_with(
+            vec![
+                info(
+                    "acp.hermes",
+                    Some(needs_install),
+                    Some(Maintenance {
+                        setup: Some(recipe()),
+                        ..maint(None, true)
+                    }),
+                    None,
+                ),
+                info(
+                    "codex",
+                    Some(health("0.170.0", ok_in("a@b.c"), VersionGate::Ok)),
+                    Some(maint(
+                        Some(updater("codex update", false, false, Some("0.171.0"))),
+                        false,
+                    )),
+                    None,
+                ),
+            ],
+            &["executors", "executor.install"],
+            NOW,
+        );
+        assert!(!v.maintain);
+        let h = row(&v, "acp.hermes");
+        assert!(!h.maintain && h.recipe.is_none() && h.can_install);
+        assert_eq!(h.install, Some(InstallOffer::Legacy));
+        assert_eq!(h.group, Group::NeedsYou);
+        let c = row(&v, "codex");
+        assert!(!c.update && c.switch.is_none() && c.available.is_none() && c.auto.is_none());
+        assert!(v.updates_waiting.is_empty());
+    }
+
+    #[test]
+    fn a_queued_update_says_what_it_waits_for() {
+        let v = view(vec![info(
+            "codex",
+            Some(health("0.170.0", ok_in("a@b.c"), VersionGate::Ok)),
+            Some(maint(
+                Some(updater("codex update", false, false, Some("0.171.0"))),
+                false,
+            )),
+            Some(job(JobKind::Update, JobPhase::Queued { waiting_runs: 1 })),
+        )]);
+        let r = row(&v, "codex");
+        assert_eq!(
+            r.job.as_ref().unwrap().words("Codex"),
+            "Update queued \u{2014} waits for 1 running task on Codex"
+        );
+        assert!(!r.update, "the job owns the line");
+        assert_eq!(v.jobs_running, 1, "a queued update counts as a job");
+        assert_eq!(r.dot, Dot::Ready, "queued is not running");
+    }
+
+    #[test]
+    fn a_running_job_counts_a_clock_after_a_second_and_notes_long_and_quiet_runs() {
+        let at = |elapsed: u64, phase: JobPhase| {
+            let v = view_with(
+                vec![info(
+                    "acp.devin",
+                    Some(not_found()),
+                    Some(Maintenance {
+                        setup: Some(recipe()),
+                        ..maint(None, true)
+                    }),
+                    Some(job(JobKind::Install, phase)),
+                )],
+                MAINTAIN,
+                NOW + elapsed,
+            );
+            row(&v, "acp.devin").clone()
+        };
+        let state = |r: &ExecutorRow| r.job.as_ref().unwrap().state.clone();
+
+        let early = at(500, running(1, 2));
+        assert_eq!(early.dot, Dot::Running);
+        assert_eq!(
+            early.job.as_ref().unwrap().words("Devin"),
+            "Installing \u{b7} step 1 of 2"
+        );
+        assert!(matches!(
+            state(&early),
+            JobState::Running {
+                clock: None,
+                long: false,
+                ..
+            }
+        ));
+
+        let s = at(7_000, running(1, 2));
+        match state(&s) {
+            JobState::Running {
+                clock,
+                last_line,
+                long,
+                quiet_minutes,
+                ..
+            } => {
+                assert_eq!(clock.as_deref(), Some("0:07"));
+                assert_eq!(last_line.as_deref(), Some("downloading"));
+                assert!(!long && quiet_minutes.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match state(&at(31_000, running(2, 2))) {
+            JobState::Running { long, .. } => assert!(long),
+            other => panic!("{other:?}"),
+        }
+        let quiet = JobPhase::Running {
+            step: 1,
+            steps: 2,
+            last_line: None,
+            quiet_since_ms: Some(NOW),
+        };
+        match state(&at(5 * 60_000 + 2_000, quiet)) {
+            JobState::Running { quiet_minutes, .. } => assert_eq!(quiet_minutes, Some(5)),
+            other => panic!("{other:?}"),
+        }
+        // One step needs no "step 1 of 1".
+        let one = at(2_000, running(1, 1));
+        assert_eq!(one.job.as_ref().unwrap().words("Devin"), "Installing");
+    }
+
+    #[test]
+    fn a_failed_job_says_what_failed_and_offers_a_terminal_unless_managed() {
+        let failed = |kind, failure, managed: bool| {
+            let phase = JobPhase::Failed {
+                failure,
+                detail: "brew asked for your password (sudo). Reno never types a password for you."
+                    .into(),
+                finished_at_ms: NOW,
+            };
+            let maintenance = Maintenance {
+                setup: Some(recipe()),
+                managed,
+                ..maint(Some(updater("codex update", false, false, None)), true)
+            };
+            let h = if kind == JobKind::Install {
+                not_found()
+            } else {
+                health("1", ok_in("a@b.c"), VersionGate::Ok)
+            };
+            let v = view(vec![info(
+                "acp.devin",
+                Some(h),
+                Some(maintenance),
+                Some(job(kind, phase)),
+            )]);
+            row(&v, "acp.devin").job.clone().unwrap()
+        };
+        let install = failed(JobKind::Install, JobFailure::NeedsPassword, false);
+        assert!(install.failed());
+        assert_eq!(install.words("Devin"), "Install failed");
+        assert_eq!(
+            install.terminal_command.as_deref(),
+            Some("brew install --cask devin-cli")
+        );
+        match &install.state {
+            JobState::Failed {
+                detail, stopped, ..
+            } => {
+                assert!(detail.starts_with("brew asked for your password"));
+                assert!(!stopped);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            failed(JobKind::Update, JobFailure::ExitCode, false).words("Devin"),
+            "Update failed"
+        );
+        assert_eq!(
+            failed(JobKind::Update, JobFailure::ExitCode, false)
+                .terminal_command
+                .as_deref(),
+            Some("codex update")
+        );
+        // A person's cancel is "Stopped", not a failure. A managed adapter has no commands.
+        assert_eq!(
+            failed(JobKind::Install, JobFailure::Cancelled, false).words("Devin"),
+            "Stopped"
+        );
+        assert_eq!(
+            failed(JobKind::Install, JobFailure::Broken, true).terminal_command,
+            None
+        );
+        // A failed job is not a running one.
+        let v = view(vec![info(
+            "acp.devin",
+            Some(not_found()),
+            Some(Maintenance {
+                setup: Some(recipe()),
+                ..maint(None, true)
+            }),
+            Some(job(
+                JobKind::Install,
+                JobPhase::Failed {
+                    failure: JobFailure::ExitCode,
+                    detail: "x".into(),
+                    finished_at_ms: NOW,
+                },
+            )),
+        )]);
+        assert_eq!(v.jobs_running, 0);
+    }
+
+    #[test]
+    fn the_header_counts_jobs_and_offers_update_all_for_more_than_one_waiting() {
+        let waiting = |id: &str| {
+            info(
+                id,
+                Some(health("0.1.0", ok_in("a@b.c"), VersionGate::Ok)),
+                Some(maint(
+                    Some(updater("u", false, false, Some("0.2.0"))),
+                    false,
+                )),
+                None,
+            )
+        };
+        let v = view(vec![waiting("codex"), waiting("acp.grok")]);
+        assert_eq!(v.updates_waiting, ["codex", "acp.grok"]);
+        // Auto-update on: nothing waits.
+        let on = view(vec![info(
+            "codex",
+            Some(health("0.1.0", ok_in("a@b.c"), VersionGate::Ok)),
+            Some(maint(Some(updater("u", false, false, Some("0.2.0"))), true)),
+            None,
+        )]);
+        assert!(on.updates_waiting.is_empty());
+    }
+
+    #[test]
+    fn auto_update_says_what_on_and_off_mean_for_each_kind_of_cli() {
+        let text = |id: &str, version: &str, self_updating: bool, auto: bool, can_pin: bool| {
+            let v = view(vec![info(
+                id,
+                Some(health(version, ok_in("a@b.c"), VersionGate::Ok)),
+                Some(maint(
+                    Some(updater(
+                        &format!("{id} update"),
+                        self_updating,
+                        can_pin,
+                        None,
+                    )),
+                    auto,
+                )),
+                None,
+            )]);
+            row(&v, id).auto.clone().unwrap()
+        };
+        assert_eq!(
+            text("claude-code", "2.1.327", true, true, true).text,
+            "Claude Code updates itself; Reno leaves that on."
+        );
+        assert_eq!(
+            text("codex", "0.169.0", false, true, false).text,
+            "Reno runs `codex update` once a day, only when Codex has no runs."
+        );
+        assert_eq!(
+            text("claude-code", "2.1.327", true, false, true).text,
+            "Reno turns off Claude Code's own updater; it stays on 2.1.327 until you press Update."
+        );
+        assert_eq!(
+            text("codex", "0.169.0", false, false, false).text,
+            "Codex stays on 0.169.0."
+        );
+        assert!(text("claude-code", "2.1.327", true, true, true).can_pin);
+        assert!(!text("codex", "0.169.0", false, true, false).can_pin);
+    }
+
+    #[test]
+    fn the_expanded_facts_keep_the_honesty_rules() {
+        let v = view(vec![info(
+            "codex",
+            Some(health(
+                "0.170.0",
+                SignedIn::Unknown,
+                VersionGate::Untested {
+                    verified: "0.169.0".into(),
+                },
+            )),
+            None,
+            None,
+        )]);
+        let r = row(&v, "codex");
+        assert_eq!(r.signed_in.as_ref().unwrap().text, "Sign-in not checkable");
+        assert_eq!(r.version.as_ref().unwrap().text, "Version untested");
+        assert_eq!(r.account, None);
+        assert_eq!(
+            r.group,
+            Group::Ready,
+            "untested and unknown are caveats, not blocks"
+        );
     }
 }

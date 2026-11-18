@@ -36,11 +36,11 @@ impl Nav {
     /// The row icon.
     pub(crate) const fn icon(self) -> Icon {
         match self {
-            Self::Home => Icon::Home,
-            Self::Runs => Icon::Terminal,
-            Self::Triggers => Icon::Clock,
-            Self::Executors => Icon::Cpu,
-            Self::Settings => Icon::Settings,
+            Self::Home => Icon::PhHouse,
+            Self::Runs => Icon::PhTerminal,
+            Self::Triggers => Icon::PhTimer,
+            Self::Executors => Icon::PhCpu,
+            Self::Settings => Icon::PhGear,
         }
     }
 }

@@ -119,8 +119,11 @@ pub(crate) fn icon_button(
     size: f32,
 ) -> Stateful<Div> {
     let hover = theme.raised;
+    let id: SharedString = id.into();
+    let selector = id.clone();
     div()
-        .id(id.into())
+        .id(id)
+        .debug_selector(move || selector.to_string())
         .flex_none()
         .size(px(size))
         .flex()

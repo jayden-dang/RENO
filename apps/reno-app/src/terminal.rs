@@ -32,7 +32,13 @@ pub(crate) fn command_file_contents(label: &str, command: &str) -> String {
 fn slug(label: &str) -> String {
     let slug: String = label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     slug.trim_matches('-').to_owned()
 }
@@ -149,7 +155,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o700, "Terminal needs it executable; nobody else");
+            assert_eq!(
+                mode & 0o777,
+                0o700,
+                "Terminal needs it executable; nobody else"
+            );
         }
         // Two files for the same command never collide.
         let again = write_command_file(&dir, "Sign in to Codex", "codex login").unwrap();
