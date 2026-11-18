@@ -148,7 +148,10 @@ mod tests {
             "title": "Clear session?", "message": "All messages will be lost."
         }));
         assert_eq!(dialog.question.options, ["Yes", "No"]);
-        assert_eq!(dialog.question.prompt, "Clear session?\nAll messages will be lost.");
+        assert_eq!(
+            dialog.question.prompt,
+            "Clear session?\nAll messages will be lost."
+        );
         assert_eq!(dialog.timeout, None);
         assert_eq!(response(&dialog, Some("Yes"))["confirmed"], true);
         assert_eq!(response(&dialog, Some("No"))["confirmed"], false);
@@ -179,7 +182,14 @@ mod tests {
 
     #[test]
     fn fire_and_forget_methods_are_not_dialogs() {
-        for method in ["notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "future"] {
+        for method in [
+            "notify",
+            "setStatus",
+            "setWidget",
+            "setTitle",
+            "set_editor_text",
+            "future",
+        ] {
             assert!(
                 parse(&json!({ "type": "extension_ui_request", "id": "n", "method": method }))
                     .is_none(),

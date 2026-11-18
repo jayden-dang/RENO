@@ -59,9 +59,8 @@ pub(crate) const KNOWN_MESSAGE_EVENTS: &[&str] = &[
     "error",
 ];
 
-/// `extension_ui_request` methods. The first four are dialogs that wait for an answer; the rest
-/// are fire-and-forget.
-pub(crate) const DIALOG_METHODS: &[&str] = &["select", "confirm", "input", "editor"];
+/// `extension_ui_request` methods that need no answer (the dialogs that do, `select`,
+/// `confirm`, `input` and `editor`, are `wire::pi::dialog`'s).
 pub(crate) const FIRE_AND_FORGET_METHODS: &[&str] = &[
     "notify",
     "setStatus",
@@ -81,12 +80,7 @@ mod tests {
 
     #[test]
     fn the_tables_have_no_duplicates() {
-        for table in [
-            KNOWN_FRAMES,
-            KNOWN_MESSAGE_EVENTS,
-            DIALOG_METHODS,
-            FIRE_AND_FORGET_METHODS,
-        ] {
+        for table in [KNOWN_FRAMES, KNOWN_MESSAGE_EVENTS, FIRE_AND_FORGET_METHODS] {
             let mut sorted = table.to_vec();
             sorted.sort_unstable();
             sorted.dedup();

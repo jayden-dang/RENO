@@ -283,13 +283,19 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ok.id, "r-1");
-        assert_eq!(Disposition::of(ok.outcome.as_ref().unwrap()), Disposition::Queued);
+        assert_eq!(
+            Disposition::of(ok.outcome.as_ref().unwrap()),
+            Disposition::Queued
+        );
         let failed = Reply::parse(&json!({
             "type": "response", "id": "r-2", "command": "set_model", "success": false,
             "error": "Model not found: a/b"
         }))
         .unwrap();
-        assert_eq!(failed.outcome, Err("Pi set_model: Model not found: a/b".into()));
+        assert_eq!(
+            failed.outcome,
+            Err("Pi set_model: Model not found: a/b".into())
+        );
         let parse = Reply::parse(&json!({
             "type": "response", "command": "parse", "success": false, "error": "bad"
         }))
@@ -297,8 +303,14 @@ mod tests {
         assert_eq!(parse.id, "");
         assert!(Reply::parse(&json!({ "type": "agent_start" })).is_none());
         assert_eq!(Disposition::of(&json!({})), Disposition::Unknown);
-        assert_eq!(Disposition::of(&json!({ "disposition": "handled" })), Disposition::Handled);
-        assert_eq!(Disposition::of(&json!({ "disposition": "started" })), Disposition::Started);
+        assert_eq!(
+            Disposition::of(&json!({ "disposition": "handled" })),
+            Disposition::Handled
+        );
+        assert_eq!(
+            Disposition::of(&json!({ "disposition": "started" })),
+            Disposition::Started
+        );
     }
 
     /// The `get_state` reply Pi 1.5.0 gave in the live handshake (model trimmed).

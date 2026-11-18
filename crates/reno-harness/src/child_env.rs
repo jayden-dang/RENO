@@ -131,6 +131,67 @@ pub const CODEX: DriverEnv = DriverEnv {
     prefixes: &[],
 };
 
+/// Pi: where it keeps its settings, credentials and sessions, its offline and telemetry
+/// switches, and the provider credentials and endpoints its own `--help` lists (read off Pi
+/// 1.5.0, which is more than the other lists here can say). Pi reaches many providers, and a
+/// run's model decides which one; a variable of a provider the owner did not sign in to is
+/// simply absent.
+pub const PI: DriverEnv = DriverEnv {
+    names: &[
+        "PI_CODING_AGENT_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_PACKAGE_DIR",
+        "PI_OFFLINE",
+        "PI_TELEMETRY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_OAUTH_TOKEN",
+        "ANT_LING_API_KEY",
+        "OPENAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_BASE_URL",
+        "AZURE_OPENAI_RESOURCE_NAME",
+        "AZURE_OPENAI_API_VERSION",
+        "AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+        "DEEPSEEK_API_KEY",
+        "NVIDIA_API_KEY",
+        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
+        "CEREBRAS_API_KEY",
+        "XAI_API_KEY",
+        "FIREWORKS_API_KEY",
+        "TOGETHER_API_KEY",
+        "BASETEN_API_KEY",
+        "OPENROUTER_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "ZAI_API_KEY",
+        "ZAI_CODING_CN_API_KEY",
+        "MISTRAL_API_KEY",
+        "MINIMAX_API_KEY",
+        "MOONSHOT_API_KEY",
+        "OPENCODE_API_KEY",
+        "KIMI_API_KEY",
+        "META_API_KEY",
+        "CLOUDFLARE_API_KEY",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_GATEWAY_ID",
+        "QWEN_TOKEN_PLAN_API_KEY",
+        "QWEN_TOKEN_PLAN_CN_API_KEY",
+        "XIAOMI_API_KEY",
+        "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+        "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+        "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    ],
+    prefixes: &[],
+};
+
 const DEVIN: DriverEnv = DriverEnv {
     names: &["DEVIN_API_KEY", "WINDSURF_API_KEY"],
     prefixes: &[],
@@ -197,6 +258,7 @@ pub fn for_harness(harness: HarnessId) -> DriverEnv {
         HarnessId::Hermes => HERMES,
         HarnessId::Fx => FX,
         HarnessId::Antigravity => ANTIGRAVITY,
+        HarnessId::Pi => PI,
         HarnessId::Registry(agent) if agent.registry_id() == "gemini" => GEMINI_REGISTRY,
         HarnessId::Registry(_) => NONE,
     }
@@ -299,6 +361,10 @@ mod tests {
             ["CODEX_HOME", "OPENAI_API_KEY"]
         );
         assert_eq!(kept(for_harness(HarnessId::Grok), &daemon), ["XAI_API_KEY"]);
+        assert_eq!(
+            kept(for_harness(HarnessId::Pi), &daemon),
+            ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY"]
+        );
     }
 
     #[test]
@@ -311,6 +377,18 @@ mod tests {
             kept(for_harness(HarnessId::Registry(gemini)), &daemon),
             ["GEMINI_API_KEY"]
         );
+    }
+
+    #[test]
+    fn a_pi_child_never_inherits_a_claude_session_or_a_reno_variable() {
+        let daemon = [
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "t"),
+            ("RENO_PI_MCP", "/x"),
+            ("PI_CODING_AGENT_DIR", "/d"),
+            ("GITHUB_TOKEN", "g"),
+        ];
+        assert_eq!(kept(PI, &daemon), ["PI_CODING_AGENT_DIR"]);
     }
 
     #[test]

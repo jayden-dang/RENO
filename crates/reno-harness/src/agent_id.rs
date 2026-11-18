@@ -84,6 +84,9 @@ pub enum HarnessId {
     /// google's antigravity agent over acp (`agy_acp_server`, installed from
     /// its pinned release archive).
     Antigravity,
+    /// Pi (the earendil-works coding agent), driven natively over its JSONL RPC
+    /// (`pi --mode rpc`).
+    Pi,
     /// An agent added from the ACP registry (`acp.<registry id>`), driven by
     /// the generic ACP harness from its registry entry: every registry
     /// agent goes through this one path.
@@ -93,7 +96,7 @@ pub enum HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 7] = [
+    pub const ALL: [HarnessId; 8] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Devin,
@@ -101,6 +104,7 @@ impl HarnessId {
         HarnessId::Hermes,
         HarnessId::Fx,
         HarnessId::Antigravity,
+        HarnessId::Pi,
     ];
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
@@ -113,6 +117,7 @@ impl HarnessId {
             HarnessId::Hermes => "hermes",
             HarnessId::Fx => "fx",
             HarnessId::Antigravity => "antigravity",
+            HarnessId::Pi => "pi",
             HarnessId::Registry(agent) => agent.slug(),
         }
     }
@@ -153,6 +158,7 @@ mod registry_slug_tests {
         );
         // A built-in's slug stays the built-in, never a registry agent.
         assert_eq!(HarnessId::from_slug("codex"), Some(HarnessId::Codex));
+        assert_eq!(HarnessId::from_slug("pi"), Some(HarnessId::Pi));
         assert_eq!(
             HarnessId::from_slug("claude-code"),
             Some(HarnessId::ClaudeCode)

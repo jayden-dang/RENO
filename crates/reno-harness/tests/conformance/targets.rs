@@ -13,7 +13,7 @@ use reno_harness::conformance::{
     UserConfigPlan,
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
-use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, RegistryAgent};
+use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, PiExecutor, RegistryAgent};
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorId,
     HealthProbe, McpServerSpec, Question, StopReason, ToolCall,
@@ -595,4 +595,85 @@ fn acp_target(name: &str, executor: AcpExecutor) -> Target {
         Limits::fake(),
     )
     .with_plan(acp_plan())
+}
+
+// -- Pi ----------------------------------------------------------------------------------------
+
+/// Pi over its fake `pi --mode rpc`. Pi asks for no approval, so it claims full access only and
+/// the suite skips every approval case; it isolates the owner's tools with launch flags, which
+/// the fake reports.
+pub(crate) fn pi_target() -> Target {
+    let executor = PiExecutor::new().with_executable(fixture("fake-pi.py"));
+    let plan = Plan {
+        lifecycle: Some(
+            Scenario::new("scenario:conf-happy")
+                .expect(Expect::TextContains("conf-hello".into()))
+                .expect(Expect::ResultContains("conf-hello".into()))
+                .expect(Expect::Tool {
+                    name: "bash".into(),
+                    class: ActionClass::Command,
+                })
+                .expect(Expect::Tool {
+                    name: "edit".into(),
+                    class: ActionClass::Edit,
+                }),
+        ),
+        approval: None,
+        input: Some(
+            Scenario::new("scenario:conf-question")
+                .expect(Expect::TextContains("answered:second".into())),
+        ),
+        steer: Some(Scenario::new("scenario:steer").expect(Expect::TextContains("steered".into()))),
+        cancel: Some(Scenario::new("scenario:interrupt")),
+        crash: Some(Scenario::new("scenario:conf-crash")),
+        resume: Some(
+            Scenario::new("scenario:resumed")
+                .resume("th-conf")
+                .expect(Expect::SessionIs("th-conf".into()))
+                .expect(Expect::TextContains("back again".into())),
+        ),
+        mcp: Some(
+            Scenario::new("scenario:mcp-config")
+                .mcp(vec![
+                    McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/reno".into(),
+                        args: vec!["mcp".into()],
+                        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+                    },
+                    McpServerSpec {
+                        name: "plugin-focus".into(),
+                        command: "/opt/focus/server".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                ])
+                .expect(Expect::TextContains(
+                    "mcp configured:reno,plugin-focus".into(),
+                )),
+        ),
+        output_schema: None,
+        mode_runs: Vec::new(),
+        unknown_frames: Some(UnknownFramePlan {
+            scenario: Scenario::new("scenario:conf-unknown")
+                .expect(Expect::ResultContains("unknown-done".into())),
+            keys: vec![
+                "type:agent_teleported".into(),
+                "message_update:audio_delta".into(),
+            ],
+        }),
+        user_config: Some(UserConfigPlan {
+            scenario: Scenario::new("scenario:user-config"),
+            isolated: vec![Expect::TextContains("user-config:isolated".into())],
+            inherited: vec![Expect::TextContains("user-config:inherited".into())],
+        }),
+    };
+    Target::new(
+        "pi",
+        Arc::new(executor),
+        Profile::driver(),
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(plan)
 }

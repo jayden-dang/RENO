@@ -227,7 +227,10 @@ mod tests {
     fn thinking_levels_follow_the_model_object() {
         let models = live();
         let levels = |i: usize| supported_levels(&models["models"][i]);
-        assert_eq!(levels(0), ["minimal", "low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            levels(0),
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(levels(1), ["off", "minimal", "low", "medium", "high"]);
         assert_eq!(levels(2), ["off"]);
     }
@@ -240,7 +243,10 @@ mod tests {
             ["anthropic/claude-fable-5", "openai/gpt-5", "openai/gpt-4"]
         );
         assert_eq!(infos[0].efforts, Effort::ALL[..].to_vec());
-        assert!(infos[0].options.is_empty(), "this model cannot turn thinking off");
+        assert!(
+            infos[0].options.is_empty(),
+            "this model cannot turn thinking off"
+        );
         assert_eq!(infos[1].efforts.len(), 4);
         assert_eq!(infos[1].options[0].id, THINKING_OPTION);
         assert!(infos[2].efforts.is_empty());
@@ -264,10 +270,21 @@ mod tests {
         let data = json!({ "models": [
             { "id": "a", "provider": "p" }, { "id": "a", "provider": "q" }, { "id": "b", "provider": "p" }
         ]});
-        assert_eq!(resolve_model(&data, "q/a").unwrap(), ("q".into(), "a".into()));
+        assert_eq!(
+            resolve_model(&data, "q/a").unwrap(),
+            ("q".into(), "a".into())
+        );
         assert_eq!(resolve_model(&data, "b").unwrap(), ("p".into(), "b".into()));
-        assert!(resolve_model(&data, "a").unwrap_err().contains("more than one provider"));
-        assert!(resolve_model(&data, "c").unwrap_err().contains("not available"));
+        assert!(
+            resolve_model(&data, "a")
+                .unwrap_err()
+                .contains("more than one provider")
+        );
+        assert!(
+            resolve_model(&data, "c")
+                .unwrap_err()
+                .contains("not available")
+        );
     }
 
     #[test]
@@ -275,7 +292,10 @@ mod tests {
         let off: std::collections::BTreeMap<_, _> =
             [(THINKING_OPTION.to_owned(), "off".to_owned())].into();
         assert_eq!(level_for(Some(Effort::High), &off), Some("off"));
-        assert_eq!(level_for(Some(Effort::XHigh), &Default::default()), Some("xhigh"));
+        assert_eq!(
+            level_for(Some(Effort::XHigh), &Default::default()),
+            Some("xhigh")
+        );
         assert_eq!(level_for(None, &Default::default()), None);
     }
 

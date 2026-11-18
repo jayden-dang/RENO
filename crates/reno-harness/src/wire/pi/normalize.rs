@@ -97,16 +97,6 @@ impl Normalizer {
         std::mem::take(&mut self.unknown)
     }
 
-    /// Forget what a previous prompt left (a new run on the same process).
-    pub(crate) fn reset(&mut self) {
-        self.text.clear();
-        self.thinking.clear();
-        self.error = None;
-        self.aborted = false;
-        self.length = false;
-        self.final_text.clear();
-    }
-
     /// How the run ended so far.
     pub(crate) fn ending(&self, interrupted: bool) -> Ending {
         if interrupted || self.aborted {
@@ -354,10 +344,14 @@ mod tests {
     #[test]
     fn a_completed_run_carries_the_last_message_text_as_its_result() {
         let mut n = Normalizer::new();
-        n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"toolUse",
-            "content":[{"type":"text","text":"checking"},{"type":"toolCall","id":"c"}]}}));
-        n.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop",
-            "content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"all done"}]}}));
+        n.map(
+            &json!({"type":"message_end","message":{"role":"assistant","stopReason":"toolUse",
+            "content":[{"type":"text","text":"checking"},{"type":"toolCall","id":"c"}]}}),
+        );
+        n.map(
+            &json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop",
+            "content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"all done"}]}}),
+        );
         let ending = n.ending(false);
         assert_eq!(ending.stop, StopReason::Completed);
         assert_eq!(ending.result.as_deref(), Some("all done"));
@@ -390,9 +384,10 @@ mod tests {
         let mut n = Normalizer::new();
         let events = n.map(&json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}));
         assert_eq!(events, [ExecEvent::Reasoning { text: "hmm".into() }]);
-        assert!(n
-            .map(&json!({"type":"message_end","message":{"role":"user","content":"hi"}}))
-            .is_empty());
+        assert!(
+            n.map(&json!({"type":"message_end","message":{"role":"user","content":"hi"}}))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -406,9 +401,14 @@ mod tests {
             [ExecEvent::Tool { id, call }] if id == "t" && call.class == ActionClass::Edit
                 && call.input["edits"][0]["newText"] == "new"
         ));
-        assert!(n.map(&start).is_empty(), "a repeated start is not a second call");
-        let closed = n.map(&json!({"type":"tool_execution_end","toolCallId":"t","isError":false,
-            "result":{"content":[{"type":"text","text":"ok"}]}}));
+        assert!(
+            n.map(&start).is_empty(),
+            "a repeated start is not a second call"
+        );
+        let closed = n.map(
+            &json!({"type":"tool_execution_end","toolCallId":"t","isError":false,
+            "result":{"content":[{"type":"text","text":"ok"}]}}),
+        );
         assert!(matches!(
             &closed[..],
             [ExecEvent::ToolResult { id, ok: true, summary: None, output: Some(o) }]
@@ -420,8 +420,10 @@ mod tests {
     fn a_failed_tool_summarises_its_first_line() {
         let mut n = Normalizer::new();
         n.map(&json!({"type":"tool_execution_start","toolCallId":"b","toolName":"bash","args":{"command":"x"}}));
-        let closed = n.map(&json!({"type":"tool_execution_end","toolCallId":"b","isError":true,
-            "result":{"content":[{"type":"text","text":"\nboom: no such file\nmore"}]}}));
+        let closed = n.map(
+            &json!({"type":"tool_execution_end","toolCallId":"b","isError":true,
+            "result":{"content":[{"type":"text","text":"\nboom: no such file\nmore"}]}}),
+        );
         assert!(matches!(
             &closed[..],
             [ExecEvent::ToolResult { ok: false, summary: Some(s), .. }] if s == "boom: no such file"
@@ -443,15 +445,21 @@ mod tests {
     fn compaction_reports_the_context_it_left() {
         let mut n = Normalizer::new();
         n.set_window(Some(1000));
-        let events = n.map(&json!({"type":"compaction_end","reason":"threshold","aborted":false,
-            "result":{"estimatedTokensAfter":300}}));
+        let events = n.map(
+            &json!({"type":"compaction_end","reason":"threshold","aborted":false,
+            "result":{"estimatedTokensAfter":300}}),
+        );
         assert_eq!(
             events,
-            [ExecEvent::ContextUsage { tokens: Some(300), window: Some(1000) }]
+            [ExecEvent::ContextUsage {
+                tokens: Some(300),
+                window: Some(1000)
+            }]
         );
-        assert!(n
-            .map(&json!({"type":"compaction_end","reason":"manual","aborted":true}))
-            .is_empty());
+        assert!(
+            n.map(&json!({"type":"compaction_end","reason":"manual","aborted":true}))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -461,16 +469,25 @@ mod tests {
         assert_eq!(n.ending(false).stop, StopReason::MaxTokens);
         n.map(&json!({"type":"agent_settled","aborted":true}));
         assert_eq!(n.ending(false).stop, StopReason::Interrupted);
-        n.reset();
         assert_eq!(n.ending(true).stop, StopReason::Interrupted);
+        let mut n = Normalizer::new();
         n.map(&json!({"type":"auto_retry_end","success":false,"attempt":3,"finalError":"529 overloaded"}));
-        assert_eq!(n.ending(false).diagnostic.as_deref(), Some("529 overloaded"));
+        assert_eq!(
+            n.ending(false).diagnostic.as_deref(),
+            Some("529 overloaded")
+        );
     }
 
     #[test]
     fn a_frame_the_table_lacks_is_counted_and_chatter_is_not() {
         let mut n = Normalizer::new();
-        for kind in ["queue_update", "turn_start", "agent_start", "extension_error", "compaction_start"] {
+        for kind in [
+            "queue_update",
+            "turn_start",
+            "agent_start",
+            "extension_error",
+            "compaction_start",
+        ] {
             assert!(n.map(&json!({ "type": kind })).is_empty());
         }
         n.map(&json!({"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","delta":"{"}}));
@@ -480,7 +497,11 @@ mod tests {
         n.map(&json!({"type":"tool_execution_end","toolCallId":"nobody"}));
         assert_eq!(
             n.take_unknown(),
-            ["type:agent_teleported", "message_update:audio_delta", "tool_execution_end:orphan"]
+            [
+                "type:agent_teleported",
+                "message_update:audio_delta",
+                "tool_execution_end:orphan"
+            ]
         );
         assert!(n.take_unknown().is_empty());
     }

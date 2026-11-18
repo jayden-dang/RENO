@@ -15,7 +15,7 @@ mod targets;
 use reno_harness::conformance::{CaseId, Status, Target, TargetReport, render_table, run_suite};
 
 use targets::{
-    claude_target, codex_target, devin_target, grok_target, hermes_target, mock_target,
+    claude_target, codex_target, devin_target, grok_target, hermes_target, mock_target, pi_target,
     registry_target,
 };
 
@@ -50,6 +50,7 @@ async fn the_mock_and_every_driver_pass_the_suite() {
         registry_target(),
         devin_target(),
         hermes_target(),
+        pi_target(),
     ])
     .await;
     println!("\n{}", render_table(&reports));
@@ -101,6 +102,17 @@ async fn the_mock_and_every_driver_pass_the_suite() {
     for name in ["acp.grok", "acp.devin", "acp.hermes"] {
         assert_eq!(labels(name), pinned(&acp_full_access_only), "{name}");
     }
+    // Pi asks for no approval: full access only, like the ACP agents above, but it isolates the
+    // owner's tools with launch flags, so the user-config case runs.
+    assert_eq!(
+        labels("pi"),
+        pinned(&[
+            ("approval-allow", "skip"),
+            ("approval-deny", "skip"),
+            ("deny-message", "skip"),
+            ("plan-mode", "skip"),
+        ])
+    );
     assert_eq!(
         labels("acp.registry"),
         pinned(&[("plan-mode", "skip"), ("user-config", "skip")])
@@ -135,5 +147,12 @@ async fn the_mock_and_every_driver_pass_the_suite() {
             "{name}"
         );
     }
+    assert_eq!(
+        counted("pi").into_iter().collect::<Vec<_>>(),
+        vec![
+            ("message_update:audio_delta".to_owned(), 1),
+            ("type:agent_teleported".to_owned(), 1),
+        ]
+    );
     assert!(counted("mock").is_empty());
 }

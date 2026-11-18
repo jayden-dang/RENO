@@ -322,6 +322,32 @@ pub fn declaration(id: &HarnessId) -> Option<MaintenanceDecl> {
             managed: true,
             ..none
         },
+        // Pi on the owner's Mac is an npm global package (`@earendil-works/pi-coding-agent` under
+        // Homebrew's npm prefix `/opt/homebrew`), not a Homebrew formula: `brew info pi` finds
+        // none. Its install and sign-in recipes are UNVERIFIED, and it declares NO updater: an
+        // updater is run by the daemon's live auto-update, and nothing here has been run on a real
+        // machine (`pi update self` and `npm install -g @earendil-works/pi-coding-agent@latest`
+        // are the two candidates; both would replace the package a running Pi is loaded from).
+        // `updater_for` knows only Homebrew casks, so declaring one would also run it for an npm,
+        // pi.dev-installer or bun install alike. Add one with a check
+        // (`npm view @earendil-works/pi-coding-agent version`) after a manual run proves it. No
+        // sign-in command: `pi --help` lists none (credentials come from `/login` inside Pi or a
+        // provider API key in the environment).
+        HarnessId::Pi => MaintenanceDecl {
+            // UNVERIFIED recipe.
+            setup: Some(SetupRecipe {
+                source: "npm @earendil-works/pi-coding-agent".to_owned(),
+                steps: vec![
+                    step(
+                        "Install",
+                        "npm install -g @earendil-works/pi-coding-agent",
+                        StepRunner::Reno,
+                    ),
+                    step("Sign in", "pi", StepRunner::Person),
+                ],
+            }),
+            ..none
+        },
         HarnessId::Registry(_) => return None,
     })
 }
@@ -444,6 +470,22 @@ mod tests {
             "codex update"
         );
         assert_eq!(codex.updater_for(None).unwrap().command, "codex update");
+    }
+
+    #[test]
+    fn pi_declares_no_updater_so_the_live_auto_update_cannot_run_an_unverified_one() {
+        let pi = declaration(&HarnessId::Pi).unwrap();
+        assert!(pi.updaters.is_empty());
+        // Wherever the binary is: Homebrew's npm prefix, a cask, nothing at all.
+        for path in ["/opt/homebrew/bin/pi", "/usr/local/bin/pi"] {
+            assert!(pi.updater_for(Some(Path::new(path))).is_none(), "{path}");
+        }
+        assert!(pi.updater_for(None).is_none());
+        // The install recipe is Reno's step, then a person's: Pi's login is its own `/login`.
+        let setup = pi.setup.unwrap();
+        assert_eq!(setup.steps[0].runner, StepRunner::Reno);
+        assert_eq!(setup.steps[1].runner, StepRunner::Person);
+        assert!(pi.sign_in.is_none());
     }
 
     #[test]
