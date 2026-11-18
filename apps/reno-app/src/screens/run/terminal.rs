@@ -209,6 +209,46 @@ impl RunScreen {
 }
 
 impl RunScreen {
+    /// A new terminal in front, with `input` typed into it once it is live (screenshots,
+    /// reviews): `\\e` is Escape and `\\n` is Enter.
+    pub(crate) fn open_demo_terminal(
+        &mut self,
+        input: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let surface = self.new_terminal_surface();
+        self.open_surface(surface, window, cx);
+        let Some(input) = input else {
+            return;
+        };
+        let bytes = input
+            .replace("\\e", "\x1b")
+            .replace("\\n", "\r\n")
+            .into_bytes();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            this.update(cx, |screen, cx| {
+                if let Some(view) = screen.visible_view() {
+                    view.update(cx, |view, cx| view.type_bytes(&bytes, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn visible_view(&mut self) -> Option<Entity<TerminalView>> {
+        let slot = slot_of(self.panel.active())?;
+        self.tabs_view(slot)
+    }
+
+    fn tabs_view(&self, slot: u64) -> Option<Entity<TerminalView>> {
+        self.terms.tabs.get(&slot)?.view.clone()
+    }
+
     // --- opening ------------------------------------------------------------------------------
 
     /// A new shell in a new tab.

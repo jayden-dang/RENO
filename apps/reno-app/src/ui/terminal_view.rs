@@ -666,6 +666,11 @@ impl TerminalView {
         .detach();
     }
 
+    /// Types `bytes` as the person would (screenshots, reviews).
+    pub(crate) fn type_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.queue_input(bytes, cx);
+    }
+
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
