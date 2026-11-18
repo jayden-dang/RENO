@@ -68,7 +68,11 @@ pub(crate) fn extended_rgb(appearance: Appearance, index: u8) -> (u8, u8, u8) {
         }
         232..=255 => {
             let step = index - 232;
-            let step = if appearance.is_dark() { step } else { 23 - step };
+            let step = if appearance.is_dark() {
+                step
+            } else {
+                23 - step
+            };
             let v = 8 + 10 * step;
             (v, v, v)
         }
@@ -408,7 +412,10 @@ pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
         out.extend_from_slice(b"\x1b[201~");
         out
     } else {
-        sanitized.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+        sanitized
+            .replace("\r\n", "\r")
+            .replace('\n', "\r")
+            .into_bytes()
     }
 }
 
@@ -973,7 +980,11 @@ mod tests {
         assert_eq!(grid_for(660.0, 440.0, 8.0, 16.0, 10.0), Some((80, 26)));
         assert_eq!(grid_for(0.0, 440.0, 8.0, 16.0, 10.0), None);
         assert_eq!(grid_for(660.0, 20.0, 8.0, 16.0, 10.0), None);
-        assert_eq!(grid_for(30.0, 440.0, 8.0, 16.0, 10.0), None, "under two columns");
+        assert_eq!(
+            grid_for(30.0, 440.0, 8.0, 16.0, 10.0),
+            None,
+            "under two columns"
+        );
         assert_eq!(grid_for(660.0, 440.0, f32::NAN, 16.0, 10.0), None);
         assert_eq!(
             grid_for(100_000.0, 100_000.0, 8.0, 16.0, 10.0),
@@ -1163,12 +1174,22 @@ mod tests {
         assert_eq!(tab_label(None), "Terminal");
         assert_eq!(tab_label(Some("")), "Terminal");
         assert_eq!(tab_label(Some("  \u{7} ")), "Terminal");
-        assert_eq!(tab_label(Some("vim notes.md")), "Terminal \u{b7} vim notes.md");
+        assert_eq!(
+            tab_label(Some("vim notes.md")),
+            "Terminal \u{b7} vim notes.md"
+        );
         let long = "x".repeat(40);
         let label = tab_label(Some(&long));
         assert!(label.ends_with('\u{2026}'));
-        assert_eq!(label.chars().count(), "Terminal \u{b7} ".chars().count() + 25);
-        assert_eq!(tab_label(Some("a\u{1b}b")), "Terminal \u{b7} ab", "controls dropped");
+        assert_eq!(
+            label.chars().count(),
+            "Terminal \u{b7} ".chars().count() + 25
+        );
+        assert_eq!(
+            tab_label(Some("a\u{1b}b")),
+            "Terminal \u{b7} ab",
+            "controls dropped"
+        );
     }
 
     #[test]
@@ -1177,12 +1198,16 @@ mod tests {
             exit_message(Some(0), None),
             b"\r\n\x1b[90m[process exited 0]\x1b[0m\r\n".to_vec()
         );
-        assert!(String::from_utf8(exit_message(None, Some("SIGKILL")))
-            .unwrap_or_default()
-            .contains("SIGKILL"));
-        assert!(String::from_utf8(exit_message(None, None))
-            .unwrap_or_default()
-            .contains("ended"));
+        assert!(
+            String::from_utf8(exit_message(None, Some("SIGKILL")))
+                .unwrap_or_default()
+                .contains("SIGKILL")
+        );
+        assert!(
+            String::from_utf8(exit_message(None, None))
+                .unwrap_or_default()
+                .contains("ended")
+        );
     }
 
     #[test]
@@ -1209,7 +1234,10 @@ mod tests {
             OpenFail::of(Some(ErrorCode::NotFound), "no such run"),
             OpenFail::Other("no such run".into())
         );
-        assert_eq!(OpenFail::of(None, "offline"), OpenFail::Other("offline".into()));
+        assert_eq!(
+            OpenFail::of(None, "offline"),
+            OpenFail::Other("offline".into())
+        );
     }
 
     #[test]

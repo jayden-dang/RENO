@@ -1088,7 +1088,10 @@ mod tests {
         assert!(!files.enabled);
         assert_eq!(files.detail, "needs a newer daemon");
         assert_eq!(files.reason.as_deref(), Some("needs a newer daemon"));
-        assert!(row(&h, HomeKind::Terminal).enabled, "terminals is its own feature");
+        assert!(
+            row(&h, HomeKind::Terminal).enabled,
+            "terminals is its own feature"
+        );
         f.files = true;
         f.terminals = false;
         let h = home(&f, &Pane::Loading);

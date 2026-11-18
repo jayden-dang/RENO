@@ -12,7 +12,7 @@ use gpui::{
     VisualTestContext, point, px, size,
 };
 use reno_client::fake::FakeDaemon;
-use reno_proto::{ErrorCode, ErrorObject, RunId, TermId};
+use reno_proto::{ErrorCode, ErrorObject, TermId};
 
 use super::RunScreen;
 use super::terminal::Terms;
@@ -68,7 +68,9 @@ fn press_t_from_home(vcx: &mut VisualTestContext) {
 }
 
 fn front(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> Entity<TerminalView> {
-    screen.read_with(vcx, |s, _| s.terminal_in_front().expect("a terminal in front"))
+    screen.read_with(vcx, |s, _| {
+        s.terminal_in_front().expect("a terminal in front")
+    })
 }
 
 fn phase(vcx: &VisualTestContext, view: &Entity<TerminalView>) -> Phase {
@@ -107,10 +109,7 @@ fn term_id(vcx: &VisualTestContext, view: &Entity<TerminalView>) -> TermId {
 }
 
 /// Opens a terminal on `name` from Home and waits until its shell is live and drawn.
-fn live_terminal(
-    vcx: &mut VisualTestContext,
-    screen: &Entity<RunScreen>,
-) -> Entity<TerminalView> {
+fn live_terminal(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>) -> Entity<TerminalView> {
     press_t_from_home(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-view"));
     let view = front(vcx, screen);
@@ -133,7 +132,10 @@ fn t_from_home_opens_a_terminal_and_typing_echoes_into_the_grid(cx: &mut TestApp
     let view = live_terminal(vcx, &screen);
     assert_eq!(fake.terminals(), 1);
     assert!(painted(vcx, "panel-tab-terminal-1"));
-    assert!(!painted(vcx, "panel-home"), "Home was replaced by what it opened");
+    assert!(
+        !painted(vcx, "panel-home"),
+        "Home was replaced by what it opened"
+    );
     // The first grid is the measured one, not the 80 by 24 a view starts with.
     let geometry = view.read_with(vcx, |v, _| v.geometry().expect("measured"));
     assert_eq!(
@@ -204,9 +206,11 @@ fn the_panel_shortcuts_still_work_while_a_terminal_has_the_keyboard(cx: &mut Tes
     draw(vcx);
     assert!(sent(vcx, &view).is_empty(), "nor did the tab keys");
     // Cmd-W closes the terminal tab and ends its shell.
-    wait_drawn(vcx, |vcx| matches!(active(vcx), Surface::Terminal(_)) || {
-        vcx.simulate_keystrokes("ctrl-tab");
-        false
+    wait_drawn(vcx, |vcx| {
+        matches!(active(vcx), Surface::Terminal(_)) || {
+            vcx.simulate_keystrokes("ctrl-tab");
+            false
+        }
     });
     vcx.simulate_keystrokes("cmd-w");
     wait_drawn(vcx, |_| fake.terminals() == 0);
@@ -463,14 +467,13 @@ fn the_wheel_scrolls_history_and_an_alt_screen_gets_arrows(cx: &mut TestAppConte
             TouchPhase::Moved,
         );
     }
-    assert_eq!(view.read_with(vcx, |v, _| v.emulator().display_offset()), 10);
+    assert_eq!(
+        view.read_with(vcx, |v, _| v.emulator().display_offset()),
+        10
+    );
     // Back down past the live bottom rests flush with it.
     for _ in 0..60 {
-        wheel(
-            vcx,
-            ScrollDelta::Lines(point(0.0, -0.7)),
-            TouchPhase::Moved,
-        );
+        wheel(vcx, ScrollDelta::Lines(point(0.0, -0.7)), TouchPhase::Moved);
     }
     assert_eq!(view.read_with(vcx, |v, _| v.emulator().display_offset()), 0);
     // Typing while scrolled back goes to the live bottom first.
@@ -518,7 +521,9 @@ fn a_terminal_on_a_live_run_says_protected_files_are_read_only_and_after_it_ends
     // The run ends: the shell keeps its limits, and a new one would have none.
     store.update(vcx, |s, cx| s.cancel_run(run_id("builder1"), cx));
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-reopen-unlimited"));
-    let text = screen.read_with(vcx, |s, cx| s.terminal_banner_text(cx)).unwrap();
+    let text = screen
+        .read_with(vcx, |s, cx| s.terminal_banner_text(cx))
+        .unwrap();
     assert!(text.contains("started while the run was live"), "{text}");
 
     let old = term_id(vcx, &view);
@@ -540,7 +545,9 @@ fn a_terminal_in_place_says_so(cx: &mut TestAppContext) {
     let view = live_terminal(vcx, &screen);
     assert!(view.read_with(vcx, |v, _| v.info().unwrap().in_place));
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-banner"));
-    let text = screen.read_with(vcx, |s, cx| s.terminal_banner_text(cx)).unwrap();
+    let text = screen
+        .read_with(vcx, |s, cx| s.terminal_banner_text(cx))
+        .unwrap();
     assert_eq!(text, "in /fake/worktrees/run_reviewer1, not a worktree");
     assert!(!painted(vcx, "terminal-reopen-unlimited"));
 }
@@ -555,11 +562,15 @@ fn a_refused_open_says_why_in_the_tab(cx: &mut TestAppContext) {
     refuse(&fake, ErrorCode::SandboxUnavailable, "no sandbox");
     press_t_from_home(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-failed"));
-    let words = screen.read_with(vcx, |s, cx| s.terminal_failure(1, cx)).unwrap();
+    let words = screen
+        .read_with(vcx, |s, cx| s.terminal_failure(1, cx))
+        .unwrap();
     assert_eq!(words.0, "No terminal on a live run");
-    assert!(words
-        .1
-        .contains("A terminal cannot be opened on a live run on this Mac"));
+    assert!(
+        words
+            .1
+            .contains("A terminal cannot be opened on a live run on this Mac")
+    );
     assert_eq!(fake.terminals(), 0);
     assert!(painted(vcx, "terminal-reopen"), "Try again");
 
@@ -580,7 +591,9 @@ fn a_removed_workspace_has_no_terminal(cx: &mut TestAppContext) {
     let surface = screen.update(vcx, |s, _| s.new_terminal_surface());
     screen.update_in(vcx, |s, window, cx| s.open_surface(surface, window, cx));
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-failed"));
-    let words = screen.read_with(vcx, |s, cx| s.terminal_failure(1, cx)).unwrap();
+    let words = screen
+        .read_with(vcx, |s, cx| s.terminal_failure(1, cx))
+        .unwrap();
     assert_eq!(words.0, "Workspace removed");
     assert!(!painted(vcx, "terminal-reopen"), "nothing to try again");
 }
@@ -591,12 +604,17 @@ fn at_the_limit_an_ended_terminal_is_offered_for_closing(cx: &mut TestAppContext
     let old = live_terminal(vcx, &screen);
     fake.term_exit(&term_id(vcx, &old), 0);
     wait_drawn(vcx, |vcx| matches!(phase(vcx, &old), Phase::Ended { .. }));
-    assert!(painted(vcx, "terminal-ended"), "an ended shell says so, with a Reopen");
+    assert!(
+        painted(vcx, "terminal-ended"),
+        "an ended shell says so, with a Reopen"
+    );
 
     refuse(&fake, ErrorCode::TerminalLimit, "16 terminals");
     press_t_from_home(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "terminal-close-ended"));
-    let words = screen.read_with(vcx, |s, cx| s.terminal_failure(2, cx)).unwrap();
+    let words = screen
+        .read_with(vcx, |s, cx| s.terminal_failure(2, cx))
+        .unwrap();
     assert_eq!(words.0, "Too many terminals");
 
     fake.clear_failures();
@@ -660,7 +678,9 @@ fn the_cursor_blinks_rests_after_a_quiet_spell_and_holds_solid_while_typing(
     draw(vcx);
     assert!(!view.read_with(vcx, |v, _| v.blink_running()));
     fake.term_output(&term_id(vcx, &view), "\x1b[1 q");
-    wait_drawn(vcx, |vcx| view.read_with(vcx, |v, _| v.emulator().cursor_style().1));
+    wait_drawn(vcx, |vcx| {
+        view.read_with(vcx, |v, _| v.emulator().cursor_style().1)
+    });
     assert!(focused(vcx, &view));
     vcx.update(|window, _| window.activate_window());
     draw(vcx);
@@ -731,12 +751,18 @@ fn colours_wide_characters_and_composition_paint_in_both_appearances(cx: &mut Te
             v.replace_and_mark_text_in_range(None, "\u{304b}\u{306a}", None, window, cx);
         });
         draw(vcx);
-        assert!(view.update_in(vcx, |v, window, cx| v.marked_text_range(window, cx)).is_some());
+        assert!(
+            view.update_in(vcx, |v, window, cx| v.marked_text_range(window, cx))
+                .is_some()
+        );
         view.update_in(vcx, |v, window, cx| {
             v.replace_text_in_range(None, "\u{304b}\u{306a}", window, cx);
         });
         draw(vcx);
-        assert!(view.update_in(vcx, |v, window, cx| v.marked_text_range(window, cx)).is_none());
+        assert!(
+            view.update_in(vcx, |v, window, cx| v.marked_text_range(window, cx))
+                .is_none()
+        );
         assert_eq!(sent(vcx, &view), "\u{304b}\u{306a}".as_bytes().to_vec());
     }
 }
@@ -774,7 +800,9 @@ fn files_and_terminal_are_dimmed_for_a_daemon_without_them(cx: &mut TestAppConte
         .set_without_saving(cx);
     });
     draw(vcx);
-    root.update_in(vcx, |r, window, cx| r.open_run(run_id("builder1"), window, cx));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("builder1"), window, cx)
+    });
     draw(vcx);
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     click(vcx, "panel-new-tab");
@@ -795,4 +823,195 @@ fn files_and_terminal_are_dimmed_for_a_daemon_without_them(cx: &mut TestAppConte
         Surface::Home
     );
     assert!(screen.read_with(vcx, |s, _| s.terminal_ids().is_empty()));
+}
+
+fn desc(kind: Kind, key: &str) -> Descriptor {
+    Descriptor {
+        kind,
+        key: key.to_owned(),
+    }
+}
+
+#[test]
+fn saved_terminals_get_slots_and_slots_become_ids_again() {
+    let saved = Descriptors {
+        tabs: vec![
+            desc(Kind::Session, ""),
+            desc(Kind::Terminal, "term_a1"),
+            desc(Kind::Terminal, "term_b2"),
+            desc(Kind::Terminal, "not an id"),
+            desc(Kind::Terminal, "term_a1"),
+            desc(Kind::File, "src/a.rs"),
+        ],
+        active: Some(desc(Kind::Terminal, "term_b2")),
+        closed: vec![desc(Kind::Terminal, "term_c3"), desc(Kind::File, "z.rs")],
+    };
+    let (terms, panel) = Terms::restore(saved);
+    // One slot per id, in the order met; a bad id and a repeat add nothing.
+    assert_eq!(
+        panel.tabs,
+        vec![
+            desc(Kind::Session, ""),
+            desc(Kind::Terminal, "1"),
+            desc(Kind::Terminal, "2"),
+            desc(Kind::Terminal, "1"),
+            desc(Kind::File, "src/a.rs"),
+        ]
+    );
+    assert_eq!(panel.active, Some(desc(Kind::Terminal, "2")));
+    assert_eq!(
+        panel.closed,
+        vec![desc(Kind::File, "z.rs")],
+        "a closed shell stays closed"
+    );
+    assert_eq!(terms.tabs.len(), 2);
+
+    // Saving writes the ids back; a tab whose shell is not open yet is not saved.
+    let mut terms = terms;
+    terms
+        .tabs
+        .insert(3, super::terminal::TermTab::open_for_tests());
+    let mut panel = panel;
+    panel.tabs.push(desc(Kind::Terminal, "3"));
+    panel.closed.push(desc(Kind::Terminal, "2"));
+    let saved = terms.to_saved(panel);
+    assert_eq!(
+        saved.tabs,
+        vec![
+            desc(Kind::Session, ""),
+            desc(Kind::Terminal, "term_a1"),
+            desc(Kind::Terminal, "term_b2"),
+            desc(Kind::Terminal, "term_a1"),
+            desc(Kind::File, "src/a.rs"),
+        ]
+    );
+    assert_eq!(saved.active, Some(desc(Kind::Terminal, "term_b2")));
+    assert_eq!(saved.closed, vec![desc(Kind::File, "z.rs")]);
+}
+
+#[gpui::test]
+fn a_restored_panel_reattaches_a_live_shell_and_says_a_dead_one_ended(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let at = crate::panel::persist::path_in(dir.path());
+    cx.update(|cx| crate::panel::saved::Saved::install(at, cx));
+    let (root, vcx, screen, fake) = open_run(cx, "builder1");
+    let first = live_terminal(vcx, &screen);
+    let (alive, dies) = (term_id(vcx, &first), {
+        press_t_from_home(vcx);
+        wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-terminal-2"));
+        let second = front(vcx, &screen);
+        wait_phase(vcx, &second, Phase::Live);
+        term_id(vcx, &second)
+    });
+    fake.term_output(&alive, "alpha\r\n");
+    let _ = &first;
+
+    // What is saved is the ids, under the panel's key.
+    let key = screen.read_with(vcx, |s, _| s.panel_key.clone());
+    let saved = vcx
+        .update(|_, cx| crate::panel::saved::Saved::get(&key, cx))
+        .unwrap();
+    let ids: Vec<_> = saved
+        .tabs
+        .iter()
+        .filter(|d| d.kind == Kind::Terminal)
+        .map(|d| d.key.clone())
+        .collect();
+    assert_eq!(ids, vec![alive.to_string(), dies.to_string()]);
+    assert_eq!(
+        saved.active,
+        Some(desc(Kind::Terminal, dies.as_str())),
+        "the front tab is remembered by id"
+    );
+
+    // One shell dies (the daemon forgets it) and output piles up past what is held.
+    let store = screen.read_with(vcx, |s, _| s.store.clone());
+    let client = store.read_with(vcx, |s, _| s.term_client().unwrap());
+    let gone = dies.clone();
+    let task = vcx
+        .update(|_, cx| gpui_tokio::Tokio::spawn(cx, async move { client.term_close(gone).await }));
+    vcx.executor().allow_parking();
+    wait_drawn(vcx, |_| fake.terminals() == 1);
+    drop(task);
+    for n in 0..(reno_client::fake::terminals::HELD + 20) {
+        fake.term_output(&alive, &format!("row {n}\r\n"));
+    }
+
+    // Leave the run and come back: a new screen restores the tabs from what was saved.
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("reviewer1"), window, cx)
+    });
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("builder1"), window, cx)
+    });
+    draw(vcx);
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.terminal_ids()),
+        vec![(1, Some(alive.clone())), (2, Some(dies.clone()))]
+    );
+
+    // The dead one is in front (it was when saved): it says so and offers Reopen.
+    wait_drawn(vcx, |vcx| painted(vcx, "terminal-gone"));
+    assert!(painted(vcx, "terminal-reopen"));
+
+    // The live one comes back with what the daemon held, a note where output was lost, and
+    // no answers typed into the shell for what the replay asked.
+    click(vcx, "panel-tab-terminal-1");
+    wait_drawn(vcx, |vcx| painted(vcx, "terminal-view"));
+    let back = front(vcx, &screen);
+    wait_phase(vcx, &back, Phase::Live);
+    wait_text(
+        vcx,
+        &back,
+        &format!("row {}", reno_client::fake::terminals::HELD + 19),
+    );
+    let text = screen_text(vcx, &back);
+    assert!(text.contains("some output was lost"), "a gap says so");
+    assert_eq!(text.matches("some output was lost").count(), 1);
+    assert_eq!(term_id(vcx, &back), alive);
+    assert!(back.read_with(vcx, |v, _| v.info().unwrap().sandboxed));
+
+    // Reopen replaces the dead tab with a fresh shell.
+    click(vcx, "panel-tab-terminal-2");
+    wait_drawn(vcx, |vcx| painted(vcx, "terminal-reopen"));
+    click(vcx, "terminal-reopen");
+    wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-terminal-3"));
+    wait_phase(vcx, &front(vcx, &screen), Phase::Live);
+    assert!(!painted(vcx, "panel-tab-terminal-2"));
+    assert_eq!(fake.terminals(), 2);
+}
+
+#[gpui::test]
+fn what_the_emulator_answers_goes_back_to_the_shell_unless_it_was_a_replay(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let at = crate::panel::persist::path_in(dir.path());
+    cx.update(|cx| crate::panel::saved::Saved::install(at, cx));
+    let (root, vcx, screen, fake) = open_run(cx, "builder1");
+    let view = live_terminal(vcx, &screen);
+    let id = term_id(vcx, &view);
+    // A cursor-position query printed live is answered, through the same queue as typing.
+    fake.term_output(&id, "\x1b[6n");
+    wait_drawn(vcx, |vcx| sent(vcx, &view).ends_with(b"R"));
+    assert!(sent(vcx, &view).starts_with(b"\x1b["));
+
+    // The same query in a replay was answered when it was live: a restored view stays quiet.
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("reviewer1"), window, cx)
+    });
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("builder1"), window, cx)
+    });
+    draw(vcx);
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    wait_drawn(vcx, |vcx| painted(vcx, "terminal-view"));
+    let back = front(vcx, &screen);
+    wait_phase(vcx, &back, Phase::Live);
+    wait_drawn(vcx, |vcx| back.read_with(vcx, |v, _| v.last_seq()) >= 1);
+    advance(vcx, Duration::from_millis(50));
+    assert!(sent(vcx, &back).is_empty(), "{:?}", sent(vcx, &back));
 }

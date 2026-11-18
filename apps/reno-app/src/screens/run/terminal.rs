@@ -59,6 +59,11 @@ impl TermTab {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn open_for_tests() -> Self {
+        Self::open()
+    }
+
     fn resume(id: TermId) -> Self {
         Self {
             start: Start::Resume(id.clone()),
@@ -169,19 +174,11 @@ fn slot_of(surface: &Surface) -> Option<u64> {
 impl RunScreen {
     /// The view of the terminal tab that is in front.
     pub(super) fn terminal_in_front(&self) -> Option<Entity<TerminalView>> {
-        self.terms.tabs.get(&slot_of(self.panel.active())?)?.view.clone()
-    }
-
-    /// The views of every terminal tab that has one, by slot.
-    pub(super) fn terminal_views(&self) -> Vec<(u64, Entity<TerminalView>)> {
-        let mut all: Vec<_> = self
-            .terms
+        self.terms
             .tabs
-            .iter()
-            .filter_map(|(slot, tab)| Some((*slot, tab.view.clone()?)))
-            .collect();
-        all.sort_by_key(|(slot, _)| *slot);
-        all
+            .get(&slot_of(self.panel.active())?)?
+            .view
+            .clone()
     }
 
     /// The words of the line above the terminal in front.
@@ -302,12 +299,7 @@ impl RunScreen {
     // --- closing and reopening ----------------------------------------------------------------
 
     /// ⌘W or the tab's close button. A shell with a program running in it asks first.
-    pub(super) fn request_close(
-        &mut self,
-        slot: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn request_close(&mut self, slot: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.guard(slot, Then::Close, window, cx);
     }
 
@@ -424,11 +416,7 @@ impl RunScreen {
     }
 
     /// The one line above a terminal (D7), from what the shell is and whether the run is live.
-    fn terminal_banner(
-        &self,
-        view: &Entity<TerminalView>,
-        cx: &gpui::App,
-    ) -> Option<vm::Banner> {
+    fn terminal_banner(&self, view: &Entity<TerminalView>, cx: &gpui::App) -> Option<vm::Banner> {
         let info = view.read(cx).info()?;
         let run = self.store.read(cx).state().run(&self.run)?.status;
         vm::banner(&BannerFacts {
@@ -462,9 +450,9 @@ impl RunScreen {
         let confirm = self.terms.tabs.get(&slot).and_then(|t| t.confirm);
         let phase = view.read(cx).phase().clone();
         let reopen = |id: &'static str, label: &'static str, tone: Tone, cx: &mut Context<Self>| {
-            kit::pill_button(theme, id, label, tone).on_click(cx.listener(
-                move |this, _, window, cx| this.request_reopen(slot, window, cx),
-            ))
+            kit::pill_button(theme, id, label, tone).on_click(
+                cx.listener(move |this, _, window, cx| this.request_reopen(slot, window, cx)),
+            )
         };
         match phase {
             Phase::Gone => {
@@ -472,8 +460,7 @@ impl RunScreen {
                     theme,
                     "terminal-gone",
                     "This shell ended",
-                    "The daemon no longer holds it. A new one opens in the same place."
-                        .to_owned(),
+                    "The daemon no longer holds it. A new one opens in the same place.".to_owned(),
                     Some(reopen("terminal-reopen", "Reopen", Tone::Primary, cx).into_any_element()),
                 );
             }
@@ -491,8 +478,9 @@ impl RunScreen {
                     .into_any_element(),
                     // A workspace that is gone stays gone; the others may work next time.
                     vm::OpenFail::WorkspaceRemoved => div().into_any_element(),
-                    _ => reopen("terminal-reopen", "Try again", Tone::Primary, cx)
-                        .into_any_element(),
+                    _ => {
+                        reopen("terminal-reopen", "Try again", Tone::Primary, cx).into_any_element()
+                    }
                 };
                 return note(
                     theme,
@@ -551,9 +539,11 @@ impl RunScreen {
                             Tone::Danger,
                         )
                         .h(px(24.0))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run_then(slot, then, window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.run_then(slot, then, window, cx);
+                            },
+                        )),
                     )
                     .child(
                         kit::pill_button(theme, "terminal-confirm-keep", "Keep open", Tone::Quiet)

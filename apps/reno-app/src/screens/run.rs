@@ -695,8 +695,8 @@ mod changes_tests;
 #[cfg(test)]
 mod files_tests;
 #[cfg(test)]
-mod terminal_tests;
-#[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
 mod persist_tests;
+#[cfg(test)]
+mod terminal_tests;

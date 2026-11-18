@@ -823,8 +823,8 @@ impl TerminalView {
                 .ok()
                 .flatten();
             if let Some((client, id, (cols, rows))) = send {
-                let _ = Tokio::spawn(cx, async move { client.term_resize(id, cols, rows).await })
-                    .await;
+                let _ =
+                    Tokio::spawn(cx, async move { client.term_resize(id, cols, rows).await }).await;
             }
         }));
     }
@@ -1487,7 +1487,10 @@ impl Element for TerminalElement {
             out.rows
                 .push((y, shape_row(row, &theme, &mono, font_size, window)));
         }
-        if let Some(c) = snapshot.cursor.filter(|_| snapshot.cursor_on && snapshot.live) {
+        if let Some(c) = snapshot
+            .cursor
+            .filter(|_| snapshot.cursor_on && snapshot.live)
+        {
             let cell = Bounds::new(
                 point(
                     origin.x + cell_w * c.col as f32,
