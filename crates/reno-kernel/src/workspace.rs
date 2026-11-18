@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
-use reno_proto::{ChangedFile, RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
+use reno_proto::{
+    ChangedFile, RunId, TermId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+};
 
 /// Why a workspace could not be prepared, inspected or released. Typed, so the run's diagnostic
 /// and the wire error say which rule applied.
@@ -179,6 +181,23 @@ pub trait Workspace: Send + Sync + fmt::Debug {
         policy: ReleasePolicy,
     ) -> Result<Released, WorkspaceError>;
 
+    /// The release hook: called by the kernel just before it releases `workspace` (a thread
+    /// closing, by a person, the idle limit or a trigger run's end; a `workspace.clean` that
+    /// names the worktree), so whatever else works in the directory can stop first. It returns
+    /// what it closed, which the kernel reports as `closed_terminals`. The kernel does no I/O of
+    /// its own (ARCH-7): the daemon implements this, closing the terminals of the directory.
+    /// Never called for a worktree a live run holds. The default closes nothing.
+    async fn before_release(&self, _workspace: &WorkspaceInfo) -> Vec<TermId> {
+        Vec::new()
+    }
+
+    /// Like [`Workspace::before_release`], for a bulk clean (`merged`, `all-clean`) that cannot
+    /// know beforehand which worktrees it will remove: called after one is removed, so a
+    /// worktree that is kept keeps its shells.
+    async fn after_removal(&self, _workspace: &WorkspaceInfo) -> Vec<TermId> {
+        Vec::new()
+    }
+
     /// Forgets the worktrees of `repo` whose directory vanished.
     async fn prune(&self, repo: &Path) -> Result<(), WorkspaceError>;
 
@@ -281,6 +300,8 @@ struct FakeState {
     /// Protected paths a run's worktree holds changed, as a test says an agent left them.
     protected: BTreeMap<RunId, Vec<String>>,
     reverted: Vec<(RunId, Vec<String>)>,
+    /// The terminals a run's worktree has open, as a test says: what the release hook closes.
+    terminals: BTreeMap<RunId, Vec<TermId>>,
     /// What a run's worktree holds against its base, as a test says an agent left it.
     diffs: BTreeMap<RunId, RunChanges>,
     /// Where a worktree's branch stands, as a test moved it; the base commit when unset.
@@ -322,6 +343,12 @@ impl FakeWorkspace {
     /// Declares `repo` a git repository after the port was built (a disk that came back).
     pub fn declare_repo(&self, repo: impl Into<PathBuf>) {
         self.lock().repos.push(repo.into());
+    }
+
+    /// Says that the worktree of `run` has these terminals open: the release hook reports them
+    /// closed (once), and logs `closing <run>` before the `release` entry.
+    pub fn set_terminals(&self, run: &RunId, ids: Vec<TermId>) {
+        self.lock().terminals.insert(run.clone(), ids);
     }
 
     /// Makes the next `create` fail with `error`.
@@ -565,6 +592,26 @@ impl Workspace for FakeWorkspace {
         tree.exists = false;
         tree.branch = false;
         Ok(Released::Removed)
+    }
+
+    async fn before_release(&self, workspace: &WorkspaceInfo) -> Vec<TermId> {
+        let mut state = self.lock();
+        state.calls.push(format!("closing {}", workspace.run_id));
+        state
+            .terminals
+            .remove(&workspace.run_id)
+            .unwrap_or_default()
+    }
+
+    async fn after_removal(&self, workspace: &WorkspaceInfo) -> Vec<TermId> {
+        let mut state = self.lock();
+        state
+            .calls
+            .push(format!("closed after {}", workspace.run_id));
+        state
+            .terminals
+            .remove(&workspace.run_id)
+            .unwrap_or_default()
     }
 
     async fn prune(&self, repo: &Path) -> Result<(), WorkspaceError> {

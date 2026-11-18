@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reno_proto::{
-    CleanItem, CleanOutcome, CleanTarget, RunId, SandboxLevel, ThreadStatus, WorkspaceChanges,
-    WorkspaceInfo, WorkspaceStatus,
+    CleanItem, CleanOutcome, CleanTarget, RunId, SandboxLevel, TermId, ThreadStatus,
+    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::RunRecord;
 
@@ -236,7 +236,40 @@ pub(crate) async fn release(
     info: &WorkspaceInfo,
     policy: ReleasePolicy,
 ) -> Result<Released, WorkspaceError> {
+    release_hooked(shared, port, info, policy, Hook::None)
+        .await
+        .map(|(released, _)| released)
+}
+
+/// When the port's release hook runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hook {
+    /// None: nothing else can be working in the worktree (a half-made one, the start-up sweep).
+    None,
+    /// Before the release: the worktree is named (thread close, idle limit, trigger run's end,
+    /// `clean` of one run or thread), so what works in it stops first, whatever the release then
+    /// decides.
+    Before,
+    /// After a removal: a bulk clean picks its own worktrees, and one it keeps keeps its shells.
+    AfterRemoval,
+}
+
+/// [`release`], running the port's release hook as `hook` says, and returning what it closed.
+pub(crate) async fn release_hooked(
+    shared: &Shared,
+    port: &Arc<dyn Workspace>,
+    info: &WorkspaceInfo,
+    policy: ReleasePolicy,
+    hook: Hook,
+) -> Result<(Released, Vec<TermId>), WorkspaceError> {
+    let mut closed = match hook {
+        Hook::Before => port.before_release(info).await,
+        Hook::None | Hook::AfterRemoval => Vec::new(),
+    };
     let released = port.release(info, policy).await?;
+    if hook == Hook::AfterRemoval && released == Released::Removed {
+        closed = port.after_removal(info).await;
+    }
     let (status, changes) = match released {
         Released::Removed => (
             WorkspaceStatus::Removed,
@@ -259,7 +292,7 @@ pub(crate) async fn release(
         .set_workspace_status(&info.run_id, status, changes)
         .await
         .map_err(store_failed)?;
-    Ok(released)
+    Ok((released, closed))
 }
 
 /// Start-up: reconciles every open workspace and reports directories nobody accounts for.
@@ -345,6 +378,11 @@ pub(crate) async fn clean(
     };
     let policy = if force { ReleasePolicy::Force } else { policy };
     let single = matches!(target, CleanTarget::Run { .. } | CleanTarget::Thread { .. });
+    let hook = if single {
+        Hook::Before
+    } else {
+        Hook::AfterRemoval
+    };
 
     let mut items = Vec::new();
     for info in candidates {
@@ -365,30 +403,30 @@ pub(crate) async fn clean(
             }
             continue;
         }
-        match release(shared, port, &info, policy).await {
-            Ok(Released::Removed) => {
+        match release_hooked(shared, port, &info, policy, hook).await {
+            Ok((Released::Removed, closed_terminals)) => {
                 close_thread_of(shared, &info).await;
                 items.push(CleanItem {
                     run_id: info.run_id,
                     outcome: CleanOutcome::Removed,
                     reason: None,
-                    closed_terminals: Vec::new(),
+                    closed_terminals,
                 });
             }
-            Ok(Released::Kept(changes)) => items.push(CleanItem {
+            Ok((Released::Kept(changes), closed_terminals)) => items.push(CleanItem {
                 run_id: info.run_id,
                 outcome: CleanOutcome::Kept,
                 reason: Some(describe(changes, policy)),
-                closed_terminals: Vec::new(),
+                closed_terminals,
             }),
-            Ok(Released::GoneBranchKept(changes)) => items.push(CleanItem {
+            Ok((Released::GoneBranchKept(changes), closed_terminals)) => items.push(CleanItem {
                 run_id: info.run_id,
                 outcome: CleanOutcome::Kept,
                 reason: Some(format!(
                     "the directory was gone; branch {} kept with {} commit(s)",
                     info.branch, changes.commits
                 )),
-                closed_terminals: Vec::new(),
+                closed_terminals,
             }),
             Err(error) if single => return Err(error.into()),
             Err(error) => items.push(CleanItem {
