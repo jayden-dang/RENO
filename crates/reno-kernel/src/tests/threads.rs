@@ -518,6 +518,71 @@ async fn the_diff_scopes_compare_the_thread_the_run_or_one_commit() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_working_tree_scope_compares_against_head_and_the_diff_carries_a_checksum() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let (fx, _m) = rig(&ws, vec![]).await;
+    let first = start(&fx, "/repo").await;
+    ended(&fx, &first, RunStatus::Succeeded).await;
+    // The branch has moved on from its base: what is not committed is against that.
+    ws.set_head(&first, MOVED);
+    let file = |path: &str| reno_proto::ChangedFile {
+        path: path.into(),
+        from: None,
+        kind: reno_proto::ChangeKind::Added,
+        additions: 1,
+        deletions: 0,
+        binary: false,
+    };
+    ws.set_diff(
+        &first,
+        RunChanges {
+            commits: 0,
+            files: vec![file("a.rs")],
+            ..RunChanges::default()
+        },
+    );
+    let seen = ws.bases_seen().len();
+    let dirty = fx
+        .kernel
+        .workspace_diff_scoped(&first, None, &DiffScope::WorkingTree)
+        .await
+        .unwrap();
+    assert_eq!((dirty.base_sha.as_str(), dirty.commits), (MOVED, 0));
+    let bases: Vec<_> = ws
+        .bases_seen()
+        .into_iter()
+        .skip(seen)
+        .map(|(_, b)| b)
+        .collect();
+    assert_eq!(bases, [MOVED]);
+
+    // The checksum is the digest of what was sent, and changes when the diff does.
+    assert_eq!(
+        dirty.checksum,
+        reno_proto::diff_checksum(&dirty.files, dirty.patch.as_deref(), dirty.patch_truncated)
+    );
+    let again = fx
+        .kernel
+        .workspace_diff_scoped(&first, None, &DiffScope::WorkingTree)
+        .await
+        .unwrap();
+    assert_eq!(again.checksum, dirty.checksum);
+    ws.set_diff(
+        &first,
+        RunChanges {
+            files: vec![file("a.rs"), file("b.rs")],
+            ..RunChanges::default()
+        },
+    );
+    let moved = fx
+        .kernel
+        .workspace_diff_scoped(&first, None, &DiffScope::WorkingTree)
+        .await
+        .unwrap();
+    assert_ne!(moved.checksum, dirty.checksum);
+}
+
+#[tokio::test(start_paused = true)]
 async fn start_up_keeps_an_open_threads_worktree_and_releases_a_closed_ones() {
     let dir = tempfile::tempdir().unwrap();
     let store = reno_store::Store::open(dir.path().join("reno.db")).unwrap();

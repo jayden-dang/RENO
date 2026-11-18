@@ -72,6 +72,16 @@ const MINT_ATTEMPTS: usize = 8;
 const BACKFILL_MAX_RUNS: usize = 20_000;
 
 /// Whether `name` could be a git object name: 7 to 64 hexadecimal characters.
+/// The checksum of a finished diff result (after redaction): what the client holds is what is
+/// digested.
+fn diff_checksum(result: &WorkspaceDiffResult) -> String {
+    reno_proto::diff_checksum(
+        &result.files,
+        result.patch.as_deref(),
+        result.patch_truncated,
+    )
+}
+
 fn is_object_name(name: &str) -> bool {
     (7..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -708,6 +718,13 @@ impl Kernel {
             info.status,
             WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept
         );
+        // What is not committed is against where the branch stands now.
+        if *scope == DiffScope::WorkingTree
+            && live
+            && let Some(port) = &self.shared.workspace
+        {
+            shown.base_sha = port.head(&info).await?;
+        }
         let changes = match (&self.shared.workspace, live, scope) {
             (Some(port), true, DiffScope::Commit { sha }) => port
                 .commit_changes(&shown, sha, path)
@@ -727,8 +744,10 @@ impl Kernel {
             files: changes.files,
             patch: changes.patch,
             patch_truncated: changes.patch_truncated,
+            checksum: String::new(),
         };
         if result.patch.is_none() && result.files.is_empty() {
+            result.checksum = diff_checksum(&result);
             return Ok(result);
         }
         // A file may hold a secret of the run: what is shown has the values redacted like the
@@ -755,6 +774,7 @@ impl Kernel {
             }
             Err(()) => result.patch = None,
         }
+        result.checksum = diff_checksum(&result);
         Ok(result)
     }
 
