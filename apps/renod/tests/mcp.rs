@@ -66,6 +66,9 @@ fn seed(config: &mut renod::DaemonConfig, policy: Option<&str>) {
         std::fs::write(defs.join("policy.toml"), policy).unwrap();
     }
     config.reno_bin = Some(reno_binary());
+    // Terminals are offered (over shells that are not real), so a run's token can be shown to be
+    // refused them.
+    config.pty = Some(std::sync::Arc::new(renod::terminals::FakePty::silent()));
 }
 
 async fn fixture() -> Fixture {
@@ -828,6 +831,55 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
             .await
             .map(|_| ())
             .unwrap_err(),
+    );
+    // And the Terminal tab (RP2): a run's token opens no shell, reads none, writes to none,
+    // not even in its own worktree. The owner opens one first, so a refusal is the token's and
+    // not a missing terminal's.
+    assert!(run.supports("terminals"));
+    let owned = within(fx.client.term_open(reno_proto::TermOpenParams {
+        run_id: me.clone(),
+        cols: 80,
+        rows: 24,
+        command: None,
+    }))
+    .await
+    .unwrap();
+    unauthorized(
+        within(run.term_open(reno_proto::TermOpenParams {
+            run_id: me.clone(),
+            cols: 80,
+            rows: 24,
+            command: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(within(run.term_list(me.clone())).await.unwrap_err());
+    unauthorized(within(run.term_status(owned.id.clone())).await.unwrap_err());
+    unauthorized(
+        within(run.term_write(owned.id.clone(), b"echo hi\r"))
+            .await
+            .unwrap_err(),
+    );
+    unauthorized(
+        within(run.term_resize(owned.id.clone(), 100, 30))
+            .await
+            .unwrap_err(),
+    );
+    unauthorized(within(run.term_close(owned.id.clone())).await.unwrap_err());
+    unauthorized(
+        within(run.term_attach(owned.id.clone(), None))
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    );
+    // None of it touched the owner's terminal.
+    assert_eq!(within(fx.client.term_list(me)).await.unwrap().len(), 1);
+    assert!(
+        !within(fx.client.term_status(owned.id))
+            .await
+            .unwrap()
+            .exited
     );
     unauthorized(
         within(run.run_task(TaskRunParams {

@@ -149,6 +149,8 @@ async fn serve(
     // The one place the real runner and the real settings files are wired. Tests never get them.
     if harnesses {
         config.maintenance = renod::real_maintenance();
+        config.pty = Some(std::sync::Arc::new(renod::terminals::RealPty::new()));
+        config.terminal_env = std::env::vars_os().collect();
     }
     let keychain: Arc<dyn secrets::Keychain> = if memory_secrets {
         Arc::new(secrets::MemoryKeychain::new())
