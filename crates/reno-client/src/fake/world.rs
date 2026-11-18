@@ -539,6 +539,102 @@ impl World {
         Ok(resolved)
     }
 
+    /// `run.configure`: the live run's effort and options change when its model lists them.
+    /// Claude Code applies both now, Codex the effort from its next turn, any other executor
+    /// stores them for the next launch (as the real caps say). Journals `ConfigChanged`.
+    pub(super) fn configure(
+        &mut self,
+        p: &reno_proto::RunConfigureParams,
+    ) -> Result<reno_proto::RunConfigureResult, ErrorObject> {
+        use reno_proto::{ConfigTiming, EffortChange};
+        let run = self
+            .run(&p.run_id)
+            .ok_or_else(|| ErrorObject::new(ErrorCode::NotFound, "no such run"))?;
+        if run.finished() {
+            return Err(ErrorObject::new(
+                ErrorCode::Conflict,
+                "the run has already ended",
+            ));
+        }
+        if p.effort.is_none() && p.model_options.is_empty() {
+            return Err(ErrorObject::new(
+                ErrorCode::InvalidParams,
+                "there is nothing to change",
+            ));
+        }
+        let executor = run.summary.executor.clone();
+        let models = self
+            .executors
+            .iter()
+            .find(|e| e.descriptor.id == executor)
+            .map(|e| e.descriptor.caps.models.clone())
+            .unwrap_or_default();
+        let model = run.summary.model.as_deref().and_then(|name| {
+            models.iter().find(|m| {
+                m.id == name
+                    || m.display_name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+        });
+        let invalid = |why: String| ErrorObject::new(ErrorCode::InvalidParams, why);
+        if let Some(EffortChange::Set { effort }) = p.effort
+            && !model.is_some_and(|m| m.efforts.contains(&effort))
+        {
+            return Err(invalid(format!(
+                "the model does not take effort {}",
+                effort.as_str()
+            )));
+        }
+        for (option, choice) in &p.model_options {
+            let listed = model.is_some_and(|m| {
+                m.options
+                    .iter()
+                    .any(|o| &o.id == option && o.choices.iter().any(|c| &c.id == choice))
+            });
+            if !listed {
+                return Err(invalid(format!(
+                    "the model does not list {option}={choice}"
+                )));
+            }
+        }
+        let (effort_timing, options_timing) = match executor.as_str() {
+            "claude-code" => (ConfigTiming::Now, ConfigTiming::Now),
+            "codex" => (ConfigTiming::NextTurn, ConfigTiming::AfterRestart),
+            _ => (ConfigTiming::AfterRestart, ConfigTiming::AfterRestart),
+        };
+        let mut effort = run.summary.effort;
+        let mut options = run.summary.model_options.clone();
+        let effort_applies = p.effort.map(|change| {
+            effort = match change {
+                EffortChange::Set { effort } => Some(effort),
+                EffortChange::Clear => None,
+            };
+            effort_timing
+        });
+        let options_apply = (!p.model_options.is_empty()).then(|| {
+            options.extend(p.model_options.clone());
+            options_timing
+        });
+        if let Some(run) = self.run_mut(&p.run_id) {
+            run.summary.effort = effort;
+            run.summary.model_options = options.clone();
+        }
+        self.push(
+            &p.run_id,
+            ExecEvent::ConfigChanged {
+                effort,
+                model_options: options.clone(),
+            },
+        );
+        Ok(reno_proto::RunConfigureResult {
+            effort,
+            model_options: options,
+            effort_applies,
+            options_apply,
+        })
+    }
+
     /// Adds a pending approval for `run`, returning it.
     pub(super) fn hold(
         &mut self,

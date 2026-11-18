@@ -820,6 +820,93 @@ impl Kernel {
             .map_err(|_| KernelError::RunEnded(run.clone()))?
     }
 
+    /// Change a live run's reasoning effort or model options (`run.configure`). `effort` sets
+    /// or clears it, `options` sets the named choices; what the run's model does not list is
+    /// refused. The executor's caps say which parts it applies to the live process; the rest is
+    /// stored on the run and used when it is next launched (a resume). Returns the run's
+    /// configuration after the change and when each part takes hold; a change that is no
+    /// change journals nothing.
+    pub async fn configure_run(
+        &self,
+        run: &RunId,
+        effort: Option<reno_proto::EffortChange>,
+        options: BTreeMap<String, String>,
+    ) -> Result<reno_proto::RunConfigureResult> {
+        use reno_proto::EffortChange;
+        if effort.is_none() && options.is_empty() {
+            return Err(KernelError::Invalid("there is nothing to change".into()));
+        }
+        let record = self.shared.run_record(run).await?;
+        let commands = self
+            .shared
+            .live_commands(run)
+            .ok_or_else(|| KernelError::RunEnded(run.clone()))?;
+        let descriptor = self
+            .shared
+            .executors
+            .get(&record.executor)
+            .ok_or_else(|| KernelError::ExecutorNotFound(record.executor.clone()))?
+            .descriptor();
+        let (live_effort, live_options) = (
+            descriptor.caps.live_effort.is_some(),
+            descriptor.caps.live_model_options.is_some(),
+        );
+        let candidate = Candidate {
+            descriptor,
+            health: self.shared.live_health(&record.executor),
+            busy: None,
+        };
+        let model = record
+            .model
+            .clone()
+            .or_else(|| crate::shared::requested_model(&record.spec));
+        if let Some(EffortChange::Set { effort }) = &effort {
+            effort::check(&candidate, model.as_deref(), *effort).map_err(KernelError::Invalid)?;
+        }
+        if !options.is_empty() {
+            effort::check_options(&candidate, model.as_deref(), &options)
+                .map_err(KernelError::Invalid)?;
+        }
+        let current_effort = crate::shared::requested_effort(&record.spec);
+        let current_options = crate::shared::requested_model_options(&record.spec);
+        let wanted_effort = effort.map(|change| match change {
+            EffortChange::Set { effort } => Some(effort),
+            EffortChange::Clear => None,
+        });
+        // What really changes: a request for what the run already has is no change.
+        let plan = crate::shared::ConfigPlan {
+            effort: wanted_effort.filter(|wanted| *wanted != current_effort),
+            options: options
+                .iter()
+                .filter(|(id, choice)| current_options.get(*id) != Some(*choice))
+                .map(|(id, choice)| (id.clone(), choice.clone()))
+                .collect(),
+            full_effort: wanted_effort.unwrap_or(current_effort),
+            full_options: current_options
+                .into_iter()
+                .chain(options)
+                .collect::<BTreeMap<_, _>>(),
+            live_effort,
+            live_options,
+        };
+        if plan.effort.is_none() && plan.options.is_empty() {
+            return Ok(reno_proto::RunConfigureResult {
+                effort: plan.full_effort,
+                model_options: plan.full_options,
+                effort_applies: None,
+                options_apply: None,
+            });
+        }
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(SupCmd::Configure { plan, reply })
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))?;
+        answer
+            .await
+            .map_err(|_| KernelError::RunEnded(run.clone()))?
+    }
+
     /// Approvals waiting for a human, oldest first, as the store holds them.
     pub async fn pending_approvals(&self) -> Result<Vec<Approval>> {
         Ok(self

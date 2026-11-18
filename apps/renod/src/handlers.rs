@@ -15,6 +15,7 @@
 //! | `budget.pause`, `budget.resume` | `pause`, `resume` |
 //! | `run.steer` | `get_run`, `steer` |
 //! | `run.set_model` | `get_run`, `set_model` |
+//! | `run.configure` | `configure_run` |
 //! | `run.events` | `run_events` |
 //! | `runs.watch` | `watch_runs` |
 //! | `approval.list`, `approval.decide` | `pending_approvals`, `decide` |
@@ -77,10 +78,11 @@ use reno_proto::{
     ApprovalsSnapshot, ApprovalsWatch, ApprovalsWatchParams, DaemonHello, DaemonShutdown,
     DaemonShutdownResult, DaemonStatus, DaemonStatusInfo, ErrorCode, ErrorObject, ExecutorId,
     FEATURES, HelloParams, HelloResult, NoParams, PROTOCOL_VERSION, RunCancel, RunCancelParams,
-    RunCancelResult, RunEventItem, RunEvents, RunEventsParams, RunGet, RunGetParams, RunList,
-    RunListParams, RunListResult, RunResume, RunResumeParams, RunResumeResult, RunSetModel,
-    RunSetModelParams, RunSetModelResult, RunStatus, RunSteer, RunSteerParams, RunSteerResult,
-    RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams, TaskRun, TaskRunParams, TaskRunResult,
+    RunCancelResult, RunConfigure, RunConfigureParams, RunConfigureResult, RunEventItem, RunEvents,
+    RunEventsParams, RunGet, RunGetParams, RunList, RunListParams, RunListResult, RunResume,
+    RunResumeParams, RunResumeResult, RunSetModel, RunSetModelParams, RunSetModelResult, RunStatus,
+    RunSteer, RunSteerParams, RunSteerResult, RunSummary, RunsSnapshot, RunsWatch, RunsWatchParams,
+    TaskRun, TaskRunParams, TaskRunResult,
 };
 use reno_proto::{
     BudgetPause, BudgetPauseParams, BudgetPauseResult, BudgetResume, BudgetResumeParams,
@@ -195,6 +197,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<RunResume, _, _>(bind(ctx, run_resume))
         .method::<RunSteer, _, _>(bind(ctx, run_steer))
         .method::<RunSetModel, _, _>(bind(ctx, run_set_model))
+        .method::<RunConfigure, _, _>(bind(ctx, run_configure))
         .method::<ApprovalList, _, _>(bind(ctx, approval_list))
         .method::<ApprovalDecide, _, _>(bind(ctx, approval_decide))
         .method::<ApprovalHistory, _, _>(bind(ctx, approval_history))
@@ -642,6 +645,13 @@ async fn run_set_model(ctx: Arc<Ctx>, p: RunSetModelParams) -> Reply<RunSetModel
         .await
         .map_err(|e| kernel_error(&e))?;
     Ok(RunSetModelResult { model })
+}
+
+async fn run_configure(ctx: Arc<Ctx>, p: RunConfigureParams) -> Reply<RunConfigureResult> {
+    ctx.kernel
+        .configure_run(&p.run_id, p.effort, p.model_options)
+        .await
+        .map_err(|e| kernel_error(&e))
 }
 
 async fn approval_list(ctx: Arc<Ctx>, _: NoParams) -> Reply<ApprovalListResult> {

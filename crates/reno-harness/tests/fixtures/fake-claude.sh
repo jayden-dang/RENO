@@ -385,6 +385,32 @@ case "$first" in
   emit '{"type":"result","subtype":"success","result":"switched","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-sm"}'
   ;;
 
+*scenario:configure*)
+  # `ExecHandle::try_configure` -> `apply_flag_settings` (effort) and `set_model` (the 1M
+  # window) control requests, each answered with success; what arrived is told in the result,
+  # which comes after the third control request.
+  emit '{"type":"system","subtype":"init","model":"claude-opus-5-5","tools":[],"cwd":"/tmp","session_id":"sess-cfg"}'
+  seen=""
+  n=0
+  while [ "$n" -lt 3 ] && read -r ask; do
+    case "$ask" in
+    *'"type":"control_request"'*)
+      id=$(printf '%s\n' "$ask" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+      case "$ask" in
+      *apply_flag_settings*)
+        level=$(printf '%s\n' "$ask" | grep -o '"effortLevel":[^}]*' | sed 's/.*://' | tr -d '"')
+        seen="$seen flag:$level" ;;
+      *set_model*)
+        m=$(printf '%s\n' "$ask" | sed 's/.*"model":"\([^"]*\)".*/\1/')
+        seen="$seen model:$m" ;;
+      esac
+      n=$((n + 1))
+      emit "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"$id\",\"response\":{\"model\":\"claude-opus-5-5\"}}}" ;;
+    esac
+  done
+  emit "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"seen:$seen\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"session_id\":\"sess-cfg\"}"
+  ;;
+
 *scenario:unknown-control*)
   # A control request this host does not serve must still be answered.
   emit '{"type":"system","subtype":"init","model":"claude-fable-5","tools":[],"cwd":"/tmp","session_id":"sess-uc"}'

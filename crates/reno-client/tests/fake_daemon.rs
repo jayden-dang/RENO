@@ -1059,3 +1059,54 @@ async fn a_live_fake_run_reports_its_context_and_takes_the_window_choice() {
     bad.model_options = [("contextWindow".to_owned(), "1m".to_owned())].into();
     assert!(client.run_task(bad).await.is_err());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_live_fake_run_takes_run_configure_like_the_daemon() {
+    use reno_proto::{ConfigTiming, Effort, EffortChange};
+    let client = FakeDaemon::spawn().await.unwrap();
+    client.hello().await.unwrap();
+    let mut params = task("/long keep going");
+    params.model = Some("claude-opus-5-5".into());
+    params.effort = Some(Effort::High);
+    let id = client.run_task(params).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let result = client
+        .configure_run(
+            &id,
+            Some(EffortChange::Set {
+                effort: Effort::Low,
+            }),
+            [("contextWindow".to_owned(), "200k".to_owned())].into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.effort, Some(Effort::Low));
+    assert_eq!(result.effort_applies, Some(ConfigTiming::Now));
+    assert_eq!(result.options_apply, Some(ConfigTiming::Now));
+    let summary = client.get_run(&id).await.unwrap();
+    assert_eq!(summary.effort, Some(Effort::Low));
+    assert_eq!(summary.model_options["contextWindow"], "200k");
+    let cleared = client
+        .configure_run(&id, Some(EffortChange::Clear), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(cleared.effort, None);
+    // A choice the model does not list, and a run that is not there, are refused.
+    assert!(
+        client
+            .configure_run(
+                &id,
+                None,
+                [("contextWindow".to_owned(), "9m".to_owned())].into()
+            )
+            .await
+            .is_err()
+    );
+    client.steer(&id, "wrap up".to_owned()).await.unwrap();
+    let transcript = events(&client, &id).await;
+    let changes = transcript
+        .iter()
+        .filter(|(_, e)| matches!(e, ExecEvent::ConfigChanged { .. }))
+        .count();
+    assert_eq!(changes, 2);
+}

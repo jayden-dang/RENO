@@ -66,7 +66,7 @@ pub(crate) mod probe;
 mod requests;
 mod unknown;
 
-pub use mock::{MockExecutor, MockLog, MockStep};
+pub use mock::{ConfigAsked, MockExecutor, MockLog, MockStep};
 pub use requests::{Open, OpenRequests, Resolved};
 pub use unknown::UnknownFrames;
 
@@ -207,6 +207,10 @@ pub struct ExecControls {
     /// executor that claims `ExecutorCaps::model_switch` serves them; for any other the
     /// requests are dropped unanswered, and the caller sees the run no longer accepts them.
     pub models: mpsc::Receiver<ModelRequest>,
+    /// Requests to change the run's effort or model options (`ExecHandle::try_configure`).
+    /// Bounded. Only an executor whose caps say `live_effort` or `live_model_options` serves
+    /// them, and the daemon asks it only for the parts it claims.
+    pub config: mpsc::Receiver<ConfigRequest>,
     /// Where to report each child process the run spawns. Bounded.
     #[cfg(unix)]
     pub processes: ProcessSink,
@@ -219,6 +223,27 @@ pub struct ModelRequest {
     pub model: String,
     /// The model the harness resolved it to, or the harness's reason for refusing it.
     pub reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+}
+
+/// One request to change the effort or the option choices of the run, with the way to answer it.
+#[derive(Debug)]
+pub struct ConfigRequest {
+    /// The effort asked for: `Some(None)` is back to the model's own default, `None` unchanged.
+    pub effort: Option<Option<reno_proto::Effort>>,
+    /// The option choices to set (option id to choice id); the rest keep theirs.
+    pub model_options: std::collections::BTreeMap<String, String>,
+    /// What the harness did, or its reason for refusing.
+    pub reply: tokio::sync::oneshot::Sender<Result<ConfigApplied, String>>,
+}
+
+/// What a harness did with a [`ConfigRequest`]: when each part takes hold. `AfterRestart` means
+/// it did not apply it to the live process (the daemon stores it for the next launch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigApplied {
+    /// For the effort, when it was asked to change.
+    pub effort: Option<reno_proto::ConfigTiming>,
+    /// For the options: the latest of the ones asked to change.
+    pub options: Option<reno_proto::ConfigTiming>,
 }
 
 /// The executor's end of the process-record queue: report every child as soon as it is spawned.
@@ -253,6 +278,7 @@ pub struct ExecHandle {
     cancel: CancellationToken,
     answers: mpsc::Sender<ExecAnswer>,
     models: mpsc::Sender<ModelRequest>,
+    config: mpsc::Sender<ConfigRequest>,
     /// The receiving end of the process-record queue, taken once.
     #[cfg(unix)]
     records: std::sync::Arc<std::sync::Mutex<Option<mpsc::Receiver<ProcessRecord>>>>,
@@ -287,6 +313,7 @@ impl ExecControls {
         let (steer_tx, steer_rx) = mpsc::channel(capacity);
         let (answer_tx, answer_rx) = mpsc::channel(capacity);
         let (model_tx, model_rx) = mpsc::channel(capacity);
+        let (config_tx, config_rx) = mpsc::channel(capacity);
         #[cfg(unix)]
         let (record_tx, record_rx) = mpsc::channel(capacity);
         (
@@ -295,6 +322,7 @@ impl ExecControls {
                 cancel: cancel.clone(),
                 answers: answer_rx,
                 models: model_rx,
+                config: config_rx,
                 #[cfg(unix)]
                 processes: ProcessSink { records: record_tx },
             },
@@ -303,6 +331,7 @@ impl ExecControls {
                 cancel,
                 answers: answer_tx,
                 models: model_tx,
+                config: config_tx,
                 #[cfg(unix)]
                 records: std::sync::Arc::new(std::sync::Mutex::new(Some(record_rx))),
             },
@@ -338,6 +367,28 @@ impl ExecHandle {
         self.models
             .try_send(ModelRequest {
                 model: model.into(),
+                reply,
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => SteerRejected::Full,
+                mpsc::error::TrySendError::Closed(_) => SteerRejected::Closed,
+            })?;
+        Ok(answer)
+    }
+
+    /// Ask the executor to change the run's effort or option choices without waiting: the
+    /// answer (when each part took hold, or why the harness refused) arrives on the returned
+    /// receiver. Like [`Self::try_set_model`], never awaited on the executor's own task.
+    pub fn try_configure(
+        &self,
+        effort: Option<Option<reno_proto::Effort>>,
+        model_options: std::collections::BTreeMap<String, String>,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<ConfigApplied, String>>, SteerRejected> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.config
+            .try_send(ConfigRequest {
+                effort,
+                model_options,
                 reply,
             })
             .map_err(|e| match e {

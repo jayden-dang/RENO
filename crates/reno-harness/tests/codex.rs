@@ -1285,6 +1285,38 @@ async fn a_rejected_steer_falls_back_to_a_follow_up_turn_inside_one_run() {
 }
 
 #[tokio::test]
+async fn a_changed_effort_applies_from_the_next_turn_and_a_clear_waits_for_a_restart() {
+    use reno_proto::ConfigTiming;
+    let mut s = spec("scenario:effort-next-turn");
+    s.effort = Some(Effort::High);
+    let mut live = start(&executor(), s).await;
+    let set = live
+        .handle
+        .try_configure(Some(Some(Effort::Low)), Default::default())
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (set.effort, set.options),
+        (Some(ConfigTiming::NextTurn), None)
+    );
+    // Back to the model's own default cannot be said on a turn that sticks: it waits.
+    let clear = live
+        .handle
+        .try_configure(Some(None), Default::default())
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(clear.effort, Some(ConfigTiming::AfterRestart));
+    live.handle.steer("redirect please").await.unwrap();
+    let events = drive(&mut live, |_| Decision::Allow).await.events;
+    assert_eq!(all_text(&events), "low", "{events:?}");
+    assert_eq!(done(&events).0, StopReason::Completed);
+}
+
+#[tokio::test]
 async fn a_stale_turn_completion_never_settles_the_running_turn() {
     let events = run_to_end(&executor(), spec("scenario:stale-completion")).await;
     assert_eq!(dones(&events), 1, "{events:?}");

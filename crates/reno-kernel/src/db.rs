@@ -350,6 +350,19 @@ impl Db {
         self.store.record_model(run, fence, model).await
     }
 
+    pub(crate) async fn record_config(
+        &self,
+        run: &RunId,
+        fence: u64,
+        effort: Option<&str>,
+        model_options: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .record_config(run, fence, effort, model_options)
+            .await
+    }
+
     pub(crate) async fn set_report(
         &self,
         run: &RunId,

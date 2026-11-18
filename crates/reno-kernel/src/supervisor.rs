@@ -78,6 +78,13 @@ struct ModelAnswer {
     reply: oneshot::Sender<Result<String, KernelError>>,
 }
 
+/// What the harness said to one configuration change, with the caller's way to hear of it.
+struct ConfigAnswer {
+    outcome: Result<reno_harness::exec::ConfigApplied, KernelError>,
+    plan: crate::shared::ConfigPlan,
+    reply: oneshot::Sender<Result<reno_proto::RunConfigureResult, KernelError>>,
+}
+
 /// A `run_events` subscriber's queue, from the supervisor's side.
 #[derive(Debug)]
 struct Sub {
@@ -190,6 +197,9 @@ pub(crate) struct Supervisor {
     /// Where the answers to `set_model` requests come back to (see [`Self::set_model`]).
     model_answers_tx: mpsc::Sender<ModelAnswer>,
     model_answers: mpsc::Receiver<ModelAnswer>,
+    /// Where the answers to configuration changes come back to (see [`Self::configure`]).
+    config_answers_tx: mpsc::Sender<ConfigAnswer>,
+    config_answers: mpsc::Receiver<ConfigAnswer>,
     /// A `ModelChanged` event processed before the answer to its request, and an answer
     /// processed before its event: each is journaled once, by whichever of the two comes first.
     model_events_ahead: u32,
@@ -259,6 +269,7 @@ impl Supervisor {
     ) -> Self {
         let records = Records::take(&handle);
         let (model_answers_tx, model_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
+        let (config_answers_tx, config_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
         // Redact first, cut second: the executors hand over tool output cut at a generous raw
         // limit, so a secret value is whole in the text the redactor sees; the journal's cut
         // falls on text that is already clean.
@@ -299,6 +310,8 @@ impl Supervisor {
             protected_seq: 0,
             model_answers_tx,
             model_answers,
+            config_answers_tx,
+            config_answers,
             model_events_ahead: 0,
             model_answers_ahead: 0,
             model_requests_open: 0,
@@ -328,6 +341,7 @@ impl Supervisor {
                 () = system_woke(&mut woke) => self.expire_past_wall_clock().await,
                 spawned = self.records.next() => self.persist(spawned).await,
                 Some(answer) = self.model_answers.recv() => self.model_answered(answer).await,
+                Some(answer) = self.config_answers.recv() => self.config_answered(answer).await,
                 cmd = self.cmd_rx.recv(), if commands_open => match cmd {
                     Some(cmd) => self.command(cmd).await,
                     None => commands_open = false,
@@ -547,6 +561,109 @@ impl Supervisor {
         let _ = reply.send(outcome);
     }
 
+    /// Passes the live parts of a configuration change to the executor; what it cannot apply
+    /// live is stored for the next launch. As with `set_model`, the answer is awaited off this
+    /// task and comes back as a [`ConfigAnswer`].
+    async fn configure(
+        &mut self,
+        plan: crate::shared::ConfigPlan,
+        reply: oneshot::Sender<Result<reno_proto::RunConfigureResult, KernelError>>,
+    ) {
+        let effort = plan.effort.filter(|_| plan.live_effort);
+        let options = if plan.live_options {
+            plan.options.clone()
+        } else {
+            Default::default()
+        };
+        if effort.is_none() && options.is_empty() {
+            // Nothing the executor does live: stored for the next launch.
+            let applied = reno_harness::exec::ConfigApplied {
+                effort: None,
+                options: None,
+            };
+            self.config_answered(ConfigAnswer {
+                outcome: Ok(applied),
+                plan,
+                reply,
+            })
+            .await;
+            return;
+        }
+        let answer = match self.handle.try_configure(effort, options) {
+            Ok(answer) => answer,
+            Err(rejected) => {
+                let _ = reply.send(Err(match rejected {
+                    SteerRejected::Full => KernelError::SteerQueueFull(self.run.clone()),
+                    SteerRejected::Closed => KernelError::RunEnded(self.run.clone()),
+                }));
+                return;
+            }
+        };
+        let (run, back) = (self.run.clone(), self.config_answers_tx.clone());
+        tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(MODEL_SWITCH_WAIT, answer).await {
+                Ok(Ok(Ok(applied))) => Ok(applied),
+                Ok(Ok(Err(why))) => Err(KernelError::Invalid(why)),
+                Ok(Err(_)) => Err(KernelError::RunEnded(run)),
+                Err(_) => Err(KernelError::ModelSwitchTimedOut(run)),
+            };
+            let _ = back
+                .send(ConfigAnswer {
+                    outcome,
+                    plan,
+                    reply,
+                })
+                .await;
+        });
+    }
+
+    /// The harness answered a configuration change (or none was asked of it). The change is
+    /// stored and journaled before the caller hears of it.
+    async fn config_answered(&mut self, answer: ConfigAnswer) {
+        use reno_proto::ConfigTiming::AfterRestart;
+        let ConfigAnswer {
+            outcome,
+            plan,
+            reply,
+        } = answer;
+        let applied = match outcome {
+            Ok(applied) => applied,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        // A part the executor was not asked, or did not apply, waits for the next launch.
+        let effort_applies = plan.effort.map(|_| applied.effort.unwrap_or(AfterRestart));
+        let options_apply =
+            (!plan.options.is_empty()).then(|| applied.options.unwrap_or(AfterRestart));
+        if !self.lost
+            && let Err(error) = self
+                .shared
+                .db
+                .record_config(
+                    &self.run,
+                    self.fence,
+                    plan.full_effort.map(reno_proto::Effort::as_str),
+                    &plan.full_options,
+                )
+                .await
+        {
+            tracing::warn!(run = %self.run, %error, "could not record the run's configuration");
+        }
+        self.shared.mark_runs_dirty();
+        self.publish(&ExecEvent::ConfigChanged {
+            effort: plan.full_effort,
+            model_options: plan.full_options.clone(),
+        });
+        let _ = reply.send(Ok(reno_proto::RunConfigureResult {
+            effort: plan.full_effort,
+            model_options: plan.full_options,
+            effort_applies,
+            options_apply,
+        }));
+    }
+
     /// Stops the run for `stop`: the executor is told to cancel, and the run ends `interrupted`
     /// with `stop` as its diagnostic. The first budget to stop a run is the one that is kept.
     fn stop_for_budget(&mut self, stop: BudgetStop) {
@@ -684,6 +801,7 @@ impl Supervisor {
                 let _ = reply.send(Ok(()));
             }
             SupCmd::SetModel { model, reply } => self.set_model(model, reply),
+            SupCmd::Configure { plan, reply } => self.configure(plan, reply).await,
             SupCmd::AgentApproval { subject, reply } => self.agent_approval(subject, reply).await,
             SupCmd::Steer { prompt, reply } => {
                 // Never wait here: the executor drains steering from inside the stream this task

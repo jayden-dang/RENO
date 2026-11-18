@@ -1693,6 +1693,58 @@ async fn set_model_reaches_the_cli_and_announces_the_resolved_model() {
 }
 
 #[tokio::test]
+async fn a_changed_effort_and_window_apply_to_the_live_process() {
+    use reno_proto::{ConfigTiming, Effort};
+    let mut s = spec("scenario:configure");
+    s.model = Some("claude-opus-5-5".into());
+    let mut live = start(&executor(), s).await;
+    let ask = |effort, options: &[(&str, &str)]| {
+        live.handle
+            .try_configure(
+                effort,
+                options
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            )
+            .unwrap()
+    };
+    // Effort goes through the flag layer, and a clear is a null.
+    let set = ask(Some(Some(Effort::High)), &[]).await.unwrap().unwrap();
+    assert_eq!((set.effort, set.options), (Some(ConfigTiming::Now), None));
+    let cleared = ask(Some(None), &[]).await.unwrap().unwrap();
+    assert_eq!(cleared.effort, Some(ConfigTiming::Now));
+    // The 200K limit is the process's environment: it waits for a launch, and nothing is sent.
+    let cap = ask(None, &[("contextWindow", "200k")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cap.options, Some(ConfigTiming::AfterRestart));
+    // The 1M window is the model's suffix, switched in place.
+    let window = ask(None, &[("contextWindow", "1m")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (window.effort, window.options),
+        (None, Some(ConfigTiming::Now))
+    );
+    let events = drive(&mut live, |_| Decision::Allow).await.events;
+    let (stop, result, _) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{events:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("seen: flag:high flag:null model:claude-opus-5-5[1m]")
+    );
+    // The model switch of a window is not announced as a model change.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ExecEvent::ModelChanged { .. }))
+    );
+}
+
+#[tokio::test]
 #[ignore = "spawns the real claude CLI (a handshake, no model call); reads its login state"]
 async fn live_probe_lists_the_clis_models() {
     let executor = ClaudeExecutor::new();

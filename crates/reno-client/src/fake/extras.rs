@@ -341,8 +341,14 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     verified: range.1.to_owned(),
                 },
                 caps: ExecutorCaps {
-                    live_effort: None,
-                    live_model_options: None,
+                    // What `run.configure` applies live, as the real drivers claim.
+                    live_effort: match id {
+                        "claude-code" => Some(reno_proto::ConfigTiming::Now),
+                        "codex" => Some(reno_proto::ConfigTiming::NextTurn),
+                        _ => None,
+                    },
+                    live_model_options: (id == "claude-code")
+                        .then_some(reno_proto::ConfigTiming::Now),
                     steering: Steering::StepBoundary,
                     resume: true,
                     access_modes: access.to_vec(),

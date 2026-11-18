@@ -636,6 +636,18 @@ pub(crate) fn set_model_request_line(request_id: &str, model: &str) -> String {
     .to_string()
 }
 
+/// Client→CLI `apply_flag_settings` control request: replaces settings of the flag layer on the
+/// live process (`{"effortLevel": "high"}`; `null` drops the override back to the user's own
+/// setting, as a launch without the flag does). Upstream verified it live on 2.1.286.
+pub(crate) fn apply_flag_settings_line(request_id: &str, settings: Value) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": { "subtype": "apply_flag_settings", "settings": settings },
+    })
+    .to_string()
+}
+
 /// Client→CLI interrupt control request.
 pub(crate) fn interrupt_request_line(request_id: &str) -> String {
     json!({
@@ -649,6 +661,15 @@ pub(crate) fn interrupt_request_line(request_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_flag_settings_carries_the_settings_and_a_null_clears_one() {
+        let line = apply_flag_settings_line("c1", json!({"effortLevel": null}));
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["request"]["subtype"], "apply_flag_settings");
+        assert!(v["request"]["settings"]["effortLevel"].is_null());
+        assert_eq!(v["request_id"], "c1");
+    }
 
     #[test]
     fn steer_priority_follows_tool_state() {

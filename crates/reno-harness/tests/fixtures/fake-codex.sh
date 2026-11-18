@@ -330,6 +330,29 @@ case "$turnline" in
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
   ;;
 
+*scenario:effort-next-turn*)
+  # The first turn is rejected a steer (as in steer-race); the follow-up turn/start must carry
+  # the effort changed meanwhile.
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'
+  read -r steerline || exit 1
+  sid=$(rid "$steerline")
+  emit "{\"id\":$sid,\"error\":{\"code\":-32602,\"message\":\"turn already completed\"}}"
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-1"}}}'
+  read -r followline || exit 1
+  fid=$(rid "$followline")
+  emit "{\"id\":$fid,\"result\":{\"turn\":{\"id\":\"t-2\"}}}"
+  emit '{"method":"turn/started","params":{"turn":{"id":"t-2"}}}'
+  if has "$followline" '"effort":"low"'; then
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"low"}}'
+  elif has "$followline" '"effort":"high"'; then
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"high"}}'
+  else
+    emit '{"method":"item/agentMessage/delta","params":{"itemId":"m2","delta":"none"}}'
+  fi
+  emit '{"method":"turn/completed","params":{"turn":{"id":"t-2"}}}'
+  ;;
+
 *scenario:steer-race*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"turn":{"id":"t-1"}}}'

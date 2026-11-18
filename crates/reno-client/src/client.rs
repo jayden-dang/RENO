@@ -284,6 +284,24 @@ impl Client {
         Ok(self.rpc.call::<reno_proto::RunSetModel>(params).await?)
     }
 
+    /// `run.configure`: changes a live run's effort and model options. The answer is the run's
+    /// configuration and when each part takes hold (`now`, `next_turn`, or `after_restart`,
+    /// stored for its next launch). Needs feature `run.configure`.
+    pub async fn configure_run(
+        &self,
+        run_id: &RunId,
+        effort: Option<reno_proto::EffortChange>,
+        model_options: std::collections::BTreeMap<String, String>,
+    ) -> Result<reno_proto::RunConfigureResult, ClientError> {
+        self.require(reno_proto::FEATURE_RUN_CONFIGURE)?;
+        let params = reno_proto::RunConfigureParams {
+            run_id: run_id.clone(),
+            effort,
+            model_options,
+        };
+        Ok(self.rpc.call::<reno_proto::RunConfigure>(params).await?)
+    }
+
     /// `trigger.list`: every trigger and its state. Needs feature `triggers`.
     pub async fn list_triggers(&self) -> Result<Vec<reno_proto::TriggerInfo>, ClientError> {
         self.require(reno_proto::FEATURE_TRIGGERS)?;

@@ -41,6 +41,9 @@ pub enum MockStep {
     /// and, when it took, emit `ExecEvent::ModelChanged` for it. An alias resolves to the
     /// first listed model.
     AwaitModel,
+    /// Wait for one `ExecHandle::try_configure` request and answer it with the timings the
+    /// descriptor's `live_effort` and `live_model_options` say.
+    AwaitConfig,
     /// Report a spawned child on the run's process-record queue, as a real executor does right
     /// after it spawns. Unix only, like `ProcessRecord`.
     #[cfg(unix)]
@@ -83,7 +86,15 @@ pub struct MockLog {
     pub answers: Vec<ExecAnswer>,
     /// Every model the run was asked to switch to, in order, accepted or not.
     pub model_requests: Vec<String>,
+    /// Every effort and option change the run was asked for, in order.
+    pub config_requests: Vec<ConfigAsked>,
 }
+
+/// One recorded configuration request: the effort (`Some(None)` is a clear) and the options.
+pub type ConfigAsked = (
+    Option<Option<reno_proto::Effort>>,
+    std::collections::BTreeMap<String, String>,
+);
 
 /// An [`Executor`] that plays a script. Cheap to clone; clones share the log.
 ///
@@ -297,6 +308,7 @@ impl Run {
                 }
                 MockStep::AwaitAnswer { request_id } => self.wait_answer(&request_id).await,
                 MockStep::AwaitSteer => self.wait_steer().await,
+                MockStep::AwaitConfig => self.wait_config().await,
                 MockStep::AwaitModel => match self.wait_model().await {
                     (Waited::Got, Some(event)) => return Some(event),
                     (waited, _) => waited,
@@ -388,6 +400,31 @@ impl Run {
             .map(|model| ExecEvent::ModelChanged { model });
         let _ = request.reply.send(resolved);
         (Waited::Got, event)
+    }
+
+    async fn wait_config(&mut self) -> Waited {
+        let received = tokio::select! {
+            biased;
+            () = self.controls.cancel.cancelled() => return Waited::Cancelled,
+            received = self.controls.config.recv() => received,
+        };
+        let Some(request) = received else {
+            return Waited::Closed;
+        };
+        if self.recording {
+            lock(&self.log)
+                .config_requests
+                .push((request.effort, request.model_options.clone()));
+        }
+        let caps = &self.descriptor.caps;
+        let timing = |live: Option<reno_proto::ConfigTiming>| {
+            live.unwrap_or(reno_proto::ConfigTiming::AfterRestart)
+        };
+        let _ = request.reply.send(Ok(crate::exec::ConfigApplied {
+            effort: request.effort.map(|_| timing(caps.live_effort)),
+            options: (!request.model_options.is_empty()).then(|| timing(caps.live_model_options)),
+        }));
+        Waited::Got
     }
 
     async fn wait_steer(&mut self) -> Waited {

@@ -638,8 +638,11 @@ impl Executor for ClaudeExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
             caps: ExecutorCaps {
-                live_effort: None,
-                live_model_options: None,
+                // `apply_flag_settings` and `set_model` (the `[1m]` window) on the live process.
+                // Upstream's live check of `apply_flag_settings` is 2.1.286; this build has not
+                // been run against a live CLI for it (ARCH-15), only against the fake one.
+                live_effort: Some(reno_proto::ConfigTiming::Now),
+                live_model_options: Some(reno_proto::ConfigTiming::Now),
                 // Prompts land in the running turn at the CLI's next step.
                 steering: Steering::StepBoundary,
                 resume: true,
@@ -755,6 +758,7 @@ impl Executor for ClaudeExecutor {
             cancel,
             answers,
             models,
+            config,
             processes,
         } = controls;
 
@@ -819,6 +823,7 @@ impl Executor for ClaudeExecutor {
             cancel,
             answers,
             models,
+            config,
             processes,
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
@@ -935,6 +940,7 @@ struct Session {
     cancel: CancellationToken,
     answers: mpsc::Receiver<ExecAnswer>,
     models: mpsc::Receiver<crate::exec::ModelRequest>,
+    config: mpsc::Receiver<crate::exec::ConfigRequest>,
     processes: crate::exec::ProcessSink,
     interrupt_grace: Duration,
     kill_grace: Duration,
@@ -945,6 +951,87 @@ struct Session {
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     tracker: TaskTracker,
     unknown: UnknownFrames,
+}
+
+/// A configuration change on its way to the CLI: the caller's reply, what was applied, and how
+/// many control requests are still unanswered.
+struct ConfigWait {
+    reply: tokio::sync::oneshot::Sender<Result<crate::exec::ConfigApplied, String>>,
+    applied: crate::exec::ConfigApplied,
+    open: u32,
+    error: Option<String>,
+}
+
+/// What a configuration change needs of the live CLI: the control requests to write (by id),
+/// and what each part will say about when it takes hold.
+///
+/// The effort is a flag-layer setting (`apply_flag_settings`, `null` for the default). The 1M
+/// window is the `[1m]` suffix of the model, switched in place (`set_model`). The 200K limit is
+/// an environment variable of the process, so a change of it (or of the window of a run with no
+/// model named) waits for the next launch.
+fn plan_config(
+    request: crate::exec::ConfigRequest,
+    launched: &ExecSpec,
+    cap_launched: bool,
+    live_options: &mut std::collections::BTreeMap<String, String>,
+    id: &str,
+) -> (ConfigWait, Vec<(String, String)>) {
+    use reno_proto::ConfigTiming::{AfterRestart, Now};
+    let crate::exec::ConfigRequest {
+        effort,
+        model_options,
+        reply,
+    } = request;
+    let mut applied = crate::exec::ConfigApplied {
+        effort: None,
+        options: None,
+    };
+    let mut lines = Vec::new();
+    if let Some(level) = effort {
+        let settings = serde_json::json!({ "effortLevel": level.map(reno_proto::Effort::as_str) });
+        lines.push((format!("{id}_flags"), settings));
+        applied.effort = Some(Now);
+    }
+    let mut lines: Vec<(String, String)> = lines
+        .into_iter()
+        .map(|(id, settings)| (id.clone(), wire::apply_flag_settings_line(&id, settings)))
+        .collect();
+    if !model_options.is_empty() {
+        let mut next = live_options.clone();
+        next.extend(model_options);
+        let live = ExecSpec {
+            model_options: live_options.clone(),
+            ..launched.clone()
+        };
+        let wanted = ExecSpec {
+            model_options: next.clone(),
+            ..launched.clone()
+        };
+        if caps_context_at_200k(&wanted) != cap_launched {
+            applied.options = Some(AfterRestart);
+        } else if model_arg(&live) == model_arg(&wanted) {
+            // The same launch: nothing for the process to do.
+            *live_options = next;
+            applied.options = Some(Now);
+        } else if let Some(model) = model_arg(&wanted) {
+            let id = format!("{id}_model");
+            lines.push((id.clone(), wire::set_model_request_line(&id, &model)));
+            *live_options = next;
+            applied.options = Some(Now);
+        } else {
+            // No model was named: the window cannot be spelled on the live process.
+            applied.options = Some(AfterRestart);
+        }
+    }
+    (
+        ConfigWait {
+            reply,
+            applied,
+            open: 0,
+            error: None,
+        },
+        lines,
+    )
 }
 
 /// Where the answer to a `set_model` control request goes.
@@ -1142,6 +1229,7 @@ async fn run_session(session: Session) {
         cancel,
         mut answers,
         mut models,
+        mut config,
         processes,
         interrupt_grace,
         kill_grace,
@@ -1164,6 +1252,16 @@ async fn run_session(session: Session) {
     let mut model_replies: std::collections::HashMap<String, ModelReply> =
         std::collections::HashMap::new();
     let mut model_requests = 0_u64;
+    // Configuration changes (`ExecHandle::try_configure`) written and not yet answered: each
+    // wait holds its caller's reply until every control request it sent is answered.
+    let mut config_open = true;
+    let mut config_requests = 0_u64;
+    let mut config_waits: Vec<Option<ConfigWait>> = Vec::new();
+    let mut config_ids: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // The 200K limit is a launch environment variable: the process keeps the one it started with.
+    let cap_launched = caps_context_at_200k(&launched);
+    // The option choices the live process runs with (a change that needs a launch is not one).
+    let mut live_options = launched.model_options.clone();
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // The run's one `Done` has gone out (or the consumer left).
@@ -1275,6 +1373,23 @@ async fn run_session(session: Session) {
                         // A `set_model` the consumer asked for: the CLI says which model it
                         // resolved the name to, or why it refused. The change is announced
                         // before the caller hears of it.
+                        if let Some(at) = config_ids.remove(&response.response.request_id) {
+                            if let Some(wait) = config_waits[at].as_mut() {
+                                if let Some(error) = response.response.error_message() {
+                                    wait.error.get_or_insert(error);
+                                }
+                                wait.open -= 1;
+                                if wait.open == 0
+                                    && let Some(done) = config_waits[at].take()
+                                {
+                                    let _ = done.reply.send(match done.error {
+                                        Some(error) => Err(error),
+                                        None => Ok(done.applied),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(reply) = model_replies.remove(&response.response.request_id) {
                             let answer = match response.response.error_message() {
                                 Some(error) => Err(error),
@@ -1453,6 +1568,39 @@ async fn run_session(session: Session) {
                     }
                 }
                 None => models_open = false,
+            },
+
+            request = config.recv(), if config_open && !interrupted => match request {
+                Some(request) => {
+                    config_requests += 1;
+                    let at = config_waits.len();
+                    let (wait, lines) = plan_config(
+                        request,
+                        &launched,
+                        cap_launched,
+                        &mut live_options,
+                        &format!("reno_cfg_{config_requests}"),
+                    );
+                    let mut wait = wait;
+                    for (id, line) in lines {
+                        if stdin.line(line) {
+                            config_ids.insert(id, at);
+                            wait.open += 1;
+                        } else {
+                            wait.error.get_or_insert("the CLI is not reading".to_owned());
+                        }
+                    }
+                    if wait.open == 0 {
+                        let _ = wait.reply.send(match wait.error {
+                            Some(error) => Err(error),
+                            None => Ok(wait.applied),
+                        });
+                        config_waits.push(None);
+                    } else {
+                        config_waits.push(Some(wait));
+                    }
+                }
+                None => config_open = false,
             },
 
             answer = answers.recv(), if answers_open => match answer {
