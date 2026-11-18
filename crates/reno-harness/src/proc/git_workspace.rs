@@ -548,10 +548,7 @@ impl GitWorktrees {
                     "--ignored",
                     "--exclude-standard",
                     "--",
-                    ":(icase,literal).claude",
-                    ":(icase,literal).codex",
                     ":(icase,literal).reno",
-                    ":(icase,literal).mcp.json",
                 ],
             )
             .await?;

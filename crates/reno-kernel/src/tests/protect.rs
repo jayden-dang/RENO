@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 //! Protected paths enforced after the fact (see `supervisor::protect`): a run whose harness
-//! cannot be asked writes `.claude/settings.json`, and the supervisor reverts it, audits it and
+//! cannot be asked writes `.reno/policy.toml`, and the supervisor reverts it, audits it and
 //! stops the run. The worktree is the `FakeWorkspace`: a test says what the run left in it.
 
 use std::path::PathBuf;
@@ -94,19 +94,19 @@ async fn a_write_to_a_protected_path_is_reverted_audited_and_stops_the_run() {
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
     let m = mock(steps([
         write("t1", "src/a.rs"),
-        write("t2", ".claude/settings.json"),
+        write("t2", ".reno/policy.toml"),
     ]));
     let fx = rig(&m, &ws, SandboxLevel::Unrestricted).await;
     let run = run_in(&fx, "/repo").await;
     placed(&ws, &run).await;
     // The run wrote an ordinary file and a protected one.
-    ws.plant_protected(&run, &[".claude/settings.json", "src/a.rs"]);
+    ws.plant_protected(&run, &[".reno/policy.toml", "src/a.rs"]);
 
     let journal = ended(&fx, &run, RunStatus::Interrupted).await;
     let (stop, reason, diagnostic) = done(&journal);
     assert_eq!(stop, StopReason::Interrupted);
     let detail = StopDetail::ProtectedPathWrite {
-        paths: vec![".claude/settings.json".into()],
+        paths: vec![".reno/policy.toml".into()],
         reverted: true,
     };
     assert_eq!(reason, Some(detail.clone()));
@@ -114,13 +114,13 @@ async fn a_write_to_a_protected_path_is_reverted_audited_and_stops_the_run() {
     assert!(
         detail
             .to_string()
-            .starts_with("blocked: .claude/settings.json is protected")
+            .starts_with("blocked: .reno/policy.toml is protected")
     );
 
     // Only the protected path was put back; the ordinary change stays for the owner.
     assert_eq!(
         ws.reverts(),
-        [(run.clone(), vec![".claude/settings.json".to_owned()])]
+        [(run.clone(), vec![".reno/policy.toml".to_owned()])]
     );
     assert_eq!(ws.protected_left(&run), ["src/a.rs"]);
 
@@ -139,13 +139,13 @@ async fn a_write_to_a_protected_path_is_reverted_audited_and_stops_the_run() {
             .3
             .as_deref()
             .unwrap()
-            .starts_with("blocked: `.claude/settings.json` is protected")
+            .starts_with("blocked: `.reno/policy.toml` is protected")
     );
     let history = fx.kernel.approval_history(Some(&run), None).await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(
         history[0].subject.paths,
-        [PathBuf::from(".claude/settings.json")]
+        [PathBuf::from(".reno/policy.toml")]
     );
     // A run stopped for this is never resumed on its own.
     assert_eq!(
@@ -166,7 +166,7 @@ async fn a_write_made_after_the_last_tool_is_caught_when_the_run_ends() {
     let fx = rig(&m, &ws, SandboxLevel::Unrestricted).await;
     let run = run_in(&fx, "/repo").await;
     placed(&ws, &run).await;
-    ws.plant_protected(&run, &[".mcp.json"]);
+    ws.plant_protected(&run, &[".git/hooks/pre-commit"]);
 
     let journal = ended(&fx, &run, RunStatus::Interrupted).await;
     let (stop, reason, _) = done(&journal);
@@ -223,7 +223,7 @@ async fn a_write_outside_the_worktree_that_the_worktree_cannot_show_still_stops_
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
     let m = mock(steps([
         write("t1", "src/a.rs"),
-        write("t2", "/home/owner/.claude/settings.json"),
+        write("t2", "/home/owner/.reno/policy.toml"),
     ]));
     let fx = rig(&m, &ws, SandboxLevel::Unrestricted).await;
     let run = run_in(&fx, "/repo").await;
@@ -232,7 +232,7 @@ async fn a_write_outside_the_worktree_that_the_worktree_cannot_show_still_stops_
     assert_eq!(
         reason,
         Some(StopDetail::ProtectedPathWrite {
-            paths: vec!["/home/owner/.claude/settings.json".into()],
+            paths: vec!["/home/owner/.reno/policy.toml".into()],
             reverted: false
         })
     );
@@ -244,7 +244,7 @@ async fn an_in_place_run_is_stopped_and_nothing_is_deleted() {
     let ws = Arc::new(FakeWorkspace::new());
     let m = mock(steps([
         write("t1", "src/a.rs"),
-        write("t2", ".claude/settings.json"),
+        write("t2", ".reno/policy.toml"),
     ]));
     let fx = opted_in_rig(&m, &ws).await;
     let run = fx
@@ -252,28 +252,28 @@ async fn an_in_place_run_is_stopped_and_nothing_is_deleted() {
         .submit_for_bot("loose", "go", None, PathBuf::from("/plain"), None)
         .await
         .unwrap();
-    ws.plant_protected(&run, &[".claude/settings.json"]);
+    ws.plant_protected(&run, &[".reno/policy.toml"]);
 
     let journal = ended(&fx, &run, RunStatus::Interrupted).await;
     let (_, reason, _) = done(&journal);
     assert_eq!(
         reason,
         Some(StopDetail::ProtectedPathWrite {
-            paths: vec![".claude/settings.json".into()],
+            paths: vec![".reno/policy.toml".into()],
             reverted: false
         })
     );
     // No worktree, so there was nothing of Reno's to revert, and the user's files were not
     // touched.
     assert!(ws.reverts().is_empty());
-    assert_eq!(ws.protected_left(&run), [".claude/settings.json"]);
+    assert_eq!(ws.protected_left(&run), [".reno/policy.toml"]);
     assert_eq!(resolved(&journal).len(), 1);
 }
 
 #[tokio::test(start_paused = true)]
 async fn an_in_place_write_that_failed_does_not_stop_the_run() {
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
-    let [call, _] = write("t1", ".claude/settings.json");
+    let [call, _] = write("t1", ".reno/policy.toml");
     let m = mock([
         MockStep::started("s", "mock-1"),
         call,
@@ -290,4 +290,54 @@ async fn an_in_place_write_that_failed_does_not_stop_the_run() {
     let run = run_in(&fx, "/repo").await;
     let journal = ended(&fx, &run, RunStatus::Succeeded).await;
     assert_eq!(done(&journal).1, None);
+}
+
+/// Project config of every harness and provider, which a run may edit.
+const HARNESS_CONFIG: [&str; 8] = [
+    ".claude/settings.json",
+    ".claude/skills/x/SKILL.md",
+    ".codex/config.toml",
+    ".mcp.json",
+    ".pi/extensions/e.ts",
+    "opencode.json",
+    ".cursor/rules/a.mdc",
+    ".grok/settings.json",
+];
+
+#[tokio::test(start_paused = true)]
+async fn writing_harness_config_in_a_worktree_run_does_not_stop_it() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let m = mock(finishing(HARNESS_CONFIG.map(|path| write(path, path))));
+    let fx = rig(&m, &ws, SandboxLevel::Unrestricted).await;
+    let run = run_in(&fx, "/repo").await;
+    let journal = ended(&fx, &run, RunStatus::Succeeded).await;
+    assert_eq!(done(&journal).1, None);
+    assert!(ws.reverts().is_empty());
+    assert!(resolved(&journal).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn writing_harness_config_in_an_in_place_run_does_not_stop_it() {
+    let ws = Arc::new(FakeWorkspace::new());
+    let m = mock(finishing(HARNESS_CONFIG.map(|path| write(path, path))));
+    let fx = opted_in_rig(&m, &ws).await;
+    let run = fx
+        .kernel
+        .submit_for_bot("loose", "go", None, PathBuf::from("/plain"), None)
+        .await
+        .unwrap();
+    let journal = ended(&fx, &run, RunStatus::Succeeded).await;
+    assert_eq!(done(&journal).1, None);
+    assert!(ws.reverts().is_empty());
+    assert!(resolved(&journal).is_empty());
+}
+
+fn finishing(parts: impl IntoIterator<Item = [MockStep; 2]>) -> Vec<MockStep> {
+    let mut steps = vec![
+        MockStep::started("s", "mock-1"),
+        MockStep::Sleep(Duration::from_secs(5)),
+    ];
+    steps.extend(parts.into_iter().flatten());
+    steps.push(MockStep::done(StopReason::Completed));
+    steps
 }

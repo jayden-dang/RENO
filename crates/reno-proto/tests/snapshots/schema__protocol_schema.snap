@@ -2826,7 +2826,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "description": "The run changed a protected path (`.reno`, git internals) where no approval could stop it\nfirst, and Reno stopped it after the fact.",
                 "properties": {
                   "paths": {
                     "description": "The protected paths the run wrote, relative to its worktree where it has one.",
@@ -5165,7 +5165,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "description": "The run changed a protected path (`.reno`, git internals) where no approval could stop it\nfirst, and Reno stopped it after the fact.",
                 "properties": {
                   "paths": {
                     "description": "The protected paths the run wrote, relative to its worktree where it has one.",
@@ -19293,7 +19293,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "description": "The run changed a protected path (`.reno`, git internals) where no approval could stop it\nfirst, and Reno stopped it after the fact.",
                 "properties": {
                   "paths": {
                     "description": "The protected paths the run wrote, relative to its worktree where it has one.",
@@ -20192,7 +20192,7 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
-                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "description": "The run changed a protected path (`.reno`, git internals) where no approval could stop it\nfirst, and Reno stopped it after the fact.",
                 "properties": {
                   "paths": {
                     "description": "The protected paths the run wrote, relative to its worktree where it has one.",

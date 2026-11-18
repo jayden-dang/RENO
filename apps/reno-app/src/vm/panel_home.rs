@@ -84,7 +84,7 @@ impl HomeKind {
             Self::History => "The branch's commits as a graph; a row opens that commit's diff.",
             Self::Terminal => {
                 "A shell in the worktree. While the run is live it starts sandboxed, with \
-                 .git, .claude, .codex, .reno and .mcp.json read-only."
+                 .git and .reno read-only."
             }
             Self::SideChat => {
                 "A new run beside this one, with its own worktree cut from this branch."

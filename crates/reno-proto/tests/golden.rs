@@ -1496,10 +1496,10 @@ fn done_carries_a_typed_reason_beside_its_diagnostic() {
         ),
         (
             StopDetail::ProtectedPathWrite {
-                paths: vec![".claude/settings.json".into()],
+                paths: vec![".reno/policy.toml".into()],
                 reverted: true,
             },
-            json!({"type": "protected_path_write", "paths": [".claude/settings.json"],
+            json!({"type": "protected_path_write", "paths": [".reno/policy.toml"],
                    "reverted": true}),
         ),
     ];

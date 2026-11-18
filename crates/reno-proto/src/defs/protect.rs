@@ -1,18 +1,23 @@
 //! Built-in protected paths: what no run may change, whatever the policy says.
 //!
-//! A bot that can edit `.claude/settings.json`, `.codex/config.toml`, `.mcp.json`, a git hook or
-//! Reno's own policy and definitions can grant itself permissions or plant a hook that runs in a
-//! later session, outside any approval. So [`violation`] is checked by [`super::evaluate`]
-//! **before the policy's rules**: its denial is final, an `allow` rule in `policy.toml` cannot
-//! loosen it, and neither can a standing rule (the kernel judges a policy denial first).
+//! A bot that can edit Reno's own policy and definitions (`.reno`) or plant a git hook can grant
+//! itself permissions or run code in a later session, outside any approval. So [`violation`] is
+//! checked by [`super::evaluate`] **before the policy's rules**: its denial is final, an `allow`
+//! rule in `policy.toml` cannot loosen it, and neither can a standing rule (the kernel judges a
+//! policy denial first).
 //!
 //! # What is protected
 //!
-//! A path with a component `.git`, `.claude`, `.codex` or `.reno` anywhere in it, a file named
-//! `.mcp.json`, and (outside the run's worktree) Reno's data directory, `Application Support/Reno`.
-//! Components compare ASCII case-insensitively, as macOS does. A path inside the worktree is
-//! judged by its worktree-relative part, so a worktree that itself lives under a `.claude` or
-//! `.reno` directory is not locked. `.gitignore` and `.github` are not protected.
+//! A path with a component `.git` or `.reno` anywhere in it, and (outside the run's worktree)
+//! Reno's data directory, `Application Support/Reno`. Components compare ASCII
+//! case-insensitively, as macOS does. A path inside the worktree is judged by its
+//! worktree-relative part, so a worktree that itself lives under a `.reno` directory is not
+//! locked. `.gitignore` and `.github` are not protected.
+//!
+//! A project's harness and provider configuration is **not** protected: `.claude/` (skills,
+//! agents, commands, settings), `.codex/`, `.mcp.json`, `.pi/`, `.opencode`, `opencode.json(c)`,
+//! `.cursor/`, `.grok/` and the like help a run while it codes. They are edited under the normal
+//! policy, approval and access mode, like any other file.
 //!
 //! # What is refused
 //!
@@ -42,14 +47,13 @@ use crate::exec::{ActionClass, ApprovalSubject, ToolCall};
 /// The name the denial carries in place of a policy rule.
 pub const PROTECTED_RULE: &str = "built-in protected paths";
 
-const PROTECTED_DIRS: &[&str] = &[".git", ".claude", ".codex", ".reno"];
-const PROTECTED_FILE: &str = ".mcp.json";
+const PROTECTED_DIRS: &[&str] = &[".git", ".reno"];
 
 /// Why `subject` is refused by the built-in protection, or `None`. `cwd` must be lexical.
 pub(super) fn violation(cwd: &Path, subject: &ApprovalSubject) -> Option<String> {
     let hit = hit(cwd, subject)?;
     Some(format!(
-        "denied: `{hit}` is protected (git internals, agent and Reno configuration cannot be \
+        "denied: `{hit}` is protected (git internals and Reno's own configuration cannot be \
          changed by a run)"
     ))
 }
@@ -133,12 +137,6 @@ fn protected_text(inside: bool, text: &str) -> bool {
             .iter()
             .any(|dir| part.eq_ignore_ascii_case(dir))
     }) {
-        return true;
-    }
-    if parts
-        .last()
-        .is_some_and(|last| last.eq_ignore_ascii_case(PROTECTED_FILE))
-    {
         return true;
     }
     !inside
@@ -234,16 +232,15 @@ mod tests {
     #[test]
     fn relative_paths_are_judged_like_the_approval_step_judges_them() {
         for path in [
-            ".claude/settings.json",
-            "a/.codex/c.toml",
+            ".git/hooks/pre-commit",
+            "a/.git/config",
             ".reno/policy.toml",
-            ".mcp.json",
-            "x/.MCP.json",
-            ".Claude/x",
+            "x/.RENO/defs.toml",
+            ".Git/HEAD",
         ] {
             assert!(is_protected_relative(path), "{path}");
         }
-        for path in ["src/lib.rs", ".gitignore", ".github/ci.yml", "claude/x"] {
+        for path in ["src/lib.rs", ".gitignore", ".github/ci.yml", "reno/x"] {
             assert!(!is_protected_relative(path), "{path}");
         }
     }
@@ -256,31 +253,31 @@ mod tests {
         assert_eq!(
             hit(
                 ActionClass::Edit,
-                json!({"file_path": "/w/.claude/settings.json"})
+                json!({"file_path": "/w/.reno/policy.toml"})
             )
             .as_deref(),
-            Some("/w/.claude/settings.json")
+            Some("/w/.reno/policy.toml")
         );
         assert_eq!(
             hit(
                 ActionClass::Edit,
-                json!({"changes": [{"path": "a.rs"}, {"path": ".mcp.json"}]})
+                json!({"changes": [{"path": "a.rs"}, {"path": ".git/hooks/pre-push"}]})
             )
             .as_deref(),
-            Some(".mcp.json")
+            Some(".git/hooks/pre-push")
         );
         assert_eq!(
             hit(
                 ActionClass::Edit,
-                json!({"locations": [{"path": ".codex/config.toml"}]})
+                json!({"locations": [{"path": ".reno/defs/bot.toml"}]})
             )
             .as_deref(),
-            Some(".codex/config.toml")
+            Some(".reno/defs/bot.toml")
         );
         assert!(
             hit(
                 ActionClass::Command,
-                json!({"command": "echo x > .claude/settings.json"})
+                json!({"command": "echo x > .reno/policy.toml"})
             )
             .is_some()
         );
@@ -292,10 +289,44 @@ mod tests {
         assert_eq!(
             hit(
                 ActionClass::Read,
-                json!({"file_path": "/w/.claude/settings.json"})
+                json!({"file_path": "/w/.reno/policy.toml"})
             ),
             None
         );
         assert_eq!(hit(ActionClass::Edit, json!(null)), None);
     }
+
+    #[test]
+    fn harness_and_provider_project_config_is_not_protected() {
+        for path in HARNESS_CONFIG {
+            assert!(!is_protected_relative(path), "{path}");
+            let cwd = Path::new("/w");
+            let edit = |p: &str| {
+                protected_path_of_call(
+                    cwd,
+                    &call(ActionClass::Edit, json!({"file_path": format!("/w/{p}")})),
+                )
+            };
+            assert_eq!(edit(path), None, "{path}");
+            let write = |line: String| {
+                protected_path_of_call(cwd, &call(ActionClass::Command, json!({"command": line})))
+            };
+            assert_eq!(write(format!("echo x > {path}")), None, "{path}");
+            assert_eq!(write(format!("tee {path}")), None, "{path}");
+            assert_eq!(write(format!("cp a.txt {path}")), None, "{path}");
+            assert_eq!(write(format!("sed -i s/a/b/ {path}")), None, "{path}");
+        }
+    }
+
+    /// Project config of every harness and provider: a run may edit these.
+    const HARNESS_CONFIG: &[&str] = &[
+        ".claude/settings.json",
+        ".claude/skills/x/SKILL.md",
+        ".codex/config.toml",
+        ".mcp.json",
+        ".pi/extensions/e.ts",
+        "opencode.json",
+        ".cursor/rules/a.mdc",
+        ".grok/settings.json",
+    ];
 }
