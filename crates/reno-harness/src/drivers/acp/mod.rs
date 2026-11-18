@@ -138,8 +138,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::agent_id::HarnessId;
 use crate::exec::{
-    ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, Resolved, UnknownFrames,
-    probe, require_access, require_sandbox,
+    ExecAnswer, ExecControls, ExecError, Executor, Open, OpenRequests, ProbeDepth, Resolved,
+    UnknownFrames, probe, require_access, require_sandbox,
 };
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::proc::scratch::ScratchDir;
@@ -619,6 +619,15 @@ impl Executor for AcpExecutor {
     /// The models are the CLI's own list where its spec names a command for it (Grok's `grok
     /// models`), else the curated list: ACP agents advertise theirs only inside a session.
     async fn probe(&self) -> HealthProbe {
+        self.probe_at(ProbeDepth::Full).await
+    }
+
+    /// A registry agent at [`ProbeDepth::Quiet`] is inspected and version-gated only: its
+    /// `initialize` and `session/new` are not run (some agents touch the desktop in them), so
+    /// sign-in is `Unknown` and the models are the curated ones. Every other agent probes the
+    /// same at both depths.
+    async fn probe_at(&self, depth: ProbeDepth) -> HealthProbe {
+        let quiet = depth == ProbeDepth::Quiet && matches!(self.spec.id, HarnessId::Registry(_));
         let curated = || ModelCatalog::curated(self.known_models());
         let spec = Arc::clone(&self.spec);
         let executable = self.executable.clone();
@@ -661,12 +670,12 @@ impl Executor for AcpExecutor {
                 verified: verified.into(),
             },
         );
-        let signed_in = if matches!(version_gate, VersionGate::TooOld { .. }) {
+        let signed_in = if quiet || matches!(version_gate, VersionGate::TooOld { .. }) {
             SignedIn::Unknown
         } else {
             self.sign_in_state().await
         };
-        let models = if matches!(version_gate, VersionGate::TooOld { .. }) {
+        let models = if quiet || matches!(version_gate, VersionGate::TooOld { .. }) {
             curated()
         } else {
             self.live_models(&path).await.unwrap_or_else(curated)

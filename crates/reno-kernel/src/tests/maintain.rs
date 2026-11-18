@@ -13,7 +13,7 @@ use reno_harness::HarnessError;
 use reno_harness::exec::maintenance::{
     CheckDecl, CheckParse, InstalledVia, MaintenanceDecl, UpdaterDecl,
 };
-use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
+use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep, ProbeDepth};
 use reno_harness::proc::maintain::{Beat, ScriptedRunner};
 use reno_harness::proc::self_update::{SelfUpdateControl, SelfUpdateError, SelfUpdateSwitch};
 use reno_proto::{
@@ -106,6 +106,8 @@ struct Tool {
     says: Arc<Mutex<HealthProbe>>,
     decl: Option<MaintenanceDecl>,
     installs: Arc<AtomicUsize>,
+    /// The depth of every probe the kernel made, in order.
+    depths: Arc<Mutex<Vec<ProbeDepth>>>,
 }
 
 impl Tool {
@@ -119,6 +121,7 @@ impl Tool {
             says: Arc::new(Mutex::new(says)),
             decl,
             installs: Arc::default(),
+            depths: Arc::default(),
         }
     }
 
@@ -140,6 +143,11 @@ impl Executor for Tool {
             verified: "0.9.0".into(),
         };
         descriptor
+    }
+
+    async fn probe_at(&self, depth: ProbeDepth) -> HealthProbe {
+        self.depths.lock().unwrap().push(depth);
+        self.probe().await
     }
 
     async fn probe(&self) -> HealthProbe {
@@ -352,6 +360,40 @@ async fn a_recipe_that_leaves_the_executor_missing_fails_as_a_probe_failure() {
         .unwrap();
     world.until_job(|j| failed(j).is_some()).await;
     assert_eq!(failed(&world.info().job).unwrap().0, JobFailure::Probe);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_a_person_started_ends_with_a_full_probe_and_an_auto_update_with_a_quiet_one() {
+    // A person's install: the probe that follows is the one they would ask for next.
+    let tool = Tool::new(needs_install(), None);
+    let world = World::new(tool.clone(), ScriptedRunner::new()).await;
+    tool.depths.lock().unwrap().clear();
+    world
+        .fx
+        .kernel
+        .start_job(&id("tool"), JobKind::Install, false)
+        .await
+        .unwrap();
+    world.until_job(Option::is_none).await;
+    assert_eq!(*tool.depths.lock().unwrap(), [ProbeDepth::Full]);
+
+    // The daily auto-update: nobody asked, so nothing starts the agent on its own.
+    let runner = ScriptedRunner::new()
+        .script(
+            "tool latest",
+            vec![Beat::Line("1.1.0".into()), Beat::Exit(0)],
+        )
+        .script("tool update", vec![Beat::Exit(0)]);
+    let tool = Tool::new(found("1.0.0"), Some(decl(Some(PLAIN))));
+    let world = World::new(tool.clone(), runner).await;
+    tool.depths.lock().unwrap().clear();
+    world.fx.clock.advance(DAY);
+    tokio::time::advance(Duration::from_millis(DAY as u64)).await;
+    until(async || (world.started() == ["tool latest", "tool update"]).then_some(())).await;
+    world.until_job(Option::is_none).await;
+    let depths = tool.depths.lock().unwrap().clone();
+    assert!(!depths.is_empty(), "the job ended with a probe");
+    assert!(depths.iter().all(|d| *d == ProbeDepth::Quiet), "{depths:?}");
 }
 
 #[tokio::test(start_paused = true)]

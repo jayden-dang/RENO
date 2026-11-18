@@ -597,7 +597,15 @@ async fn attempt(
             match error {
                 ExecError::NotInstalled(detail) => {
                     let detail = clean(detail);
-                    // A definite signal that what the board holds may be out of date.
+                    // The executor's own word: the board says it now, without a probe.
+                    shared
+                        .note_refusal(
+                            id,
+                            crate::health::Refusal::NotInstalled {
+                                detail: detail.clone(),
+                            },
+                        )
+                        .await;
                     shared.probe_soon(id);
                     Attempt::Declined {
                         why,
@@ -607,6 +615,9 @@ async fn attempt(
                 }
                 ExecError::NotSignedIn(hint) => {
                     let hint = clean(hint);
+                    shared
+                        .note_refusal(id, crate::health::Refusal::SignedOut { hint: hint.clone() })
+                        .await;
                     shared.probe_soon(id);
                     Attempt::Declined {
                         why,

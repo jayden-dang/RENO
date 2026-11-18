@@ -11,6 +11,15 @@
 //!   fresh probe confirms it before the run is refused, so a login made since the last probe
 //!   is noticed at the moment it matters.
 //!
+//! # How deep
+//!
+//! A probe is [`ProbeDepth::Full`] when a person asked for it (`executor.refresh`, and the check
+//! before a run they started is refused) and [`ProbeDepth::Quiet`] when nobody did (start-up,
+//! the probe a refused run queues, the probes around maintenance jobs and plan usage). A quiet
+//! probe of a registry ACP agent starts nothing, since some agents touch the desktop in their
+//! handshake; the kernel lays the stored sign-in and models over it while the installed version
+//! is unchanged.
+//!
 //! Nothing probes on a timer (ARCH-10). At most [`PROBE_CONCURRENCY`] probes run at once, each
 //! under [`PROBE_DEADLINE`], and probes of one executor never overlap (ARCH-11).
 //!
@@ -30,9 +39,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::future::join_all;
+use reno_harness::exec::ProbeDepth;
 use reno_proto::{
-    ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog,
-    NotInstalledReason, PlanUsage, UnknownFrameKind,
+    ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, InstallStatus,
+    ModelCatalog, NotInstalledReason, PlanUsage, SignedIn, UnknownFrameKind,
 };
 use tokio::sync::{Semaphore, watch};
 
@@ -75,6 +85,45 @@ struct Entry {
     health: ExecutorHealth,
     /// Probed by this process; only a live entry decides eligibility.
     live: bool,
+    /// The last refusal a run met, with when (ms): the executor's own word, newer than any probe
+    /// that began before it.
+    refusal: Option<(i64, Refusal)>,
+}
+
+/// What an executor itself said when it refused to start a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    SignedOut { hint: String },
+    NotInstalled { detail: String },
+}
+
+/// Lays a refusal over `found` when it was seen at or after the probe began (`probe_started_ms`):
+/// then it is the newer fact. A probe that began later knows better and is left alone.
+pub(crate) fn lay_refusal_over(
+    found: &mut ExecutorHealth,
+    refusal: Option<(i64, &Refusal)>,
+    probe_started_ms: i64,
+) {
+    let Some((at, refusal)) = refusal else { return };
+    if at < probe_started_ms {
+        return;
+    }
+    apply_refusal(found, refusal);
+}
+
+fn apply_refusal(health: &mut ExecutorHealth, refusal: &Refusal) {
+    match refusal {
+        Refusal::SignedOut { hint } => {
+            health.signed_in = SignedIn::No { hint: hint.clone() };
+        }
+        Refusal::NotInstalled { detail } => {
+            health.installed = InstallStatus::NotInstalled {
+                why: NotInstalledReason::NotFound {
+                    hint: detail.clone(),
+                },
+            };
+        }
+    }
 }
 
 /// The board of executor health.
@@ -164,6 +213,25 @@ impl std::fmt::Debug for HealthBoard {
     }
 }
 
+/// Lays the stored health over what a quiet probe could not see. A quiet probe of a registry
+/// agent says `Unknown` for sign-in and gives the curated models; when the stored health is of
+/// the same installed version, its sign-in verdict and models stand, so the page does not drop
+/// to "unknown" after every restart. A new version, or nothing stored, leaves `Unknown`.
+fn keep_what_a_quiet_probe_cannot_see(found: &mut ExecutorHealth, stored: Option<&ExecutorHealth>) {
+    let Some(stored) = stored else { return };
+    if !matches!(found.signed_in, SignedIn::Unknown) {
+        return;
+    }
+    let (Some(now), Some(before)) = (found.installed.version(), stored.installed.version()) else {
+        return;
+    };
+    if now != before {
+        return;
+    }
+    found.signed_in = stored.signed_in.clone();
+    found.models = stored.models.clone();
+}
+
 /// How a probe request relates to one already finished or running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Probing {
@@ -229,6 +297,7 @@ impl Shared {
                         Entry {
                             health,
                             live: false,
+                            refusal: None,
                         },
                     );
                 }
@@ -239,7 +308,12 @@ impl Shared {
     }
 
     /// Probes `id` and publishes the result. `Err` only for an executor that is not registered.
-    pub(crate) async fn probe_executor(&self, id: &ExecutorId, how: Probing) -> Result<()> {
+    pub(crate) async fn probe_executor(
+        &self,
+        id: &ExecutorId,
+        how: Probing,
+        depth: ProbeDepth,
+    ) -> Result<()> {
         let executor = self
             .executors
             .get(id)
@@ -255,14 +329,22 @@ impl Shared {
         let Ok(_permit) = self.health.permits.acquire().await else {
             return Ok(());
         };
+        let started_ms = self.db.now_ms();
         let probe = tokio::select! {
             biased;
             () = self.root.cancelled() => return Err(KernelError::ShuttingDown),
-            probe = tokio::time::timeout(PROBE_DEADLINE, executor.probe()) => probe,
+            probe = tokio::time::timeout(PROBE_DEADLINE, executor.probe_at(depth)) => probe,
         };
         let checked_at = u64::try_from(self.db.now_ms()).unwrap_or(0);
         let health = match probe {
-            Ok(probe) => ExecutorHealth::from_probe(probe, checked_at),
+            Ok(probe) => {
+                let mut health = ExecutorHealth::from_probe(probe, checked_at);
+                if depth == ProbeDepth::Quiet {
+                    let stored = self.any_health(id);
+                    keep_what_a_quiet_probe_cannot_see(&mut health, stored.as_ref());
+                }
+                health
+            }
             Err(_elapsed) => {
                 tracing::warn!(executor = %id, "the executor probe did not finish in time");
                 gate.finished.fetch_add(1, Ordering::SeqCst);
@@ -286,9 +368,24 @@ impl Shared {
         if let Err(error) = self.db.put_executor_health(id, &health).await {
             tracing::error!(executor = %id, %error, "could not store the executor health");
         }
-        self.health
-            .entries()
-            .insert(id.clone(), Entry { health, live: true });
+        {
+            let mut entries = self.health.entries();
+            let refusal = entries.get(id).and_then(|entry| entry.refusal.clone());
+            let mut health = health;
+            lay_refusal_over(
+                &mut health,
+                refusal.as_ref().map(|(at, r)| (*at, r)),
+                started_ms,
+            );
+            entries.insert(
+                id.clone(),
+                Entry {
+                    health,
+                    live: true,
+                    refusal,
+                },
+            );
+        }
         gate.finished.fetch_add(1, Ordering::SeqCst);
         self.publish_executors();
         // What the health says decides which executors the maintenance task looks at.
@@ -304,15 +401,39 @@ impl Shared {
         &self,
         ids: Option<&ExecutorId>,
         how: Probing,
+        depth: ProbeDepth,
     ) -> Result<()> {
         let ids: Vec<ExecutorId> = match ids {
             Some(id) => vec![id.clone()],
             None => self.executors.ids().cloned().collect(),
         };
-        for outcome in join_all(ids.iter().map(|id| self.probe_executor(id, how))).await {
+        for outcome in join_all(ids.iter().map(|id| self.probe_executor(id, how, depth))).await {
             outcome?;
         }
         Ok(())
+    }
+
+    /// Records what an executor itself said when it refused a run (not signed in, not
+    /// installed): the answer is known, so the stored health says it now, stamped now, with no
+    /// probe. A probe that began before this keeps it; one that begins later may overturn it.
+    /// Nothing is recorded for an executor with no health yet: its probe will find out.
+    pub(crate) async fn note_refusal(&self, id: &ExecutorId, refusal: Refusal) {
+        let now = self.db.now_ms();
+        let health = {
+            let mut entries = self.health.entries();
+            let Some(entry) = entries.get_mut(id) else {
+                return;
+            };
+            apply_refusal(&mut entry.health, &refusal);
+            entry.health.checked_at_ms = u64::try_from(now).unwrap_or(0);
+            entry.live = true;
+            entry.refusal = Some((now, refusal));
+            entry.health.clone()
+        };
+        if let Err(error) = self.db.put_executor_health(id, &health).await {
+            tracing::error!(executor = %id, %error, "could not store the executor health");
+        }
+        self.publish_executors();
     }
 
     /// Asks for a probe of `id` in the background, unless one is already queued for it. Used
@@ -333,7 +454,10 @@ impl Shared {
         let shared = Arc::clone(self);
         let id = id.clone();
         self.spawn(async move {
-            let outcome = shared.probe_executor(&id, Probing::Shared).await;
+            // Nobody asked for this probe, so it stays quiet.
+            let outcome = shared
+                .probe_executor(&id, Probing::Shared, ProbeDepth::Quiet)
+                .await;
             shared
                 .health
                 .queued
@@ -359,7 +483,13 @@ impl Shared {
             .db
             .now_ms()
             .saturating_sub(i64::try_from(stored.checked_at_ms).unwrap_or(0));
-        if age >= RECHECK_FLOOR_MS && self.probe_executor(id, Probing::Shared).await.is_ok() {
+        // A run is about to start on this executor, so it is spawned anyway: the probe is full.
+        if age >= RECHECK_FLOOR_MS
+            && self
+                .probe_executor(id, Probing::Shared, ProbeDepth::Full)
+                .await
+                .is_ok()
+        {
             return self.health.live(id);
         }
         Some(stored)
@@ -486,7 +616,10 @@ impl Shared {
                 return Err(KernelError::ExecutorNotFound(id.clone()));
             }
             if self.any_health(id).is_none() {
-                self.probe_executor(id, Probing::Shared).await?;
+                // Reading usage is not a request to start the agent: a quiet probe is enough to
+                // know whether it is installed.
+                self.probe_executor(id, Probing::Shared, ProbeDepth::Quiet)
+                    .await?;
             }
         }
         let changed = join_all(ids.iter().map(|id| self.read_plan_usage(id))).await;

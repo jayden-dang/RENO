@@ -70,6 +70,19 @@ pub use mock::{ConfigAsked, MockExecutor, MockLog, MockStep};
 pub use requests::{Open, OpenRequests, Resolved};
 pub use unknown::UnknownFrames;
 
+/// How much a probe may do to find out. Only an executor whose full probe starts the agent
+/// itself (a registry ACP agent: `initialize` and `session/new`) tells the two apart; for every
+/// other executor both depths are the same probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProbeDepth {
+    /// Nothing the agent owns is spawned: install inspection and the version gate. For
+    /// background callers nobody asked for, so an agent that touches the desktop in its
+    /// handshake (a Keychain item, an Automation prompt) never does so on its own.
+    Quiet,
+    /// The whole probe: a person asked for it.
+    Full,
+}
+
 /// A harness run, as the kernel sees it. Object safe: the kernel holds `Arc<dyn Executor>`.
 #[async_trait]
 pub trait Executor: Send + Sync {
@@ -85,6 +98,14 @@ pub trait Executor: Send + Sync {
     /// Bounded in time and output, spawns nothing it does not reap, and installs nothing: a
     /// harness that needs an install says so (`NeedsInstall`) and waits for [`Self::install`].
     async fn probe(&self) -> HealthProbe;
+
+    /// [`Self::probe`] at `depth`. The default is the same probe at either depth; an executor
+    /// whose probe starts a program that may reach the desktop answers [`ProbeDepth::Quiet`]
+    /// without starting it (sign-in `Unknown`, curated models).
+    async fn probe_at(&self, depth: ProbeDepth) -> HealthProbe {
+        let _ = depth;
+        self.probe().await
+    }
 
     /// The signed-in account's plan usage (feature `executor.usage`), or `None` when this
     /// executor has none to show or it is unavailable: no login with meters, a token the

@@ -45,7 +45,7 @@ fn agents() -> &'static Path {
     static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let root = tempfile::tempdir().unwrap();
-        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "elicit", "kimi", "gemini"] {
+        for mode in ["droid", "droid-hang", "droid-stale", "droid-cli", "droid-signed-in", "signed-in-email", "quiet-probe", "elicit", "kimi", "gemini"] {
             let dir = root.path().join(format!("fake-{mode}"));
             std::fs::create_dir_all(&dir).unwrap();
             let state = dir.join("state");
@@ -378,4 +378,36 @@ async fn probe_asks_a_registry_agent_whether_it_is_signed_in_without_a_run() {
         "{health:?}"
     );
     assert!(health.ineligible().is_some());
+}
+
+/// How many times the agent in `mode`'s record was started (the fixture logs each start).
+fn spawns(mode: &str) -> usize {
+    std::fs::read_to_string(agents().join(format!("fake-{mode}/state/spawns")))
+        .map_or(0, |log| log.lines().count())
+}
+
+#[tokio::test]
+async fn a_quiet_probe_of_a_registry_agent_spawns_nothing_and_a_full_one_asks_it() {
+    use reno_harness::exec::{Executor, ProbeDepth};
+    use reno_proto::SignedIn;
+    let agent = harness("quiet-probe");
+
+    // Inspected and version-gated, never started: nothing is known of the sign-in.
+    let quiet = agent.probe_at(ProbeDepth::Quiet).await;
+    assert!(
+        matches!(quiet.installed, reno_proto::InstallStatus::Installed { .. }),
+        "{quiet:?}"
+    );
+    assert_eq!(quiet.signed_in, SignedIn::Unknown);
+    assert_eq!(spawns("quiet-probe"), 0, "a quiet probe starts no agent");
+
+    // The full probe is today's: the agent is started and says who is signed in.
+    let full = agent.probe_at(ProbeDepth::Full).await;
+    assert_eq!(
+        full.signed_in,
+        SignedIn::Yes {
+            account: Some("ada@example.com".into())
+        }
+    );
+    assert!(spawns("quiet-probe") >= 1, "a full probe starts the agent");
 }

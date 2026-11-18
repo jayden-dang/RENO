@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
-use reno_harness::exec::Decision;
+use reno_harness::exec::{Decision, ProbeDepth};
 use reno_proto::defs::{
     BotPin, DefKind, DefRecord, DefValidateResult, ValidationContext, validate_body,
 };
@@ -463,7 +463,7 @@ impl Kernel {
             return Err(KernelError::ShuttingDown);
         }
         self.shared
-            .probe_executors(id, health::Probing::Fresh)
+            .probe_executors(id, health::Probing::Fresh, ProbeDepth::Full)
             .await?;
         self.shared.refresh_plan_usage(id).await?;
         Ok(self.executors())
@@ -499,7 +499,11 @@ impl Kernel {
     pub fn probe_executors_in_background(&self) {
         let shared = Arc::clone(&self.shared);
         self.shared.spawn(async move {
-            if let Err(error) = shared.probe_executors(None, health::Probing::Shared).await {
+            // Nobody asked: quiet, so no agent is started on its own.
+            if let Err(error) = shared
+                .probe_executors(None, health::Probing::Shared, ProbeDepth::Quiet)
+                .await
+            {
                 tracing::debug!(%error, "the start-up probe of the executors ended early");
             }
             // Once, with the probes: nothing reads usage on a timer (ARCH-10).
