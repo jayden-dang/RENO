@@ -82,9 +82,12 @@ pub(crate) enum StoreEvent {
     /// composer that sent it gets its draft back.
     SendFailed(u64),
     /// Why a send with this ticket was refused, in the daemon's words (follows `SendFailed`).
-    SendRefused { ticket: u64, why: String },
+    SendRefused {
+        ticket: u64,
+        why: String,
+    },
     /// `thread.close` answered: what became of the worktree.
-    ThreadClosed(ThreadId),
+    ThreadClosed,
 }
 
 /// What the daemon says about where one run went.
@@ -719,12 +722,6 @@ impl Store {
         self.changes.get(&(run.clone(), scope))
     }
 
-    /// The patch of `path` in `run`, as last read.
-    #[cfg(test)]
-    pub(crate) fn patch(&self, run: &RunId, path: &str) -> Option<&Loaded<Patch>> {
-        self.patch_in(run, ReviewScope::Thread, path)
-    }
-
     /// The patch of `path` in `run` within `scope`, as last read.
     pub(crate) fn patch_in(
         &self,
@@ -998,7 +995,7 @@ impl Store {
                     if let Some(mirror) = &store.mirror {
                         mirror.refresh_threads();
                     }
-                    cx.emit(StoreEvent::ThreadClosed(ok_id));
+                    cx.emit(StoreEvent::ThreadClosed);
                     cx.notify();
                 }),
                 err: Box::new(move |store, cx| {

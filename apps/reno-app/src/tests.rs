@@ -402,12 +402,20 @@ pub(crate) fn kinds(rows: &[Row]) -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) fn run_status(vcx: &VisualTestContext, store: &Entity<Store>, run: &RunId) -> Option<RunStatus> {
+pub(crate) fn run_status(
+    vcx: &VisualTestContext,
+    store: &Entity<Store>,
+    run: &RunId,
+) -> Option<RunStatus> {
     store.read_with(vcx, |s, _| s.state().run(run).map(|r| r.status))
 }
 
 /// Sends `prompt` from Home and returns the opened run's id once the Run screen shows.
-pub(crate) fn send_from_home(vcx: &mut VisualTestContext, root: &Entity<RootView>, prompt: &str) -> RunId {
+pub(crate) fn send_from_home(
+    vcx: &mut VisualTestContext,
+    root: &Entity<RootView>,
+    prompt: &str,
+) -> RunId {
     let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
     composer.update_in(vcx, |c, window, cx| c.fill(prompt, window, cx));
     draw(vcx);

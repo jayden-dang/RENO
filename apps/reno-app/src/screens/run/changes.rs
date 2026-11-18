@@ -207,8 +207,9 @@ impl RunScreen {
                 || file_tab.as_deref() == Some(r.path.as_str())
         }) {
             if !row.binary {
-                self.store
-                    .update(cx, |store, cx| store.load_patch_in(&run, scope, &row.path, cx));
+                self.store.update(cx, |store, cx| {
+                    store.load_patch_in(&run, scope, &row.path, cx)
+                });
             }
             // The rows of the patch, parsed once per answer.
             let loaded = self
@@ -647,7 +648,9 @@ impl RunScreen {
             .flex()
             .flex_col()
             .child(bar)
-            .when(self.offers_scope(cx), |d| d.child(self.scope_bar(theme, cx)))
+            .when(self.offers_scope(cx), |d| {
+                d.child(self.scope_bar(theme, cx))
+            })
             .child(
                 div()
                     .id("review-files")

@@ -74,7 +74,10 @@ pub(crate) fn closed_line(result: &ThreadCloseResult) -> String {
 
 /// What closing would keep, said before it is done: the branch and its unmerged commits.
 /// `None` when the worktree holds nothing to lose (or there is none).
-pub(crate) fn keeps(info: &ThreadInfo, changes: Option<&reno_proto::WorkspaceChanges>) -> Option<String> {
+pub(crate) fn keeps(
+    info: &ThreadInfo,
+    changes: Option<&reno_proto::WorkspaceChanges>,
+) -> Option<String> {
     let held = changes.filter(|c| !c.is_clean())?;
     let branch = info.branch.as_deref().unwrap_or("the branch");
     let commits = match held.commits {

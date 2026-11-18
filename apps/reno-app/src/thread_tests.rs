@@ -186,7 +186,9 @@ fn a_follow_up_keeps_the_panel_of_its_thread(cx: &mut TestAppContext) {
     // A tab the person opened.
     root.update_in(vcx, |r, window, cx| {
         let screen = r.run_screen().cloned().unwrap();
-        screen.update(cx, |s, cx| s.open_surface(Surface::File("a.rs".into()), window, cx));
+        screen.update(cx, |s, cx| {
+            s.open_surface(Surface::File("a.rs".into()), window, cx)
+        });
     });
     draw(vcx);
 
@@ -199,7 +201,10 @@ fn a_follow_up_keeps_the_panel_of_its_thread(cx: &mut TestAppContext) {
     let screen = screen_of(vcx, &root);
     assert_eq!(screen.read_with(vcx, |s, _| s.panel_key().clone()), key);
     assert!(
-        screen.read_with(vcx, |s, _| s.panel_state().tabs().contains(&Surface::File("a.rs".into()))),
+        screen.read_with(vcx, |s, _| s
+            .panel_state()
+            .tabs()
+            .contains(&Surface::File("a.rs".into()))),
         "the tabs carry over to the follow-up run"
     );
 }
@@ -229,7 +234,7 @@ fn an_old_daemon_starts_a_new_run_and_keys_the_panel_by_the_run(cx: &mut TestApp
     let second = current_run(vcx, &root);
     store.read_with(vcx, |s, _| {
         assert!(!s.supports_threads());
-        assert_eq!(s.thread_run_ids(&second), [second.clone()]);
+        assert_eq!(s.thread_run_ids(&second), std::slice::from_ref(&second));
     });
     // Its transcript is its own: no divider.
     assert!(!kinds(&rows_of(vcx, &root)).contains(&"divider"));
@@ -263,7 +268,9 @@ fn a_thread_that_went_busy_or_gone_says_so_under_the_box(cx: &mut TestAppContext
     draw(vcx);
     click(vcx, "send");
     wait_drawn(vcx, |vcx| {
-        steer.read_with(vcx, |c, _| c.refusal_note() == Some(crate::vm::threads::Refusal::Busy))
+        steer.read_with(vcx, |c, _| {
+            c.refusal_note() == Some(crate::vm::threads::Refusal::Busy)
+        })
     });
     assert_eq!(steer.read_with(vcx, |c, _| c.text().to_owned()), "again");
     assert!(painted(vcx, "composer-note"));
@@ -277,7 +284,9 @@ fn a_thread_that_went_busy_or_gone_says_so_under_the_box(cx: &mut TestAppContext
     );
     click(vcx, "send");
     wait_drawn(vcx, |vcx| {
-        steer.read_with(vcx, |c, _| c.refusal_note() == Some(crate::vm::threads::Refusal::Gone))
+        steer.read_with(vcx, |c, _| {
+            c.refusal_note() == Some(crate::vm::threads::Refusal::Gone)
+        })
     });
     // The next message starts a thread of its own.
     daemon.clear_failures();
@@ -296,7 +305,9 @@ fn a_thread_whose_worktree_is_gone_says_a_new_thread_starts(cx: &mut TestAppCont
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     // builder0's worktree was removed.
-    root.update_in(vcx, |r, window, cx| r.open_run(run_id("builder0"), window, cx));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("builder0"), window, cx)
+    });
     wait_drawn(vcx, |vcx| {
         store.read_with(vcx, |s, _| {
             s.state()
@@ -304,7 +315,8 @@ fn a_thread_whose_worktree_is_gone_says_a_new_thread_starts(cx: &mut TestAppCont
                 .is_some_and(crate::vm::threads::worktree_gone)
         })
     });
-    let note = screen_of(vcx, &root).read_with(vcx, |s, cx| s.steer_input().read(cx).note_for_test(cx));
+    let note =
+        screen_of(vcx, &root).read_with(vcx, |s, cx| s.steer_input().read(cx).note_for_test(cx));
     assert!(note.contains("starts a new thread"), "{note}");
 }
 
@@ -342,7 +354,9 @@ fn the_sidebar_lists_a_thread_once_and_a_click_opens_its_latest_run(cx: &mut Tes
     click(vcx, "nav-Home");
     draw(vcx);
     click(vcx, &format!("recent-{second}"));
-    wait_drawn(vcx, |vcx| root.read_with(vcx, |r, _| r.run_screen().is_some()));
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
     assert_eq!(current_run(vcx, &root), second);
     assert!(kinds(&rows_of(vcx, &root)).contains(&"divider"));
 }
@@ -403,7 +417,9 @@ fn an_old_daemon_has_no_scope_switch(cx: &mut TestAppContext) {
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    root.update_in(vcx, |r, window, cx| r.open_run(run_id("builder1"), window, cx));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("builder1"), window, cx)
+    });
     root.update_in(vcx, |r, window, cx| {
         let screen = r.run_screen().cloned().unwrap();
         screen.update(cx, |s, cx| s.open_surface(Surface::Review, window, cx));
@@ -428,9 +444,8 @@ fn closing_a_thread_asks_when_work_is_unmerged_keeps_it_and_leaves_the_sidebar(
     wait_drawn(vcx, |vcx| {
         store.read_with(vcx, |s, _| {
             s.thread_of(&first).is_some()
-                && s.changes(&first).is_some_and(|c| {
-                    matches!(&c.workspace, Loaded::Ready(Some(_)))
-                })
+                && s.changes(&first)
+                    .is_some_and(|c| matches!(&c.workspace, Loaded::Ready(Some(_))))
         })
     });
     open_scratch_folder(vcx);
@@ -448,7 +463,9 @@ fn closing_a_thread_asks_when_work_is_unmerged_keeps_it_and_leaves_the_sidebar(
 
     wait_drawn(vcx, |vcx| painted(vcx, "thread-closed"));
     let result = store.read_with(vcx, |s, _| {
-        s.close_result(&s.thread_of(&first).unwrap()).cloned().unwrap()
+        s.close_result(&s.thread_of(&first).unwrap())
+            .cloned()
+            .unwrap()
     });
     assert_eq!(result.workspace, Some(reno_proto::CleanOutcome::Kept));
     // Closed threads leave the sidebar.
@@ -462,9 +479,7 @@ fn an_active_thread_cannot_be_closed_from_the_session_tab(cx: &mut TestAppContex
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     let _run = send_from_home(vcx, &root, "/long job");
-    wait_drawn(vcx, |vcx| {
-        crate::tests::painted(vcx, "panel-tab-session")
-    });
+    wait_drawn(vcx, |vcx| crate::tests::painted(vcx, "panel-tab-session"));
     crate::tests::show_session(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "thread-busy"));
     assert!(!painted(vcx, "thread-close"));
@@ -486,7 +501,9 @@ fn a_panel_saved_under_a_run_id_is_taken_over_by_its_one_run_thread(cx: &mut Tes
     cx.update(|cx| Saved::put(PanelKey("run_keeper1".to_owned()), old.snapshot(), cx));
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    root.update_in(vcx, |r, window, cx| r.open_run(run_id("keeper1"), window, cx));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(run_id("keeper1"), window, cx)
+    });
     draw(vcx);
     let screen = screen_of(vcx, &root);
     assert_eq!(
@@ -494,7 +511,10 @@ fn a_panel_saved_under_a_run_id_is_taken_over_by_its_one_run_thread(cx: &mut Tes
         PanelKey("thr_keeper1".to_owned())
     );
     assert!(
-        screen.read_with(vcx, |s, _| s.panel_state().tabs().contains(&Surface::File("old.rs".into()))),
+        screen.read_with(vcx, |s, _| s
+            .panel_state()
+            .tabs()
+            .contains(&Surface::File("old.rs".into()))),
         "the old key's tabs carry over"
     );
 }

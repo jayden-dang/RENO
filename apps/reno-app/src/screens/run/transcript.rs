@@ -66,9 +66,13 @@ impl RunScreen {
                 ))
                 // Only the thread's latest run says what the branch holds.
                 .children(
-                    (self.rows.iter().rposition(|r| matches!(r, Row::Done { .. })) == Some(ix))
-                        .then(|| self.result_line(&theme, cx))
-                        .flatten(),
+                    (self
+                        .rows
+                        .iter()
+                        .rposition(|r| matches!(r, Row::Done { .. }))
+                        == Some(ix))
+                    .then(|| self.result_line(&theme, cx))
+                    .flatten(),
                 )
                 .into_any_element(),
             Row::Divider {
@@ -100,10 +104,12 @@ impl RunScreen {
         at_ms: u64,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let model = model.map(|id| {
-            crate::vm::models::model_name(self.store.read(cx).state(), executor, id)
-        });
-        let mut text = format!("New run \u{b7} {}", summary::executor_name(executor.as_str()));
+        let model = model
+            .map(|id| crate::vm::models::model_name(self.store.read(cx).state(), executor, id));
+        let mut text = format!(
+            "New run \u{b7} {}",
+            summary::executor_name(executor.as_str())
+        );
         if let Some(model) = model {
             text.push_str(&format!(" \u{b7} {model}"));
         }
@@ -125,11 +131,7 @@ impl RunScreen {
             .text_color(theme.faint)
             .child(line())
             .child(SharedString::from(text))
-            .child(
-                div()
-                    .font_family(MONO)
-                    .child(SharedString::from(started)),
-            )
+            .child(div().font_family(MONO).child(SharedString::from(started)))
             .child(line())
             .into_any_element()
     }

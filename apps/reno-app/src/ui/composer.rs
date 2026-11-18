@@ -356,14 +356,12 @@ impl Composer {
                 this.refresh_preview(cx);
                 cx.notify();
             }),
-            _events: cx.subscribe(&store, |this, _, event: &StoreEvent, cx| {
-                match event {
-                    StoreEvent::SendFailed(ticket) => this.take_draft_back(*ticket, cx),
-                    StoreEvent::SendRefused { ticket, why } if *ticket == this.next_ticket => {
-                        this.refuse(why, cx);
-                    }
-                    _ => {}
+            _events: cx.subscribe(&store, |this, _, event: &StoreEvent, cx| match event {
+                StoreEvent::SendFailed(ticket) => this.take_draft_back(*ticket, cx),
+                StoreEvent::SendRefused { ticket, why } if *ticket == this.next_ticket => {
+                    this.refuse(why, cx);
                 }
+                _ => {}
             }),
             store,
             mode,

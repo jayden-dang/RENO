@@ -284,11 +284,6 @@ impl RunScreen {
         }
     }
 
-    /// The thread this screen shows, once the daemon has named it.
-    pub(crate) fn thread_id(&self, cx: &gpui::App) -> Option<ThreadId> {
-        self.store.read(cx).thread_of(&self.run)
-    }
-
     /// Rebuilds what changed: the latest run's rows each time, an older run's only when its
     /// events or summary moved. Rows of older runs sit before it, each run after the first
     /// behind a divider. The list is told only what differs.
@@ -406,14 +401,18 @@ impl RunScreen {
     /// the thread (started elsewhere) opening in this screen's place.
     fn follow_thread(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
-        let newer = store.thread_run_ids(&self.run).last().cloned().filter(|latest| {
-            let state = store.state();
-            latest != &self.run
-                && state
-                    .run(latest)
-                    .zip(state.run(&self.run))
-                    .is_some_and(|(l, mine)| l.created_at_ms > mine.created_at_ms)
-        });
+        let newer = store
+            .thread_run_ids(&self.run)
+            .last()
+            .cloned()
+            .filter(|latest| {
+                let state = store.state();
+                latest != &self.run
+                    && state
+                        .run(latest)
+                        .zip(state.run(&self.run))
+                        .is_some_and(|(l, mine)| l.created_at_ms > mine.created_at_ms)
+            });
         if let Some(latest) = newer {
             cx.emit(ScreenEvent::OpenRun(latest));
         }
@@ -500,7 +499,11 @@ impl RunScreen {
         };
         if line != self.result {
             self.result = line;
-            if let Some(ix) = self.rows.iter().rposition(|r| matches!(r, Row::Done { .. })) {
+            if let Some(ix) = self
+                .rows
+                .iter()
+                .rposition(|r| matches!(r, Row::Done { .. }))
+            {
                 self.list.splice(ix..ix + 1, 1);
             }
         }
