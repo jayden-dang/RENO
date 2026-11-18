@@ -117,40 +117,46 @@ fn allowed(tree: &Tree, script: &str) {
 fn protected_files_cannot_be_written_created_renamed_into_or_removed() {
     let t = tree();
     // Writes into what does not exist yet.
-    denied(&t, "mkdir .claude");
-    denied(
-        &t,
-        "mkdir -p .claude/sub && echo x > .claude/sub/settings.json",
-    );
-    denied(&t, "echo '{}' > .mcp.json");
-    denied(&t, "mkdir -p .codex && echo x > .codex/config.toml");
     denied(&t, "mkdir .reno");
+    denied(&t, "mkdir -p .reno/defs && echo x > .reno/defs/bot.toml");
     // Through a child process: the denial is the sandbox's, not the shell's.
-    denied(&t, "sh -c 'sh -c \"echo x > .mcp.json\"'");
-    // A rename into a protected path, and out of one.
-    std::fs::write(t.path.join("plain.txt"), "p").unwrap();
-    denied(&t, "mv plain.txt .mcp.json");
-    denied(&t, "mkdir .x && mv .x .claude");
+    denied(&t, "sh -c 'sh -c \"mkdir .reno\"'");
+    // A rename into a protected path.
+    denied(&t, "mkdir .x && mv .x .reno");
     // Names count at any depth, and in any case, as the guard counts them.
-    denied(&t, "mkdir -p pkg/.claude && echo x > pkg/.claude/s.json");
-    denied(&t, "mkdir -p pkg/deep/.codex");
-    denied(&t, "mkdir -p pkg && echo x > pkg/.mcp.json");
-    denied(&t, "mkdir -p pkg && echo x > pkg/.MCP.JSON");
-    denied(&t, "mkdir .CLAUDE");
+    denied(&t, "mkdir -p pkg/.reno && echo x > pkg/.reno/s.toml");
+    denied(&t, "mkdir -p pkg/deep/.reno");
+    denied(&t, "mkdir .RENO");
     denied(&t, "mkdir .Reno");
     // Existing protected files cannot be changed or removed either.
     // (They are made outside the sandbox, as the run or git would.)
-    std::fs::create_dir_all(t.path.join(".claude")).unwrap();
-    std::fs::write(t.path.join(".claude/settings.json"), "{}").unwrap();
-    std::fs::write(t.path.join(".mcp.json"), "{}").unwrap();
-    denied(&t, "echo changed > .claude/settings.json");
-    denied(&t, "rm .claude/settings.json");
-    denied(&t, "rm .mcp.json");
-    denied(&t, "mv .mcp.json elsewhere.json");
-    denied(&t, "touch .claude/settings.json");
-    denied(&t, "chmod 777 .mcp.json");
+    std::fs::create_dir_all(t.path.join(".reno")).unwrap();
+    std::fs::write(t.path.join(".reno/policy.toml"), "").unwrap();
+    denied(&t, "echo changed > .reno/policy.toml");
+    denied(&t, "rm .reno/policy.toml");
+    denied(&t, "mv .reno/policy.toml elsewhere.toml");
+    denied(&t, "touch .reno/policy.toml");
+    denied(&t, "chmod 777 .reno/policy.toml");
     // Reading them is fine.
-    allowed(&t, "cat .claude/settings.json .mcp.json");
+    allowed(&t, "cat .reno/policy.toml");
+}
+
+#[test]
+fn a_projects_provider_config_is_writable_in_a_limited_terminal() {
+    // Owner decision 2026-11-18: harness and provider project config is not protected.
+    let t = tree();
+    allowed(
+        &t,
+        "mkdir -p .claude/skills/x && echo x > .claude/skills/x/SKILL.md",
+    );
+    allowed(&t, "mkdir -p .codex && echo x > .codex/config.toml");
+    allowed(&t, "echo '{}' > .mcp.json && rm .mcp.json");
+    allowed(&t, "mkdir -p pkg/.pi && echo x > pkg/.pi/settings.json");
+    allowed(&t, "echo '{}' > opencode.json");
+    allowed(
+        &t,
+        "mkdir -p .cursor .grok && echo x > .cursor/a && echo x > .grok/b",
+    );
 }
 
 #[test]
@@ -288,14 +294,7 @@ async fn the_same_attempts_without_the_sandbox_do_trip_the_guard() {
         assert!(out.status.success(), "{attempt}");
     }
     let seen = guard_sees(&t).await;
-    for expected in [
-        ".claude/f",
-        ".codex/f",
-        ".reno/f",
-        ".mcp.json",
-        "sub/.claude/f",
-        "pkg/.mcp.json",
-    ] {
+    for expected in [".reno/f", "sub/.reno/f"] {
         assert!(
             seen.iter().any(|p| p == expected),
             "{expected} missing from {seen:?}"
@@ -315,12 +314,12 @@ fn the_profile_needs_the_real_path_and_the_limits_use_it() {
     // The profile as a person would write it from the symlinked spelling does not deny: the
     // spike's finding, kept as a test so a change that stops canonicalizing fails here.
     let naive =
-        format!("(version 1)(allow default)(deny file-write* (subpath \"{spelled}/.claude\"))");
+        format!("(version 1)(allow default)(deny file-write* (subpath \"{spelled}/.reno\"))");
     if spelled.starts_with("/var/") {
         let out = Command::new(SANDBOX_EXEC)
             .arg("-p")
             .arg(&naive)
-            .args(["/bin/sh", "-c", "mkdir .claude"])
+            .args(["/bin/sh", "-c", "mkdir .reno"])
             .current_dir(&t.path)
             .output()
             .unwrap();
@@ -328,15 +327,15 @@ fn the_profile_needs_the_real_path_and_the_limits_use_it() {
             out.status.success(),
             "the naive profile unexpectedly denied"
         );
-        std::fs::remove_dir_all(t.path.join(".claude")).unwrap();
+        std::fs::remove_dir_all(t.path.join(".reno")).unwrap();
     }
     // Ours denies, asked from either spelling.
-    denied(&t, "mkdir .claude");
+    denied(&t, "mkdir .reno");
     let (text, ok) = {
         let out = Command::new(SANDBOX_EXEC)
             .arg("-p")
             .arg(limits.profile())
-            .args(["/bin/sh", "-c", "mkdir .claude"])
+            .args(["/bin/sh", "-c", "mkdir .reno"])
             .current_dir(t.path.canonicalize().unwrap())
             .output()
             .unwrap();
@@ -441,7 +440,7 @@ fn live_pty_a_sandboxed_real_shell_cannot_write_a_protected_path() {
             program: PathBuf::from("/bin/sh"),
             args: vec![
                 "-c".into(),
-                "echo x > .mcp.json; echo mcp-rc=$?; echo y > ok.txt; echo ok-rc=$?".into(),
+                "mkdir .reno; echo reno-rc=$?; echo y > ok.txt; echo ok-rc=$?".into(),
             ],
             cwd: t.path.clone(),
             env: Vec::new(),
@@ -457,9 +456,9 @@ fn live_pty_a_sandboxed_real_shell_cannot_write_a_protected_path() {
     parts.control.release();
     drop(parts.writer);
     let output = output.join().unwrap();
-    assert!(output.contains("mcp-rc=1"), "{output:?}");
+    assert!(output.contains("reno-rc=1"), "{output:?}");
     assert!(output.contains("ok-rc=0"), "{output:?}");
-    assert!(!t.path.join(".mcp.json").exists());
+    assert!(!t.path.join(".reno").exists());
 }
 
 /// A real shell through the whole service: the reader thread, the pump, the lane, the exit.
@@ -535,14 +534,14 @@ async fn live_pty_the_service_limits_a_real_shell_on_a_live_run() {
     let (text, code) = live_session(
         &t.path,
         true,
-        "echo x > .mcp.json; echo mcp-rc=$?; echo y > fine.txt; echo fine-rc=$?; git commit -qam no; echo commit-rc=$?; exit 0\n",
+        "mkdir .reno; echo reno-rc=$?; echo y > fine.txt; echo fine-rc=$?; git commit -qam no; echo commit-rc=$?; exit 0\n",
     )
     .await;
-    assert!(text.contains("mcp-rc=1"), "{text:?}");
+    assert!(text.contains("reno-rc=1"), "{text:?}");
     assert!(text.contains("fine-rc=0"), "{text:?}");
     assert!(!text.contains("commit-rc=0"), "{text:?}");
     assert_eq!(code, Some(0));
-    assert!(!t.path.join(".mcp.json").exists());
+    assert!(!t.path.join(".reno").exists());
     assert!(t.path.join("fine.txt").exists());
 }
 
