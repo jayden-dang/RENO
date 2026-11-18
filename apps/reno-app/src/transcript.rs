@@ -24,7 +24,7 @@
 
 use reno_proto::{
     Approval, ApprovalOutcome, ApprovalSubject, ExecEvent, Question, ReportStatus, ResolvedBy, Seq,
-    StopReason,
+    StopReason, ToolOutput,
 };
 
 use crate::summary;
@@ -61,6 +61,13 @@ pub(crate) enum Outcome {
     Failed(Option<String>),
 }
 
+impl ToolEntry {
+    /// Whether the call has its result.
+    pub(crate) fn finished(&self) -> bool {
+        self.outcome != Outcome::Pending
+    }
+}
+
 /// One tool call in a group.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolEntry {
@@ -69,6 +76,9 @@ pub(crate) struct ToolEntry {
     /// The command, path or URL, else the tool's name.
     pub(crate) label: String,
     pub(crate) outcome: Outcome,
+    /// What the tool printed, as the daemon kept it; none from an older daemon or a tool that
+    /// printed nothing.
+    pub(crate) output: Option<ToolOutput>,
 }
 
 /// One row of the transcript.
@@ -304,6 +314,7 @@ pub(crate) fn build_rows(
                     kind: tool_kind(&call.name),
                     label: tool_label(&call.name, &call.input),
                     outcome: Outcome::Pending,
+                    output: None,
                 };
                 match built.rows.last_mut() {
                     Some(Row::Tools { calls, .. }) => calls.push(entry),
@@ -314,7 +325,10 @@ pub(crate) fn build_rows(
                 }
             }
             ExecEvent::ToolResult {
-                id, ok, summary, ..
+                id,
+                ok,
+                summary,
+                output,
             } => {
                 if input_calls.contains(id) {
                     resolve_open_question(&mut built.rows, *ok, summary.as_deref());
@@ -340,6 +354,7 @@ pub(crate) fn build_rows(
                 if let Some((r, c)) = target {
                     if let Row::Tools { calls, .. } = &mut built.rows[r] {
                         calls[c].outcome = outcome;
+                        calls[c].output = output.clone().filter(|o| !o.text.is_empty());
                     }
                 } else {
                     let orphan = ToolEntry {
@@ -347,6 +362,7 @@ pub(crate) fn build_rows(
                         kind: ToolKind::Other,
                         label: "tool result".to_owned(),
                         outcome,
+                        output: output.clone().filter(|o| !o.text.is_empty()),
                     };
                     match built.rows.last_mut() {
                         Some(Row::Tools { calls, .. }) => calls.push(orphan),
@@ -748,6 +764,43 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_output_stays_with_its_call_and_its_outcome() {
+        let out = |text: &str, truncated| {
+            Some(ToolOutput {
+                text: text.into(),
+                bytes: 9_000,
+                truncated,
+            })
+        };
+        let with = |id: &str, ok, output| ExecEvent::ToolResult {
+            id: id.into(),
+            ok,
+            summary: Some("s".into()),
+            output,
+        };
+        let built = build(
+            vec![
+                bash("a", "ls"),
+                bash("b", "cargo test"),
+                bash("c", "true"),
+                with("a", true, out("Cargo.toml\n", false)),
+                with("b", false, out("FAILED\n", true)),
+                // An empty output is no output.
+                with("c", true, out("", false)),
+            ],
+            &[],
+        );
+        let Row::Tools { calls, .. } = &built.rows[0] else {
+            panic!("expected a group");
+        };
+        assert_eq!(calls[0].output.as_ref().unwrap().text, "Cargo.toml\n");
+        assert!(matches!(calls[0].outcome, Outcome::Ok(_)));
+        let failed = calls[1].output.as_ref().unwrap();
+        assert!(failed.truncated && matches!(calls[1].outcome, Outcome::Failed(_)));
+        assert_eq!(calls[2].output, None);
+    }
+
+    #[test]
     fn an_orphan_result_still_shows() {
         let built = build(vec![result("zz", true, "ok")], &[]);
         let Row::Tools { calls, .. } = &built.rows[0] else {
@@ -763,6 +816,7 @@ mod tests {
             kind,
             label: String::new(),
             outcome: Outcome::Pending,
+            output: None,
         };
         let mixed = [
             entry(ToolKind::Edit),
