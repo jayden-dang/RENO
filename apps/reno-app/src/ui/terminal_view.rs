@@ -267,6 +267,11 @@ impl TerminalView {
     }
 
     #[cfg(test)]
+    pub(crate) fn focus_handle_for_tests(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn blink_on(&self) -> bool {
         self.blink_on
     }
@@ -729,12 +734,13 @@ impl TerminalView {
     /// The cursor blinks every half second and rests solid after a quiet spell, so an idle
     /// terminal schedules no frames; the next key starts it again.
     fn blink_loop(cx: &mut Context<Self>) -> Task<()> {
-        let started = Instant::now();
         cx.spawn(async move |this, cx| {
+            let mut ticks = 0u32;
             loop {
                 cx.background_executor().timer(BLINK).await;
+                ticks += 1;
                 let keep = this.update(cx, |view, cx| {
-                    if !view.blink_wanted || started.elapsed() >= BLINK_IDLE {
+                    if !view.blink_wanted || BLINK * ticks >= BLINK_IDLE {
                         if !view.blink_on {
                             view.blink_on = true;
                             cx.notify();

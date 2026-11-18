@@ -184,6 +184,21 @@ impl RunScreen {
         all
     }
 
+    /// The words of the line above the terminal in front.
+    pub(super) fn terminal_banner_text(&self, cx: &gpui::App) -> Option<String> {
+        let view = self.terminal_in_front()?;
+        self.terminal_banner(&view, cx).map(|b| b.text())
+    }
+
+    /// What a refused tab says: its title and its words.
+    pub(super) fn terminal_failure(&self, slot: u64, cx: &gpui::App) -> Option<(String, String)> {
+        let view = self.terms.tabs.get(&slot)?.view.clone()?;
+        match view.read(cx).phase() {
+            Phase::Failed(fail) => Some((fail.title().to_owned(), fail.text())),
+            _ => None,
+        }
+    }
+
     pub(super) fn terminal_ids(&self) -> Vec<(u64, Option<TermId>)> {
         let mut all: Vec<_> = self
             .terms
@@ -408,6 +423,22 @@ impl RunScreen {
         .detach();
     }
 
+    /// The one line above a terminal (D7), from what the shell is and whether the run is live.
+    fn terminal_banner(
+        &self,
+        view: &Entity<TerminalView>,
+        cx: &gpui::App,
+    ) -> Option<vm::Banner> {
+        let info = view.read(cx).info()?;
+        let run = self.store.read(cx).state().run(&self.run)?.status;
+        vm::banner(&BannerFacts {
+            sandboxed: info.sandboxed,
+            in_place: info.in_place,
+            cwd: &info.cwd,
+            run,
+        })
+    }
+
     // --- the page -----------------------------------------------------------------------------
 
     /// The Terminal tab's page: the line above it (D7), a question when a close waits for an
@@ -429,16 +460,7 @@ impl RunScreen {
         }
         let view = self.terminal_view(slot, cx);
         let confirm = self.terms.tabs.get(&slot).and_then(|t| t.confirm);
-        let (phase, info) = {
-            let v = view.read(cx);
-            (v.phase().clone(), v.info().cloned())
-        };
-        let run_status = self
-            .store
-            .read(cx)
-            .state()
-            .run(&self.run)
-            .map(|run| run.status);
+        let phase = view.read(cx).phase().clone();
         let reopen = |id: &'static str, label: &'static str, tone: Tone, cx: &mut Context<Self>| {
             kit::pill_button(theme, id, label, tone).on_click(cx.listener(
                 move |this, _, window, cx| this.request_reopen(slot, window, cx),
@@ -484,28 +506,20 @@ impl RunScreen {
         }
 
         let mut top: Vec<AnyElement> = Vec::new();
-        if let (Some(info), Some(status)) = (info.as_ref(), run_status) {
-            let facts = BannerFacts {
-                sandboxed: info.sandboxed,
-                in_place: info.in_place,
-                cwd: &info.cwd,
-                run: status,
-            };
-            if let Some(banner) = vm::banner(&facts) {
-                let mut row = bar(theme, "terminal-banner", banner.text());
-                if banner.offers_reopen() {
-                    row = row.child(
-                        reopen(
-                            "terminal-reopen-unlimited",
-                            "Reopen without limits",
-                            Tone::Quiet,
-                            cx,
-                        )
-                        .h(px(24.0)),
-                    );
-                }
-                top.push(row.into_any_element());
+        if let Some(banner) = self.terminal_banner(&view, cx) {
+            let mut row = bar(theme, "terminal-banner", banner.text());
+            if banner.offers_reopen() {
+                row = row.child(
+                    reopen(
+                        "terminal-reopen-unlimited",
+                        "Reopen without limits",
+                        Tone::Quiet,
+                        cx,
+                    )
+                    .h(px(24.0)),
+                );
             }
+            top.push(row.into_any_element());
         }
         if let Phase::Ended { code, signal } = &phase {
             let what = match (code, signal) {
