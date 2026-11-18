@@ -57,7 +57,20 @@ impl Prefs {
         cx.try_global::<Self>().copied().unwrap_or_default()
     }
 
+    /// Sets it and has the window layout saved.
     pub(crate) fn set(self, cx: &mut App) {
+        self.set_without_saving(cx);
+        super::saved::Saved::set_window(
+            super::persist::WindowState {
+                open: self.open,
+                width: self.width,
+            },
+            cx,
+        );
+    }
+
+    /// Sets it as loaded from the saved layout, which has nothing to save.
+    pub(crate) fn set_without_saving(self, cx: &mut App) {
         cx.set_global(self);
     }
 }

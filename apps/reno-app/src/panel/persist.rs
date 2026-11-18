@@ -34,13 +34,20 @@ pub(crate) const SAVE_DELAY: Duration = Duration::from_millis(750);
 /// `<Reno data dir>/app/panel-state.json`, the data dir being the one the daemon and CLI use
 /// (`RENO_DATA_DIR` overrides). `None` when no home directory is known.
 pub(crate) fn default_path() -> Option<PathBuf> {
-    reno_client::default_data_dir().map(|dir| dir.join("app").join("panel-state.json"))
+    reno_client::default_data_dir().map(|dir| path_in(&dir))
+}
+
+/// The panel state file inside a data dir.
+pub(crate) fn path_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("app").join("panel-state.json")
 }
 
 /// The global panel window layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WindowState {
-    pub(crate) open: bool,
+    /// `None`: the person has not chosen, so the window's width decides.
+    #[serde(default)]
+    pub(crate) open: Option<bool>,
     #[serde(default)]
     pub(crate) width: Option<f32>,
 }
@@ -144,11 +151,13 @@ impl PanelStore {
     }
 
     /// Number of keys held.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.keys.len()
     }
 
     /// Keys from least to most recently used.
+    #[cfg(test)]
     pub(crate) fn order(&self) -> &[PanelKey] {
         &self.order
     }
@@ -293,11 +302,13 @@ impl Saver {
     }
 
     /// Unsaved changes exist.
+    #[cfg(test)]
     pub(crate) fn dirty(&self) -> bool {
         self.deadline.is_some()
     }
 
     /// When the pending write is due, if any.
+    #[cfg(test)]
     pub(crate) fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
@@ -367,7 +378,7 @@ mod tests {
         let path = d.path().join("app/panel-state.json");
         let mut s = PanelStore::default();
         s.set_window(WindowState {
-            open: true,
+            open: Some(true),
             width: Some(420.5),
         });
         s.put(key(1), panel(&["a.rs"]));
@@ -391,7 +402,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("read")).expect("json");
         assert_eq!(v["version"], 1);
-        assert_eq!(v["window"]["open"], false);
+        assert!(v["window"]["open"].is_null(), "not chosen is saved as null");
         assert!(v["keys"]["run_1"]["tabs"].is_array());
         assert_eq!(v["order"], serde_json::json!(["run_1"]));
     }
@@ -464,7 +475,7 @@ mod tests {
         assert_eq!(r.tabs, [Surface::Session.descriptor(), file("a.rs")]);
         assert_eq!(r.active, None);
         assert_eq!(r.closed, [file("b.rs")]);
-        assert!(s.window().open);
+        assert_eq!(s.window().open, Some(true));
     }
 
     #[test]
@@ -557,12 +568,12 @@ mod tests {
     fn bad_window_width_is_dropped() {
         let mut s = PanelStore::default();
         s.set_window(WindowState {
-            open: true,
+            open: Some(true),
             width: Some(f32::NAN),
         });
         assert_eq!(s.window().width, None);
         s.set_window(WindowState {
-            open: true,
+            open: Some(true),
             width: Some(-3.0),
         });
         assert_eq!(s.window().width, None);

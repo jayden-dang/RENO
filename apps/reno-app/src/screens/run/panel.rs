@@ -11,6 +11,7 @@ use gpui::{
 
 use super::RunScreen;
 use crate::panel::layout::{GUTTER, Layout, OVERLAY_BELOW, fit};
+use crate::panel::saved::Saved;
 use crate::panel::surface::{Counts, Surface};
 use crate::panel::view::{self, Cmd, Emit, Prefs};
 use crate::summary;
@@ -107,6 +108,7 @@ impl RunScreen {
             PanelAction::ReopenTab => {
                 self.panel_touched = true;
                 if self.panel.reopen_closed().is_some() {
+                    self.persist_panel(cx);
                     self.set_panel_open(true, cx);
                     self.ensure_patches(cx);
                     cx.notify();
@@ -114,11 +116,17 @@ impl RunScreen {
             }
             PanelAction::NextTab | PanelAction::PrevTab if open => {
                 self.panel.cycle(action == PanelAction::NextTab);
+                self.persist_panel(cx);
                 self.ensure_patches(cx);
                 cx.notify();
             }
             PanelAction::CloseTab | PanelAction::NextTab | PanelAction::PrevTab => {}
         }
+    }
+
+    /// The tabs changed: remember them under the panel's key, and write soon.
+    fn persist_panel(&self, cx: &mut Context<Self>) {
+        Saved::put(self.panel_key.clone(), self.panel.snapshot(), cx);
     }
 
     // --- opening tabs ------------------------------------------------------------------------
@@ -134,6 +142,7 @@ impl RunScreen {
         self.set_panel_open(true, cx);
         let home = surface == Surface::Home;
         self.panel.open(surface);
+        self.persist_panel(cx);
         if home {
             // The page's letters work once the panel has the keyboard.
             window.focus(&self.panel_focus, cx);
@@ -164,10 +173,12 @@ impl RunScreen {
             Cmd::Activate(surface) => {
                 self.panel_touched = true;
                 self.panel.activate(&surface);
+                self.persist_panel(cx);
             }
             Cmd::Close(surface) => {
                 self.panel_touched = true;
                 self.panel.close(&surface);
+                self.persist_panel(cx);
             }
             Cmd::NewTab => return self.open_surface(Surface::Home, window, cx),
             Cmd::Hide => {
@@ -176,6 +187,7 @@ impl RunScreen {
             }
             Cmd::Reorder { from, to } => {
                 self.panel.reorder(from, to);
+                self.persist_panel(cx);
             }
             Cmd::Open(kind) => return self.open_kind(kind, window, cx),
             Cmd::Reopen(surface) => return self.open_surface(surface, window, cx),
@@ -229,10 +241,14 @@ impl RunScreen {
         let state = store.state();
         let run = state.run(&self.run)?;
         let pane = self.pane(cx);
-        // A `workspace.get` answer means the run's folder is in a repository.
-        let in_repository = store
-            .changes(&self.run)
-            .is_some_and(|c| matches!(c.workspace, Loaded::Ready(Some(_))));
+        // A `workspace.get` answer means the run's folder is in a repository. A daemon that
+        // cannot answer (too old) leaves it unknown, which is not "no repository".
+        let in_repository = panel_home::in_repository(
+            store.supports_changes(),
+            store
+                .changes(&self.run)
+                .is_some_and(|c| matches!(c.workspace, Loaded::Ready(Some(_)))),
+        );
         let project = crate::vm::projects::key_of(Some(run), |dir| store.root_of(dir));
         let project = match project {
             crate::vm::projects::FolderKey::NoProject => None,
