@@ -450,7 +450,23 @@ pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
 /// `grok models` names no efforts or windows; the CLI's own cache (`~/.grok/models_cache.json`,
 /// what `grok models` itself reads) does. Read-only: nothing is written there.
 fn grok_enriched(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
-    let cache = crate::executable::home_dir()
+    let home = crate::executable::home_dir();
+    // A test must inject its home: reading the machine's real cache would make its result depend
+    // on who runs it, so a read outside the temp dir fails the test.
+    #[cfg(test)]
+    if let Some(home) = &home {
+        assert!(
+            home.starts_with(std::env::temp_dir()),
+            "a test read the real Grok cache under {}: inject a home with grok_enriched_from",
+            home.display()
+        );
+    }
+    grok_enriched_from(home.as_deref(), models)
+}
+
+/// [`grok_enriched`] with the home directory given.
+fn grok_enriched_from(home: Option<&std::path::Path>, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let cache = home
         .map(|home| home.join(".grok").join("models_cache.json"))
         .and_then(|path| std::fs::read_to_string(path).ok());
     grok_with_cache(models, cache.as_deref())
@@ -630,6 +646,22 @@ mod grok_models_tests {
         // A model the cache lacks (a provider's copy) stays as `grok models` listed it.
         let routed = models.iter().find(|m| m.id == "zroute/grok-4.7").unwrap();
         assert!(routed.efforts.is_empty() && routed.options.is_empty());
+    }
+
+    #[test]
+    fn the_cache_is_read_from_the_home_it_is_given_and_an_empty_home_adds_nothing() {
+        let empty = tempfile::tempdir().unwrap();
+        let plain = grok_models(REAL);
+        assert_eq!(
+            super::grok_enriched_from(Some(empty.path()), plain.clone()),
+            plain
+        );
+        assert_eq!(super::grok_enriched_from(None, plain.clone()), plain);
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".grok")).unwrap();
+        std::fs::write(home.path().join(".grok/models_cache.json"), CACHE).unwrap();
+        let models = super::grok_enriched_from(Some(home.path()), plain);
+        assert!(!models[0].efforts.is_empty() && !models[0].options.is_empty());
     }
 
     #[test]

@@ -142,7 +142,8 @@ pub(crate) fn chosen_label(option: &ModelOption, chosen: Option<&str>) -> String
         .map_or_else(|| id.to_owned(), |c| c.label.clone())
 }
 
-/// The options to send for a picked model: each remembered choice the model still lists.
+/// The options to send for a picked model: each remembered choice the model still lists, and
+/// never a read-only option.
 pub(crate) fn options_for_model(
     model: &ModelChoice,
     remembered: Option<&super::composer_prefs::Options>,
@@ -155,6 +156,9 @@ pub(crate) fn options_for_model(
         .iter()
         .filter_map(|o| {
             let choice = remembered.get(&o.id)?;
+            if !o.settable {
+                return None;
+            }
             o.choices
                 .iter()
                 .any(|c| &c.id == choice)
@@ -333,6 +337,17 @@ mod tests {
             "1M",
             "a choice it does not list falls back"
         );
+    }
+
+    #[test]
+    fn a_read_only_option_is_never_sent_even_when_remembered() {
+        // Grok reports its window and cannot set it: a remembered choice must not reach task.run.
+        let mut grok = window_choices();
+        grok.settable = false;
+        let model = model_with(vec![grok]);
+        let mut remembered = super::super::composer_prefs::Options::new();
+        remembered.insert("contextWindow".into(), "200k".into());
+        assert!(options_for_model(&model, Some(&remembered)).is_empty());
     }
 
     #[test]

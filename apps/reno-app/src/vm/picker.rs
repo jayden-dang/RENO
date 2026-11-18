@@ -356,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn a_remembered_effort_the_model_no_longer_lists_is_dropped_not_sent() {
+        // Remembered Max, the model now lists up to High: nothing is carried to it.
+        assert_eq!(effort_on_pick(Some(Max), None, &[Low, Medium, High]), None);
+        // A carried level is dropped the same way; a listed one still goes.
+        assert_eq!(effort_on_pick(None, Some(XHigh), &[Low, High]), None);
+        assert_eq!(
+            effort_on_pick(Some(Max), Some(High), &[Low, High]),
+            Some(High)
+        );
+        // A model that lists no levels takes none.
+        assert_eq!(effort_on_pick(Some(High), Some(High), &[]), None);
+    }
+
+    #[test]
     fn the_picker_opens_on_the_shown_harness_else_auto_else_favourites() {
         let all = [harness("claude-code", true, vec![])];
         let pick = Pick {
