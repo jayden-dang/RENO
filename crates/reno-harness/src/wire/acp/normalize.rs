@@ -139,6 +139,7 @@ impl Normalizer {
                 id,
                 ok,
                 summary: output_summary(update),
+                output: None,
             });
         }
         events
@@ -341,6 +342,7 @@ mod tests {
                     id: "t1".into(),
                     ok: true,
                     summary: Some("test result: ok".into()),
+                    output: None
                 },
             ]
         );
@@ -391,7 +393,8 @@ mod tests {
             ExecEvent::ToolResult {
                 id: "t".into(),
                 ok: false,
-                summary: None
+                summary: None,
+                output: None
             }
         );
     }
@@ -411,7 +414,8 @@ mod tests {
             ExecEvent::ToolResult {
                 id: "r1".into(),
                 ok: true,
-                summary: Some("contents".into())
+                summary: Some("contents".into()),
+                output: None
             }
         );
     }

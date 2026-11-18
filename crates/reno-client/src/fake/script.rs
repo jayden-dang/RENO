@@ -276,6 +276,7 @@ pub(super) async fn resume(shared: Arc<Shared>, run: RunId, decision: ApprovalDe
                         id,
                         ok: approved,
                         summary: Some(summary.to_owned()),
+                        output: None,
                     },
                 );
                 true

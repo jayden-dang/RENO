@@ -232,6 +232,31 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// What a tool call returned, kept in the journal so the transcript can show it and a later
+/// reader (the app, a verifier, a teammate) does not have to run the call again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutput {
+    /// The text, with the middle cut out when it was longer than [`Self::MAX_BYTES`]: the head and
+    /// the tail are kept, joined by a line saying how much is missing. Always valid UTF-8 cut on a
+    /// character boundary, with secrets redacted like the rest of the journal.
+    pub text: String,
+    /// The size of the whole output in bytes before it was cut.
+    pub bytes: u64,
+    /// Whether `text` is shorter than the whole output.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl ToolOutput {
+    /// The most text a journal row keeps for one call.
+    pub const MAX_BYTES: usize = 16 * 1024;
+}
+
 /// A tool invocation as far as Reno needs to know it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -419,6 +444,10 @@ pub enum ExecEvent {
         /// Short human-readable outcome.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        /// What the tool printed or returned, cut to [`ToolOutput::MAX_BYTES`]. The journal is the
+        /// only record of it: an event written without it cannot be given one later.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<ToolOutput>,
     },
     /// Tokens used since the previous `Usage` of the run (executors report per turn, or once at
     /// the end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.

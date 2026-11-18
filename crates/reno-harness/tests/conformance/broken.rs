@@ -131,6 +131,7 @@ impl Executor for Broken {
                     id: "t".into(),
                     ok: true,
                     summary: None,
+                    output: None,
                 },
                 done(StopReason::Completed),
             ],

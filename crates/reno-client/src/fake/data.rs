@@ -135,6 +135,7 @@ pub(super) fn tool_ok(id: &str, summary: &str) -> ExecEvent {
         id: id.to_owned(),
         ok: true,
         summary: Some(summary.to_owned()),
+        output: None,
     }
 }
 

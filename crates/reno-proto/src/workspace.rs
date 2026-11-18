@@ -186,3 +186,77 @@ pub struct WorkspaceCleanResult {
     /// Each workspace looked at.
     pub items: Vec<CleanItem>,
 }
+
+/// Params of `workspace.diff`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiffParams {
+    /// The run whose workspace to compare with its base commit.
+    pub run_id: RunId,
+    /// One file (repository-relative) whose patch to return too; none: the list only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// How a file differs from the base commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// New file.
+    Added,
+    /// Changed file.
+    Modified,
+    /// Removed file.
+    Deleted,
+    /// Moved, possibly edited.
+    Renamed,
+}
+
+/// One changed file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    /// Repository-relative path (the new one for a rename).
+    pub path: String,
+    /// The old path of a rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// How it changed.
+    pub kind: ChangeKind,
+    /// Lines added; 0 for a binary file.
+    pub additions: u32,
+    /// Lines removed; 0 for a binary file.
+    pub deletions: u32,
+    /// Whether git treats the file as binary (no patch).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub binary: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Result of `workspace.diff`: everything the run changed against its base commit, committed or
+/// not, untracked files included. Computed on request from the worktree; empty once the
+/// workspace has been removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiffResult {
+    /// The run.
+    pub run_id: RunId,
+    /// The branch, `reno/<run id>`.
+    pub branch: String,
+    /// The commit the branch was cut from.
+    pub base_sha: String,
+    /// Commits on the branch beyond the base.
+    pub commits: u32,
+    /// The changed files, by path.
+    pub files: Vec<ChangedFile>,
+    /// The patch of the requested file, cut at 256 KiB; none when no file was asked for or the
+    /// file is binary or unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
+    /// Whether `patch` was cut.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub patch_truncated: bool,
+}

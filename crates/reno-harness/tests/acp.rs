@@ -318,6 +318,7 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
         id: "t1".into(),
         ok: true,
         summary: Some("test result: ok. 13 passed; 0 failed; 0 ignored".into()),
+        output: None
     }));
     // An edit resolved in one shot.
     assert!(events.contains(&ExecEvent::Tool {
@@ -328,6 +329,7 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
         id: "t2".into(),
         ok: true,
         summary: None,
+        output: None
     }));
 
     // Plans, command lists, context gauges and unknown updates have no place in the contract.

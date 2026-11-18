@@ -159,6 +159,7 @@ async fn play(
                     id: "t".into(),
                     ok: true,
                     summary: None,
+                    output: None,
                 })
                 .await;
         }

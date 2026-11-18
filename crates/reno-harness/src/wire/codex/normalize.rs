@@ -797,7 +797,12 @@ impl Normalizer {
                 while self.closed.len() > REMEMBERED {
                     self.closed.pop_front();
                 }
-                events.push(ExecEvent::ToolResult { id, ok, summary });
+                events.push(ExecEvent::ToolResult {
+                    id,
+                    ok,
+                    summary,
+                    output: None,
+                });
             }
         }
         events
@@ -1078,6 +1083,7 @@ mod tests {
                 id: "c1".into(),
                 ok: false,
                 summary: Some("exit code 1: two".into()),
+                output: None
             }]
         );
         // A repeated completion closes nothing, and neither reopens it.

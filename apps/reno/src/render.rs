@@ -986,6 +986,7 @@ mod tests {
                     id: "1".into(),
                     ok: false,
                     summary: Some("no match".into()),
+                    output: None,
                 },
                 text("bye\n"),
                 done(StopReason::Completed),

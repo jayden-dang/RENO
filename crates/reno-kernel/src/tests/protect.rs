@@ -34,6 +34,7 @@ fn write(id: &str, path: &str) -> [MockStep; 2] {
             id: id.into(),
             ok: true,
             summary: None,
+            output: None,
         }),
     ]
 }
@@ -281,6 +282,7 @@ async fn an_in_place_write_that_failed_does_not_stop_the_run() {
             id: "t1".into(),
             ok: false,
             summary: None,
+            output: None,
         }),
         MockStep::done(StopReason::Completed),
     ]);

@@ -216,6 +216,7 @@ fn tool_result(
         id: b.tool_use_id.clone(),
         ok: !is_error,
         summary,
+        output: None,
     }
 }
 
@@ -683,21 +684,25 @@ mod tests {
                     id: "ok".into(),
                     ok: true,
                     summary: Some("exit code 0: all 3 tests passed".into()),
+                    output: None
                 },
                 ExecEvent::ToolResult {
                     id: "bad".into(),
                     ok: false,
                     summary: Some("exit code 2: make: *** [all] Error 1".into()),
+                    output: None
                 },
                 ExecEvent::ToolResult {
                     id: "bg".into(),
                     ok: true,
                     summary: Some("Command running in background with ID: b1.".into()),
+                    output: None
                 },
                 ExecEvent::ToolResult {
                     id: "rd".into(),
                     ok: true,
                     summary: None,
+                    output: None
                 },
             ]
         );

@@ -91,6 +91,7 @@ fn script(prompt: &str) -> Vec<MockStep> {
                 id: "t1".into(),
                 ok: true,
                 summary: None,
+                output: None,
             }),
             MockStep::Emit(ExecEvent::Done {
                 stop: StopReason::Completed,

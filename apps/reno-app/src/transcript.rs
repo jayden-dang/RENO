@@ -313,7 +313,9 @@ pub(crate) fn build_rows(
                     }),
                 }
             }
-            ExecEvent::ToolResult { id, ok, summary } => {
+            ExecEvent::ToolResult {
+                id, ok, summary, ..
+            } => {
                 if input_calls.contains(id) {
                     resolve_open_question(&mut built.rows, *ok, summary.as_deref());
                 }
@@ -594,6 +596,7 @@ mod tests {
             id: id.into(),
             ok,
             summary: Some(s.into()),
+            output: None,
         }
     }
 
