@@ -60,7 +60,9 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
-    /// `RENO_PANEL=home|session|review|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
+    /// `RENO_SPLIT=1`: draw diffs side by side from the start (screenshots, reviews).
+    pub(crate) split: bool,
+    /// `RENO_PANEL=home|session|review|history|commit:<sha>|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
     /// `RENO_FILES_OPEN=<path>` or `<path>:<line>`: with `RENO_PANEL=files`, open that file in
@@ -141,6 +143,10 @@ impl Options {
             Some("session") => Some(Surface::Session),
             Some("review") => Some(Surface::Review),
             Some("files") => Some(Surface::Files),
+            Some("history") => Some(Surface::History),
+            Some(other) if other.starts_with("commit:") && other.len() > "commit:".len() => {
+                Some(Surface::Commit(other["commit:".len()..].to_owned()))
+            }
             Some("terminal") => Some(Surface::Terminal(0)),
             Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
                 Some(Surface::File(other["file:".len()..].to_owned()))
@@ -148,6 +154,7 @@ impl Options {
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
+        options.split = env("RENO_SPLIT").is_some_and(|v| v == "1");
         options.files_open = env("RENO_FILES_OPEN").filter(|v| !v.is_empty());
         options.files_search = env("RENO_FILES_SEARCH").filter(|v| !v.is_empty());
         options.terminal_input = env("RENO_TERMINAL_INPUT").filter(|v| !v.is_empty());
@@ -219,6 +226,14 @@ pub(crate) fn run(options: Options) {
 
         if let Some(path) = options.panel_state_path() {
             crate::panel::saved::Saved::install(path, cx);
+        }
+        if options.split {
+            let prefs = crate::panel::view::Prefs::get(cx);
+            crate::panel::view::Prefs {
+                split: true,
+                ..prefs
+            }
+            .set_without_saving(cx);
         }
         let toasts = toast::install(cx);
         let store = cx.new(|cx| {
@@ -1097,6 +1112,7 @@ mod tests {
                 appearance: Some(Appearance::Light),
                 quit_after: Some(Duration::from_millis(250)),
                 reduce_motion: true,
+                split: false,
                 open: Some(Nav::Executors),
                 open_run: None,
                 open_project: None,
@@ -1140,6 +1156,12 @@ mod tests {
         );
         assert_eq!(tab(""), Ok(None));
         assert_eq!(tab("files"), Ok(Some(Surface::Files)));
+        assert_eq!(tab("history"), Ok(Some(Surface::History)));
+        assert_eq!(
+            tab("commit:e6e6e6e"),
+            Ok(Some(Surface::Commit("e6e6e6e".into())))
+        );
+        assert!(tab("commit:").is_err());
         assert!(tab("filez").is_err());
         assert!(tab("file:").is_err());
     }

@@ -299,11 +299,6 @@ pub(crate) fn sidebar(
             looking_at: store.looking_at(),
             now_ms: store.now_ms(),
             thread_of: &|run| store.thread_of(run),
-            closed: &|thread| {
-                state
-                    .thread(thread)
-                    .is_some_and(|t| t.status == reno_proto::ThreadStatus::Closed)
-            },
         },
     );
     let selected_run = store.looking_at().cloned();

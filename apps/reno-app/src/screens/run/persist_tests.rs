@@ -220,7 +220,8 @@ fn the_panel_width_and_visibility_persist(cx: &mut TestAppContext) {
             Prefs::get(cx),
             Prefs {
                 open: Some(false),
-                width: Some(512.0)
+                width: Some(512.0),
+                split: false,
             }
         );
     });

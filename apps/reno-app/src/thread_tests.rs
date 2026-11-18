@@ -430,9 +430,7 @@ fn an_old_daemon_has_no_scope_switch(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn closing_a_thread_asks_when_work_is_unmerged_keeps_it_and_leaves_the_sidebar(
-    cx: &mut TestAppContext,
-) {
+fn closing_a_thread_asks_when_work_is_unmerged_keeps_it_and_keeps_its_row(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -468,8 +466,8 @@ fn closing_a_thread_asks_when_work_is_unmerged_keeps_it_and_leaves_the_sidebar(
             .unwrap()
     });
     assert_eq!(result.workspace, Some(reno_proto::CleanOutcome::Kept));
-    // Closed threads leave the sidebar.
-    wait_drawn(vcx, |vcx| !painted(vcx, &format!("recent-{first}")));
+    // A closed thread is history: its worktree is released, its row stays.
+    assert!(painted(vcx, &format!("recent-{first}")));
 }
 
 #[gpui::test]

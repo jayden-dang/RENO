@@ -162,8 +162,6 @@ pub(crate) struct Inputs<'a> {
     pub(crate) now_ms: u64,
     /// The thread a run belongs to (always `None` on a daemon without threads).
     pub(crate) thread_of: &'a dyn Fn(&RunId) -> Option<ThreadId>,
-    /// Whether a thread is closed: it leaves the list.
-    pub(crate) closed: &'a dyn Fn(&ThreadId) -> bool,
 }
 
 /// A thread's runs the app knows, oldest first. A run with no known thread is one of its own.
@@ -199,7 +197,6 @@ fn entries<'a>(runs: &[&'a RunSummary], inputs: &Inputs<'_>) -> Vec<Entry<'a>> {
             }),
         }
     }
-    out.retain(|e| e.thread.as_ref().is_none_or(|t| !(inputs.closed)(t)));
     for entry in &mut out {
         entry
             .runs
@@ -350,7 +347,6 @@ mod tests {
             looking_at: None,
             now_ms: 1_000_000,
             thread_of: &|_| None,
-            closed: &|_| false,
         }
     }
 
@@ -466,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_thread_leaves_the_list_and_a_run_without_a_thread_is_its_own_row() {
+    fn a_closed_thread_stays_listed_as_history_and_a_run_without_a_thread_is_its_own_row() {
         let a = run("a1", RunStatus::Succeeded, Some("/w/porch"), 100);
         let b = run("b1", RunStatus::Succeeded, Some("/w/porch"), 200);
         let c = run("c1", RunStatus::Succeeded, Some("/w/porch"), 300);
@@ -475,15 +471,15 @@ mod tests {
         let toggled = HashSet::new();
         let table = [("a1", "t1"), ("b1", "t2")];
         let thread_of = thread_named(&table);
-        let closed = |t: &ThreadId| t.as_str() == "thr_t1";
+        // Closing a thread releases its worktree; the migration closes every old finished
+        // run's thread, so a closed thread is history and must keep its row.
         let inputs = Inputs {
             thread_of: &thread_of,
-            closed: &closed,
             ..inputs(&seen, &toggled)
         };
         let f = &folders(&runs, roots, &inputs)[0];
         let listed: Vec<_> = f.rows.iter().map(|r| r.run.as_str()).collect();
-        assert_eq!(listed, ["run_c1", "run_b1"]);
+        assert_eq!(listed, ["run_c1", "run_b1", "run_a1"]);
         assert_eq!(f.rows[0].thread, None);
     }
 

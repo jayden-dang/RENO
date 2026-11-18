@@ -49,6 +49,8 @@ pub(crate) type Emit = Rc<dyn Fn(Cmd, &mut Window, &mut App)>;
 pub(crate) struct Prefs {
     pub(crate) open: Option<bool>,
     pub(crate) width: Option<f32>,
+    /// Review and the Commit tab draw side by side (split) instead of unified.
+    pub(crate) split: bool,
 }
 
 impl Global for Prefs {}
@@ -65,6 +67,7 @@ impl Prefs {
             super::persist::WindowState {
                 open: self.open,
                 width: self.width,
+                split: self.split,
             },
             cx,
         );

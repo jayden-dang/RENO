@@ -95,10 +95,13 @@ impl HomeKind {
         }
     }
 
-    /// Whether the tab behind the row exists yet. Changes, Files and Terminal do; the UI opens a
-    /// placeholder tab for the rest.
+    /// Whether the tab behind the row exists yet. Changes, Files, History and Terminal do; the UI
+    /// opens a placeholder tab for the rest.
     pub(crate) const fn built(self) -> bool {
-        matches!(self, Self::Changes | Self::Files | Self::Terminal)
+        matches!(
+            self,
+            Self::Changes | Self::Files | Self::History | Self::Terminal
+        )
     }
 }
 
@@ -203,6 +206,8 @@ pub(crate) fn record(connected: bool, supports_changes: bool, answer: Option<boo
 pub(crate) struct HomeFacts<'a> {
     /// The daemon serves the Files tab (feature `files`).
     pub(crate) files: bool,
+    /// The daemon serves History and the commit diffs (feature `history`).
+    pub(crate) history: bool,
     /// The daemon serves the Terminal tab (feature `terminals`).
     pub(crate) terminals: bool,
     pub(crate) status: RunStatus,
@@ -514,16 +519,20 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
             } else {
                 needs_newer(HomeKind::Files)
             },
-            gated(
-                HomeKind::History,
-                place,
-                format!(
-                    "commits on {}",
-                    branch_full
-                        .as_deref()
-                        .map_or_else(|| "the branch".to_owned(), short_branch)
-                ),
-            ),
+            if facts.history {
+                gated(
+                    HomeKind::History,
+                    place,
+                    format!(
+                        "commits on {}",
+                        branch_full
+                            .as_deref()
+                            .map_or_else(|| "the branch".to_owned(), short_branch)
+                    ),
+                )
+            } else {
+                needs_newer(HomeKind::History)
+            },
         ],
         work: vec![
             terminal,
@@ -784,6 +793,7 @@ mod tests {
     fn facts(status: RunStatus) -> HomeFacts<'static> {
         HomeFacts {
             files: true,
+            history: true,
             terminals: true,
             status,
             problem: None,
@@ -1056,14 +1066,14 @@ mod tests {
     }
 
     #[test]
-    fn only_changes_files_and_terminal_have_a_tab_built() {
+    fn only_changes_files_history_and_terminal_have_a_tab_built() {
         let h = home(&facts(RunStatus::Running), &Pane::Loading);
         for r in h.rows() {
             assert_eq!(
                 r.built,
                 matches!(
                     r.kind,
-                    HomeKind::Changes | HomeKind::Files | HomeKind::Terminal
+                    HomeKind::Changes | HomeKind::Files | HomeKind::History | HomeKind::Terminal
                 ),
                 "{:?}",
                 r.kind
@@ -1075,8 +1085,9 @@ mod tests {
         };
         let h = home(&facts(RunStatus::Succeeded), &pane);
         assert!(row(&h, HomeKind::Files).built);
-        assert!(!row(&h, HomeKind::History).built);
-        assert_eq!(h.rows().filter(|r| r.built).count(), 3);
+        assert!(row(&h, HomeKind::History).built);
+        assert!(!row(&h, HomeKind::SideChat).built);
+        assert_eq!(h.rows().filter(|r| r.built).count(), 4);
     }
 
     #[test]
@@ -1103,6 +1114,18 @@ mod tests {
         f.status = RunStatus::Succeeded;
         let h = home(&f, &Pane::Unsupported);
         assert_eq!(row(&h, HomeKind::Terminal).detail, "needs a newer daemon");
+    }
+
+    #[test]
+    fn history_needs_a_daemon_that_serves_it() {
+        let mut f = facts(RunStatus::Running);
+        f.history = false;
+        let h = home(&f, &Pane::Loading);
+        let history = row(&h, HomeKind::History);
+        assert!(!history.enabled);
+        assert_eq!(history.detail, "needs a newer daemon");
+        assert_eq!(history.reason.as_deref(), Some("needs a newer daemon"));
+        assert!(row(&h, HomeKind::Files).enabled, "its own feature");
     }
 
     #[test]

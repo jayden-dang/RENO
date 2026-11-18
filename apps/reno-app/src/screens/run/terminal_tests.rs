@@ -48,6 +48,7 @@ fn open_run_in<'a>(cx: &'a mut TestAppContext, name: &str, appearance: Appearanc
         Prefs {
             open: Some(true),
             width: Some(800.0),
+            ..Prefs::default()
         }
         .set_without_saving(cx);
     });
@@ -796,6 +797,7 @@ fn files_and_terminal_are_dimmed_for_a_daemon_without_them(cx: &mut TestAppConte
         Prefs {
             open: Some(true),
             width: Some(800.0),
+            ..Prefs::default()
         }
         .set_without_saving(cx);
     });
