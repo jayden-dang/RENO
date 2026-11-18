@@ -45,7 +45,8 @@ the emulator. At most 16 terminals; a shell that exited is reaped after 30 minut
 with the daemon. Their output is not redacted: it is the person's own shell. `RENO_*` variables are
 not passed to it. All of it is person-only: a run's token is refused.
 
-While the thread's latest run is live, the shell runs under `sandbox-exec` with a profile that
+While the thread's latest run is live (queued, running, or interrupted: an interrupted run may be
+resumed into the same worktree, by the daemon or a person, so it counts as live), the shell runs under `sandbox-exec` with a profile that
 denies writes to what the protected-path guard watches (`.claude`, `.codex`, `.reno`, `.mcp.json`
 at any depth, the worktree's `.git` link, and its private git directory under
 `<repo>/.git/worktrees/`), from `reno_proto::defs::PROTECTED_DIRS`, so the guard and the sandbox
@@ -54,6 +55,23 @@ viewer offers "reopen without limits" (a new `term.open` once the run is over). 
 `sandbox-exec` is missing or refuses the profile, `term.open` on a live run fails with
 `SandboxUnavailable`; it never opens an unlimited shell. A run with no worktree (`inPlace`) gets a
 shell in its own folder, not sandboxed.
+
+Closing is one path in the kernel: a thread that closes (a person, the idle limit, or the end of a
+trigger's run) and `workspace.clean` call the `Workspace` port's release hook before they release a
+worktree, and the daemon's hook closes that directory's terminals; the result lists them as
+`closed_terminals`. A bulk clean (`merged`, `all-clean`) closes them only for a worktree it removes.
+
+Known limits of the sandbox:
+
+- It denies the protected paths and the worktree's private git directory, nothing else in git.
+  `git update-ref`, `git branch -f <other>`, `git config`, hooks (`.git/hooks`) and the shared
+  `<repo>/.git` are not denied, and the guard does not see them either: it looks at the
+  worktree, not at the repository. They are left open on purpose: denying them would break
+  ordinary git use in a terminal (`git config`, moving a branch). A hook a person installs runs
+  with the person's rights, outside a run's sandbox. `a_sandboxed_git_branch_force_and_git_config_are_allowed_...`
+  in `tests/term_sandbox.rs` pins this, so a change is deliberate.
+- A shell opened while a run was live keeps its limits after the run ends.
+- An interrupted run that can never be resumed still counts as live until it is cancelled.
 
 A daemon started without a PTY spawner (`DaemonConfig::pty`, set only by the binary, and not under
 `--no-harnesses`) does not offer the feature. Tests use `FakePty`; `RENO_LIVE_PTY=1 cargo test -p

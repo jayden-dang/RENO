@@ -5,18 +5,21 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::terminals::Terminals;
 use async_trait::async_trait;
 use reno_harness::proc::git_workspace::{
     Changes, GitError, GitWorktrees, Inspection as GitInspection, Location, Release,
     Released as GitReleased,
 };
 use reno_kernel::{Inspection, ReleasePolicy, Released, RunChanges, Workspace, WorkspaceError};
-use reno_proto::{RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
+use reno_proto::{RunId, TermId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 
 /// Git worktrees under `<data dir>/worktrees/<repo key>/<thread id>`.
 #[derive(Debug)]
 pub struct GitWorkspace {
     git: GitWorktrees,
+    /// The terminals the release hook closes; none until [`GitWorkspace::with_terminals`].
+    terminals: Option<Terminals>,
 }
 
 impl GitWorkspace {
@@ -24,7 +27,23 @@ impl GitWorkspace {
     pub fn new(root: PathBuf) -> Self {
         Self {
             git: GitWorktrees::new(root),
+            terminals: None,
         }
+    }
+
+    /// The release hooks close the shells of a worktree before the kernel releases it (see
+    /// `Workspace::before_release`): one path for a thread closing, the idle limit and a clean.
+    #[must_use]
+    pub fn with_terminals(mut self, terminals: Terminals) -> Self {
+        self.terminals = Some(terminals);
+        self
+    }
+
+    fn close_terminals(&self, workspace: &WorkspaceInfo) -> Vec<TermId> {
+        self.terminals
+            .as_ref()
+            .map(|terminals| terminals.close_dir(&workspace.path))
+            .unwrap_or_default()
     }
 }
 
@@ -138,6 +157,14 @@ impl Workspace for GitWorkspace {
                 GitReleased::GoneBranchKept(held) => Released::GoneBranchKept(changes(held)),
             },
         )
+    }
+
+    async fn before_release(&self, workspace: &WorkspaceInfo) -> Vec<TermId> {
+        self.close_terminals(workspace)
+    }
+
+    async fn after_removal(&self, workspace: &WorkspaceInfo) -> Vec<TermId> {
+        self.close_terminals(workspace)
     }
 
     async fn prune(&self, repo: &Path) -> Result<(), WorkspaceError> {
