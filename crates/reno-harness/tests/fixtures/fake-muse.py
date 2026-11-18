@@ -506,10 +506,22 @@ def scenario_steer(turn, prompt):
 
 
 def scenario_idle_steer(turn, prompt):
-    """The turn ends; a steering message that meets the idle host starts a turn of its own."""
+    """The turn ends with a subagent still running, so the run is still open; a steering message
+    that now meets the idle host starts a turn of its own, which the run waits for."""
     begin_turn(turn, prompt)
+    sub = uid()
+    emit_item("started", "subagent", sub, turn, 1, "inProgress", objective="x", subagentId="s1")
     say(turn, "first turn done")
     finish(turn)
+    frame = wait_for("turn/start")
+    params = frame["params"]
+    late = params["commandId"]
+    ack(frame, params, late, "started")
+    begin_turn(late, prompt_of(params))
+    say(late, "steered:%s" % prompt_of(params))
+    finish(late)
+    emit_item("completed", "subagent", sub, turn, 2, "completed", objective="x", subagentId="s1",
+              result={"summary": "done"})
 
 
 def scenario_interrupt(turn, prompt):
