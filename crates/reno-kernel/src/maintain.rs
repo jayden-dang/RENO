@@ -67,6 +67,11 @@ pub struct MaintenancePorts {
     pub self_update: Arc<dyn SelfUpdateControl>,
     /// The quiet notice and the ceiling of a job.
     pub limits: Limits,
+    /// Ask each executor's check command for its newest version once, when its first probe
+    /// lands after start-up, so "an update is available" shows without waiting a day. Read-only:
+    /// it never starts an update (that stays on the daily deadline). Off in tests that script
+    /// the runner command by command.
+    pub check_at_start: bool,
 }
 
 /// What a started job does.
@@ -391,7 +396,14 @@ async fn maintenance_loop(shared: Arc<Shared>) {
         return;
     };
     let mut woke = shared.system_wake.as_ref().map(|wake| wake.subscribe());
+    // Executors still owed their read-only start-up check (`check_at_start`).
+    let mut owed: Vec<ExecutorId> = if maintainer.ports.check_at_start {
+        shared.executors.ids().cloned().collect()
+    } else {
+        Vec::new()
+    };
     loop {
+        start_up_checks(&shared, &maintainer, &mut owed);
         promote_queued(&shared, &maintainer);
         let next = daily_round(&shared, &maintainer);
         let deadline = async {
@@ -408,6 +420,29 @@ async fn maintenance_loop(shared: Arc<Shared>) {
             () = deadline => {}
         }
     }
+}
+
+/// Runs the start-up check of each owed executor whose first probe has landed: it refreshes
+/// `latest` and nothing else. An executor with no check command, or not installed, is dropped.
+fn start_up_checks(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>, owed: &mut Vec<ExecutorId>) {
+    owed.retain(|id| {
+        let Some(health) = shared.any_health(id) else {
+            return true; // not probed yet: wait for it
+        };
+        let resolved = maintainer.resolved(shared, id, Some(&health));
+        let Some(updater) = resolved.as_deref().and_then(Resolved::updater).cloned() else {
+            return false;
+        };
+        if updater.check.is_none() || health.installed.version().is_none() {
+            return false;
+        }
+        let (shared, maintainer, id) = (Arc::clone(shared), Arc::clone(maintainer), id.clone());
+        let task = Arc::clone(&shared);
+        task.spawn(async move {
+            refresh_latest(&shared, &maintainer, &id, &updater, &health).await;
+        });
+        false
+    });
 }
 
 /// What an update or install of `id` would run, decided from the health the board holds now.

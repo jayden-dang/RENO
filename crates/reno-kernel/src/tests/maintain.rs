@@ -220,6 +220,7 @@ impl World {
                 runner: Arc::new(runner.clone()),
                 self_update: Arc::new(switch.clone()),
                 limits,
+                check_at_start: false,
             })
             .await
             .unwrap();
@@ -671,6 +672,45 @@ async fn the_daily_check_updates_an_idle_executor_that_does_not_update_itself_an
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_start_up_check_learns_the_newest_version_once_and_never_updates() {
+    let runner = ScriptedRunner::new().script(
+        "tool latest",
+        vec![Beat::Line("1.1.0".into()), Beat::Exit(0)],
+    );
+    let tool = Tool::new(found("1.0.0"), Some(decl(Some(PLAIN))));
+    let fx = Fx::new(config(2), tool.registry()).await;
+    fx.kernel
+        .attach_maintenance(MaintenancePorts {
+            runner: Arc::new(runner.clone()),
+            self_update: Arc::new(Switch::default()),
+            limits: Limits::default(),
+            check_at_start: true,
+        })
+        .await
+        .unwrap();
+    // Nothing is checked before the first probe lands.
+    fx.idle().await;
+    assert!(runner.started().is_empty());
+    fx.kernel.refresh_executors(None).await.unwrap();
+    until(async || {
+        fx.kernel
+            .executors()
+            .remove(0)
+            .maintenance
+            .and_then(|m| m.updater)
+            .and_then(|u| u.latest)
+            .filter(|v| v == "1.1.0")
+    })
+    .await;
+    // Read-only: no update starts, and a second probe does not check again.
+    fx.kernel.refresh_executors(None).await.unwrap();
+    tokio::time::advance(Duration::from_secs(60 * 60)).await;
+    fx.idle().await;
+    assert_eq!(runner.started(), ["tool latest"]);
+    assert!(fx.kernel.executors().remove(0).job.is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_daily_check_waits_for_an_idle_executor_and_leaves_a_self_updating_cli_alone() {
     // Busy: the check does not run until the last run ends.
     let runner = ScriptedRunner::new()
@@ -820,6 +860,7 @@ async fn the_settings_survive_a_restart() {
             runner: Arc::new(ScriptedRunner::new()),
             self_update: Arc::new(Switch::default()),
             limits: Limits::default(),
+            check_at_start: false,
         })
         .await
         .unwrap();

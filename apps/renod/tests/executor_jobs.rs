@@ -125,6 +125,7 @@ async fn an_install_job_runs_the_recipe_and_the_errors_have_their_stable_codes()
         runner: Arc::new(runner.clone()),
         self_update: Arc::new(NoFiles),
         limits: Limits::default(),
+        check_at_start: false,
     };
     let found = recipe.found.clone();
     let fx = Fixture::with(|c| {

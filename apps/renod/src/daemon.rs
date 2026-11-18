@@ -162,6 +162,7 @@ pub fn real_maintenance() -> Option<MaintenancePorts> {
             &home,
         )),
         limits: Limits::default(),
+        check_at_start: true,
     })
 }
 
