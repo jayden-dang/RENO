@@ -664,6 +664,7 @@ async fn what_the_run_says_through_its_own_mcp_tools_is_redacted_too() {
         journal.contains("token [secret:GITHUB_TOKEN] was rejected"),
         "{journal}"
     );
+}
 
 // ---- a value split across streamed events ----
 
