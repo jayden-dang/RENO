@@ -19,6 +19,7 @@ mod policy;
 mod render;
 mod rule;
 mod secret;
+mod term;
 
 use std::io;
 use std::process::ExitCode;
@@ -69,6 +70,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Thread(command) => commands::thread(env, command).await,
         Command::Fs(command) => files::fs(env, command).await,
         Command::Git(command) => files::git(env, command).await,
+        Command::Term(command) => term::run(env, command).await,
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
         Command::Secret(command) => secret::run(env, command).await,

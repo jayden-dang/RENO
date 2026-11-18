@@ -1188,6 +1188,8 @@ impl EventsState {
 
 #[path = "files.rs"]
 mod files;
+#[path = "terminals.rs"]
+mod terminals;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
