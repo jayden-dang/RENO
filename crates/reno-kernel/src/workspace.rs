@@ -150,6 +150,23 @@ pub trait Workspace: Send + Sync + fmt::Debug {
     /// Forgets the worktrees of `repo` whose directory vanished.
     async fn prune(&self, repo: &Path) -> Result<(), WorkspaceError>;
 
+    /// The protected paths (`reno_proto::defs::is_protected_relative`) that `workspace` holds
+    /// different from its base commit: changed, added (tracked or not, ignored or not), deleted
+    /// or committed. Relative to the worktree root, `/`-separated, sorted. Read-only.
+    async fn protected_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+    ) -> Result<Vec<String>, WorkspaceError>;
+
+    /// Puts `paths` (from [`Workspace::protected_changes`]) back as they are at the base
+    /// commit: restored where the base has them, removed where it does not. Only inside the
+    /// run's own worktree, and only these paths.
+    async fn revert_protected(
+        &self,
+        workspace: &WorkspaceInfo,
+        paths: &[String],
+    ) -> Result<(), WorkspaceError>;
+
     /// Directories in the worktrees area that no workspace in `known` accounts for. Reported,
     /// never removed: they may hold work.
     async fn unknown_dirs(&self, known: &HashSet<PathBuf>) -> Vec<PathBuf>;
@@ -218,6 +235,9 @@ struct FakeState {
     calls: Vec<String>,
     fail_create: Option<WorkspaceError>,
     merged: HashSet<RunId>,
+    /// Protected paths a run's worktree holds changed, as a test says an agent left them.
+    protected: BTreeMap<RunId, Vec<String>>,
+    reverted: Vec<(RunId, Vec<String>)>,
 }
 
 #[derive(Debug)]
@@ -262,6 +282,25 @@ impl FakeWorkspace {
         if let Some(tree) = self.lock().trees.get_mut(run) {
             tree.changes = changes;
         }
+    }
+
+    /// Says `run`'s worktree holds these protected paths changed, as a run that wrote them
+    /// leaves it. Only a revert clears them.
+    pub fn plant_protected(&self, run: &RunId, paths: &[&str]) {
+        self.lock().protected.insert(
+            run.clone(),
+            paths.iter().map(|path| (*path).to_owned()).collect(),
+        );
+    }
+
+    /// The protected paths still changed in `run`'s worktree.
+    pub fn protected_left(&self, run: &RunId) -> Vec<String> {
+        self.lock().protected.get(run).cloned().unwrap_or_default()
+    }
+
+    /// Every revert asked of the port, in order.
+    pub fn reverts(&self) -> Vec<(RunId, Vec<String>)> {
+        self.lock().reverted.clone()
     }
 
     /// Marks `run`'s branch as merged into its repository's `HEAD`.
@@ -420,5 +459,27 @@ impl Workspace for FakeWorkspace {
 
     async fn unknown_dirs(&self, _known: &HashSet<PathBuf>) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    async fn protected_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        Ok(self.protected_left(&workspace.run_id))
+    }
+
+    async fn revert_protected(
+        &self,
+        workspace: &WorkspaceInfo,
+        paths: &[String],
+    ) -> Result<(), WorkspaceError> {
+        let mut state = self.lock();
+        state
+            .reverted
+            .push((workspace.run_id.clone(), paths.to_vec()));
+        if let Some(held) = state.protected.get_mut(&workspace.run_id) {
+            held.retain(|path| !paths.contains(path));
+        }
+        Ok(())
     }
 }

@@ -380,7 +380,7 @@ impl Supervisor {
         })
     }
 
-    fn mint(&self) -> std::result::Result<ApprovalId, String> {
+    pub(super) fn mint(&self) -> std::result::Result<ApprovalId, String> {
         let suffix = self.shared.mint.suffix(self.shared.db.now_ms());
         ApprovalId::from_suffix(&suffix).map_err(|error| format!("cannot mint an id: {error}"))
     }

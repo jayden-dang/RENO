@@ -1373,6 +1373,14 @@ fn done_carries_a_typed_reason_beside_its_diagnostic() {
             StopDetail::ExecutorStopped,
             json!({"type": "executor_stopped"}),
         ),
+        (
+            StopDetail::ProtectedPathWrite {
+                paths: vec![".claude/settings.json".into()],
+                reverted: true,
+            },
+            json!({"type": "protected_path_write", "paths": [".claude/settings.json"],
+                   "reverted": true}),
+        ),
     ];
     for (reason, wire) in reasons {
         golden(&reason, wire.clone());

@@ -22,6 +22,12 @@
 //! journal from that state on the next start. Last, the slot is freed (by dropping it) and the
 //! dispatcher wakes.
 //!
+//! # Protected paths
+//!
+//! A harness that cannot be asked (or whose edits are accepted unseen) is checked after the
+//! fact: after each tool result and at the run's end the worktree is compared with its base and
+//! a write to a protected path is reverted, audited and stops the run (`protect` module).
+//!
 //! # Waiting
 //!
 //! `NeedsApproval` is judged by policy and standing rules (see the `approval` module, which has
@@ -35,6 +41,7 @@
 //! time"), and the run returns to `running`. This applies whether or not a client is connected.
 
 mod approval;
+mod protect;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -172,6 +179,14 @@ pub(crate) struct Supervisor {
     /// The budget that stopped the run, which becomes the diagnostic of its `Done` when the
     /// executor ends because of the cancel.
     budget: Option<BudgetStop>,
+    /// Tool calls whose results have not come, for the protected-path checks.
+    open_tools: HashMap<String, protect::OpenTool>,
+    /// The run's worktree row, read once: `Some(None)` is a run that works in place.
+    workspace: Option<Option<reno_proto::WorkspaceInfo>>,
+    /// The protected paths the run wrote, once it has: it ends `interrupted` for them.
+    blocked: Option<protect::Blocked>,
+    /// Counts the request ids minted for protected-path blocks.
+    protected_seq: u32,
     /// Where the answers to `set_model` requests come back to (see [`Self::set_model`]).
     model_answers_tx: mpsc::Sender<ModelAnswer>,
     model_answers: mpsc::Receiver<ModelAnswer>,
@@ -256,6 +271,10 @@ impl Supervisor {
             lost: false,
             wall: None,
             budget: None,
+            open_tools: HashMap::new(),
+            workspace: None,
+            blocked: None,
+            protected_seq: 0,
             model_answers_tx,
             model_answers,
             model_events_ahead: 0,
@@ -380,6 +399,9 @@ impl Supervisor {
             self.approval_requested(event).await;
             return;
         }
+        if let ExecEvent::Tool { id, call } = &event {
+            self.note_tool(id, call);
+        }
         if let ExecEvent::NeedsInput { request_id, .. } = &event {
             self.input_requested(request_id).await;
         }
@@ -407,6 +429,9 @@ impl Supervisor {
         }
         // Whatever the event is, it is recorded and broadcast.
         self.publish(&event);
+        if let ExecEvent::ToolResult { id, ok, .. } = &event {
+            self.tool_finished(id, *ok).await;
+        }
         if let ExecEvent::Usage {
             input_tokens,
             output_tokens,
@@ -688,7 +713,9 @@ impl Supervisor {
         if stop != StopReason::Interrupted {
             return None;
         }
-        Some(if let Some(budget) = self.budget {
+        Some(if let Some(blocked) = &self.blocked {
+            blocked.detail()
+        } else if let Some(budget) = self.budget {
             budget.into()
         } else if let Some(cause) = self.cause.get() {
             cause
@@ -712,11 +739,20 @@ impl Supervisor {
         while let Some(spawned) = self.records.try_next() {
             self.persist(spawned).await;
         }
+        // The last look at the run's worktree: whatever it wrote since the last tool result.
+        self.last_look().await;
         let End {
             mut stop,
             result,
             mut diagnostic,
         } = end;
+        if let Some(blocked) = &self.blocked
+            && matches!(stop, StopReason::Completed | StopReason::Interrupted)
+        {
+            // Stopped for a protected write, even when the harness was about to finish.
+            stop = StopReason::Interrupted;
+            diagnostic = Some(blocked.detail().to_string());
+        }
         if let Some(budget) = self.budget
             && stop == StopReason::Interrupted
         {

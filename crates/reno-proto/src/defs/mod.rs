@@ -83,6 +83,7 @@ pub(crate) use normalize::{allow_form, deny_forms};
 pub use normalize::{shell_join, unwrapped_command};
 pub(crate) use pipeline::pure_pipeline_head;
 pub use policy::{PolicyDef, PolicyEffect, PolicyRule, RuleMatch, RuleScope};
+pub use protect::{PROTECTED_RULE, is_protected_relative, protected_path_of_call};
 pub use time::{
     CronSchedule, MIN_EVERY, format_instant, format_span, parse_duration, parse_instant_ms,
 };

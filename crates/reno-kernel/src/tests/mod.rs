@@ -19,6 +19,7 @@ mod budget;
 mod defs;
 mod effort;
 mod health;
+mod protect;
 mod queue;
 mod recovery;
 mod resume;

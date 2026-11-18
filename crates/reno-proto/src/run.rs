@@ -180,6 +180,15 @@ pub enum StopDetail {
     Crashed,
     /// The executor ended the run itself, as interrupted, without being asked to.
     ExecutorStopped,
+    /// The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git
+    /// internals) where no approval could stop it first, and Reno stopped it after the fact.
+    ProtectedPathWrite {
+        /// The protected paths the run wrote, relative to its worktree where it has one.
+        paths: Vec<String>,
+        /// Whether Reno put them back as they were at the run's base. False for a run that works
+        /// in place (nothing of the user's is ever deleted) or when the revert failed.
+        reverted: bool,
+    },
 }
 
 impl StopDetail {
@@ -207,6 +216,7 @@ impl StopDetail {
             } => Some(NotResumed::Paused),
             Self::BudgetExceeded { .. } => Some(NotResumed::BudgetStopped),
             Self::ExecutorStopped => Some(NotResumed::ExecutorStopped),
+            Self::ProtectedPathWrite { .. } => Some(NotResumed::ProtectedPathWrite),
             Self::StartRefused { .. } => Some(NotResumed::StartRefused),
             Self::Shutdown | Self::Crashed => None,
         }
@@ -232,6 +242,25 @@ impl fmt::Display for StopDetail {
             Self::Shutdown => f.write_str("the daemon was shutting down"),
             Self::Crashed => f.write_str("the daemon stopped while the run was live"),
             Self::ExecutorStopped => f.write_str("the executor ended the run by itself"),
+            Self::ProtectedPathWrite { paths, reverted } => {
+                let shown = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                let more = paths.len().saturating_sub(3);
+                let more = if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                };
+                let verb = if paths.len() == 1 { "is" } else { "are" };
+                let outcome = if *reverted {
+                    "the change was reverted"
+                } else {
+                    "the change was not reverted"
+                };
+                write!(
+                    f,
+                    "blocked: {shown}{more} {verb} protected; the run was stopped and {outcome}"
+                )
+            }
         }
     }
 }
@@ -263,6 +292,8 @@ pub enum NotResumed {
     BudgetStopped,
     /// The executor ended it by itself; a loop of those is not retried unasked.
     ExecutorStopped,
+    /// It was stopped for changing a protected path; resuming would let it try again.
+    ProtectedPathWrite,
     /// It never started on an executor.
     StartRefused,
     /// The harness never reported a session, so there is nothing to resume.
@@ -310,6 +341,7 @@ impl fmt::Display for NotResumed {
             Self::Paused => f.write_str("the kill switch stopped it"),
             Self::BudgetStopped => f.write_str("a budget stopped it"),
             Self::ExecutorStopped => f.write_str("its executor ended it without being asked"),
+            Self::ProtectedPathWrite => f.write_str("it was stopped for changing a protected path"),
             Self::StartRefused => f.write_str("it never started"),
             Self::NoSession => f.write_str("its harness never reported a session to resume"),
             Self::ExecutorCannotResume { executor } => {

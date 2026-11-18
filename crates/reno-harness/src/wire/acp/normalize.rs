@@ -62,6 +62,33 @@ fn output_summary(update: &Value) -> Option<String> {
     Some(line.chars().take(SUMMARY_CHARS).collect())
 }
 
+/// The input of a call: the agent's `rawInput`, plus the call's `locations` (the files it names)
+/// under that key when the input has none of its own, so a later check can see which paths a
+/// call touches whatever the agent put in `rawInput`.
+fn call_input(update: &Value) -> Value {
+    let mut input = update.get("rawInput").cloned().unwrap_or(Value::Null);
+    let paths: Vec<Value> = update
+        .get("locations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|location| location.get("path").and_then(Value::as_str))
+        .filter(|path| !path.is_empty())
+        .map(|path| serde_json::json!({ "path": path }))
+        .collect();
+    if paths.is_empty() {
+        return input;
+    }
+    match &mut input {
+        Value::Null => input = serde_json::json!({ "locations": paths }),
+        Value::Object(map) if !map.contains_key("locations") => {
+            map.insert("locations".to_owned(), Value::Array(paths));
+        }
+        _ => {}
+    }
+    input
+}
+
 /// Turns one session's `session/update` payloads into events.
 #[derive(Debug, Default)]
 pub(crate) struct Normalizer {
@@ -97,11 +124,7 @@ impl Normalizer {
             let (class, name) = permission::classify(update);
             events.push(ExecEvent::Tool {
                 id: id.clone(),
-                call: ToolCall::new(
-                    name,
-                    update.get("rawInput").cloned().unwrap_or(Value::Null),
-                    class,
-                ),
+                call: ToolCall::new(name, call_input(update), class),
             });
         }
         // A terminal status resolves the call, in the same update that opens it (some agents send
@@ -320,6 +343,37 @@ mod tests {
                     summary: Some("test result: ok".into()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_calls_locations_ride_with_its_input_so_a_later_check_can_see_the_paths() {
+        let input = |update: Value| match &events(&[update])[0] {
+            ExecEvent::Tool { call, .. } => call.input.clone(),
+            other => panic!("not a tool: {other:?}"),
+        };
+        let locations = json!([{ "path": "/w/.claude/settings.json", "line": 1 }]);
+        assert_eq!(
+            input(
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "a", "kind": "edit",
+                          "locations": locations })
+            ),
+            json!({ "locations": [{ "path": "/w/.claude/settings.json" }] })
+        );
+        assert_eq!(
+            input(
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "b", "kind": "edit",
+                          "rawInput": { "content": "x" }, "locations": locations })
+            ),
+            json!({ "content": "x", "locations": [{ "path": "/w/.claude/settings.json" }] })
+        );
+        // The agent's own input is never overwritten.
+        assert_eq!(
+            input(
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "c", "kind": "edit",
+                          "rawInput": { "locations": "mine" }, "locations": locations })
+            ),
+            json!({ "locations": "mine" })
         );
     }
 

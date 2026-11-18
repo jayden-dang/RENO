@@ -21,6 +21,9 @@
 //! `merge-base --is-ancestor`, `rev-list` and `update-ref` on `refs/heads/reno/*`. It never
 //! checks out, switches, stashes, resets, cleans or configures anything there, and it never runs
 //! `status` there (`status` can refresh the index). `status` runs only inside a Reno worktree.
+//! (Inside a run's own worktree, never the user's checkout, `protected_changes` and
+//! `revert_protected` also run `diff`, `ls-files`, `ls-tree`, `checkout`, `rm --cached`, `clean`
+//! and `commit`, to undo a write to a protected path.)
 //! The branch is cut from a commit sha resolved first, so the user's branch never moves. Git hooks
 //! are disabled for the commands Reno runs, so a user's `post-checkout` hook does not fire in a
 //! worktree an agent will work in.
@@ -509,6 +512,152 @@ impl GitWorktrees {
             let _ = tokio::fs::remove_dir(parent).await;
         }
         Ok(Released::Removed)
+    }
+
+    /// The protected paths (see `reno_proto::defs::is_protected_relative`) the worktree of `loc`
+    /// holds different from its base commit: a tracked file changed, deleted or committed since
+    /// the base, and any untracked file, ignored or not. Relative to the worktree root,
+    /// `/`-separated, sorted. Runs only inside the run's own worktree, and writes nothing.
+    pub async fn protected_changes(&self, loc: &Location) -> Result<Vec<String>, GitError> {
+        let base = loc.base_sha.as_str();
+        // Tracked paths against the base: staged, unstaged and committed alike.
+        let tracked = self
+            .names(
+                &loc.path,
+                &["diff", "--name-only", "-z", "--no-renames", base, "--"],
+            )
+            .await?;
+        let untracked = self
+            .names(
+                &loc.path,
+                &["ls-files", "-z", "--others", "--exclude-standard"],
+            )
+            .await?;
+        // Ignored files are not listed above; look for them only where a protected name can
+        // start, so the walk never enters `target/` or `node_modules/`.
+        let ignored = self
+            .names(
+                &loc.path,
+                &[
+                    "ls-files",
+                    "-z",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--",
+                    ":(icase,literal).claude",
+                    ":(icase,literal).codex",
+                    ":(icase,literal).reno",
+                    ":(icase,literal).mcp.json",
+                ],
+            )
+            .await?;
+        let mut found: Vec<String> = tracked
+            .into_iter()
+            .chain(untracked)
+            .chain(ignored)
+            .filter(|path| reno_proto::defs::is_protected_relative(path))
+            .collect();
+        found.sort();
+        found.dedup();
+        Ok(found)
+    }
+
+    /// Puts `paths` of the worktree of `loc` back as the base commit has them: restored where
+    /// the base holds the path, removed (from the index and the disk) where it does not. A run
+    /// that committed one of them gets one more commit on its branch that undoes it. Only paths
+    /// that are protected and inside the worktree are touched; anything else is refused.
+    pub async fn revert_protected(&self, loc: &Location, paths: &[String]) -> Result<(), GitError> {
+        for path in paths {
+            let clean = !path.is_empty()
+                && !path.starts_with('/')
+                && !path.split('/').any(|part| part.is_empty() || part == "..")
+                && !path.contains('\0')
+                && reno_proto::defs::is_protected_relative(path);
+            if !clean {
+                return Err(GitError::Unsafe(format!(
+                    "{path:?} is not a protected path inside the worktree"
+                )));
+            }
+        }
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let base = loc.base_sha.as_str();
+        // Which of them the base has.
+        let mut ls = vec!["ls-tree", "-r", "-z", "--name-only", base, "--"];
+        ls.extend(paths.iter().map(String::as_str));
+        let in_base: HashSet<String> = self.names(&loc.path, &ls).await?.into_iter().collect();
+        let (present, absent): (Vec<&String>, Vec<&String>) =
+            paths.iter().partition(|path| in_base.contains(*path));
+        if !present.is_empty() {
+            let mut args = vec!["checkout", "-q", base, "--"];
+            args.extend(present.iter().map(|path| path.as_str()));
+            self.expect_ok(&loc.path, &args, "checkout").await?;
+        }
+        if !absent.is_empty() {
+            let mut rm = vec!["rm", "-q", "-r", "-f", "--cached", "--ignore-unmatch", "--"];
+            rm.extend(absent.iter().map(|path| path.as_str()));
+            self.expect_ok(&loc.path, &rm, "rm").await?;
+            let mut clean = vec!["clean", "-q", "-f", "-d", "-x", "--"];
+            clean.extend(absent.iter().map(|path| path.as_str()));
+            self.expect_ok(&loc.path, &clean, "clean").await?;
+            // The directories the run made for them are left empty; git does not track those.
+            for path in &absent {
+                let mut dir = loc.path.join(path);
+                while dir.pop() && dir != loc.path {
+                    if tokio::fs::remove_dir(&dir).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // A path the run committed is still changed at `HEAD`: undo it in a commit of its own.
+        let mut committed = vec![
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            base,
+            "HEAD",
+            "--",
+        ];
+        committed.extend(paths.iter().map(String::as_str));
+        if !self.names(&loc.path, &committed).await?.is_empty() {
+            let mut commit = vec![
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Reno",
+                "-c",
+                "user.email=reno@localhost",
+                "commit",
+                "-q",
+                "--no-verify",
+                "--allow-empty-message",
+                "-m",
+                "reno: revert a change to protected paths",
+                "--only",
+                "--",
+            ];
+            commit.extend(paths.iter().map(String::as_str));
+            self.expect_ok(&loc.path, &commit, "commit").await?;
+        }
+        Ok(())
+    }
+
+    /// The NUL-separated names `git args` prints.
+    async fn names(&self, dir: &Path, args: &[&str]) -> Result<Vec<String>, GitError> {
+        let out = self.git(dir, args).await?;
+        if !out.ok() {
+            return Err(failed(&args.join(" "), &out));
+        }
+        Ok(out
+            .stdout
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Forgets worktrees of `repo` whose directory has vanished (`git worktree prune`).

@@ -1622,6 +1622,19 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "It was stopped for changing a protected path; resuming would let it try again.",
+                "properties": {
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "It never started on an executor.",
                 "properties": {
                   "type": {
@@ -2034,6 +2047,32 @@ expression: protocol_schema()
                 },
                 "required": [
                   "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "properties": {
+                  "paths": {
+                    "description": "The protected paths the run wrote, relative to its worktree where it has one.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reverted": {
+                    "description": "Whether Reno put them back as they were at the run's base. False for a run that works\nin place (nothing of the user's is ever deleted) or when the revert failed.",
+                    "type": "boolean"
+                  },
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "paths",
+                  "reverted"
                 ],
                 "type": "object"
               }
@@ -3734,6 +3773,19 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "It was stopped for changing a protected path; resuming would let it try again.",
+                "properties": {
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "It never started on an executor.",
                 "properties": {
                   "type": {
@@ -4298,6 +4350,32 @@ expression: protocol_schema()
                 },
                 "required": [
                   "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "properties": {
+                  "paths": {
+                    "description": "The protected paths the run wrote, relative to its worktree where it has one.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reverted": {
+                    "description": "Whether Reno put them back as they were at the run's base. False for a run that works\nin place (nothing of the user's is ever deleted) or when the revert failed.",
+                    "type": "boolean"
+                  },
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "paths",
+                  "reverted"
                 ],
                 "type": "object"
               }
@@ -10476,6 +10554,32 @@ expression: protocol_schema()
                   "type"
                 ],
                 "type": "object"
+              },
+              {
+                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "properties": {
+                  "paths": {
+                    "description": "The protected paths the run wrote, relative to its worktree where it has one.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reverted": {
+                    "description": "Whether Reno put them back as they were at the run's base. False for a run that works\nin place (nothing of the user's is ever deleted) or when the revert failed.",
+                    "type": "boolean"
+                  },
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "paths",
+                  "reverted"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -10730,6 +10834,19 @@ expression: protocol_schema()
                 "properties": {
                   "type": {
                     "const": "executor_stopped",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It was stopped for changing a protected path; resuming would let it try again.",
+                "properties": {
+                  "type": {
+                    "const": "protected_path_write",
                     "type": "string"
                   }
                 },
@@ -11303,6 +11420,32 @@ expression: protocol_schema()
                 },
                 "required": [
                   "type"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git\ninternals) where no approval could stop it first, and Reno stopped it after the fact.",
+                "properties": {
+                  "paths": {
+                    "description": "The protected paths the run wrote, relative to its worktree where it has one.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reverted": {
+                    "description": "Whether Reno put them back as they were at the run's base. False for a run that works\nin place (nothing of the user's is ever deleted) or when the revert failed.",
+                    "type": "boolean"
+                  },
+                  "type": {
+                    "const": "protected_path_write",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "paths",
+                  "reverted"
                 ],
                 "type": "object"
               }

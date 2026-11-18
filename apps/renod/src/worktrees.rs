@@ -141,4 +141,25 @@ impl Workspace for GitWorkspace {
     async fn unknown_dirs(&self, known: &HashSet<PathBuf>) -> Vec<PathBuf> {
         self.git.unknown_dirs(known).await
     }
+
+    async fn protected_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.git
+            .protected_changes(&location(workspace))
+            .await
+            .map_err(error)
+    }
+
+    async fn revert_protected(
+        &self,
+        workspace: &WorkspaceInfo,
+        paths: &[String],
+    ) -> Result<(), WorkspaceError> {
+        self.git
+            .revert_protected(&location(workspace), paths)
+            .await
+            .map_err(error)
+    }
 }
