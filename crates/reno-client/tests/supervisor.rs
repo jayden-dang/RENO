@@ -25,6 +25,7 @@ fn run(name: &str) -> RunId {
 
 fn task(prompt: &str) -> TaskRunParams {
     TaskRunParams {
+        model_options: Default::default(),
         effort: None,
         prompt: prompt.to_owned(),
         executor: Some("claude-code".parse().unwrap()),

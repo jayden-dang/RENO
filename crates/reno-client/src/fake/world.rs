@@ -342,6 +342,44 @@ impl World {
         }
     }
 
+    /// Why `params.model_options` cannot be honoured: an option or choice the run's model does
+    /// not list (any model of the executor, when none is named). `None` when it can.
+    pub(super) fn refuse_model_options(
+        &self,
+        params: &reno_proto::TaskRunParams,
+    ) -> Option<String> {
+        if params.model_options.is_empty() {
+            return None;
+        }
+        let models = self
+            .executors
+            .iter()
+            .find(|e| Some(&e.descriptor.id) == params.executor.as_ref())
+            .map(|e| e.descriptor.caps.models.as_slice())
+            .unwrap_or_default();
+        let takes = |m: &reno_proto::ModelInfo| {
+            params.model_options.iter().all(|(option, choice)| {
+                m.options
+                    .iter()
+                    .any(|o| &o.id == option && o.choices.iter().any(|c| &c.id == choice))
+            })
+        };
+        let named = params.model.as_deref().and_then(|name| {
+            models.iter().find(|m| {
+                m.id == name
+                    || m.display_name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+        });
+        let ok = match (&params.model, named) {
+            (_, Some(model)) => takes(model),
+            (None, None) => models.iter().any(takes),
+            (Some(_), None) => false,
+        };
+        (!ok).then(|| "the model does not list that option or choice".to_owned())
+    }
+
     /// Creates a queued run and returns its id.
     pub(super) fn create_run(
         &mut self,
@@ -364,6 +402,7 @@ impl World {
             .collect();
         self.runs.push(RunRecord {
             summary: RunSummary {
+                model_options: params.model_options.clone(),
                 effort: params.effort,
                 run_id: run_id.clone(),
                 task_id: TaskId::from_suffix(&format!("fake{n}"))?,
@@ -755,6 +794,7 @@ impl World {
         }
         let (bot, prompt) = super::extras::trigger_target(name).unwrap_or(("keeper", name));
         let params = reno_proto::TaskRunParams {
+            model_options: Default::default(),
             effort: None,
             prompt: prompt.to_owned(),
             executor: "claude-code".parse().ok(),

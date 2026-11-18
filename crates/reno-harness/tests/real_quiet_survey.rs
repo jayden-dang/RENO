@@ -29,6 +29,7 @@ struct ProbeOutcome {
 async fn probe_once(executor: AcpExecutor) -> ProbeOutcome {
     let (controls, handle) = ExecControls::new(8);
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "Use your shell tool to run `echo probe-one`. After you see its output, \

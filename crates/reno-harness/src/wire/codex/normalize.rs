@@ -301,6 +301,30 @@ pub(crate) fn settle_turn_error(
     }
 }
 
+/// `thread/tokenUsage/updated` as a [`ExecEvent::ContextUsage`]: the LAST call's tokens (never
+/// the thread's running total) and the model's context window. `None` when it carries neither.
+pub(crate) fn context_usage_event(params: &Value) -> Option<ExecEvent> {
+    let usage = field(params, &["tokenUsage", "token_usage"])?;
+    let last = usage.get("last");
+    let tokens = last
+        .and_then(|last| field(last, &["totalTokens", "total_tokens"]).and_then(Value::as_u64))
+        .or_else(|| {
+            let last = last?;
+            let input = field(last, &["inputTokens", "input_tokens"])?.as_u64()?;
+            Some(
+                input.saturating_add(
+                    field(last, &["outputTokens", "output_tokens"])
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                ),
+            )
+        });
+    let window = field(usage, &["modelContextWindow", "model_context_window"])
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0);
+    (tokens.is_some() || window.is_some()).then_some(ExecEvent::ContextUsage { tokens, window })
+}
+
 /// `thread/tokenUsage/updated` as a [`ExecEvent::Usage`] snapshot of the LAST turn's tokens
 /// (held until the turn ends, emitted just before its `Done`).
 pub(crate) fn usage_event(params: &Value) -> Option<ExecEvent> {
@@ -740,11 +764,13 @@ impl Normalizer {
         self.reasoning.map(method, params)
     }
 
-    /// `thread/tokenUsage/updated`: held until the turn ends.
-    pub(crate) fn token_usage(&mut self, params: &Value) {
+    /// `thread/tokenUsage/updated`: the billing snapshot is held until the turn ends; the
+    /// context occupancy is reported now. The two are never derived from one another.
+    pub(crate) fn token_usage(&mut self, params: &Value) -> Vec<ExecEvent> {
         if let Some(usage) = usage_event(params) {
             self.usage = Some(usage);
         }
+        context_usage_event(params).into_iter().collect()
     }
 
     /// `account/rateLimits/updated`.
@@ -1614,6 +1640,61 @@ mod tests {
             settle_turn_error(&done, Some("held".into()), None, 0),
             (None, Some("held".into()))
         );
+    }
+
+    #[test]
+    fn context_uses_the_latest_call_not_the_thread_total() {
+        assert_eq!(
+            context_usage_event(&json!({"tokenUsage": {
+                "last": {"totalTokens": 42000}, "total": {"totalTokens": 900000}, "modelContextWindow": 200000
+            }})),
+            Some(ExecEvent::ContextUsage {
+                tokens: Some(42000),
+                window: Some(200000)
+            })
+        );
+        assert_eq!(
+            context_usage_event(&json!({"token_usage": {
+                "last": {"input_tokens": 0, "output_tokens": 0}, "model_context_window": 0
+            }})),
+            Some(ExecEvent::ContextUsage {
+                tokens: Some(0),
+                window: None
+            })
+        );
+        assert_eq!(
+            context_usage_event(&json!({"tokenUsage": {"total": {"totalTokens": 100}}})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_token_update_reports_context_now_and_keeps_billing_for_the_turns_end() {
+        let mut n = Normalizer::new();
+        let events = n.token_usage(&json!({"tokenUsage": {
+            "last": {"inputTokens": 3, "outputTokens": 4, "totalTokens": 7}, "modelContextWindow": 100
+        }}));
+        assert_eq!(
+            events,
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(7),
+                window: Some(100)
+            }]
+        );
+        let end = n.finish_turn(
+            "turn/completed",
+            &json!({"turn": {"id": "t", "status": "completed"}}),
+            false,
+            0,
+        );
+        assert!(matches!(
+            end.usage,
+            Some(ExecEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 4,
+                ..
+            })
+        ));
     }
 
     #[test]

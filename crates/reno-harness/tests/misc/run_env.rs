@@ -39,6 +39,7 @@ fn run_env() -> BTreeMap<String, String> {
 
 fn spec(cwd: &Path) -> ExecSpec {
     ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "hello".into(),

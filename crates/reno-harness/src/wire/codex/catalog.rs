@@ -76,6 +76,7 @@ pub(crate) fn parse_model_page(result: &Value) -> (Vec<(ModelInfo, bool)>, Optio
             .to_owned();
         models.push((
             ModelInfo {
+                options: Vec::new(),
                 default_effort: item
                     .get("defaultReasoningEffort")
                     .and_then(Value::as_str)
@@ -136,6 +137,7 @@ pub(crate) fn static_model_infos() -> Vec<ModelInfo> {
     CURATED
         .iter()
         .map(|(id, label)| ModelInfo {
+            options: Vec::new(),
             default_effort: None,
             efforts: vec![],
             id: (*id).into(),
@@ -238,6 +240,7 @@ mod tests {
             vec![
                 (
                     ModelInfo {
+                        options: Vec::new(),
                         default_effort: Some(Effort::Medium),
                         efforts: vec![Effort::Medium, Effort::XHigh],
                         id: "gpt-6-astra".into(),
@@ -248,6 +251,7 @@ mod tests {
                 ),
                 (
                     ModelInfo {
+                        options: Vec::new(),
                         default_effort: None,
                         efforts: vec![],
                         id: "gpt-old".into(),

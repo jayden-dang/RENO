@@ -47,6 +47,7 @@ fn executor() -> CodexExecutor {
 /// A full-access, unrestricted run in `/tmp`: what the `happy` scenario verifies on the wire.
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: prompt.into(),

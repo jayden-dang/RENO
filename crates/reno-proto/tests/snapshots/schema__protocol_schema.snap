@@ -715,6 +715,7 @@ expression: protocol_schema()
     "rules.project",
     "run.model",
     "run.effort",
+    "run.context",
     "executor.maintain",
     "run.changes",
     "executor.usage"
@@ -1003,6 +1004,13 @@ expression: protocol_schema()
               "string",
               "null"
             ]
+          },
+          "modelOptions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Per-model option choices (option id to choice id), each one the run's model lists\n(`ModelInfo::options`); an unknown option or choice is refused. Absent: the model's\ndefaults. Needs feature `run.context`.",
+            "type": "object"
           },
           "prompt": {
             "description": "The task prompt.",
@@ -2171,6 +2179,13 @@ expression: protocol_schema()
               "null"
             ]
           },
+          "modelOptions": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The per-model option choices the run was launched with (`task.run`'s `modelOptions`);\nempty when none were asked for. A resumed attempt keeps them. Needs feature\n`run.context`.",
+            "type": "object"
+          },
           "notResumed": {
             "anyOf": [
               {
@@ -2857,6 +2872,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "modelOptions": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Per-model option choices (option id to choice id), each one the run's model lists\n(`ModelInfo::options`); an unknown option or choice is refused. Absent: the model's\ndefaults. Needs feature `run.context`.",
+                "type": "object"
               },
               "prompt": {
                 "description": "The task prompt.",
@@ -4104,6 +4126,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "modelOptions": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "The per-model option choices the run was launched with (`task.run`'s `modelOptions`);\nempty when none were asked for. A resumed attempt keeps them. Needs feature\n`run.context`.",
+                "type": "object"
               },
               "notResumed": {
                 "anyOf": [
@@ -7836,10 +7865,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -8968,10 +9053,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -10092,10 +10233,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -11237,10 +11434,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -12358,10 +12611,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -13479,10 +13788,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -14657,10 +15022,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },
@@ -16126,6 +16547,37 @@ expression: protocol_schema()
                 "type": "object"
               },
               {
+                "description": "The latest occupancy of the model's context window: how many tokens the next model call\nstarts from, and how many the window holds. Not billing (that is `Usage`, which adds up;\nthis replaces itself): never derive one from the other. A field the harness did not say\nis absent and means \"unchanged\", see [`ContextUsage::apply`]. Only daemons that negotiate\nthe `run.context` feature emit it; older clients skip it.",
+                "properties": {
+                  "tokens": {
+                    "description": "Tokens now in the context, when the harness says.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "const": "context_usage",
+                    "type": "string"
+                  },
+                  "window": {
+                    "description": "Size of the context window, when the harness says.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "type": "object"
+              },
+              {
                 "description": "A message from the human, added by `run.steer`. Only daemons that negotiate the\n`run.steer` feature emit it.",
                 "properties": {
                   "text": {
@@ -17161,6 +17613,13 @@ expression: protocol_schema()
                   "string",
                   "null"
                 ]
+              },
+              "modelOptions": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "The per-model option choices the run was launched with (`task.run`'s `modelOptions`);\nempty when none were asked for. A resumed attempt keeps them. Needs feature\n`run.context`.",
+                "type": "object"
               },
               "notResumed": {
                 "anyOf": [
@@ -18619,10 +19078,66 @@ expression: protocol_schema()
               "id": {
                 "description": "Model id as passed to the harness.",
                 "type": "string"
+              },
+              "options": {
+                "description": "Per-model options a run may choose at launch (the context window of a Claude model).\nEmpty: none. Needs feature `run.context`.",
+                "items": {
+                  "$ref": "#/$defs/ModelOption"
+                },
+                "type": "array"
               }
             },
             "required": [
               "id"
+            ],
+            "type": "object"
+          },
+          "ModelOption": {
+            "description": "A launch-time setting a model offers besides effort, as a closed set of choices.",
+            "properties": {
+              "choices": {
+                "description": "The values it takes.",
+                "items": {
+                  "$ref": "#/$defs/ModelOptionChoice"
+                },
+                "type": "array"
+              },
+              "defaultChoice": {
+                "description": "The choice id used when none is asked for.",
+                "type": "string"
+              },
+              "id": {
+                "description": "What `task.run`'s `modelOptions` names it by (`contextWindow`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "choices",
+              "defaultChoice"
+            ],
+            "type": "object"
+          },
+          "ModelOptionChoice": {
+            "description": "One value of a [`ModelOption`].",
+            "properties": {
+              "id": {
+                "description": "What `modelOptions` names it by (`1m`).",
+                "type": "string"
+              },
+              "label": {
+                "description": "Display name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label"
             ],
             "type": "object"
           },

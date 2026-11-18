@@ -222,6 +222,38 @@ const ISOLATION_ENV: [(&str, &str); 2] = [
     ("ENABLE_CLAUDEAI_MCP_SERVERS", "false"),
 ];
 
+/// The variable that makes the CLI resolve a 200K window on a model that runs 1M under its plain
+/// id (verified upstream on 2.1.319: `modelUsage.contextWindow` 1000000 to 200000). Read at launch,
+/// so a changed choice is launch-time only.
+const DISABLE_1M_ENV: &str = "CLAUDE_CODE_DISABLE_1M_CONTEXT";
+
+/// The run's choice for the context-window option, when it made one.
+fn context_window_choice(spec: &ExecSpec) -> Option<&str> {
+    spec.model_options
+        .get(reno_proto::MODEL_OPTION_CONTEXT_WINDOW)
+        .map(String::as_str)
+}
+
+/// The `--model` value: the 1M window is selected by a model-id suffix (`opus-5-5[1m]`), exactly
+/// how the CLI does it. Never doubled when the name already carries it.
+fn model_arg(spec: &ExecSpec) -> Option<String> {
+    let model = spec.model.as_ref()?;
+    let one_m = context_window_choice(spec) == Some(reno_proto::CONTEXT_WINDOW_1M);
+    Some(if one_m && !model.ends_with("[1m]") {
+        format!("{model}[1m]")
+    } else {
+        model.clone()
+    })
+}
+
+/// Whether the run must really be limited to 200K. The model id alone cannot do it: a model such
+/// as `claude-opus-5-5` runs 1M under its plain id. Only an explicit 200K choice sets it; unset,
+/// a model keeps the window the CLI gives it.
+fn caps_context_at_200k(spec: &ExecSpec) -> bool {
+    context_window_choice(spec)
+        .is_some_and(|window| window.eq_ignore_ascii_case(reno_proto::CONTEXT_WINDOW_200K))
+}
+
 /// A Reno run is headless: when the turn ends the run ends, and nobody is left to receive a
 /// "background task finished" notification. So every run, isolated or not, turns background
 /// work off: the Bash tool's `run_in_background`, Claude Code moving a timed-out shell command
@@ -431,8 +463,8 @@ impl ClaudeExecutor {
         ]
         .map(str::to_owned)
         .into();
-        if let Some(model) = &spec.model {
-            args.extend(["--model".into(), model.clone()]);
+        if let Some(model) = model_arg(spec) {
+            args.extend(["--model".into(), model]);
         }
         // Appended to Claude Code's own system prompt, so its tool guidance stays. The
         // project's `CLAUDE.md` rides along: the CLI reads it only with the `project` setting
@@ -488,6 +520,11 @@ impl ClaudeExecutor {
         // Always, and after the run's own variables: a headless run cannot wait in the
         // background (see `HEADLESS_ENV`).
         cmd.envs(HEADLESS_ENV);
+        // "200K" on a model that runs 1M by itself really limits the window (see
+        // `caps_context_at_200k`).
+        if caps_context_at_200k(spec) {
+            cmd.env(DISABLE_1M_ENV, "1");
+        }
         cmd.args(Self::launch_args(spec));
         if let Some(resume) = &spec.resume {
             cmd.arg(format!("--resume={}", resume.0));
@@ -1642,6 +1679,7 @@ mod tests {
 
     fn spec(access: AccessMode) -> ExecSpec {
         ExecSpec {
+            model_options: Default::default(),
             run_id: RunId::from_suffix("01HZX9").unwrap(),
             inherit_user_config: false,
             prompt: "do it".into(),
@@ -1791,6 +1829,36 @@ mod tests {
         env.iter()
             .find(|(k, _)| k == name)
             .and_then(|(_, v)| v.as_deref())
+    }
+
+    fn with_window(model: &str, choice: Option<&str>) -> ExecSpec {
+        let mut s = spec(AccessMode::Supervised);
+        s.model = Some(model.into());
+        if let Some(choice) = choice {
+            s.model_options
+                .insert("contextWindow".into(), choice.into());
+        }
+        s
+    }
+
+    #[test]
+    fn the_1m_choice_is_a_model_id_suffix_and_the_200k_choice_a_launch_env() {
+        let (args, env) = args_and_env(&with_window("claude-opus-5-5", Some("1m")));
+        assert_eq!(flag(&args, "--model"), Some("claude-opus-5-5[1m]"));
+        assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), None);
+
+        let (args, env) = args_and_env(&with_window("claude-opus-5-5", Some("200k")));
+        assert_eq!(flag(&args, "--model"), Some("claude-opus-5-5"));
+        assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), Some("1"));
+
+        // Unset: the CLI's own window.
+        let (args, env) = args_and_env(&with_window("claude-opus-5-5", None));
+        assert_eq!(flag(&args, "--model"), Some("claude-opus-5-5"));
+        assert_eq!(env_value(&env, "CLAUDE_CODE_DISABLE_1M_CONTEXT"), None);
+
+        // Never doubled, and an alias that already says 1M is left alone.
+        let (args, _) = args_and_env(&with_window("sonnet[1m]", Some("1m")));
+        assert_eq!(flag(&args, "--model"), Some("sonnet[1m]"));
     }
 
     #[test]

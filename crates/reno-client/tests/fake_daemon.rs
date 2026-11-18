@@ -16,6 +16,7 @@ use reno_proto::{
 
 fn task(prompt: &str) -> TaskRunParams {
     TaskRunParams {
+        model_options: Default::default(),
         effort: None,
         prompt: prompt.to_owned(),
         executor: Some("claude-code".parse().unwrap()),
@@ -1052,4 +1053,45 @@ async fn the_fake_daemon_carries_plan_usage_for_claude_and_codex() {
     let (after, checked_after) = usage_of(&refreshed, "claude-code").unwrap();
     assert!(after.fetched_at_ms > claude.fetched_at_ms);
     assert_eq!(checked_after, checked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_fake_run_reports_its_context_and_takes_the_window_choice() {
+    let client = FakeDaemon::spawn().await.unwrap();
+    client.hello().await.unwrap();
+    let health = client.list_executors().await.unwrap();
+    let claude = health
+        .iter()
+        .find(|e| e.descriptor.id.as_str() == "claude-code")
+        .unwrap();
+    let models = &claude.descriptor.caps.models;
+    let default_of = |id: &str| {
+        let model = models.iter().find(|m| m.id == id).unwrap();
+        model.options[0].default_choice.clone()
+    };
+    assert_eq!(default_of("claude-opus-5-5"), "1m");
+    assert_eq!(default_of("claude-sonnet-5-5"), "200k");
+    assert!(models.iter().any(|m| m.options.is_empty()));
+
+    let mut params = task("tidy the readme");
+    params.model = Some("claude-opus-5-5".into());
+    params.model_options = [("contextWindow".to_owned(), "200k".to_owned())].into();
+    let id = client.run_task(params).await.unwrap();
+    assert_eq!(
+        client.get_run(&id).await.unwrap().model_options["contextWindow"],
+        "200k"
+    );
+    let transcript = events(&client, &id).await;
+    let events: Vec<ExecEvent> = transcript.into_iter().map(|(_, e)| e).collect();
+    let context = reno_proto::ContextUsage::latest(&events);
+    assert_eq!(
+        (context.tokens, context.window),
+        (Some(84_213), Some(200_000))
+    );
+
+    // A choice the model does not list is refused.
+    let mut bad = task("x");
+    bad.model = Some("claude-haiku-5-5".into());
+    bad.model_options = [("contextWindow".to_owned(), "1m".to_owned())].into();
+    assert!(client.run_task(bad).await.is_err());
 }

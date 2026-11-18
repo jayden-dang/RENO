@@ -39,6 +39,7 @@ async fn a_run_is_torn_down_only_once_no_login_refresh_is_in_flight() {
     std::fs::create_dir(&held).unwrap();
 
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "hello".into(),

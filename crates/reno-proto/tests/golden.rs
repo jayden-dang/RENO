@@ -210,6 +210,7 @@ fn exec_event_every_variant() {
 #[test]
 fn exec_spec() {
     let full = ExecSpec {
+        model_options: Default::default(),
         run_id: run_id(),
         inherit_user_config: true,
         prompt: "fix it".into(),
@@ -242,6 +243,7 @@ fn exec_spec() {
     );
 
     let minimal = ExecSpec {
+        model_options: Default::default(),
         run_id: run_id(),
         inherit_user_config: false,
         prompt: "p".into(),
@@ -311,7 +313,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "executor.maintain", "run.changes", "executor.usage"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "executor.maintain", "run.changes", "executor.usage"],
                "pid": 4242}),
     );
 }
@@ -588,6 +590,7 @@ fn daemon_shutdown() {
 
 fn run_summary(prompt: Option<&str>, model: Option<&str>) -> RunSummary {
     RunSummary {
+        model_options: Default::default(),
         effort: None,
         run_id: run_id(),
         task_id: "task_01HZX8".parse().unwrap(),
@@ -699,6 +702,7 @@ fn task_run_params_old_and_new_shapes() {
     // A client that predates `bot` sends exactly this, and it still parses.
     golden(
         &TaskRunParams {
+            model_options: Default::default(),
             effort: None,
             prompt: "go".into(),
             executor: Some("mock".parse().unwrap()),
@@ -712,6 +716,7 @@ fn task_run_params_old_and_new_shapes() {
     );
     golden(
         &TaskRunParams {
+            model_options: Default::default(),
             effort: None,
             prompt: "go".into(),
             executor: None,
@@ -1110,6 +1115,7 @@ fn executor_health_on_the_wire() {
                 account: Some("me@example.com".into()),
             },
             models: ModelCatalog::live(vec![ModelInfo {
+                options: Vec::new(),
                 default_effort: None,
                 efforts: vec![],
                 id: "gpt-6".into(),
@@ -1699,4 +1705,67 @@ fn project_rules() {
         json!({"project": "/Users/x/porch", "effect": "deny", "command": "git push --force",
                "tool": "exec", "expiresInSecs": 60}),
     );
+}
+
+#[test]
+fn run_context() {
+    golden(
+        &ExecEvent::ContextUsage {
+            tokens: Some(84_213),
+            window: Some(200_000),
+        },
+        json!({"type": "context_usage", "tokens": 84_213, "window": 200_000}),
+    );
+    golden(
+        &ExecEvent::ContextUsage {
+            tokens: None,
+            window: Some(1_000_000),
+        },
+        json!({"type": "context_usage", "window": 1_000_000}),
+    );
+    golden(
+        &ContextUsage {
+            tokens: Some(1),
+            window: None,
+        },
+        json!({"tokens": 1, "window": null}),
+    );
+    golden(
+        &ModelInfo {
+            id: "claude-opus-5-5".into(),
+            display_name: None,
+            description: None,
+            efforts: vec![],
+            default_effort: None,
+            options: vec![ModelOption {
+                id: MODEL_OPTION_CONTEXT_WINDOW.into(),
+                label: "Context window".into(),
+                choices: vec![
+                    ModelOptionChoice {
+                        id: CONTEXT_WINDOW_200K.into(),
+                        label: "200K".into(),
+                    },
+                    ModelOptionChoice {
+                        id: CONTEXT_WINDOW_1M.into(),
+                        label: "1M".into(),
+                    },
+                ],
+                default_choice: CONTEXT_WINDOW_1M.into(),
+            }],
+        },
+        json!({"id": "claude-opus-5-5", "options": [{
+            "id": "contextWindow", "label": "Context window",
+            "choices": [{"id": "200k", "label": "200K"}, {"id": "1m", "label": "1M"}],
+            "defaultChoice": "1m"}]}),
+    );
+    golden(
+        &TaskRunParams {
+            prompt: "p".into(),
+            model_options: [("contextWindow".to_owned(), "200k".to_owned())].into(),
+            ..TaskRunParams::default()
+        },
+        json!({"prompt": "p", "modelOptions": {"contextWindow": "200k"}}),
+    );
+    assert_eq!(FEATURE_RUN_CONTEXT, "run.context");
+    assert!(FEATURES.contains(&FEATURE_RUN_CONTEXT));
 }

@@ -33,6 +33,7 @@ async fn managed_install_reaches_started() {
 
     let (controls, handle) = ExecControls::new(1);
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "say the word ok and stop".into(),

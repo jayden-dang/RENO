@@ -422,6 +422,7 @@ pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
             None => (None, id),
         };
         let model = ModelInfo {
+            options: Vec::new(),
             default_effort: None,
             efforts: vec![],
             id: id.to_owned(),

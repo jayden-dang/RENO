@@ -40,6 +40,7 @@ fn a_routing_warning_is_on_the_wire_and_absent_when_there_is_none() {
 fn task_run_in_place_is_opt_in_and_omitted_when_off() {
     golden(
         &TaskRunParams {
+            model_options: Default::default(),
             effort: None,
             prompt: "go".into(),
             executor: None,

@@ -507,6 +507,7 @@ impl AcpExecutor {
             .models
             .iter()
             .map(|(id, name)| ModelInfo {
+                options: Vec::new(),
                 default_effort: None,
                 efforts: vec![],
                 id: (*id).to_owned(),
@@ -1934,6 +1935,7 @@ mod tests {
     #[test]
     fn a_bots_instructions_lead_the_opening_prompt() {
         let mut spec = ExecSpec {
+            model_options: Default::default(),
             run_id: reno_proto::RunId::from_suffix("a").unwrap(),
             inherit_user_config: false,
             prompt: "do it".into(),

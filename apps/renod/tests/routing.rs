@@ -116,6 +116,7 @@ macro_rules! daemon_test {
 
 fn task(bot: Option<&str>) -> TaskRunParams {
     TaskRunParams {
+        model_options: Default::default(),
         effort: None,
         prompt: "go".into(),
         executor: None,

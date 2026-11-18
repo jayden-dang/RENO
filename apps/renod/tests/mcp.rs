@@ -92,6 +92,7 @@ impl Live {
 async fn start(fx: &Fixture, bot: Option<&str>) -> Live {
     let before = fx.executors.hold.log().specs.len();
     let run = within(fx.client.run_task(TaskRunParams {
+        model_options: Default::default(),
         effort: None,
         prompt: "go".into(),
         executor: bot.is_none().then(|| common::id("mock-hold")),
@@ -746,6 +747,7 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
     unauthorized(within(run.list_executors()).await.unwrap_err());
     unauthorized(
         within(run.run_task(TaskRunParams {
+            model_options: Default::default(),
             effort: None,
             prompt: "do more".into(),
             executor: Some(common::id("mock")),

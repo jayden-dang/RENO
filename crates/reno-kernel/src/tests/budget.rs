@@ -826,3 +826,49 @@ fn a_weight_past_a_full_one_is_clamped_to_a_full_one() {
     assert_eq!(cfg.cache_read_permille(), 1000);
     assert_eq!(config(1).cache_read_permille(), 100);
 }
+
+#[tokio::test(start_paused = true)]
+async fn context_usage_is_journalled_and_never_counted_by_a_budget() {
+    // A context of 5M tokens against a 1_000 ceiling: it is occupancy, not spend.
+    let fx = fx_with(
+        "max_concurrent_runs = 2\ndaily_token_ceiling = 1000",
+        [
+            MockStep::Emit(ExecEvent::ContextUsage {
+                tokens: Some(5_000_000),
+                window: Some(10_000_000),
+            }),
+            usage(10, 10),
+            MockStep::Emit(ExecEvent::ContextUsage {
+                tokens: Some(5_000_100),
+                window: None,
+            }),
+        ],
+        config(8),
+    )
+    .await;
+    let run = as_bot(&fx, "keeper").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let journal = fx.journal_with_done(&run).await;
+    let kinds: Vec<&str> = journal
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ExecEvent::ContextUsage { .. } => Some("context"),
+            ExecEvent::Usage { .. } => Some("usage"),
+            ExecEvent::Done { .. } => Some("done"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["context", "usage", "context", "done"]);
+    let status = fx.kernel.budget_status().await.unwrap();
+    let keeper = status.bots.iter().find(|b| b.bot == "keeper").unwrap();
+    assert_eq!(keeper.tokens_today, 20);
+    let own = fx.store.run_usage(&run).await.unwrap();
+    assert_eq!((own.input, own.output), (10, 10));
+    // The fold the app uses reads the occupancy and never the billing.
+    let events: Vec<ExecEvent> = journal.into_iter().map(|(_, e)| e).collect();
+    let context = reno_proto::ContextUsage::latest(&events);
+    assert_eq!(
+        (context.tokens, context.window),
+        (Some(5_000_100), Some(10_000_000))
+    );
+}

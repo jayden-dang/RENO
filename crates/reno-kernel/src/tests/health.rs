@@ -378,6 +378,7 @@ async fn a_probe_that_never_finishes_is_given_up_on_and_does_not_block_a_run() {
 #[tokio::test(start_paused = true)]
 async fn the_listed_models_are_the_ones_the_health_labels() {
     let live = ModelCatalog::live(vec![reno_proto::ModelInfo {
+        options: Vec::new(),
         default_effort: None,
         efforts: vec![],
         id: "live-1".into(),

@@ -26,6 +26,7 @@ pub(super) async fn live_models(
     kill_grace: Duration,
 ) -> Option<LiveModels> {
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("probe").ok()?,
         inherit_user_config: false,
         prompt: String::new(),
@@ -69,5 +70,10 @@ pub(super) async fn live_models(
     };
     let found = tokio::time::timeout(budget, asked).await.ok().flatten();
     child.shutdown(kill_grace).await;
-    found
+    found.map(|mut live| {
+        for model in &mut live.models {
+            model.options = super::catalog::options_for(&model.id);
+        }
+        live
+    })
 }

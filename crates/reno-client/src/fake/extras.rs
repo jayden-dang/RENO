@@ -374,9 +374,30 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             _ => (vec![], None),
         }
     };
+    // The context-window choice, as the Claude catalog offers it: Opus 5.5 runs 1M by itself
+    // (default 1m); the fake's Sonnet 5.5 defaults to 200k so both defaults can be shown.
+    let options = |id: &str| -> Vec<reno_proto::ModelOption> {
+        let default_choice = match id {
+            "claude-opus-5-5" => "1m",
+            "claude-sonnet-5-5" => "200k",
+            _ => return Vec::new(),
+        };
+        vec![reno_proto::ModelOption {
+            id: reno_proto::MODEL_OPTION_CONTEXT_WINDOW.to_owned(),
+            label: "Context window".to_owned(),
+            choices: [("200k", "200K"), ("1m", "1M")]
+                .map(|(id, label)| reno_proto::ModelOptionChoice {
+                    id: id.to_owned(),
+                    label: label.to_owned(),
+                })
+                .into(),
+            default_choice: default_choice.to_owned(),
+        }]
+    };
     let models = |ids: &[(&str, &str)]| {
         ids.iter()
             .map(|(id, name)| ModelInfo {
+                options: options(id),
                 default_effort: efforts(id).1,
                 efforts: efforts(id).0,
                 id: (*id).to_owned(),

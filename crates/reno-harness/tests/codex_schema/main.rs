@@ -254,6 +254,7 @@ async fn record(s: &Scenario) -> Recorded {
     let dir = tempfile::tempdir().unwrap();
     let (executor, log) = recording_executor(dir.path());
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZXD").unwrap(),
         prompt: s.prompt.into(),
         cwd: PathBuf::from("/tmp"),

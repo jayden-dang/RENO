@@ -55,6 +55,7 @@ fn antigravity() -> AcpExecutor {
 
 fn spec(prompt: &str) -> ExecSpec {
     ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: prompt.into(),
@@ -336,7 +337,12 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
         ))
     }));
 
-    // Plans, command lists, context gauges and unknown updates have no place in the contract.
+    // The agent's `usage_update` gauge is the run's context occupancy.
+    assert!(events.contains(&ExecEvent::ContextUsage {
+        tokens: Some(1200),
+        window: Some(500_000)
+    }));
+    // Plans, command lists and unknown updates have no place in the contract.
     let known = |e: &ExecEvent| {
         matches!(
             e,
@@ -345,6 +351,7 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
                 | ExecEvent::Reasoning { .. }
                 | ExecEvent::Tool { .. }
                 | ExecEvent::ToolResult { .. }
+                | ExecEvent::ContextUsage { .. }
                 | ExecEvent::Done { .. }
         )
     };

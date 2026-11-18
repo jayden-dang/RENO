@@ -149,6 +149,7 @@ impl MockExecutor {
                 deterministic_turn_end: true,
                 plan_mode: false,
                 models: vec![ModelInfo {
+                    options: Vec::new(),
                     default_effort: None,
                     efforts: vec![],
                     id: "mock-1".into(),
@@ -434,6 +435,7 @@ mod tests {
 
     fn spec(access: AccessMode) -> ExecSpec {
         ExecSpec {
+            model_options: Default::default(),
             run_id: RunId::from_suffix("01HZX9").unwrap(),
             inherit_user_config: false,
             prompt: "do it".into(),

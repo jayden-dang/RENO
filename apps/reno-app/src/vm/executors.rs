@@ -1276,6 +1276,7 @@ mod tests {
             detail: "words for a person, never read".into(),
         };
         let run = |status: RunStatus, stop: Option<StopDetail>| RunSummary {
+            model_options: Default::default(),
             effort: None,
             run_id: RunId::from_suffix("r1").unwrap(),
             task_id: "task_t1".parse().unwrap(),

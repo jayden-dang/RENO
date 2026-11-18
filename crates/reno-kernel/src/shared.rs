@@ -493,6 +493,21 @@ fn requested_effort(spec: &serde_json::Value) -> Option<reno_proto::Effort> {
     reno_proto::Effort::from_word(spec.get("effort")?.as_str()?)
 }
 
+/// The model option choices a task asked for, from its spec (`{"modelOptions": {id: choice}}`).
+pub(crate) fn requested_model_options(
+    spec: &serde_json::Value,
+) -> std::collections::BTreeMap<String, String> {
+    spec.get("modelOptions")
+        .and_then(serde_json::Value::as_object)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|(id, choice)| Some((id.clone(), choice.as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `prompt` cut to `PROMPT_SUMMARY_CHARS` characters (on a char boundary), with `…` when cut.
 fn truncate_prompt(prompt: &str) -> String {
     match prompt.char_indices().nth(PROMPT_SUMMARY_CHARS) {
@@ -524,6 +539,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         _ => None,
     };
     RunSummary {
+        model_options: requested_model_options(&row.spec),
         effort: requested_effort(&row.spec),
         run_id: row.id.clone(),
         task_id: row.task_id.clone(),

@@ -179,6 +179,11 @@ pub struct ExecSpec {
     /// Reasoning effort override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
+    /// Per-model option choices (option id to choice id), each one the model lists
+    /// (`ModelInfo::options`). Applied when the harness starts: a changed choice is launch-time
+    /// only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_options: BTreeMap<String, String>,
     /// Access granted to the harness.
     pub access: AccessMode,
     /// Sandbox the harness must enforce.
@@ -217,6 +222,7 @@ impl std::fmt::Debug for ExecSpec {
             .field("model", &self.model)
             .field("instructions", &self.instructions)
             .field("effort", &self.effort)
+            .field("model_options", &self.model_options)
             .field("access", &self.access)
             .field("sandbox", &self.sandbox)
             .field("resume", &self.resume)
@@ -513,6 +519,19 @@ pub enum ExecEvent {
         /// The model now in use, as the harness resolved it (`claude-sonnet-5-5` for `sonnet`).
         model: String,
     },
+    /// The latest occupancy of the model's context window: how many tokens the next model call
+    /// starts from, and how many the window holds. Not billing (that is `Usage`, which adds up;
+    /// this replaces itself): never derive one from the other. A field the harness did not say
+    /// is absent and means "unchanged", see [`ContextUsage::apply`]. Only daemons that negotiate
+    /// the `run.context` feature emit it; older clients skip it.
+    ContextUsage {
+        /// Tokens now in the context, when the harness says.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+        /// Size of the context window, when the harness says.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// A message from the human, added by `run.steer`. Only daemons that negotiate the
     /// `run.steer` feature emit it.
     UserMessage {
@@ -575,6 +594,168 @@ pub struct ModelInfo {
     /// The level the model uses when none is asked for, when the harness says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_effort: Option<Effort>,
+    /// Per-model options a run may choose at launch (the context window of a Claude model).
+    /// Empty: none. Needs feature `run.context`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ModelOption>,
+}
+
+/// The id of the context-window option of a model ([`ModelOption::id`]), whose choices are
+/// [`CONTEXT_WINDOW_200K`] and [`CONTEXT_WINDOW_1M`].
+pub const MODEL_OPTION_CONTEXT_WINDOW: &str = "contextWindow";
+/// The `200k` choice of [`MODEL_OPTION_CONTEXT_WINDOW`].
+pub const CONTEXT_WINDOW_200K: &str = "200k";
+/// The `1m` choice of [`MODEL_OPTION_CONTEXT_WINDOW`].
+pub const CONTEXT_WINDOW_1M: &str = "1m";
+
+/// A launch-time setting a model offers besides effort, as a closed set of choices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    /// What `task.run`'s `modelOptions` names it by (`contextWindow`).
+    pub id: String,
+    /// Display name.
+    pub label: String,
+    /// The values it takes.
+    pub choices: Vec<ModelOptionChoice>,
+    /// The choice id used when none is asked for.
+    pub default_choice: String,
+}
+
+/// One value of a [`ModelOption`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOptionChoice {
+    /// What `modelOptions` names it by (`1m`).
+    pub id: String,
+    /// Display name.
+    pub label: String,
+}
+
+/// How full the model's context is: the latest of what `ExecEvent::ContextUsage` reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Tokens in the context, when known.
+    pub tokens: Option<u64>,
+    /// Size of the window, when known.
+    pub window: Option<u64>,
+}
+
+impl ContextUsage {
+    /// Merge a report: a field it does not carry keeps its previous value, a window of 0 is
+    /// ignored (a harness that does not know says 0), and 0 tokens is valid (a compaction
+    /// emptied the context).
+    pub fn apply(&mut self, tokens: Option<u64>, window: Option<u64>) {
+        self.tokens = tokens.or(self.tokens);
+        self.window = window.filter(|n| *n > 0).or(self.window);
+    }
+
+    /// Tokens over window, when both are known.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn fraction(self) -> Option<f64> {
+        Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
+    }
+
+    /// Fold a run's journal: the usage after its last `ContextUsage` event. Never reads
+    /// `Usage`, which is billing.
+    pub fn latest<'a>(events: impl IntoIterator<Item = &'a ExecEvent>) -> Self {
+        let mut usage = Self::default();
+        for event in events {
+            if let ExecEvent::ContextUsage { tokens, window } = event {
+                usage.apply(*tokens, *window);
+            }
+        }
+        usage
+    }
+}
+
+#[cfg(test)]
+mod context_usage_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_field_keeps_its_previous_value() {
+        let mut usage = ContextUsage::default();
+        usage.apply(Some(150_000), Some(200_000));
+        usage.apply(None, Some(1_000_000));
+        assert_eq!(
+            (usage.tokens, usage.window),
+            (Some(150_000), Some(1_000_000))
+        );
+        usage.apply(Some(90_000), None);
+        assert_eq!(
+            (usage.tokens, usage.window),
+            (Some(90_000), Some(1_000_000))
+        );
+    }
+
+    #[test]
+    fn a_zero_window_is_ignored_and_zero_tokens_are_valid() {
+        let mut usage = ContextUsage::default();
+        usage.apply(Some(150_000), Some(200_000));
+        usage.apply(Some(0), Some(0));
+        assert_eq!((usage.tokens, usage.window), (Some(0), Some(200_000)));
+        let mut empty = ContextUsage::default();
+        empty.apply(None, Some(0));
+        assert_eq!(empty, ContextUsage::default());
+    }
+
+    #[test]
+    fn the_fraction_needs_both_and_a_window() {
+        let usage = ContextUsage {
+            tokens: Some(50),
+            window: Some(200),
+        };
+        assert_eq!(usage.fraction(), Some(0.25));
+        assert_eq!(
+            ContextUsage {
+                tokens: Some(1),
+                window: None
+            }
+            .fraction(),
+            None
+        );
+        assert_eq!(
+            ContextUsage {
+                tokens: None,
+                window: Some(1)
+            }
+            .fraction(),
+            None
+        );
+        assert_eq!(
+            ContextUsage {
+                tokens: Some(1),
+                window: Some(0)
+            }
+            .fraction(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_journal_folds_to_the_last_report_and_ignores_billing() {
+        let events = [
+            ExecEvent::ContextUsage {
+                tokens: Some(10),
+                window: Some(200_000),
+            },
+            ExecEvent::Usage {
+                input_tokens: 999_999,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            ExecEvent::ContextUsage {
+                tokens: Some(30),
+                window: None,
+            },
+        ];
+        let usage = ContextUsage::latest(&events);
+        assert_eq!((usage.tokens, usage.window), (Some(30), Some(200_000)));
+        assert_eq!(ContextUsage::latest(&events[1..2]), ContextUsage::default());
+    }
 }
 
 /// Harness CLI versions an adapter supports.

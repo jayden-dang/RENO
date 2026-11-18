@@ -156,7 +156,8 @@ impl Client {
     }
 
     /// `task.run`: creates a task and its first run. Running as a `bot` needs feature `defs`;
-    /// leaving the executor to the router, or `in_place`, needs feature `routing`.
+    /// leaving the executor to the router, or `in_place`, needs feature `routing`; `model_options`
+    /// needs `run.context`.
     pub async fn run_task(&self, params: TaskRunParams) -> Result<RunId, ClientError> {
         Ok(self.submit_task(params).await?.run_id)
     }
@@ -169,6 +170,9 @@ impl Client {
         }
         if !params.attachments.is_empty() {
             self.require(reno_proto::FEATURE_ATTACHMENTS)?;
+        }
+        if !params.model_options.is_empty() {
+            self.require(reno_proto::FEATURE_RUN_CONTEXT)?;
         }
         if params.in_place || (params.executor.is_none() && params.bot.is_none()) {
             self.require(reno_proto::FEATURE_ROUTING)?;

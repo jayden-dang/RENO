@@ -5,7 +5,59 @@
 //! fallback: the probe's live `initialize` handshake (see `discover`) replaces it, and its
 //! aliases join [`aliases`], whenever the CLI answers.
 
-use reno_proto::ModelInfo;
+use reno_proto::{
+    CONTEXT_WINDOW_1M, CONTEXT_WINDOW_200K, MODEL_OPTION_CONTEXT_WINDOW, ModelInfo, ModelOption,
+    ModelOptionChoice,
+};
+
+/// The 200K/1M context-window option. The 1M window is selected by a model-id suffix
+/// (`<model>[1m]`), exactly how the CLI does it. Default 200K: the plain id runs 200K.
+pub(super) fn context_window() -> ModelOption {
+    ModelOption {
+        id: MODEL_OPTION_CONTEXT_WINDOW.into(),
+        label: "Context window".into(),
+        choices: vec![
+            ModelOptionChoice {
+                id: CONTEXT_WINDOW_200K.into(),
+                label: "200K".into(),
+            },
+            ModelOptionChoice {
+                id: CONTEXT_WINDOW_1M.into(),
+                label: "1M".into(),
+            },
+        ],
+        default_choice: CONTEXT_WINDOW_200K.into(),
+    }
+}
+
+/// The context-window option of the models whose plain id already runs the 1M window: left
+/// unset they run at 1M, so the option says so, and an explicit 200K is enforced at launch with
+/// `CLAUDE_CODE_DISABLE_1M_CONTEXT` (upstream zeron#1083).
+pub(super) fn native_1m_context_window() -> ModelOption {
+    ModelOption {
+        default_choice: CONTEXT_WINDOW_1M.into(),
+        ..context_window()
+    }
+}
+
+/// The curated table of models that offer the context-window choice (the CLI's `initialize`
+/// reports no 1M flag): the long-context rows, by id. Absent means the model has no option.
+const NATIVE_1M: &[&str] = &[
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-sonnet-5",
+];
+
+/// The per-model options Reno offers for the Claude model `id`: empty for a model not in the
+/// curated table.
+pub(super) fn options_for(id: &str) -> Vec<ModelOption> {
+    if NATIVE_1M.contains(&id) {
+        vec![native_1m_context_window()]
+    } else {
+        Vec::new()
+    }
+}
 
 /// The curated models, best first: `(id, display name)`. Which CLI versions list each is in
 /// [`MIN_CLI`].
@@ -83,6 +135,7 @@ pub(super) fn supported_models(cli: Option<&str>) -> Vec<ModelInfo> {
         .iter()
         .filter(|(id, _)| !too_old_for(id, cli))
         .map(|(id, label)| ModelInfo {
+            options: options_for(id),
             default_effort: None,
             efforts: vec![],
             id: (*id).into(),
@@ -129,6 +182,35 @@ mod tests {
         assert!(all.iter().any(|a| a == "opusplan"));
         assert_eq!(all.iter().filter(|a| *a == "sonnet").count(), 1);
         assert!(all.iter().any(|a| a == "newalias"));
+    }
+
+    #[test]
+    fn only_the_long_context_models_offer_the_window_choice() {
+        let models = supported_models(None);
+        let offering: Vec<&str> = models
+            .iter()
+            .filter(|m| !m.options.is_empty())
+            .map(|m| &*m.id)
+            .collect();
+        assert_eq!(
+            offering,
+            [
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-5-5",
+                "claude-sonnet-5"
+            ]
+        );
+        let opus = models.iter().find(|m| m.id == "claude-opus-5-5").unwrap();
+        let option = &opus.options[0];
+        assert_eq!(option.id, "contextWindow");
+        assert_eq!(option.default_choice, "1m");
+        let choices: Vec<&str> = option.choices.iter().map(|c| &*c.id).collect();
+        assert_eq!(choices, ["200k", "1m"]);
+        assert!(options_for("claude-haiku-4-5").is_empty());
+        assert!(options_for("claude-opus-5-5-unheard-of").is_empty());
+        // The plain constructor defaults to 200K.
+        assert_eq!(context_window().default_choice, "200k");
     }
 
     #[test]
