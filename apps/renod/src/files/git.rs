@@ -22,15 +22,44 @@ const MAX_OUTPUT: u64 = 64 * 1024 * 1024;
 /// A git command in `dir`, read-only and quiet.
 fn command(dir: &Path) -> Command {
     let mut git = Command::new("git");
+    // The same hygiene as `reno_harness::proc::git_workspace` (no hooks, no fsmonitor daemon, no
+    // lock, no prompt, nothing that redirects git), plus the settings the parsers below depend
+    // on, pinned so a person's own git configuration cannot change what they read.
     git.current_dir(dir)
-        .arg("-c")
-        .arg("core.quotepath=off")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotepath=off",
+            "-c",
+            "status.renames=true",
+            "-c",
+            "grep.column=false",
+            "-c",
+            "grep.fullName=false",
+            "-c",
+            "color.ui=false",
+        ])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    ] {
+        git.env_remove(key);
+    }
     git
 }
 
@@ -250,6 +279,60 @@ pub(crate) async fn list_files(dir: &Path) -> Result<Option<Vec<String>>, FsErro
     Ok(Some(files))
 }
 
+/// Which of `paths` (relative to `dir`; a directory written with a trailing `/`) git ignores.
+/// Tracked paths are never ignored. Empty when `dir` is in no repository.
+pub(crate) async fn ignored(
+    dir: &Path,
+    paths: &[String],
+) -> Result<std::collections::HashSet<String>, FsError> {
+    if paths.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut child = command(dir)
+        .args(["check-ignore", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|error| FsError::Git(format!("cannot run git: {error}")))?;
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let work = async {
+        let write = async {
+            if let Some(stdin) = stdin.as_mut() {
+                let _ = tokio::io::AsyncWriteExt::write_all(stdin, &input).await;
+            }
+            // Closing stdin lets git finish.
+            drop(stdin.take());
+        };
+        let mut out = Vec::new();
+        let read = async {
+            if let Some(stdout) = stdout.as_mut() {
+                let _ = stdout.take(MAX_OUTPUT).read_to_end(&mut out).await;
+            }
+        };
+        tokio::join!(write, read);
+        let status = child.wait().await;
+        (status, out)
+    };
+    let (status, out) = tokio::time::timeout(GIT_TIMEOUT, work)
+        .await
+        .map_err(|_| FsError::Git("git check-ignore timed out".to_owned()))?;
+    // 0: some are ignored; 1: none are; anything else: not a repository, or git failed.
+    if !matches!(status.map(|s| s.code()), Ok(Some(0))) {
+        return Ok(std::collections::HashSet::new());
+    }
+    Ok(out
+        .split(|b| *b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect())
+}
+
 /// What a content search asks for.
 #[derive(Debug, Clone)]
 pub(crate) struct Grep<'a> {
@@ -264,6 +347,8 @@ pub(crate) struct Grep<'a> {
 pub(crate) struct Hit {
     pub(crate) path: String,
     pub(crate) line: u32,
+    /// Byte offset of the first match, from 0.
+    pub(crate) column: u32,
     pub(crate) text: String,
 }
 
@@ -287,7 +372,7 @@ async fn grep_in(
     no_index: bool,
 ) -> Result<Option<(Vec<Hit>, bool)>, FsError> {
     let mut git = command(dir);
-    git.args(["grep", "-n", "-z", "-I", "--no-color"]);
+    git.args(["grep", "-n", "--column", "-z", "-I", "--no-color"]);
     if no_index {
         git.args(["--no-index", "--exclude-standard"]);
     } else {
@@ -361,15 +446,17 @@ async fn grep_in(
     }
 }
 
-/// `path NUL line NUL text` of one `git grep -n -z` line.
+/// `path NUL line NUL column NUL text` of one `git grep -n --column -z` line.
 fn parse_hit(line: &[u8]) -> Option<Hit> {
-    let mut parts = line.splitn(3, |b| *b == 0);
+    let mut parts = line.splitn(4, |b| *b == 0);
     let path = String::from_utf8_lossy(parts.next()?).into_owned();
     let number: u32 = std::str::from_utf8(parts.next()?).ok()?.parse().ok()?;
+    let column: u32 = std::str::from_utf8(parts.next()?).ok()?.parse().ok()?;
     let text = String::from_utf8_lossy(parts.next()?);
     Some(Hit {
         path,
         line: number,
+        column: column.saturating_sub(1),
         text: text.chars().take(HIT_CHARS).collect(),
     })
 }
@@ -450,16 +537,17 @@ mod tests {
 
     #[test]
     fn a_grep_line_splits_on_its_separators_and_cuts_a_long_text() {
-        let hit = parse_hit(b"d e/b c.txt\x007\x00x: hello").unwrap();
+        let hit = parse_hit(b"d e/b c.txt\x007\x003\x00x: hello").unwrap();
         assert_eq!(
             hit,
             Hit {
                 path: "d e/b c.txt".into(),
                 line: 7,
+                column: 2,
                 text: "x: hello".into()
             }
         );
-        let mut long = b"a.txt\x001\x00".to_vec();
+        let mut long = b"a.txt\x001\x001\x00".to_vec();
         long.extend(std::iter::repeat_n(b'x', 900));
         assert_eq!(parse_hit(&long).unwrap().text.chars().count(), HIT_CHARS);
         assert_eq!(parse_hit(b"no separators"), None);

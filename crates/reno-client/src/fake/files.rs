@@ -216,6 +216,8 @@ fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
                     Node::File(bytes) => Some(bytes.len() as u64),
                 },
                 mtime_ms: Some(super::data::NOW_MS - 60_000),
+                // The demo tree has one ignored directory, as a build output is.
+                ignored: path == "many",
             })
         })
         .collect();
@@ -276,6 +278,8 @@ fn read(p: &FsReadParams, place: &Place) -> Result<FsReadResult, ErrorObject> {
             line_ending: LineEnding::None,
             size,
             binary: true,
+            content_hash: None,
+            mtime_ms: Some(super::data::NOW_MS - 60_000),
             in_place: place.in_place,
         });
     }
@@ -295,6 +299,8 @@ fn read(p: &FsReadParams, place: &Place) -> Result<FsReadResult, ErrorObject> {
         encoding: "utf-8".to_owned(),
         size,
         binary: false,
+        content_hash: Some(image_hash(&bytes[..bytes.len().min(FS_READ_MAX_BYTES)])),
+        mtime_ms: Some(super::data::NOW_MS - 60_000),
         in_place: place.in_place,
     })
 }
@@ -401,6 +407,7 @@ fn search_content(
                 matches.push(FsContentMatch {
                     path: path.clone(),
                     line: u32::try_from(n + 1).unwrap_or(u32::MAX),
+                    column: u32::try_from(hay.find(&needle).unwrap_or(0)).unwrap_or(0),
                     text: line.to_owned(),
                 });
             }
@@ -472,6 +479,11 @@ pub(super) fn add(router: Router, shared: &Arc<Shared>) -> Router {
             Ok(GitStatusResult {
                 branch: place.repo.then(|| place.branch.clone()),
                 repo: place.repo,
+                revision: if place.repo {
+                    "demo-1".to_owned()
+                } else {
+                    String::new()
+                },
                 files: if place.repo {
                     status_files()
                 } else {

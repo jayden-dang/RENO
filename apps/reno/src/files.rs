@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::bail;
 use clap::{Args, Subcommand};
+use futures::StreamExt;
 use reno_client::{Client, ClientError};
 use reno_proto::{
     FS_LIST_MAX_LIMIT, FsEntry, FsEntryKind, FsListParams, FsListResult, FsReadParams,
@@ -29,6 +30,29 @@ pub(crate) enum FsCommand {
     /// Find lines that contain a text, with `git grep`: `path:line:text`. Exit status 1 when
     /// nothing matches.
     Grep(FsGrep),
+    /// Write an image (png, jpg, gif, webp or svg, up to 8 MiB) of a run's worktree, whole and
+    /// checked against its hash, to a file or to stdout.
+    Image(FsImage),
+    /// Follow the changes of a run's worktree: one line for each settled burst (the directories
+    /// that changed), until interrupted. The daemon watches only while this runs.
+    Watch(FsWatch),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FsImage {
+    /// The run.
+    pub(crate) run: RunId,
+    /// The image, relative to the worktree root.
+    pub(crate) path: String,
+    /// Write to this file instead of stdout.
+    #[arg(long, short = 'o', value_name = "FILE")]
+    pub(crate) out: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct FsWatch {
+    /// The run.
+    pub(crate) run: RunId,
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +119,8 @@ pub(crate) async fn fs(env: &Env, command: FsCommand) -> anyhow::Result<ExitCode
         FsCommand::Cat(args) => cat(env, args).await,
         FsCommand::Find(args) => find(env, args).await,
         FsCommand::Grep(args) => grep(env, args).await,
+        FsCommand::Image(args) => image(env, args).await,
+        FsCommand::Watch(args) => watch(env, args).await,
     }
 }
 
@@ -250,6 +276,73 @@ async fn grep(env: &Env, args: FsGrep) -> anyhow::Result<ExitCode> {
     })
 }
 
+async fn image(env: &Env, args: FsImage) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let (mime, bytes) = client
+        .fs_read_image_all(args.run, args.path)
+        .await
+        .map_err(|e| env.explain(e))?;
+    match &args.out {
+        Some(file) => {
+            std::fs::write(file, &bytes)
+                .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", file.display()))?;
+            print_note(format!(
+                "{mime}, {} bytes -> {}",
+                bytes.len(),
+                file.display()
+            ))?;
+        }
+        None => io::stdout().lock().write_all(&bytes)?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn watch(env: &Env, args: FsWatch) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let mut changes = client
+        .watch_fs(args.run)
+        .await
+        .map_err(|e| env.explain(e))?;
+    while let Some(change) = changes.next().await {
+        let change = change.map_err(|e| env.explain(e))?;
+        if env.json {
+            print_json(&change)?;
+        } else {
+            print_line(change_line(&change))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One burst on one line.
+fn change_line(change: &reno_proto::FsChange) -> String {
+    if change.degraded {
+        return "live updates are down; retrying".to_owned();
+    }
+    let mut parts = Vec::new();
+    if change.overflow {
+        parts.push("rescan everything".to_owned());
+    }
+    if !change.dirs.is_empty() {
+        let dirs: Vec<String> = change
+            .dirs
+            .iter()
+            .map(|d| {
+                if d.is_empty() {
+                    "./".to_owned()
+                } else {
+                    format!("{d}/")
+                }
+            })
+            .collect();
+        parts.push(format!("changed: {}", dirs.join(" ")));
+    }
+    if change.git {
+        parts.push("git state moved".to_owned());
+    }
+    parts.join("; ")
+}
+
 async fn status(env: &Env, args: GitStatusArgs) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
     let status = client
@@ -328,6 +421,7 @@ mod tests {
         let status = GitStatusResult {
             branch: Some("reno/thr_1".into()),
             repo: true,
+            revision: String::new(),
             files: vec![
                 file("a.rs", None, GitChange::Unmodified, GitChange::Modified),
                 file(
@@ -367,10 +461,31 @@ mod tests {
         let none = GitStatusResult {
             branch: None,
             repo: false,
+            revision: String::new(),
             files: vec![],
             in_place: true,
         };
         assert_eq!(status_lines(&none).len(), 1);
+    }
+
+    #[test]
+    fn a_burst_reads_on_one_line() {
+        let burst = reno_proto::FsChange {
+            dirs: vec![String::new(), "src/a".into()],
+            git: true,
+            ..Default::default()
+        };
+        assert_eq!(change_line(&burst), "changed: ./ src/a/; git state moved");
+        let lost = reno_proto::FsChange {
+            overflow: true,
+            ..Default::default()
+        };
+        assert_eq!(change_line(&lost), "rescan everything");
+        let down = reno_proto::FsChange {
+            degraded: true,
+            ..Default::default()
+        };
+        assert!(change_line(&down).contains("down"));
     }
 
     #[test]
@@ -381,6 +496,7 @@ mod tests {
             kind,
             size,
             mtime_ms: None,
+            ignored: false,
         };
         assert_eq!(
             entry_line(&entry(FsEntryKind::Dir, None)),

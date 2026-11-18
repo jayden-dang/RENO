@@ -58,7 +58,20 @@ fn repo(fx: &Fixture) -> PathBuf {
     let dir = fx.dir.path().canonicalize().unwrap().join("proj");
     std::fs::create_dir_all(&dir).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
-    put(&dir, ".gitignore", "ignored/\n*.log\n");
+    // A person's own git configuration must not change what is read: each of these would break
+    // a parser that did not pin its own settings on the command line.
+    for (key, value) in [
+        ("status.renames", "false"),
+        ("status.showUntrackedFiles", "no"),
+        ("grep.column", "true"),
+        ("grep.fullName", "true"),
+        ("grep.lineNumber", "false"),
+        ("color.ui", "always"),
+        ("core.quotePath", "true"),
+    ] {
+        git(&dir, &["config", key, value]);
+    }
+    put(&dir, ".gitignore", "ignored/\n*.log\ntarget/\n");
     put(&dir, "src/lib.rs", "fn alpha() {}\nfn beta() {}\n");
     put(&dir, "src/main.rs", "fn main() { alpha(); }\n");
     put(&dir, "README.md", "Alpha readme\n");
@@ -171,7 +184,31 @@ async fn a_live_runs_worktree_is_listed_read_and_hides_git() {
     );
     assert!(!root.in_place);
     assert_eq!(root.entries[0].kind, FsEntryKind::Dir);
-    assert_eq!(root.entries[2].size, Some(15));
+    assert_eq!(root.entries[2].size, Some(23));
+    assert!(root.entries.iter().all(|e| !e.ignored));
+
+    // What git ignores is flagged, so the tree can dim it; a tracked file is never ignored,
+    // whatever the patterns say.
+    put(&tree, "ignored/skip.rs", "x");
+    put(&tree, "debug.log", "x");
+    let again = within(fx.client.fs_list(list(&run, ""))).await.unwrap();
+    let flagged: Vec<(&str, bool)> = again
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.ignored))
+        .collect();
+    assert!(flagged.contains(&("ignored", true)), "{flagged:?}");
+    assert!(flagged.contains(&("debug.log", true)), "{flagged:?}");
+    assert!(flagged.contains(&("kept.log", false)), "{flagged:?}");
+    assert!(flagged.contains(&("src", false)), "{flagged:?}");
+    assert!(
+        within(fx.client.fs_list(list(&run, "ignored")))
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .all(|e| !e.name.is_empty())
+    );
 
     let src = within(fx.client.fs_list(list(&run, "src"))).await.unwrap();
     let paths: Vec<&str> = src.entries.iter().map(|e| e.path.as_str()).collect();
@@ -182,6 +219,12 @@ async fn a_live_runs_worktree_is_listed_read_and_hides_git() {
         .unwrap();
     assert_eq!(lib.text.as_deref(), Some("fn alpha() {}\nfn beta() {}\n"));
     assert!(!lib.binary && !lib.truncated && !lib.in_place);
+    assert_eq!(lib.encoding, "utf-8");
+    assert_eq!(
+        lib.content_hash,
+        Some(reno_proto::image_hash(b"fn alpha() {}\nfn beta() {}\n"))
+    );
+    assert!(lib.mtime_ms.is_some());
 
     // A write in the worktree shows at once: nothing is cached.
     put(&tree, "src/lib.rs", "changed\n");
@@ -365,6 +408,10 @@ async fn search_finds_files_by_name_and_lines_by_content_and_skips_ignored_files
     let fx = Fixture::start().await;
     let (run, tree) = live(&fx, &repo(&fx)).await;
     // Untracked but not ignored: found. Ignored and untracked: not.
+    // A link to a file outside the root that holds the query: git is never asked to read it.
+    let outside = fx.dir.path().canonicalize().unwrap().join("outside.txt");
+    std::fs::write(&outside, "alpha outside the root\n").unwrap();
+    symlink(&outside, tree.join("leak.txt")).unwrap();
     put(&tree, "src/extra.rs", "fn Alpha_extra() {}\n");
     put(&tree, "ignored/skip.rs", "fn alpha_hidden() {}\n");
     put(&tree, "debug.log", "alpha in a log\n");
@@ -430,6 +477,15 @@ async fn search_finds_files_by_name_and_lines_by_content_and_skips_ignored_files
         .collect();
     assert_eq!(hits, [("src/lib.rs", 1), ("src/main.rs", 1)]);
     assert_eq!(literal.matches[0].text, "fn alpha() {}");
+    // The byte offset of the first match: `fn alpha` starts its match at 3.
+    assert_eq!(literal.matches[0].column, 3);
+    assert!(
+        literal
+            .matches
+            .iter()
+            .all(|m| m.path != "leak.txt" && !m.text.contains("outside")),
+        "{literal:?}"
+    );
     assert!(!literal.truncated);
     let folded = within(fx.client.fs_search_content(content("alpha", false, true)))
         .await
@@ -478,6 +534,7 @@ async fn git_status_reports_added_modified_renamed_deleted_and_untracked() {
     let (run, tree) = live(&fx, &repo(&fx)).await;
     let clean = within(fx.client.git_status(run.clone())).await.unwrap();
     assert!(clean.repo && clean.files.is_empty());
+    assert_eq!(clean.revision.len(), 64);
     let thread = fx.client.list_threads(None).await.unwrap()[0]
         .thread_id
         .clone();
@@ -528,6 +585,10 @@ async fn git_status_reports_added_modified_renamed_deleted_and_untracked() {
         (GitChange::Modified, GitChange::Modified)
     );
     assert_eq!(status.files.len(), 6);
+    // The revision moves with the status, and only with it.
+    assert_ne!(status.revision, clean.revision);
+    let same = within(fx.client.git_status(run.clone())).await.unwrap();
+    assert_eq!(same.revision, status.revision);
     // A status refresh takes no lock: the run can still `git add` right after.
     assert!(!tree.join(".git").is_dir());
     git(&tree, &["add", "untracked.txt"]);
@@ -775,7 +836,51 @@ async fn a_watch_that_cannot_start_says_so_retries_and_then_asks_for_a_rescan() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_disconnect_stops_its_watches_and_the_daemon_caps_how_many_it_opens() {
+async fn subscriptions_of_one_tree_share_a_watcher_and_the_daemon_caps_how_many_trees() {
+    let rig = Arc::new(Rig::default());
+    let fx = Fixture::with(|config| config.watchers = rig.clone()).await;
+    let repo = repo(&fx);
+    let (first, _tree) = live(&fx, &repo).await;
+    let baseline = rig.live();
+
+    // Two subscriptions to one tree (two windows): one watcher between them.
+    let one = within(fx.client.watch_fs(first.clone())).await.unwrap();
+    let two = within(fx.client.watch_fs(first.clone())).await.unwrap();
+    assert_eq!(rig.live(), baseline + 1);
+    drop(one);
+    // Not stopped yet: the other still looks.
+    assert_eq!(rig.live(), baseline + 1);
+    drop(two);
+    until_live(&rig, baseline).await;
+
+    // Each thread has its own worktree, so each of these is another tree.
+    let mut held = Vec::new();
+    let mut last = first.clone();
+    for _ in 0..renod::files::MAX_OPEN_WATCHES {
+        // A run that has ended keeps its thread's worktree while the thread is open.
+        let run = within(fx.client.run_task(task(&repo, "mock", false)))
+            .await
+            .unwrap();
+        fx.events(&run, None).await;
+        held.push(within(fx.client.watch_fs(run.clone())).await.unwrap());
+        last = run;
+    }
+    assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
+    // One more tree is refused, as a typed "unavailable", and costs no watcher; a tree that is
+    // already watched is not refused.
+    assert_eq!(
+        code(fx.client.watch_fs(first.clone()).await.map(|_| ())),
+        ErrorCode::Unavailable
+    );
+    held.push(within(fx.client.watch_fs(last)).await.unwrap());
+    assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
+    drop(held);
+    until_live(&rig, baseline).await;
+    fx.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disconnect_stops_the_watches_it_held() {
     let rig = Arc::new(Rig::default());
     let fx = Fixture::with(|config| config.watchers = rig.clone()).await;
     let (run, _tree) = live(&fx, &repo(&fx)).await;
@@ -784,28 +889,80 @@ async fn a_disconnect_stops_its_watches_and_the_daemon_caps_how_many_it_opens() 
     let other = within(Client::connect_unix(&fx.paths.socket))
         .await
         .unwrap();
-    let mut held = Vec::new();
-    for _ in 0..renod::files::MAX_OPEN_WATCHES {
-        held.push(within(other.watch_fs(run.clone())).await.unwrap());
-    }
-    assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
-    // One more is refused, as a typed "unavailable", and costs no watcher.
-    assert_eq!(
-        code(fx.client.watch_fs(run.clone()).await.map(|_| ())),
-        ErrorCode::Unavailable
-    );
-    assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
-
-    // The connection goes away without unsubscribing: every watch it held goes with it.
+    let held = within(other.watch_fs(run.clone())).await.unwrap();
+    assert_eq!(rig.live(), baseline + 1);
+    // The connection goes away without unsubscribing: the watch goes with it.
     drop(held);
     other.close().await;
     drop(other);
     until_live(&rig, baseline).await;
-    // And its places are free again.
-    let mut again = within(fx.client.watch_fs(run.clone())).await.unwrap();
-    assert_eq!(rig.live(), baseline + 1);
-    drop(again.next());
-    drop(again);
-    until_live(&rig, baseline).await;
+    fx.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_drops_the_noise_of_ignored_build_output() {
+    let rig = Arc::new(Rig::default());
+    let fx = Fixture::with(|config| config.watchers = rig.clone()).await;
+    let (run, tree) = live(&fx, &repo(&fx)).await;
+    put(&tree, "ignored/old.txt", "x");
+    let mut changes = within(fx.client.watch_fs(run.clone())).await.unwrap();
+
+    // A build writes into `target/` (ignored by the repository, though it does not exist yet)
+    // and into an ignored directory that does; nothing of that is reported, but a source file is.
+    for n in 0..300 {
+        rig.create(&tree.join(format!("target/debug/deps/f{n}.o")));
+        rig.create(&tree.join(format!("ignored/gen/{n}/x")));
+    }
+    rig.create(&tree.join("src/real.rs"));
+    let item = next(&mut changes).await;
+    assert_eq!(item.dirs, ["src"], "{item:?}");
+    assert!(!item.overflow);
+    fx.stop().await;
+}
+
+// ----- Which tree a run is served from
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_run_and_a_refused_run_have_no_folder_to_show() {
+    let fx = Fixture::start().await;
+    let repo = repo(&fx);
+
+    // A write run held in the queue has no worktree yet, and its working directory is the
+    // person's own checkout: it is not served as if it were the run's.
+    within(fx.client.pause(None, false)).await.unwrap();
+    let queued = within(fx.client.run_task(task(&repo, "mock", false)))
+        .await
+        .unwrap();
+    assert_eq!(fx.status(&queued).await, RunStatus::Queued);
+    assert_eq!(
+        code(fx.client.fs_list(list(&queued, "")).await),
+        ErrorCode::WorkspaceUnavailable
+    );
+    assert_eq!(
+        code(fx.client.git_status(queued.clone()).await),
+        ErrorCode::WorkspaceUnavailable
+    );
+    assert_eq!(
+        code(fx.client.watch_fs(queued.clone()).await.map(|_| ())),
+        ErrorCode::WorkspaceUnavailable
+    );
+    within(fx.client.resume(None)).await.unwrap();
+    fx.events(&queued, None).await;
+    // Started, it has its worktree.
+    assert!(within(fx.client.fs_list(list(&queued, ""))).await.is_ok());
+
+    // A write run in a folder that is no repository, not allowed in place, is refused before it
+    // starts: nothing to show.
+    let plain = fx.dir.path().canonicalize().unwrap().join("plain");
+    put(&plain, "notes.txt", "x\n");
+    let refused = within(fx.client.run_task(task(&plain, "mock", false)))
+        .await
+        .unwrap();
+    fx.events(&refused, None).await;
+    assert_eq!(fx.status(&refused).await, RunStatus::Failed);
+    assert_eq!(
+        code(fx.client.fs_list(list(&refused, "")).await),
+        ErrorCode::WorkspaceUnavailable
+    );
     fx.stop().await;
 }

@@ -110,7 +110,7 @@ use reno_proto::{
     FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
     FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
     FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
-    GitStatusParams, GitStatusResult, RunId, Seq,
+    GitStatusParams, GitStatusResult, RunId, Seq, StopDetail,
 };
 use reno_proto::{
     RuleAdd, RuleAddParams, RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams,
@@ -915,8 +915,11 @@ async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceI
 // ----- The Files tab (RP1). Person-only: the guard above refuses these to a run's connection.
 
 /// The tree `run` is served from: its thread's worktree while that exists (live, or kept after
-/// the run ended); for a run with no worktree its own working directory, flagged `in_place`; and
-/// for a worktree that was removed, nothing (`WorkspaceUnavailable`).
+/// the run ended); for a run that works in a folder instead (read-only, a scratch folder, or a
+/// write run the person allowed in place) that folder, flagged `in_place`; and nothing
+/// (`WorkspaceUnavailable`) for a worktree that was removed, a run that has not started (its
+/// place is not decided yet, and its folder may be the person's own checkout), a run that was
+/// refused, and a run with no folder.
 async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
     use crate::files::{FsError, Served};
     use reno_proto::WorkspaceStatus;
@@ -933,6 +936,23 @@ async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
             }
         },
         Err(KernelError::WorkspaceNotFound(_)) => {
+            let summary = ctx
+                .kernel
+                .get_run(run)
+                .await
+                .map_err(|e| kernel_error(&e))?;
+            if matches!(summary.status, RunStatus::Queued | RunStatus::Leased) {
+                return Err(FsError::Unavailable(
+                    "the run has not started, so it has no folder yet".to_owned(),
+                )
+                .object());
+            }
+            if matches!(summary.stop, Some(StopDetail::StartRefused { .. })) {
+                return Err(FsError::Unavailable(
+                    "the run was refused before it started, so it has no folder".to_owned(),
+                )
+                .object());
+            }
             let thread = ctx
                 .kernel
                 .run_thread(run)

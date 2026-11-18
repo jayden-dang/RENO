@@ -68,6 +68,9 @@ pub struct FsEntry {
     /// When it was last modified, in milliseconds since the Unix epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtime_ms: Option<u64>,
+    /// Git ignores it (a build directory, say): shown dimmed. Always false outside a repository.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ignored: bool,
 }
 
 /// Params of `fs.list`.
@@ -136,7 +139,8 @@ pub struct FsReadResult {
     pub text: Option<String>,
     /// The file is longer than what `text` holds.
     pub truncated: bool,
-    /// `utf-8`, or `utf-8-lossy` when invalid bytes were replaced.
+    /// `utf-8`; `utf-8-bom` when the file started with a byte order mark (not in `text`);
+    /// `utf-8-lossy` when invalid bytes were replaced; `binary`.
     pub encoding: String,
     /// How its lines end.
     pub line_ending: LineEnding,
@@ -144,6 +148,13 @@ pub struct FsReadResult {
     pub size: u64,
     /// The file is not text (it holds NUL bytes): no `text`.
     pub binary: bool,
+    /// SHA-256 of the bytes that were read (the whole file unless `truncated`), in lower-case
+    /// hex: equal hashes mean equal content. Absent for a binary file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// When the file was last modified, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<u64>,
     /// The run has no worktree of its own and is served from its working directory.
     #[serde(default, skip_serializing_if = "is_false")]
     pub in_place: bool,
@@ -275,6 +286,9 @@ pub struct FsContentMatch {
     pub path: String,
     /// The line, from 1.
     pub line: u32,
+    /// The byte offset of the first match in the line, from 0 (before the line was cut).
+    #[serde(default)]
+    pub column: u32,
     /// The line's text, cut at 500 characters.
     pub text: String,
 }
@@ -352,6 +366,10 @@ pub struct GitStatusResult {
     pub repo: bool,
     /// The changed paths.
     pub files: Vec<GitFileStatus>,
+    /// A digest of `branch` and `files`: the same while nothing changed, so a client can skip
+    /// redrawing.
+    #[serde(default)]
+    pub revision: String,
     /// The run has no worktree of its own and is served from its working directory.
     #[serde(default, skip_serializing_if = "is_false")]
     pub in_place: bool,

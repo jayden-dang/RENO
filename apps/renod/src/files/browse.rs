@@ -19,6 +19,8 @@ const SNIFF_BYTES: usize = 8 * 1024;
 /// One page of a directory.
 #[derive(Debug)]
 pub(crate) struct Page {
+    /// The listed directory's real path.
+    pub(crate) real: std::path::PathBuf,
     pub(crate) entries: Vec<FsEntry>,
     pub(crate) next_cursor: Option<String>,
 }
@@ -92,6 +94,7 @@ pub(crate) fn list(
             path: join(&target.rel, &name),
             size: (kind != FsEntryKind::Dir).then_some(meta.len()),
             mtime_ms: millis(meta.modified()),
+            ignored: false,
             name,
             kind,
         });
@@ -104,6 +107,7 @@ pub(crate) fn list(
     entries.truncate(limit);
     let next_cursor = more.then(|| entries.last().map(cursor_of)).flatten();
     Ok(Page {
+        real: target.real,
         entries,
         next_cursor,
     })
@@ -121,6 +125,7 @@ pub(crate) fn read(root: &Root, path: &str) -> Result<FsReadResult, FsError> {
         return Err(FsError::NotAFile(path.to_owned()));
     }
     let size = meta.len();
+    let mtime_ms = millis(meta.modified());
     let binary_result = |size| FsReadResult {
         path: target.rel.clone(),
         text: None,
@@ -129,6 +134,8 @@ pub(crate) fn read(root: &Root, path: &str) -> Result<FsReadResult, FsError> {
         line_ending: LineEnding::None,
         size,
         binary: true,
+        content_hash: None,
+        mtime_ms,
         in_place: false,
     };
 
@@ -149,14 +156,23 @@ pub(crate) fn read(root: &Root, path: &str) -> Result<FsReadResult, FsError> {
     let truncated = body.len() > FS_READ_MAX_BYTES;
     body.truncate(FS_READ_MAX_BYTES);
 
-    let (text, encoding) = match std::str::from_utf8(&body) {
+    let content_hash = Some(image_hash(&body));
+    // A byte order mark is the file's, not its text: it is named in `encoding` and left out.
+    let bom = body.starts_with(b"\xEF\xBB\xBF");
+    let shown = if bom { &body[3..] } else { &body[..] };
+    let (text, encoding) = match std::str::from_utf8(shown) {
         Ok(text) => (text.to_owned(), "utf-8"),
         // The cut fell inside a character: drop its start.
         Err(error) if truncated && error.error_len().is_none() => {
-            let valid = body.get(..error.valid_up_to()).unwrap_or_default();
+            let valid = shown.get(..error.valid_up_to()).unwrap_or_default();
             (String::from_utf8_lossy(valid).into_owned(), "utf-8")
         }
-        Err(_) => (String::from_utf8_lossy(&body).into_owned(), "utf-8-lossy"),
+        Err(_) => (String::from_utf8_lossy(shown).into_owned(), "utf-8-lossy"),
+    };
+    let encoding = if bom && encoding == "utf-8" {
+        "utf-8-bom"
+    } else {
+        encoding
     };
     Ok(FsReadResult {
         path: target.rel,
@@ -166,6 +182,8 @@ pub(crate) fn read(root: &Root, path: &str) -> Result<FsReadResult, FsError> {
         encoding: encoding.to_owned(),
         size,
         binary: false,
+        content_hash,
+        mtime_ms,
         in_place: false,
     })
 }
@@ -394,6 +412,27 @@ mod tests {
         let fit = read(&root, "fit.txt").unwrap();
         assert!(!fit.truncated);
         assert_eq!(fit.text.unwrap().len(), FS_READ_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_read_has_a_content_hash_a_modified_time_and_names_a_byte_order_mark() {
+        let (_dir, root) = root();
+        put(&root, "plain.txt", b"hello\n");
+        put(&root, "bom.txt", b"\xEF\xBB\xBFhello\n");
+        let plain = read(&root, "plain.txt").unwrap();
+        assert_eq!(plain.content_hash, Some(image_hash(b"hello\n")));
+        assert!(plain.mtime_ms.is_some());
+        let bom = read(&root, "bom.txt").unwrap();
+        assert_eq!(
+            (bom.encoding.as_str(), bom.text.as_deref()),
+            ("utf-8-bom", Some("hello\n"))
+        );
+        assert_ne!(bom.content_hash, plain.content_hash);
+        put(&root, "plain.txt", b"hello!\n");
+        assert_ne!(
+            read(&root, "plain.txt").unwrap().content_hash,
+            plain.content_hash
+        );
     }
 
     #[test]

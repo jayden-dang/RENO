@@ -1833,6 +1833,29 @@ fn fs_and_git_status_read_a_runs_worktree_through_the_cli() {
         text(&escape.stderr)
     );
 
+    // An image comes back whole, from its chunks.
+    let pic: Vec<u8> = (0..300_000_u32).map(|n| (n % 251) as u8).collect();
+    std::fs::write(path.join("pic.png"), &pic).unwrap();
+    let saved = world._root.path().join("saved.png");
+    let image = world.reno(&[
+        "fs",
+        "image",
+        &run,
+        "pic.png",
+        "-o",
+        saved.to_str().unwrap(),
+    ]);
+    assert!(image.status.success(), "{}", text(&image.stderr));
+    assert_eq!(std::fs::read(&saved).unwrap(), pic);
+    assert_eq!(world.reno(&["fs", "image", &run, "pic.png"]).stdout, pic);
+    assert_eq!(
+        world
+            .reno(&["fs", "image", &run, "README.md"])
+            .status
+            .code(),
+        Some(1)
+    );
+
     let found = text(&world.reno(&["fs", "find", &run, "lib"]).stdout);
     assert_eq!(found.lines().next(), Some("src/lib.rs"));
     assert_eq!(
@@ -1860,7 +1883,7 @@ fn fs_and_git_status_read_a_runs_worktree_through_the_cli() {
     assert!(status.contains("?? new.txt"), "{status}");
     let status = world.json(&["git", "status", &run]);
     assert_eq!(status["repo"], true);
-    assert_eq!(status["files"].as_array().unwrap().len(), 3);
+    assert_eq!(status["files"].as_array().unwrap().len(), 4);
 
     assert!(world.reno(&["run", "cancel", &run]).status.success());
     task.wait_with_output().expect("task run ends");

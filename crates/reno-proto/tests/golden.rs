@@ -338,18 +338,20 @@ fn files_wire_shapes() {
                 kind: FsEntryKind::File,
                 size: Some(10),
                 mtime_ms: Some(5),
+                ignored: true,
             }],
             next_cursor: Some("1:lib.rs".into()),
             in_place: true,
         },
         json!({"entries": [{"name": "lib.rs", "path": "src/lib.rs", "kind": "file",
-                            "size": 10, "mtimeMs": 5}],
+                            "size": 10, "mtimeMs": 5, "ignored": true}],
                "nextCursor": "1:lib.rs", "inPlace": true}),
     );
     golden(
         &GitStatusResult {
             branch: Some("reno/th_a".into()),
             repo: true,
+            revision: "r1".into(),
             files: vec![GitFileStatus {
                 path: "b.rs".into(),
                 old_path: Some("a.rs".into()),
@@ -358,7 +360,7 @@ fn files_wire_shapes() {
             }],
             in_place: false,
         },
-        json!({"branch": "reno/th_a", "repo": true,
+        json!({"branch": "reno/th_a", "repo": true, "revision": "r1",
                "files": [{"path": "b.rs", "oldPath": "a.rs", "index": "renamed",
                           "worktree": "modified"}]}),
     );

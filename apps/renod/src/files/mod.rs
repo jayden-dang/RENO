@@ -24,14 +24,13 @@ mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 
 use futures::Stream;
 use reno_kernel::WatchBackoff;
 use reno_proto::{
     FS_LIST_DEFAULT_LIMIT, FS_LIST_MAX_LIMIT, FS_SEARCH_DEFAULT_LIMIT, FS_SEARCH_MAX_LIMIT,
-    FsChange, FsContentMatch, FsImageChunk, FsListResult, FsReadResult, FsSearchContentResult,
-    FsSearchFilesResult, GitStatusResult,
+    FsChange, FsContentMatch, FsEntryKind, FsImageChunk, FsListResult, FsReadResult,
+    FsSearchContentResult, FsSearchFilesResult, GitStatusResult, image_hash,
 };
 
 pub use error::{FsError, Rejection};
@@ -39,9 +38,23 @@ use sandbox::Root;
 
 use crate::watcher::WatcherFactory;
 
-/// The most `fs.watch` subscriptions the daemon serves at once: each holds a platform watcher,
-/// a stream from a pool the whole machine shares.
-pub const MAX_OPEN_WATCHES: usize = 16;
+/// The most trees the daemon watches at once. Each is one platform watcher (an FSEvents stream),
+/// from a pool the whole machine shares and that measured about sixteen free, which the
+/// definitions and `fs` triggers draw on too. Subscriptions to one tree share its watcher, so
+/// this bounds trees, not subscribers.
+pub const MAX_OPEN_WATCHES: usize = 4;
+
+/// Names that build tools make at the top of a tree, asked about whether git ignores them even
+/// when they do not exist yet, so a first build is noise from its first file.
+const BUILD_DIRS: [&str; 7] = [
+    "target/",
+    "node_modules/",
+    ".build/",
+    "dist/",
+    "build/",
+    ".venv/",
+    ".next/",
+];
 
 /// The tree a request is served from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,28 +68,35 @@ pub struct Served {
 /// The Files service.
 #[derive(Debug)]
 pub struct Files {
-    watchers: Arc<dyn WatcherFactory>,
+    hub: Arc<watch::Hub>,
     timing: watch::Timing,
-    open_watches: Arc<AtomicUsize>,
 }
 
 impl Files {
     /// A service that starts its watchers with `watchers` and retries a refused start with
     /// `retry`.
     pub fn new(watchers: Arc<dyn WatcherFactory>, retry: WatchBackoff) -> Self {
+        Self::with_max_watches(watchers, retry, MAX_OPEN_WATCHES)
+    }
+
+    /// Like [`Files::new`], watching at most `max` trees at once.
+    pub fn with_max_watches(
+        watchers: Arc<dyn WatcherFactory>,
+        retry: WatchBackoff,
+        max: usize,
+    ) -> Self {
         Self {
-            watchers,
+            hub: Arc::new(watch::Hub::new(watchers, max)),
             timing: watch::Timing {
                 retry,
                 ..watch::Timing::default()
             },
-            open_watches: Arc::default(),
         }
     }
 
-    /// How many `fs.watch` subscriptions are open.
+    /// How many trees are being watched (one watcher each, shared by their subscriptions).
     pub fn open_watches(&self) -> usize {
-        self.open_watches.load(std::sync::atomic::Ordering::SeqCst)
+        self.hub.open()
     }
 
     /// `fs.list`.
@@ -91,7 +111,27 @@ impl Files {
             .unwrap_or(FS_LIST_DEFAULT_LIMIT)
             .clamp(1, FS_LIST_MAX_LIMIT) as usize;
         let root = Root::open(&served.dir)?;
-        let page = blocking(move || browse::list(&root, &dir, cursor.as_deref(), limit)).await?;
+        let for_list = root.clone();
+        let mut page =
+            blocking(move || browse::list(&for_list, &dir, cursor.as_deref(), limit)).await?;
+        // Which of them git ignores, in one call from the listed directory (a folder that is no
+        // repository ignores none).
+        let asked: Vec<String> = page
+            .entries
+            .iter()
+            .map(|e| match e.kind {
+                FsEntryKind::Dir => format!("{}/", e.name),
+                _ => e.name.clone(),
+            })
+            .collect();
+        let hidden = git::ignored(&page.real, &asked).await?;
+        for entry in &mut page.entries {
+            let name = match entry.kind {
+                FsEntryKind::Dir => format!("{}/", entry.name),
+                _ => entry.name.clone(),
+            };
+            entry.ignored = hidden.contains(&name);
+        }
         Ok(FsListResult {
             entries: page.entries,
             next_cursor: page.next_cursor,
@@ -189,6 +229,7 @@ impl Files {
                 .map(|hit| FsContentMatch {
                     path: hit.path,
                     line: hit.line,
+                    column: hit.column,
                     text: hit.text,
                 })
                 .collect(),
@@ -204,12 +245,14 @@ impl Files {
             return Ok(GitStatusResult {
                 branch: None,
                 repo: false,
+                revision: revision(None, &[]),
                 files: Vec::new(),
                 in_place: served.in_place,
             });
         };
         let (branch, files) = git::status(root.path(), &repo.prefix).await?;
         Ok(GitStatusResult {
+            revision: revision(branch.as_deref(), &files),
             branch,
             repo: true,
             files,
@@ -217,27 +260,56 @@ impl Files {
         })
     }
 
-    /// `fs.watch`: arms a watcher for `served` now and returns the stream of its changes. The
-    /// watcher lives exactly as long as the stream.
+    /// `fs.watch`: starts watching `served` now (or joins the watcher it already has) and
+    /// returns the stream of its changes. The watcher lives as long as its last stream.
     pub async fn watch(
         &self,
         served: &Served,
     ) -> Result<impl Stream<Item = FsChange> + Send + 'static + use<>, FsError> {
         let root = Root::open(&served.dir)?;
-        let slot = watch::Slot::take(&self.open_watches, MAX_OPEN_WATCHES)
-            .ok_or(FsError::TooManyWatches)?;
         let git_dir = git::repo_info(root.path()).await?.map(|repo| repo.git_dir);
+        // The top-level entries git ignores, and the usual build directories whether or not they
+        // exist yet: their events are noise.
+        let mut candidates: Vec<String> = BUILD_DIRS.iter().map(|d| (*d).to_owned()).collect();
+        if let Ok(page) = blocking({
+            let root = root.clone();
+            move || browse::list(&root, "", None, 2_000)
+        })
+        .await
+        {
+            candidates.extend(page.entries.iter().map(|e| match e.kind {
+                FsEntryKind::Dir => format!("{}/", e.name),
+                _ => e.name.clone(),
+            }));
+        }
+        let noise = if git_dir.is_some() {
+            git::ignored(root.path(), &candidates)
+                .await?
+                .into_iter()
+                .map(|name| name.trim_end_matches('/').to_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let plan = watch::Plan {
             root: root.path().to_path_buf(),
             git_dir,
+            noise,
         };
-        Ok(watch::start(
-            Arc::clone(&self.watchers),
-            plan,
-            self.timing,
-            slot,
-        ))
+        watch::start(Arc::clone(&self.hub), plan, self.timing).map_err(|refused| match refused {
+            watch::Refused::Capacity => FsError::TooManyWatches,
+            watch::Refused::Platform(error) => FsError::Io {
+                what: "starting a file watcher".to_owned(),
+                error,
+            },
+        })
     }
+}
+
+/// A digest of what a status says, so a client can tell "the same" without comparing lists.
+fn revision(branch: Option<&str>, files: &[reno_proto::GitFileStatus]) -> String {
+    let text = serde_json::to_string(&(branch, files)).unwrap_or_default();
+    image_hash(text.as_bytes())
 }
 
 /// Runs blocking file system work off the async threads.
