@@ -41,8 +41,8 @@ use std::time::Duration;
 use futures::future::join_all;
 use reno_harness::exec::ProbeDepth;
 use reno_proto::{
-    ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, ModelCatalog,
-    NotInstalledReason, PlanUsage, SignedIn, UnknownFrameKind,
+    ExecutorFrameCounts, ExecutorHealth, ExecutorId, ExecutorInfo, HealthProbe, InstallStatus,
+    ModelCatalog, NotInstalledReason, PlanUsage, SignedIn, UnknownFrameKind,
 };
 use tokio::sync::{Semaphore, watch};
 
@@ -85,6 +85,45 @@ struct Entry {
     health: ExecutorHealth,
     /// Probed by this process; only a live entry decides eligibility.
     live: bool,
+    /// The last refusal a run met, with when (ms): the executor's own word, newer than any probe
+    /// that began before it.
+    refusal: Option<(i64, Refusal)>,
+}
+
+/// What an executor itself said when it refused to start a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    SignedOut { hint: String },
+    NotInstalled { detail: String },
+}
+
+/// Lays a refusal over `found` when it was seen at or after the probe began (`probe_started_ms`):
+/// then it is the newer fact. A probe that began later knows better and is left alone.
+pub(crate) fn lay_refusal_over(
+    found: &mut ExecutorHealth,
+    refusal: Option<(i64, &Refusal)>,
+    probe_started_ms: i64,
+) {
+    let Some((at, refusal)) = refusal else { return };
+    if at < probe_started_ms {
+        return;
+    }
+    apply_refusal(found, refusal);
+}
+
+fn apply_refusal(health: &mut ExecutorHealth, refusal: &Refusal) {
+    match refusal {
+        Refusal::SignedOut { hint } => {
+            health.signed_in = SignedIn::No { hint: hint.clone() };
+        }
+        Refusal::NotInstalled { detail } => {
+            health.installed = InstallStatus::NotInstalled {
+                why: NotInstalledReason::NotFound {
+                    hint: detail.clone(),
+                },
+            };
+        }
+    }
 }
 
 /// The board of executor health.
@@ -258,6 +297,7 @@ impl Shared {
                         Entry {
                             health,
                             live: false,
+                            refusal: None,
                         },
                     );
                 }
@@ -289,6 +329,7 @@ impl Shared {
         let Ok(_permit) = self.health.permits.acquire().await else {
             return Ok(());
         };
+        let started_ms = self.db.now_ms();
         let probe = tokio::select! {
             biased;
             () = self.root.cancelled() => return Err(KernelError::ShuttingDown),
@@ -327,9 +368,24 @@ impl Shared {
         if let Err(error) = self.db.put_executor_health(id, &health).await {
             tracing::error!(executor = %id, %error, "could not store the executor health");
         }
-        self.health
-            .entries()
-            .insert(id.clone(), Entry { health, live: true });
+        {
+            let mut entries = self.health.entries();
+            let refusal = entries.get(id).and_then(|entry| entry.refusal.clone());
+            let mut health = health;
+            lay_refusal_over(
+                &mut health,
+                refusal.as_ref().map(|(at, r)| (*at, r)),
+                started_ms,
+            );
+            entries.insert(
+                id.clone(),
+                Entry {
+                    health,
+                    live: true,
+                    refusal,
+                },
+            );
+        }
         gate.finished.fetch_add(1, Ordering::SeqCst);
         self.publish_executors();
         // What the health says decides which executors the maintenance task looks at.
@@ -355,6 +411,29 @@ impl Shared {
             outcome?;
         }
         Ok(())
+    }
+
+    /// Records what an executor itself said when it refused a run (not signed in, not
+    /// installed): the answer is known, so the stored health says it now, stamped now, with no
+    /// probe. A probe that began before this keeps it; one that begins later may overturn it.
+    /// Nothing is recorded for an executor with no health yet: its probe will find out.
+    pub(crate) async fn note_refusal(&self, id: &ExecutorId, refusal: Refusal) {
+        let now = self.db.now_ms();
+        let health = {
+            let mut entries = self.health.entries();
+            let Some(entry) = entries.get_mut(id) else {
+                return;
+            };
+            apply_refusal(&mut entry.health, &refusal);
+            entry.health.checked_at_ms = u64::try_from(now).unwrap_or(0);
+            entry.live = true;
+            entry.refusal = Some((now, refusal));
+            entry.health.clone()
+        };
+        if let Err(error) = self.db.put_executor_health(id, &health).await {
+            tracing::error!(executor = %id, %error, "could not store the executor health");
+        }
+        self.publish_executors();
     }
 
     /// Asks for a probe of `id` in the background, unless one is already queued for it. Used

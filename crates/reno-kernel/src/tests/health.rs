@@ -16,6 +16,7 @@ use reno_proto::{
 
 use super::{Fx, START_MS, config, id, last_done, until};
 use crate::{ExecutorRegistry, KernelError};
+use reno_proto::ExecutorHealth as ExecutorHealthOf;
 
 fn installed(signed_in: SignedIn, gate: VersionGate) -> HealthProbe {
     HealthProbe {
@@ -660,4 +661,51 @@ async fn a_new_version_after_a_restart_is_unknown_until_a_full_probe() {
         fx.kernel.executors()[0].health.as_ref().unwrap().signed_in,
         SignedIn::Yes { .. }
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_refused_as_signed_out_is_recorded_at_once_and_a_quiet_probe_does_not_undo_it() {
+    let probed = registry_like(signed_in_as_ada());
+    let fx = Fx::new(config(1), probed.registry()).await;
+    fx.kernel.refresh_executors(None).await.unwrap();
+    assert!(matches!(
+        fx.kernel.executors()[0].health.as_ref().unwrap().signed_in,
+        SignedIn::Yes { .. }
+    ));
+
+    // The agent says it is signed out when the run starts.
+    probed.refuse_start.store(true, Ordering::SeqCst);
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    until(async || {
+        let health = fx.kernel.executors()[0].health.clone()?;
+        matches!(health.signed_in, SignedIn::No { .. }).then_some(())
+    })
+    .await;
+    // The follow-up probe is quiet and learns nothing about sign-in: the refusal stands.
+    until(async || (probed.depths.lock().unwrap().len() >= 2).then_some(())).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let health = fx.kernel.executors()[0].health.clone().unwrap();
+    assert!(
+        matches!(&health.signed_in, SignedIn::No { hint } if hint.contains("mock login")),
+        "{health:?}"
+    );
+    assert_eq!(probed.probes(), 1, "only the person's refresh started it");
+}
+
+#[test]
+fn a_refusal_newer_than_a_probe_wins_and_an_older_one_does_not() {
+    use crate::health::{Refusal, lay_refusal_over};
+    let yes = signed_in_as_ada();
+    let mut found = ExecutorHealthOf::from_probe(yes, 100);
+    let refusal = Refusal::SignedOut {
+        hint: "run `mock login`".into(),
+    };
+    // The probe began before the refusal was seen: the refusal is the newer fact.
+    lay_refusal_over(&mut found, Some((50, &refusal)), 40);
+    assert!(matches!(found.signed_in, SignedIn::No { .. }));
+    // The probe began after it: its answer is the newer fact.
+    let mut found = ExecutorHealthOf::from_probe(signed_in_as_ada(), 100);
+    lay_refusal_over(&mut found, Some((50, &refusal)), 60);
+    assert!(matches!(found.signed_in, SignedIn::Yes { .. }));
 }
