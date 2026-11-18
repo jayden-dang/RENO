@@ -578,7 +578,7 @@ fn opening_a_run_from_the_sidebar_shows_its_transcript(cx: &mut TestAppContext) 
     assert!(text.starts_with("Three crates have minor updates"));
     // The header, the details pane and the card are on screen.
     assert!(painted(vcx, "approve"));
-    assert!(painted(vcx, "stop"));
+    assert!(painted(vcx, "header-stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let facts = screen.read_with(vcx, |s, _| s.facts().clone());
     assert_eq!(facts.model.as_deref(), Some("opus-5.5"));
@@ -690,12 +690,12 @@ fn stop_cancels_the_run(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     let run = send_from_home(vcx, &root, "/long job");
-    wait_drawn(vcx, |vcx| painted(vcx, "stop"));
-    click(vcx, "stop");
+    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
+    click(vcx, "header-stop");
     wait_drawn(vcx, |vcx| {
         run_status(vcx, &store, &run) == Some(RunStatus::Cancelled)
     });
-    wait_drawn(vcx, |vcx| !painted(vcx, "stop"));
+    wait_drawn(vcx, |vcx| !painted(vcx, "header-stop"));
     let rows = rows_of(vcx, &root);
     assert!(matches!(
         rows.last(),
@@ -766,7 +766,7 @@ fn a_finished_run_sends_a_new_run_in_its_project(cx: &mut TestAppContext) {
     });
     // The box says what sending does, and takes typing.
     assert!(painted(vcx, "composer-note"));
-    assert!(!painted(vcx, "stop"));
+    assert!(!painted(vcx, "header-stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
     steer.update_in(vcx, |c, window, cx| c.fill("one more thing", window, cx));

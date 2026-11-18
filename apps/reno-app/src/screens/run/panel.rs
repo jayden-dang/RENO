@@ -241,13 +241,16 @@ impl RunScreen {
         let state = store.state();
         let run = state.run(&self.run)?;
         let pane = self.pane(cx);
-        // A `workspace.get` answer means the run's folder is in a repository. A daemon that
-        // cannot answer (too old) leaves it unknown, which is not "no repository".
-        let in_repository = panel_home::in_repository(
+        // What `workspace.get` said. A daemon that is not connected, or has not answered, leaves
+        // it unread, which is neither "no repository" nor "same folder".
+        let connected = store.connection() == reno_client::ConnectionStatus::Connected;
+        let record = panel_home::record(
+            connected,
             store.supports_changes(),
-            store
-                .changes(&self.run)
-                .is_some_and(|c| matches!(c.workspace, Loaded::Ready(Some(_)))),
+            store.changes(&self.run).and_then(|c| match &c.workspace {
+                Loaded::Ready(w) => Some(w.is_some()),
+                _ => None,
+            }),
         );
         let project = crate::vm::projects::key_of(Some(run), |dir| store.root_of(dir));
         let project = match project {
@@ -264,7 +267,7 @@ impl RunScreen {
             executor: run.executor.as_str(),
             project: project.as_deref(),
             path: path.as_deref(),
-            in_repository,
+            record,
             model: model.as_deref(),
             bot: summary::run_bot(run),
             note: Some(&note),
@@ -444,8 +447,11 @@ impl RunScreen {
 
     /// The header's Stop, on a run that can be stopped.
     pub(super) fn stop_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.summary(cx).is_some_and(|r| summary::is_live(r.status));
-        if !live {
+        // Anything not finished can be stopped, a run waiting on you included.
+        let stoppable = self
+            .summary(cx)
+            .is_some_and(|r| !r.status.is_terminal() && !summary::stopped_by_person(r));
+        if !stoppable {
             return None;
         }
         let run = self.run.clone();

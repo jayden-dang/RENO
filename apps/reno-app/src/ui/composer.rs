@@ -391,6 +391,16 @@ impl Composer {
         overlay::set(cx, owner, open);
     }
 
+    /// The composer is hidden (its screen is not showing): its menus, pickers and cards close and
+    /// the signal is released, so nothing invisible holds an overlay open.
+    pub(crate) fn hide(&mut self, cx: &mut Context<Self>) {
+        self.class_open = false;
+        self.context_card_open = false;
+        self.close_picker(cx);
+        self.sync_overlay(cx);
+        cx.notify();
+    }
+
     /// The small reason input of a denial.
     pub(crate) fn reason(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         Self::with_mode(store, Mode::Reason, cx)
@@ -584,20 +594,6 @@ impl Composer {
             && self.connected(cx)
             && self.target_live(cx)
             && !self.store.read(cx).is_sending()
-    }
-
-    /// Stop shows instead of Steer while the run is live and nothing is typed.
-    fn shows_stop(&self, cx: &App) -> bool {
-        let Mode::Steer(run) = &self.mode else {
-            return false;
-        };
-        self.model.is_empty()
-            && self
-                .store
-                .read(cx)
-                .state()
-                .run(run)
-                .is_some_and(|r| !r.status.is_terminal() && !summary::stopped_by_person(r))
     }
 
     /// Enter: send non-blank text to the daemon. A blank draft does nothing; with no daemon the
@@ -1612,29 +1608,9 @@ impl Composer {
         }
     }
 
-    /// The round button at the foot's right: Stop, Steer, Send or nothing to send.
+    /// The round button at the foot's right: Steer, Send or nothing to send. Stop lives in the run
+    /// header (brief 2026-11-18), so the box never shows a second one.
     fn action_button(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        if self.shows_stop(cx) {
-            let Mode::Steer(run) = self.mode.clone() else {
-                unreachable!("only a steer box shows Stop");
-            };
-            return div()
-                .id("stop")
-                .debug_selector(|| "stop".to_owned())
-                .flex_none()
-                .size(px(34.0))
-                .rounded(px(17.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme.text)
-                .cursor_pointer()
-                .child(icon(Icon::Stop, 14.0, theme.canvas))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let run = run.clone();
-                    this.store.update(cx, |store, cx| store.cancel_run(run, cx));
-                }));
-        }
         let can_send = self.can_send(cx);
         kit::send_button(theme, can_send)
             .debug_selector(|| "send".to_owned())

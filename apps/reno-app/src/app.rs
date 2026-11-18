@@ -588,9 +588,19 @@ impl RootView {
         window.focus(&handle, cx);
     }
 
+    /// The home screen is about to be replaced: its composer lives on, hidden, so it closes its
+    /// menus and lets go of the overlay signal.
+    fn leave_home(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.screen, Screen::Home) {
+            let composer = self.home.read(cx).composer().clone();
+            composer.update(cx, |c, cx| c.hide(cx));
+        }
+    }
+
     /// Shows a built destination; the others say they are not built yet.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
+        self.leave_home(cx);
         self.screen = match nav {
             Nav::Runs => {
                 self.runs.update(cx, |screen, cx| screen.shown(cx));
@@ -625,6 +635,7 @@ impl RootView {
             cx.subscribe_in(&screen, window, Self::on_screen_event),
             cx.subscribe_in(&steer, window, Self::on_open_executors),
         ];
+        self.leave_home(cx);
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
         cx.notify();
@@ -672,6 +683,7 @@ impl RootView {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
         let store = self.store.clone();
         let screen = cx.new(|cx| crate::screens::project::ProjectScreen::new(store, key, cx));
+        self.leave_home(cx);
         self.screen = Screen::Project(screen);
         self.focus_composer(window, cx);
         cx.notify();
