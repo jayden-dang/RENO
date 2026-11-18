@@ -114,6 +114,12 @@ fn worker_command(
     .env("LANG", "en_US.UTF-8")
     .env("SHELL", "/bin/sh")
     .env("TERM", "dumb")
+    .env("UV_CACHE_DIR", dir.join("cache/uv"))
+    .env("UV_TOOL_DIR", dir.join("data/uv-tools"))
+    .env("UV_TOOL_BIN_DIR", dir.join("data/uv-bin"))
+    .env("UV_PYTHON_INSTALL_DIR", dir.join("data/uv-python"))
+    .env("UV_NO_BUILD", "1")
+    .env("UV_PYTHON", "3.12")
     // A JVM agent (Junie) takes the home from the passwd entry, not $HOME, and wrote the real
     // ~/.junie on the first run of this audit.
     .env(
@@ -459,7 +465,7 @@ async fn handshake(agent: RegistryAgent, name: &str, dir: &Path) -> Value {
 fn tail(path: &Path) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let text = crate::redact::redact_output(&text);
-    let cut = text.len().saturating_sub(1500);
+    let cut = text.len().saturating_sub(6000);
     let start = (cut..=text.len())
         .find(|i| text.is_char_boundary(*i))
         .unwrap_or(0);
