@@ -15,7 +15,7 @@ use gpui::{
 };
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
-    RunSummary, StopReason,
+    RunSummary, StopReason, ThreadId,
 };
 
 use super::ScreenEvent;
@@ -29,7 +29,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
-use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane};
+use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 use crate::vm::rules;
@@ -52,11 +52,31 @@ const COLUMN: f32 = 760.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
 
+/// What one older run of the thread contributed to the transcript, and what it was built from:
+/// a finished run is not built again until its events (or its summary) change.
+#[derive(Clone)]
+struct Segment {
+    signature: (usize, Option<RunStatus>),
+    rows: Vec<Row>,
+}
+
 pub(crate) struct RunScreen {
     store: Entity<Store>,
+    /// The thread's latest run when the screen opened: the run the composer, the header and the
+    /// Review read. The transcript shows every run of its thread up to this one.
     run: RunId,
     list: ListState,
     rows: Vec<Row>,
+    /// How many leading rows are the older runs' (with their dividers), and what they were built
+    /// from. While that holds, only the latest run's rows are built again.
+    prefix_len: usize,
+    prefix_runs: Vec<(RunId, (usize, Option<RunStatus>))>,
+    /// Older runs' rows, by run.
+    segments: HashMap<RunId, Segment>,
+    /// What Review compares: the whole thread (default) or the latest run.
+    scope: ReviewScope,
+    /// The Session tab's "Close thread" is asking for a confirmation.
+    close_confirm: bool,
     facts: Facts,
     /// One streaming parse per prose row, keyed by the row's first event.
     markdown: HashMap<Key, Streaming>,
@@ -105,8 +125,9 @@ impl RunScreen {
     pub(crate) fn new(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
         store.update(cx, |store, cx| store.open_run(run.clone(), cx));
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
-        let key = PanelKey(run.to_string());
-        let (panel, panel_seeded) = match Saved::get(&key, cx) {
+        let key = panel_key_for(store.read(cx), &run);
+        let saved = Saved::get(&key, cx).or_else(|| migrated(store.read(cx), &key, cx));
+        let (panel, panel_seeded) = match saved {
             // What the person left: the first-tabs choice must not undo it.
             Some(saved) => (PanelState::restore(&saved), true),
             None => (PanelState::default(), false),
@@ -122,6 +143,11 @@ impl RunScreen {
             run: run.clone(),
             list,
             rows: Vec::new(),
+            prefix_len: 0,
+            prefix_runs: Vec::new(),
+            segments: HashMap::new(),
+            scope: ReviewScope::default(),
+            close_confirm: false,
             facts: Facts::default(),
             markdown: HashMap::new(),
             open: HashSet::new(),
@@ -215,27 +241,177 @@ impl RunScreen {
             Some(RunRouting::Ready(Some(decision))) => Some(routing::view(decision)),
             _ => None,
         };
-        let built = {
-            let state = self.store.read(cx).state();
+        let pending: Vec<Approval> = self
+            .store
+            .read(cx)
+            .state()
+            .approvals_for(&self.run)
+            .cloned()
+            .collect();
+        self.rebuild_rows(routing, &pending, cx);
+        self.keep_reasons(&pending, cx);
+        self.resolve_panel_key(cx);
+        self.follow_changes(cx);
+        self.follow_thread(cx);
+    }
+
+    /// The runs the transcript shows, oldest first, ending with this screen's run.
+    fn thread_runs(&self, cx: &gpui::App) -> Vec<RunId> {
+        let all = self.store.read(cx).thread_run_ids(&self.run);
+        match all.iter().position(|r| r == &self.run) {
+            Some(at) => all[..=at].to_vec(),
+            None => vec![self.run.clone()],
+        }
+    }
+
+    /// The thread this screen shows, once the daemon has named it.
+    pub(crate) fn thread_id(&self, cx: &gpui::App) -> Option<ThreadId> {
+        self.store.read(cx).thread_of(&self.run)
+    }
+
+    /// Rebuilds what changed: the latest run's rows each time, an older run's only when its
+    /// events or summary moved. Rows of older runs sit before it, each run after the first
+    /// behind a divider. The list is told only what differs.
+    fn rebuild_rows(
+        &mut self,
+        routing: Option<RoutingView>,
+        pending: &[Approval],
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self.thread_runs(cx);
+        let (older, anchor) = ids.split_at(ids.len() - 1);
+        let segment_at = ids.len() - 1;
+        let state = self.store.read(cx).state();
+        let signature = |id: &RunId| {
+            (
+                state.transcript(id).map_or(0, |t| t.events.len()),
+                state.run(id).map(|r| r.status),
+            )
+        };
+        let build = |id: &RunId, with: &[Approval]| {
             let events = state
-                .transcript(&self.run)
+                .transcript(id)
                 .map_or(&[][..], |t| t.events.as_slice());
-            let pending: Vec<Approval> = state.approvals_for(&self.run).cloned().collect();
             // The whole prompt when the daemon sends it; otherwise (an older daemon) the title,
             // which is its first line, and which in the "bot . repo: what" shape shows its "what".
-            let prompt = state.run(&self.run).map(|r| {
+            let prompt = state.run(id).map(|r| {
                 r.prompt
                     .as_deref()
                     .unwrap_or_else(|| summary::parse_title(&r.title).what)
             });
-            let mut built = model::build_rows(prompt, events, &pending);
-            built.rows = model::with_routing(built.rows, routing);
-            (built, pending)
+            model::build_rows(prompt, events, with)
         };
-        let (built, pending) = built;
-        self.keep_reasons(&pending, cx);
-        self.apply(built);
-        self.follow_changes(cx);
+        let divider = |id: &RunId, at: usize, model: Option<String>| {
+            state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
+                key: Key::divider(at),
+                executor: r.executor.clone(),
+                model: r.model.clone().or(model),
+                at_ms: r.created_at_ms,
+            })
+        };
+        let prefix_runs: Vec<_> = older.iter().map(|id| (id.clone(), signature(id))).collect();
+        let prefix_same = prefix_runs == self.prefix_runs;
+        let mut built = build(&anchor[0], pending);
+        built.rows = model::with_routing(built.rows, routing);
+        let mut tail: Vec<Row> = divider(&anchor[0], segment_at, built.facts.model.clone())
+            .into_iter()
+            .collect();
+        tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
+        let facts = built.facts;
+
+        if prefix_same {
+            self.apply_tail(facts, tail);
+            return;
+        }
+        // Some older run moved: build it again, the others come from the cache.
+        let mut cache = std::mem::take(&mut self.segments);
+        let mut rows: Vec<Row> = Vec::new();
+        for (at, (id, sig)) in prefix_runs.iter().enumerate() {
+            let segment = match cache.remove(id).filter(|c| &c.signature == sig) {
+                Some(segment) => segment,
+                None => {
+                    let built = build(id, &[]);
+                    let mut seg_rows: Vec<Row> = divider(id, at, built.facts.model.clone())
+                        .into_iter()
+                        .collect();
+                    seg_rows.extend(built.rows.into_iter().map(|row| row.in_segment(at)));
+                    Segment {
+                        signature: *sig,
+                        rows: seg_rows,
+                    }
+                }
+            };
+            rows.extend(segment.rows.iter().cloned());
+            self.segments.insert(id.clone(), segment);
+        }
+        self.prefix_len = rows.len();
+        self.prefix_runs = prefix_runs;
+        for row in &rows {
+            if let Row::Prose { key, text } = row {
+                self.markdown.entry(*key).or_default().set_text(text);
+            }
+        }
+        rows.extend(tail);
+        self.apply(Built { rows, facts });
+    }
+
+    /// The latest run's rows replace what followed the older runs'.
+    fn apply_tail(&mut self, facts: Facts, tail: Vec<Row>) {
+        self.facts = facts;
+        for row in &tail {
+            if let Row::Prose { key, text } = row {
+                self.markdown.entry(*key).or_default().set_text(text);
+            }
+        }
+        let at = self.prefix_len.min(self.rows.len());
+        let same = self.rows[at..]
+            .iter()
+            .zip(&tail)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let old_len = self.rows.len() - at;
+        if same < old_len || same < tail.len() {
+            self.list
+                .splice(at + same..self.rows.len(), tail.len() - same);
+        }
+        self.rows.truncate(at);
+        self.rows.extend(tail);
+    }
+
+    /// Follows the thread: the panel key once the daemon names the thread, and a newer run of
+    /// the thread (started elsewhere) opening in this screen's place.
+    fn follow_thread(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let newer = store.thread_run_ids(&self.run).last().cloned().filter(|latest| {
+            let state = store.state();
+            latest != &self.run
+                && state
+                    .run(latest)
+                    .zip(state.run(&self.run))
+                    .is_some_and(|(l, mine)| l.created_at_ms > mine.created_at_ms)
+        });
+        if let Some(latest) = newer {
+            cx.emit(ScreenEvent::OpenRun(latest));
+        }
+    }
+
+    /// The panel's key is the thread once the daemon says which it is. Until then (a run just
+    /// started) it is the run; the tabs the person has carry over.
+    fn resolve_panel_key(&mut self, cx: &mut Context<Self>) {
+        let want = panel_key_for(self.store.read(cx), &self.run);
+        if want == self.panel_key {
+            return;
+        }
+        self.panel_key = want;
+        match Saved::get(&self.panel_key, cx) {
+            // The thread's tabs are already known (an earlier run of it): they win, unless the
+            // person has changed this panel since it opened.
+            Some(saved) if !self.panel_touched => {
+                self.panel = PanelState::restore(&saved);
+                self.panel_seeded = true;
+            }
+            _ => self.persist_panel(cx),
+        }
     }
 
     /// Keeps what the run changed current: read when the run opens and when it ends, and about
@@ -300,7 +476,7 @@ impl RunScreen {
         };
         if line != self.result {
             self.result = line;
-            if let Some(ix) = self.rows.iter().position(|r| matches!(r, Row::Done { .. })) {
+            if let Some(ix) = self.rows.iter().rposition(|r| matches!(r, Row::Done { .. })) {
                 self.list.splice(ix..ix + 1, 1);
             }
         }
@@ -439,6 +615,26 @@ impl Render for RunScreen {
             .child(chat);
         self.with_panel(stage, &theme, window, cx)
     }
+}
+
+/// The panel key of `run`: its thread when the daemon has threads and has named it, else the run.
+fn panel_key_for(store: &Store, run: &RunId) -> PanelKey {
+    match store.thread_of(run) {
+        Some(thread) if store.supports_threads() => PanelKey(thread.to_string()),
+        _ => PanelKey(run.to_string()),
+    }
+}
+
+/// What an earlier version saved for the thread's first run under its run id: a thread of one run
+/// takes it over, so tabs survive the move to thread keys. A key already saved wins (the caller
+/// asks only when there is none).
+fn migrated(store: &Store, key: &PanelKey, cx: &gpui::App) -> Option<crate::panel::Descriptors> {
+    let thread = ThreadId::from_suffix(key.0.strip_prefix("thr_")?).ok()?;
+    let info = store.state().thread(&thread)?;
+    let [only] = info.runs.as_slice() else {
+        return None;
+    };
+    Saved::get(&PanelKey(only.run_id.to_string()), cx)
 }
 
 #[cfg(test)]

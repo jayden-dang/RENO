@@ -116,7 +116,7 @@ fn the_tabs_survive_a_restart_through_the_file(cx: &mut TestAppContext) {
     advance(&mut f, SAVE_DELAY);
     let (store, _) = PanelStore::load(&path(&f.dir));
     let saved = store
-        .get(&PanelKey(run_id("builder1").to_string()))
+        .get(&PanelKey("thr_builder1".to_owned()))
         .unwrap();
     let restored = crate::panel::PanelState::restore(saved);
     assert_eq!(restored.tabs(), [Surface::Session, Surface::Home]);
@@ -192,7 +192,7 @@ fn quitting_writes_what_is_pending(cx: &mut TestAppContext) {
     assert_eq!(loaded, Loaded::Read);
     assert!(
         store
-            .get(&PanelKey(run_id("builder1").to_string()))
+            .get(&PanelKey("thr_builder1".to_owned()))
             .is_some()
     );
 }
@@ -244,7 +244,7 @@ fn a_file_tab_is_saved_and_comes_back_showing_its_diff(cx: &mut TestAppContext) 
     advance(&mut f, SAVE_DELAY);
     let (store, _) = PanelStore::load(&path(&f.dir));
     let saved = store
-        .get(&PanelKey(run_id("builder1").to_string()))
+        .get(&PanelKey("thr_builder1".to_owned()))
         .unwrap();
     let restored = crate::panel::PanelState::restore(saved);
     assert!(restored.tabs().contains(&file));

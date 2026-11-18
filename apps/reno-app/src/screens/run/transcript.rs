@@ -64,8 +64,19 @@ impl RunScreen {
                     diagnostic.as_deref(),
                     reason.as_ref(),
                 ))
-                .children(self.result_line(&theme, cx))
+                // Only the thread's latest run says what the branch holds.
+                .children(
+                    (self.rows.iter().rposition(|r| matches!(r, Row::Done { .. })) == Some(ix))
+                        .then(|| self.result_line(&theme, cx))
+                        .flatten(),
+                )
                 .into_any_element(),
+            Row::Divider {
+                executor,
+                model,
+                at_ms,
+                ..
+            } => self.divider(&theme, executor, model.as_deref(), *at_ms, cx),
         };
         div()
             .w_full()
@@ -76,6 +87,50 @@ impl RunScreen {
                 16.0
             }))
             .child(body)
+            .into_any_element()
+    }
+
+    /// Where a follow-up run begins: "New run · Claude Code · Sonnet" and when it started, between
+    /// two hairlines.
+    fn divider(
+        &self,
+        theme: &Theme,
+        executor: &ExecutorId,
+        model: Option<&str>,
+        at_ms: u64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let model = model.map(|id| {
+            crate::vm::models::model_name(self.store.read(cx).state(), executor, id)
+        });
+        let mut text = format!("New run \u{b7} {}", summary::executor_name(executor.as_str()));
+        if let Some(model) = model {
+            text.push_str(&format!(" \u{b7} {model}"));
+        }
+        let started = chrono::DateTime::from_timestamp_millis(i64::try_from(at_ms).unwrap_or(0))
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%-d %b %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let line = || div().flex_1().h(px(1.0)).bg(theme.hairline);
+        div()
+            .id("run-divider")
+            .debug_selector(|| "run-divider".to_owned())
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .text_size(px(12.0))
+            .text_color(theme.faint)
+            .child(line())
+            .child(SharedString::from(text))
+            .child(
+                div()
+                    .font_family(MONO)
+                    .child(SharedString::from(started)),
+            )
+            .child(line())
             .into_any_element()
     }
 

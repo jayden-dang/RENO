@@ -402,7 +402,9 @@ impl RootView {
                         this.open_run(run.clone(), window, cx);
                     }
                     // The composer that sent it takes its draft back.
-                    StoreEvent::SendFailed(_) => {}
+                    StoreEvent::SendFailed(_)
+                    | StoreEvent::SendRefused { .. }
+                    | StoreEvent::ThreadClosed(_) => {}
                     StoreEvent::ExecutorInstalled(id) => {
                         toast::push(
                             cx,

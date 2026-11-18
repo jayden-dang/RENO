@@ -396,6 +396,7 @@ fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::Asked { .. } => "asked",
             Row::ModelChanged { .. } => "model",
             Row::Routing { .. } => "routing",
+            Row::Divider { .. } => "divider",
             Row::Done { .. } => "done",
         })
         .collect()
