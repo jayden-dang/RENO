@@ -5,6 +5,7 @@
 //! only draw what these return.
 
 pub(crate) mod changes;
+pub(crate) mod composer_prefs;
 pub(crate) mod executors;
 pub(crate) mod history;
 pub(crate) mod models;

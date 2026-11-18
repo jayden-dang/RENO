@@ -224,6 +224,10 @@ pub(crate) struct Store {
     /// When you last opened each run; kept on disk next to the socket for the real daemon.
     seen: crate::vm::projects::Seen,
     seen_file: Option<PathBuf>,
+    /// What the composer's picker remembers; kept on disk next to the socket for the real
+    /// daemon, in memory only for the fake one.
+    composer: crate::vm::composer_prefs::ComposerPrefs,
+    composer_file: Option<PathBuf>,
     /// The run on screen: it is seen as it changes.
     looking: Option<RunId>,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
@@ -266,6 +270,8 @@ impl Store {
             roots: crate::local::Roots::default(),
             seen: crate::vm::projects::Seen::default(),
             seen_file: None,
+            composer: crate::vm::composer_prefs::ComposerPrefs::default(),
+            composer_file: None,
             looking: None,
             bridge: None,
         }
@@ -284,6 +290,26 @@ impl Store {
     /// When you last opened each run.
     pub(crate) fn seen(&self) -> &crate::vm::projects::Seen {
         &self.seen
+    }
+
+    /// What the composer's picker remembers.
+    #[allow(dead_code)] // the picker reads it in the next commit
+    pub(crate) fn composer_prefs(&self) -> &crate::vm::composer_prefs::ComposerPrefs {
+        &self.composer
+    }
+
+    #[allow(dead_code)] // the picker writes it in the next commit
+    /// Changes what the composer remembers and saves it, when there is a file for it.
+    pub(crate) fn update_composer_prefs(
+        &mut self,
+        change: impl FnOnce(&mut crate::vm::composer_prefs::ComposerPrefs),
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.composer);
+        if let Some(path) = &self.composer_file {
+            crate::local::save_composer(path, &self.composer);
+        }
+        cx.notify();
     }
 
     /// The run on screen, if one is.
@@ -491,6 +517,10 @@ impl Store {
         if let Some(file) = crate::local::seen_path(&path) {
             self.seen = crate::local::load_seen(&file, system_now_ms());
             self.seen_file = Some(file);
+        }
+        if let Some(file) = crate::local::composer_path(&path) {
+            self.composer = crate::local::load_composer(&file);
+            self.composer_file = Some(file);
         }
         match daemon_keeper(&path, |key| std::env::var(key).ok()) {
             Some(keeper) => {

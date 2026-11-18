@@ -1,10 +1,11 @@
 //! What the app keeps on this machine besides the daemon: which repository a folder is in, and
-//! when you last opened each run (the sidebar's "has a message" dot, ui-brief 2026-11-17).
+//! when you last opened each run (the sidebar's "has a message" dot, ui-brief 2026-11-17).  And what the composer's picker remembers (stars, effort and options per model).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::vm::composer_prefs::ComposerPrefs;
 use crate::vm::projects::Seen;
 
 /// Finds repository roots on disk, once per directory.
@@ -80,6 +81,36 @@ pub(crate) fn save_seen(path: &Path, seen: &Seen) {
     }
 }
 
+/// Where the composer's remembered picks are kept: beside the daemon's socket, in their own
+/// file.
+pub(crate) fn composer_path(socket: &Path) -> Option<PathBuf> {
+    socket.parent().map(|dir| dir.join("app-composer.json"))
+}
+
+/// Reads the composer's picks from `path`; a missing or unreadable file is a fresh start.
+pub(crate) fn load_composer(path: &Path) -> ComposerPrefs {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Writes the composer's picks to `path` through a temporary file, so a crash never leaves half
+/// a file. A failure only costs the memory; it is logged, not shown.
+#[allow(clippy::print_stderr)]
+#[allow(dead_code)] // the picker saves in the next commit
+pub(crate) fn save_composer(path: &Path, prefs: &ComposerPrefs) {
+    let write = || -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(prefs)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)
+    };
+    if let Err(error) = write() {
+        eprintln!("reno-app: could not save {}: {error}", path.display());
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -120,5 +151,27 @@ mod tests {
 
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(load_seen(&path, 5_000), Seen::new(5_000));
+    }
+
+    #[test]
+    fn composer_picks_live_beside_the_socket_and_survive_a_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = composer_path(&tmp.path().join("reno.sock")).unwrap();
+        assert_eq!(path, tmp.path().join("app-composer.json"));
+        assert_eq!(
+            load_composer(&path),
+            ComposerPrefs::default(),
+            "no file yet"
+        );
+        let mut prefs = ComposerPrefs::default();
+        prefs.toggle_favourite(&"codex".parse().unwrap(), "gpt");
+        save_composer(&path, &prefs);
+        assert_eq!(load_composer(&path), prefs);
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "renamed into place"
+        );
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(load_composer(&path), ComposerPrefs::default());
     }
 }
