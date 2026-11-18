@@ -11,6 +11,7 @@ mod app;
 mod attach;
 mod local;
 mod nav;
+mod panel;
 mod screens;
 mod store;
 mod summary;
