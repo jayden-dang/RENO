@@ -574,3 +574,81 @@ async fn workspaces_list_by_status() {
             .is_empty()
     );
 }
+
+fn changed(path: &str, kind: reno_proto::ChangeKind, additions: u32) -> reno_proto::ChangedFile {
+    reno_proto::ChangedFile {
+        path: path.into(),
+        from: None,
+        kind,
+        additions,
+        deletions: 0,
+        binary: false,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_kept_workspace_reports_what_the_run_changed_and_the_patch_of_one_file() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let m = mock([MockStep::Sleep(Duration::from_secs(5))]);
+    let fx = with(&ws, config(1), &[m]).await;
+    let run = submit_at(&fx, "/repo").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    placed(&ws, &run).await;
+    ws.set_changes(&run, changes(1, true));
+    ws.set_diff(
+        &run,
+        crate::RunChanges {
+            commits: 1,
+            files: vec![changed("a.rs", reno_proto::ChangeKind::Added, 3)],
+            patch: Some("PATCH".into()),
+            patch_truncated: true,
+        },
+    );
+    ended(&fx, &run, RunStatus::Succeeded).await;
+
+    let info = fx.kernel.workspace(&run).await.unwrap();
+    let list = fx.kernel.workspace_diff(&run, None).await.unwrap();
+    assert_eq!(list.run_id, run);
+    assert_eq!(
+        (list.branch.as_str(), list.base_sha.as_str()),
+        (info.branch.as_str(), info.base_sha.as_str())
+    );
+    assert_eq!((list.commits, list.files.len()), (1, 1));
+    assert_eq!(list.patch, None, "no path, no patch");
+    let one = fx.kernel.workspace_diff(&run, Some("a.rs")).await.unwrap();
+    assert_eq!(one.patch.as_deref(), Some("PATCH"));
+    assert!(one.patch_truncated);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_removed_workspace_has_an_empty_diff_not_an_error_and_an_unknown_run_is_not_found() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let m = mock([MockStep::Sleep(Duration::from_secs(5))]);
+    let fx = with(&ws, config(1), &[m]).await;
+    let run = submit_at(&fx, "/repo").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    placed(&ws, &run).await;
+    // Whatever the port would say, a removed workspace has nothing.
+    ws.set_diff(
+        &run,
+        crate::RunChanges {
+            commits: 9,
+            files: vec![changed("a.rs", reno_proto::ChangeKind::Added, 3)],
+            ..Default::default()
+        },
+    );
+    ended(&fx, &run, RunStatus::Succeeded).await;
+    let info = fx.kernel.workspace(&run).await.unwrap();
+    assert_eq!(info.status, WorkspaceStatus::Removed);
+
+    let got = fx.kernel.workspace_diff(&run, Some("a.rs")).await.unwrap();
+    assert_eq!((got.commits, got.files.len(), got.patch), (0, 0, None));
+    assert_eq!(got.branch, info.branch);
+    assert_eq!(got.base_sha, info.base_sha);
+
+    let stranger = RunId::from_suffix("nope").unwrap();
+    assert!(matches!(
+        fx.kernel.workspace_diff(&stranger, None).await,
+        Err(crate::KernelError::WorkspaceNotFound(_))
+    ));
+}

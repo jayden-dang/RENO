@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use reno_proto::{ChangeKind, ChangedFile};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -646,6 +647,160 @@ impl GitWorktrees {
         Ok(())
     }
 
+    /// What the run changed in the worktree of `loc` against its base commit: committed, staged,
+    /// unstaged and untracked files (ignored files are not changes), and, for `path`, that
+    /// file's patch cut at [`PATCH_CAP`]. Reads only: no `add`, no index write
+    /// (`GIT_OPTIONAL_LOCKS=0`), no external diff driver or textconv. A worktree whose directory
+    /// is gone has no changes. `path` must be a clean repository-relative path and name a
+    /// changed file, else there is no patch; a symlink is never followed.
+    pub async fn changes_since_base(
+        &self,
+        loc: &Location,
+        path: Option<&str>,
+    ) -> Result<RunChanges, GitError> {
+        if let Some(path) = path
+            && !is_clean_relative(path)
+        {
+            return Err(GitError::Unsafe(format!(
+                "{path:?} is not a path inside the worktree"
+            )));
+        }
+        let mut out = RunChanges::default();
+        if !tokio::fs::try_exists(&loc.path).await.unwrap_or(false) {
+            return Ok(out);
+        }
+        let base = loc.base_sha.as_str();
+        out.commits = self
+            .count(&loc.path, &format!("{base}..HEAD"))
+            .await
+            .unwrap_or(0);
+        let numstat = self
+            .git(
+                &loc.path,
+                &[
+                    "diff",
+                    "--numstat",
+                    "-z",
+                    "-M",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    base,
+                    "--",
+                ],
+            )
+            .await?;
+        if !numstat.ok() {
+            return Err(failed("diff --numstat", &numstat));
+        }
+        let status = self
+            .git(
+                &loc.path,
+                &[
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    "-M",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    base,
+                    "--",
+                ],
+            )
+            .await?;
+        if !status.ok() {
+            return Err(failed("diff --name-status", &status));
+        }
+        let mut files = parse_changes(&status.stdout, &numstat.stdout);
+        let tracked_paths: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
+
+        let untracked = self
+            .names(
+                &loc.path,
+                &["ls-files", "-z", "--others", "--exclude-standard"],
+            )
+            .await?;
+        for (n, name) in untracked.into_iter().enumerate() {
+            if tracked_paths.contains(&name) {
+                continue;
+            }
+            let (additions, binary) = if n < UNTRACKED_COUNTED {
+                count_untracked(&loc.path.join(&name)).await
+            } else {
+                (0, false)
+            };
+            files.push(ChangedFile {
+                path: name,
+                from: None,
+                kind: ChangeKind::Added,
+                additions,
+                deletions: 0,
+                binary,
+            });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        if let Some(path) = path
+            && let Some(entry) = files.iter().find(|f| f.path == path)
+            && !entry.binary
+        {
+            let raw = if tracked_paths.contains(path) {
+                let mut args = vec![
+                    "diff",
+                    "--no-color",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "-M",
+                    base,
+                    "--",
+                ];
+                let spec = format!(":(literal){path}");
+                let from_spec = entry.from.as_ref().map(|f| format!(":(literal){f}"));
+                args.push(&spec);
+                if let Some(from) = &from_spec {
+                    args.push(from);
+                }
+                let diff = self.git(&loc.path, &args).await?;
+                if !diff.ok() {
+                    return Err(failed("diff", &diff));
+                }
+                diff.stdout
+            } else {
+                // Untracked: a new-file patch from outside the index. Exit 1 means "differs".
+                // A symlink would show its target path, not the file behind it.
+                let diff = self
+                    .git(
+                        &loc.path,
+                        &[
+                            "diff",
+                            "--no-index",
+                            "--no-color",
+                            "--src-prefix=a/",
+                            "--dst-prefix=b/",
+                            "--no-ext-diff",
+                            "--no-textconv",
+                            "--",
+                            "/dev/null",
+                            path,
+                        ],
+                    )
+                    .await?;
+                if !matches!(diff.code, Some(0 | 1)) {
+                    return Err(failed("diff --no-index", &diff));
+                }
+                diff.stdout
+            };
+            if !raw.is_empty() {
+                let (patch, cut) = cut_patch(raw);
+                out.patch = Some(patch);
+                out.patch_truncated = cut;
+            }
+        }
+        out.files = files;
+        Ok(out)
+    }
+
     /// The NUL-separated names `git args` prints.
     async fn names(&self, dir: &Path, args: &[&str]) -> Result<Vec<String>, GitError> {
         let out = self.git(dir, args).await?;
@@ -823,6 +978,132 @@ impl GitWorktrees {
             }
         }
     }
+}
+
+/// The longest patch `changes_since_base` returns.
+pub const PATCH_CAP: usize = 256 * 1024;
+/// Untracked files larger than this are listed without line counts.
+const COUNT_LIMIT: u64 = 1024 * 1024;
+/// At most this many untracked files are read to count their lines.
+const UNTRACKED_COUNTED: usize = 2000;
+
+/// What a run changed against its base commit: see [`GitWorktrees::changes_since_base`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunChanges {
+    /// Commits beyond the base.
+    pub commits: u32,
+    /// The changed files, by path.
+    pub files: Vec<ChangedFile>,
+    /// The patch of the requested file.
+    pub patch: Option<String>,
+    /// Whether `patch` was cut at [`PATCH_CAP`].
+    pub patch_truncated: bool,
+}
+
+/// A path git can be asked about: relative, `/`-separated, no empty, `.` or `..` part, no NUL.
+fn is_clean_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\0')
+        && !path.contains('\\')
+        && !path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+/// Cuts `patch` to [`PATCH_CAP`] bytes at the last line end that fits.
+fn cut_patch(patch: String) -> (String, bool) {
+    if patch.len() <= PATCH_CAP {
+        return (patch, false);
+    }
+    let mut end = PATCH_CAP;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some(line) = patch[..end].rfind('\n') {
+        end = line + 1;
+    }
+    (patch[..end].to_owned(), true)
+}
+
+/// Lines in an untracked regular file and whether it looks binary. A file over [`COUNT_LIMIT`],
+/// unreadable, or not a regular file (a symlink is never followed) counts as nothing.
+async fn count_untracked(path: &Path) -> (u32, bool) {
+    let Ok(meta) = tokio::fs::symlink_metadata(path).await else {
+        return (0, false);
+    };
+    if !meta.is_file() || meta.len() > COUNT_LIMIT {
+        return (0, false);
+    }
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return (0, false);
+    };
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        return (0, true);
+    }
+    let newlines = bytes.iter().filter(|b| **b == b'\n').count();
+    let tail = usize::from(bytes.last().is_some_and(|b| *b != b'\n'));
+    (u32::try_from(newlines + tail).unwrap_or(u32::MAX), false)
+}
+
+/// Joins `git diff --name-status -z -M` and `--numstat -z -M` (the same entries, keyed by their
+/// new path) into files. A record cut short by the output bound is dropped.
+fn parse_changes(name_status: &str, numstat: &str) -> Vec<ChangedFile> {
+    // `adds \t dels \t path \0`, or for a rename `adds \t dels \t \0 old \0 new \0`.
+    let mut counts: HashMap<String, (Option<(u32, u32)>, bool)> = HashMap::new();
+    let mut parts = numstat.split('\0');
+    while let Some(record) = parts.next() {
+        let mut fields = record.splitn(3, '\t');
+        let (Some(adds), Some(dels), Some(path)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let (Some(_old), Some(new)) = (parts.next(), parts.next()) else {
+                break;
+            };
+            new
+        } else {
+            path
+        };
+        let binary = adds == "-" && dels == "-";
+        let n = (adds.parse().unwrap_or(0), dels.parse().unwrap_or(0));
+        counts.insert(path.to_owned(), (Some(n), binary));
+    }
+    // `S \0 path \0`, or `R<score> \0 old \0 new \0`.
+    let mut files = Vec::new();
+    let mut parts = name_status.split('\0');
+    while let Some(code) = parts.next() {
+        if code.is_empty() {
+            continue;
+        }
+        let kind = match code.chars().next() {
+            Some('A') => ChangeKind::Added,
+            Some('D') => ChangeKind::Deleted,
+            Some('R' | 'C') => ChangeKind::Renamed,
+            _ => ChangeKind::Modified,
+        };
+        let (from, path) = if kind == ChangeKind::Renamed {
+            let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
+                break;
+            };
+            (Some(old.to_owned()), new.to_owned())
+        } else {
+            let Some(path) = parts.next() else { break };
+            (None, path.to_owned())
+        };
+        let (n, binary) = counts.remove(&path).unwrap_or((None, false));
+        let (additions, deletions) = if binary { (0, 0) } else { n.unwrap_or((0, 0)) };
+        files.push(ChangedFile {
+            path,
+            from,
+            kind,
+            additions,
+            deletions,
+            binary,
+        });
+    }
+    files
 }
 
 /// What [`GitWorktrees::probe`] learned about a directory inside a repository.

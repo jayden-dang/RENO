@@ -299,6 +299,29 @@ mod tests {
     }
 
     #[test]
+    fn many_worst_case_tool_outputs_stay_far_under_the_frame_limit() {
+        // 16 KiB of control characters is the worst case: each escapes to six bytes of JSON.
+        let worst = reno_proto::ToolOutput::from_text(&"\u{1}".repeat(40_000));
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journals::new(dir.path().join("journals"));
+        let mut w = j.writer(&run()).unwrap();
+        for i in 0..300 {
+            w.append(&ExecEvent::ToolResult {
+                id: format!("t{i}"),
+                ok: true,
+                summary: None,
+                output: Some(worst.clone()),
+            })
+            .unwrap();
+        }
+        w.flush().unwrap();
+        let file = std::fs::read_to_string(j.path(&run())).unwrap();
+        let longest = file.lines().map(str::len).max().unwrap();
+        assert!(longest < 120 * 1024, "one row is {longest} bytes");
+        assert_eq!(collect(&j, 1).len(), 300);
+    }
+
+    #[test]
     fn replay_from_mid_seq_and_missing_journal() {
         let dir = tempfile::tempdir().unwrap();
         let j = Journals::new(dir.path());
