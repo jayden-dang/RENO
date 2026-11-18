@@ -25,6 +25,7 @@ fn run(name: &str) -> RunId {
 
 fn task(prompt: &str) -> TaskRunParams {
     TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: prompt.to_owned(),
