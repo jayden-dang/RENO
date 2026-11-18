@@ -258,6 +258,9 @@ pub(crate) struct Normalizer {
     failure_noticed: bool,
     /// This turn already said it is retrying the API.
     retry_noticed: bool,
+    /// The model of the last main-thread assistant frame, to find its entry in a result's
+    /// `modelUsage` (a subagent may have used another model).
+    last_model: Option<String>,
 }
 
 impl Normalizer {
@@ -268,6 +271,7 @@ impl Normalizer {
             notices: Vec::new(),
             failure_noticed: false,
             retry_noticed: false,
+            last_model: None,
         }
     }
 
@@ -281,6 +285,28 @@ impl Normalizer {
         let mut parts = std::mem::take(&mut self.notices);
         parts.extend(error);
         (!parts.is_empty()).then(|| parts.join(" "))
+    }
+
+    /// The context window the result's `modelUsage` reports for the main model: the entry of
+    /// the last assistant model (by id or `canonicalModel`), else the only entry. Never a
+    /// subagent's.
+    fn context_window(&self, f: &ResultFrame) -> Option<u64> {
+        let usage = f.model_usage.as_ref()?.as_object()?;
+        let entry = self
+            .last_model
+            .as_ref()
+            .and_then(|model| {
+                usage.get(model).or_else(|| {
+                    usage.values().find(|entry| {
+                        entry.get("canonicalModel").and_then(Value::as_str) == Some(model.as_str())
+                    })
+                })
+            })
+            .or_else(|| (usage.len() == 1).then(|| usage.values().next()).flatten())?;
+        entry
+            .get("contextWindow")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
     }
 
     /// The turn ended: what it noticed is no longer anyone's.
@@ -327,6 +353,21 @@ impl Normalizer {
                     }
                     return Vec::new();
                 }
+                // The context shrank: report the new occupancy now rather than at the next
+                // assistant frame.
+                if f.subtype == "compact_boundary" {
+                    return f
+                        .compact_metadata
+                        .as_ref()
+                        .and_then(|m| m.get("post_tokens"))
+                        .and_then(Value::as_u64)
+                        .map(|tokens| ExecEvent::ContextUsage {
+                            tokens: Some(tokens),
+                            window: None,
+                        })
+                        .into_iter()
+                        .collect();
+                }
                 if f.subtype != "init" || self.saw_init {
                     return Vec::new();
                 }
@@ -361,7 +402,7 @@ impl Normalizer {
                     return Vec::new();
                 }
                 note_commands(&f, &mut self.command_calls);
-                let out = f
+                let mut out: Vec<ExecEvent> = f
                     .message
                     .blocks()
                     .filter(|b: &ContentBlock| b.kind == "tool_use")
@@ -373,6 +414,15 @@ impl Normalizer {
                         }
                     })
                     .collect();
+                self.last_model = f.message.model.clone().or(self.last_model.take());
+                // What this call read as input is the context now: fresh, cached and newly
+                // cached input, never the output. A replacement, not billing (`Usage` is that).
+                if let Some(tokens) = f.message.usage.as_ref().and_then(context_tokens) {
+                    out.push(ExecEvent::ContextUsage {
+                        tokens: Some(tokens),
+                        window: None,
+                    });
+                }
                 // A failed turn (usage limit, billing, auth, overloaded, ...) carries a terse
                 // `error` code here, often with empty content and no `result` error.
                 if let Some(code) = &f.error {
@@ -440,6 +490,7 @@ impl Normalizer {
                     cache_read_tokens: f.usage.cache_read_input_tokens,
                     cache_write_tokens: f.usage.cache_creation_input_tokens,
                 };
+                let window = self.context_window(&f);
                 let failure = (f.subtype == "success" && !interrupted && !aborted(&f))
                     .then(|| api_failure(&f))
                     .flatten();
@@ -500,7 +551,16 @@ impl Normalizer {
                     }
                 };
                 self.end_turn();
-                vec![usage, done]
+                // The window first, so `Done` stays last and `Usage` stays beside it.
+                let mut out = Vec::new();
+                if let Some(window) = window {
+                    out.push(ExecEvent::ContextUsage {
+                        tokens: None,
+                        window: Some(window),
+                    });
+                }
+                out.extend([usage, done]);
+                out
             }
 
             // Control frames are handled by the run loop, not normalized.
@@ -511,6 +571,21 @@ impl Normalizer {
             | Frame::Unknown(_) => Vec::new(),
         }
     }
+}
+
+/// The input of one model call, from its API usage: `input + cache_read + cache_creation`.
+/// `None` when the usage carries none of the three.
+fn context_tokens(usage: &Value) -> Option<u64> {
+    let fields = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ];
+    let counts: Vec<u64> = fields
+        .iter()
+        .filter_map(|key| usage.get(*key).and_then(Value::as_u64))
+        .collect();
+    (!counts.is_empty()).then(|| counts.into_iter().fold(0, u64::saturating_add))
 }
 
 fn done(stop: StopReason, result: Option<String>, diagnostic: Option<String>) -> ExecEvent {
@@ -993,12 +1068,82 @@ mod tests {
         }
         for raw in [
             r#"{"type":"system","subtype":"status","status":"compacting"}"#,
-            r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":180000,"post_tokens":9000}}"#,
             r#"{"type":"system","subtype":"informational","content":"x","level":"info"}"#,
             r#"{"type":"system","subtype":"thinking_tokens","tokens":12}"#,
         ] {
             assert!(norm.normalize(parse(raw), false).is_empty(), "{raw}");
         }
+    }
+
+    #[test]
+    fn compaction_reports_the_new_context_and_a_boundary_without_it_nothing() {
+        assert_eq!(
+            normalize_one(
+                r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":180000,"post_tokens":9000}}"#
+            ),
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(9000),
+                window: None
+            }]
+        );
+        assert!(normalize_one(r#"{"type":"system","subtype":"compact_boundary"}"#).is_empty());
+    }
+
+    #[test]
+    fn context_counts_cached_prompt_not_output_and_matches_the_primary_model() {
+        let mut norm = Normalizer::new();
+        let events = norm.normalize(parse(r#"{"type":"assistant","message":{"model":"primary","content":[],"usage":{"input_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1800,"output_tokens":100}}}"#), false);
+        assert_eq!(
+            events,
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(42_000),
+                window: None
+            }]
+        );
+        // A subagent's frame is not the run's context.
+        let events = norm.normalize(parse(r#"{"type":"assistant","parent_tool_use_id":"child","message":{"model":"child","content":[],"usage":{"input_tokens":999999}}}"#), false);
+        assert!(events.is_empty());
+        // The result gives the window of the main model, and never tokens; Done stays last.
+        let events = norm.normalize(parse(r#"{"type":"result","subtype":"success","usage":{"input_tokens":999999},"modelUsage":{"primary":{"contextWindow":200000},"child":{"contextWindow":1000000}}}"#), false);
+        assert_eq!(
+            events[0],
+            ExecEvent::ContextUsage {
+                tokens: None,
+                window: Some(200_000)
+            }
+        );
+        assert!(matches!(events[1], ExecEvent::Usage { .. }));
+        assert!(matches!(events.last(), Some(ExecEvent::Done { .. })));
+        assert_eq!(events.len(), 3);
+        // A usage with none of the input counts says nothing; so does a result with no window.
+        assert!(
+            norm.normalize(
+                parse(
+                    r#"{"type":"assistant","message":{"content":[],"usage":{"output_tokens":5}}}"#
+                ),
+                false
+            )
+            .is_empty()
+        );
+        let events = norm.normalize(
+            parse(r#"{"type":"result","subtype":"success","modelUsage":{"primary":{"contextWindow":0}}}"#),
+            false,
+        );
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn a_single_model_entry_serves_when_no_assistant_frame_named_one() {
+        let events = normalize_one(
+            r#"{"type":"result","subtype":"success","modelUsage":{"claude-opus-5-5":{"contextWindow":1000000}}}"#,
+        );
+        assert_eq!(
+            events[0],
+            ExecEvent::ContextUsage {
+                tokens: None,
+                window: Some(1_000_000)
+            }
+        );
     }
 
     #[test]

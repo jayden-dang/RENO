@@ -102,6 +102,9 @@ pub(crate) struct SystemFrame {
     pub error_status: Option<u64>,
     #[serde(default)]
     pub error: Option<Value>,
+    /// `compact_boundary`: what the compaction did (`post_tokens` is the context left).
+    #[serde(default)]
+    pub compact_metadata: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -149,6 +152,13 @@ pub(crate) struct MessageBody {
     /// Either a plain string or an array of content blocks.
     #[serde(default)]
     pub content: Value,
+    /// The model that produced an assistant message.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The API usage of an assistant message: how much the call read as input. Kept as read
+    /// (any shape) so an odd value never costs the frame.
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 impl MessageBody {
@@ -227,6 +237,10 @@ pub(crate) struct ResultFrame {
     pub errors: Vec<Value>,
     #[serde(default)]
     pub usage: UsageBody,
+    /// Per-model usage (`modelUsage`, keyed by model id), each entry with the model's
+    /// `contextWindow`. Kept as read, so a shape we do not know never costs the result.
+    #[serde(default, rename = "modelUsage")]
+    pub model_usage: Option<Value>,
     /// Set on API failures the CLI still files under `subtype: "success"`
     /// (an invalid key, an overloaded or rate-limited API): the turn did no
     /// real work.

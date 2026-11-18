@@ -160,6 +160,19 @@ impl Normalizer {
                 .into_iter()
                 .collect(),
             "tool_call" | "tool_call_update" => self.tool(update),
+            // The gauge: `used` tokens of the window (`size`; some agents say `max`, `limit`).
+            "usage_update" => {
+                let tokens = update.get("used").and_then(Value::as_u64);
+                let window = ["size", "max", "limit", "contextWindow", "context_window"]
+                    .iter()
+                    .find_map(|key| update.get(*key).and_then(Value::as_u64))
+                    .filter(|n| *n > 0);
+                if tokens.is_some() || window.is_some() {
+                    vec![ExecEvent::ContextUsage { tokens, window }]
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -572,12 +585,31 @@ mod tests {
     }
 
     #[test]
-    fn plans_commands_usage_gauges_and_unknown_kinds_are_dropped() {
+    fn a_usage_update_is_the_context_gauge() {
+        assert_eq!(
+            events(&[json!({ "sessionUpdate": "usage_update", "used": 53_000, "size": 200_000 })]),
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(53_000),
+                window: Some(200_000)
+            }]
+        );
+        // A zero window is "not known"; zero used is a real, empty context.
+        assert_eq!(
+            events(&[json!({ "sessionUpdate": "usage_update", "used": 0, "size": 0 })]),
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(0),
+                window: None
+            }]
+        );
+        assert!(events(&[json!({ "sessionUpdate": "usage_update" })]).is_empty());
+    }
+
+    #[test]
+    fn plans_commands_and_unknown_kinds_are_dropped() {
         assert!(
             events(&[
                 json!({ "sessionUpdate": "plan", "entries": [] }),
                 json!({ "sessionUpdate": "available_commands_update", "availableCommands": [] }),
-                json!({ "sessionUpdate": "usage_update", "used": 1, "size": 2 }),
                 json!({ "sessionUpdate": "current_mode_update", "currentModeId": "x" }),
                 json!({ "sessionUpdate": "totally_unknown_kind" }),
                 json!({}),
