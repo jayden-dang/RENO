@@ -490,6 +490,25 @@ async fn resolve_secrets(
     })
 }
 
+/// The redactor for the secrets `row`'s pinned bot version lists, read again from the port, for
+/// what is shown after the run (a workspace's patch). `Ok(None)`: the run has no secrets.
+/// `Err`: it has some and they cannot be read now, so nothing can be redacted.
+pub(crate) async fn redactor_for(
+    shared: &Shared,
+    row: &RunRecord,
+) -> Result<Option<ValueRedactor>, ()> {
+    let settings = launch_settings(shared, row).await.map_err(|_| ())?;
+    match resolve_secrets(shared, &settings).await {
+        Ok(found) if found.is_empty() => Ok(None),
+        Ok(found) => Ok(Some(ValueRedactor::new(
+            found
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.expose())),
+        ))),
+        Err(_) => Err(()),
+    }
+}
+
 /// What to say when a task that named no executor and no bot found none to go to.
 const NAME_ONE: &str =
     "name an executor (task.run executor, `reno task run --executor`) or use a bot";

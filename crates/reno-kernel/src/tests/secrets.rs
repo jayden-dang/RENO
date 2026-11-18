@@ -411,3 +411,258 @@ async fn a_secret_in_a_tools_output_is_redacted_before_it_is_journaled() {
         "{shown}"
     );
 }
+
+/// The journal's tool outputs of `run`.
+fn journaled_outputs(journal: &[(reno_proto::Seq, ExecEvent)]) -> Vec<reno_proto::ToolOutput> {
+    journal
+        .iter()
+        .filter_map(|(_, event)| match event {
+            ExecEvent::ToolResult { output, .. } => output.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// No window of `needle` of `min` bytes survives in `shown`.
+fn no_fragment(shown: &str, needle: &str, min: usize) {
+    for window in needle.as_bytes().windows(min) {
+        let window = std::str::from_utf8(window).unwrap();
+        assert!(!shown.contains(window), "fragment {window:?} leaked");
+    }
+}
+
+/// `before` bytes of filler, the token, then `after` bytes of filler.
+fn around(before: usize, after: usize) -> String {
+    format!("{}{TOKEN}{}", "a".repeat(before), "b".repeat(after))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_across_the_journal_cut_leaves_no_fragment() {
+    let half = reno_proto::ToolOutput::MAX_BYTES / 2;
+    let raw_half = reno_proto::ToolOutput::RAW_MAX_BYTES / 2;
+    let texts = [
+        // Across the end of the journal's head.
+        around(half - 10, 20_000),
+        // Across the start of the journal's tail.
+        around(20_000, half - 15),
+        // Across the end of the raw head and the start of the raw tail, in a huge output.
+        around(raw_half - 10, 1_500_000),
+        around(1_500_000, raw_half - 15),
+    ];
+    let mut steps = Vec::new();
+    for (n, text) in texts.iter().enumerate() {
+        steps.push(MockStep::Emit(ExecEvent::ToolResult {
+            id: format!("t{n}"),
+            ok: true,
+            summary: None,
+            // What the drivers hand over: the raw cut, no journal cut.
+            output: Some(reno_proto::ToolOutput::from_raw(text)),
+        }));
+    }
+    steps.push(MockStep::Emit(ExecEvent::Done {
+        stop: StopReason::Completed,
+        result: None,
+        diagnostic: None,
+        reason: None,
+    }));
+    let m = mock(steps);
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]"),
+        Some(secrets),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let journal = fx.journal_with_done(&run).await;
+    let outputs = journaled_outputs(&journal);
+    assert_eq!(outputs.len(), texts.len());
+    for (output, text) in outputs.iter().zip(&texts) {
+        assert_eq!(output.bytes, text.len() as u64, "bytes is the real size");
+        assert!(output.truncated);
+        assert!(output.text.len() <= reno_proto::ToolOutput::MAX_BYTES + 40);
+        no_fragment(&output.text, TOKEN, 6);
+    }
+    let shown = serde_json::to_string(&journal).unwrap();
+    no_fragment(&shown, TOKEN, 6);
+
+    // The same texts, cut at the journal limit before redaction (the old order), would have
+    // left a fragment: this is what the test is for.
+    let old = reno_proto::ToolOutput::from_text(&texts[0]);
+    assert!(
+        old.text.contains(&TOKEN[..10]),
+        "the fixture straddles the cut"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tool_output_is_cut_for_the_journal_even_when_the_run_has_no_secrets() {
+    let big = "q".repeat(300_000);
+    let m = mock([
+        MockStep::Emit(ExecEvent::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            summary: None,
+            output: Some(reno_proto::ToolOutput::from_raw(&big)),
+        }),
+        MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }),
+    ]);
+    let fx = fx_with(bot_with_secrets(""), None, &m).await;
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let outputs = journaled_outputs(&fx.journal_with_done(&run).await);
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].bytes, 300_000);
+    assert!(outputs[0].text.len() <= reno_proto::ToolOutput::MAX_BYTES + 40);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_workspace_patch_and_paths_are_redacted_and_a_cut_value_is_dropped() {
+    use crate::FakeWorkspace;
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let m = mock([MockStep::Sleep(std::time::Duration::from_secs(5))]);
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let port = FakePort::with(vec![bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]")]);
+    let definitions = setup(&port).with_secrets(secrets.clone());
+    let fx = Fx::with_workspace(
+        config(1),
+        registry(std::slice::from_ref(&m)),
+        Some(definitions),
+        ws.clone(),
+    )
+    .await;
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/repo"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    until(async || ws.exists(&run).then_some(())).await;
+    let file = |path: &str| reno_proto::ChangedFile {
+        path: path.into(),
+        from: Some(format!("old-{TOKEN}")),
+        kind: reno_proto::ChangeKind::Modified,
+        additions: 1,
+        deletions: 0,
+        binary: false,
+    };
+    ws.set_diff(
+        &run,
+        crate::RunChanges {
+            commits: 1,
+            files: vec![file(&format!("env-{TOKEN}.txt"))],
+            patch: Some(format!("+GITHUB_TOKEN={TOKEN}\n+more {}", &TOKEN[..12])),
+            patch_truncated: true,
+        },
+    );
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let got = fx.kernel.workspace_diff(&run, Some("a")).await.unwrap();
+    let shown = serde_json::to_string(&got).unwrap();
+    assert!(!shown.contains(TOKEN), "{shown}");
+    no_fragment(&shown, TOKEN, 6);
+    assert_eq!(
+        got.patch.as_deref(),
+        Some("+GITHUB_TOKEN=[secret:GITHUB_TOKEN]\n+more ")
+    );
+    assert_eq!(got.files[0].path, "env-[secret:GITHUB_TOKEN].txt");
+    assert_eq!(
+        got.files[0].from.as_deref(),
+        Some("old-[secret:GITHUB_TOKEN]")
+    );
+
+    // The values cannot be read now: the patch is withheld rather than shown raw.
+    secrets.set_unavailable(Some("locked"));
+    let got = fx.kernel.workspace_diff(&run, Some("a")).await.unwrap();
+    assert_eq!(got.patch, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_the_run_says_through_its_own_mcp_tools_is_redacted_too() {
+    use reno_proto::{AgentApprovalParams, AgentReportParams, ReportStatus, token_digest};
+    let m = mock([
+        MockStep::started("s", "mock-1"),
+        MockStep::AwaitSteer,
+        MockStep::text("after"),
+    ]);
+    let link = Arc::new(crate::FakeRunLink::new());
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let port = FakePort::with(vec![bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]")]);
+    let definitions = setup(&port).with_secrets(secrets);
+    let fx = Fx::with_link(
+        config(1),
+        registry(std::slice::from_ref(&m)),
+        Some(definitions),
+        link.clone(),
+    )
+    .await;
+    let run = go(&fx).await;
+    until(async || (!m.log().specs.is_empty()).then_some(())).await;
+    let session = fx
+        .kernel
+        .agent_authenticate(&run, &token_digest(&link.token_for(&run).unwrap()))
+        .await
+        .unwrap();
+
+    fx.kernel
+        .agent_report(
+            &session,
+            AgentReportParams {
+                status: ReportStatus::Blocked,
+                summary: format!("token {TOKEN} was rejected"),
+                details: Some(format!("tried {TOKEN}")),
+            },
+        )
+        .await
+        .unwrap();
+    let kernel = fx.kernel.clone();
+    let asking = session.clone();
+    let waiting = tokio::spawn(async move {
+        kernel
+            .agent_request_approval(
+                &asking,
+                AgentApprovalParams {
+                    action: ActionClass::Command,
+                    reason: format!("uses {TOKEN}"),
+                    command: Some(format!("curl -H 'Authorization: {TOKEN}' x")),
+                    paths: vec![format!("{TOKEN}.txt")],
+                },
+            )
+            .await
+    });
+    let held = until(async || {
+        fx.kernel
+            .pending_approvals()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+    })
+    .await;
+    let shown = serde_json::to_string(&held).unwrap();
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(shown.contains("[secret:GITHUB_TOKEN]"), "{shown}");
+    let summary = serde_json::to_string(&fx.kernel.get_run(&run).await.unwrap()).unwrap();
+    assert!(!summary.contains(TOKEN), "{summary}");
+
+    fx.kernel
+        .decide(&held.id, reno_proto::ApprovalDecision::ApproveOnce)
+        .await
+        .unwrap();
+    waiting.await.unwrap().unwrap();
+    fx.kernel.steer(&run, "go on").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let journal = serde_json::to_string(&fx.journal_with_done(&run).await).unwrap();
+    assert!(!journal.contains(TOKEN), "{journal}");
+    assert!(
+        journal.contains("token [secret:GITHUB_TOKEN] was rejected"),
+        "{journal}"
+    );
+}

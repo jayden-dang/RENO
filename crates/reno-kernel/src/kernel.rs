@@ -628,7 +628,7 @@ impl Kernel {
             ) => port.changes_since_base(&info, path).await?,
             _ => crate::workspace::RunChanges::default(),
         };
-        Ok(WorkspaceDiffResult {
+        let mut result = WorkspaceDiffResult {
             run_id: info.run_id,
             branch: info.branch,
             base_sha: info.base_sha,
@@ -636,7 +636,36 @@ impl Kernel {
             files: changes.files,
             patch: changes.patch,
             patch_truncated: changes.patch_truncated,
-        })
+        };
+        if result.patch.is_none() && result.files.is_empty() {
+            return Ok(result);
+        }
+        // A file may hold a secret of the run: what is shown has the values redacted like the
+        // journal. When the values cannot be read, the patch is withheld (the paths stay).
+        let row = self.shared.run_record(run).await?;
+        match dispatcher::redactor_for(&self.shared, &row).await {
+            Ok(None) => {}
+            Ok(Some(redactor)) => {
+                for file in &mut result.files {
+                    file.path = redactor.redact_str(&file.path).into_owned();
+                    file.from = file
+                        .from
+                        .take()
+                        .map(|from| redactor.redact_str(&from).into_owned());
+                }
+                // A patch cut by the port may end inside a value, which no match would see.
+                result.patch = result.patch.take().map(|patch| {
+                    let patch = if result.patch_truncated {
+                        redactor.without_cut_tail(&patch)
+                    } else {
+                        &patch
+                    };
+                    redactor.redact_str(patch).into_owned()
+                });
+            }
+            Err(()) => result.patch = None,
+        }
+        Ok(result)
     }
 
     /// Workspaces in one of `status` (all when `None`), newest first.

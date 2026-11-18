@@ -186,7 +186,7 @@ impl Normalizer {
                 id,
                 ok,
                 summary: output_summary(update),
-                output: ToolOutput::from_text_opt(&output_text(update)),
+                output: ToolOutput::from_raw_opt(&output_text(update)),
             });
         }
         events
@@ -503,10 +503,10 @@ mod tests {
             Some(ToolOutput::from_text("edited a.rs"))
         );
         assert_eq!(out(done(json!({}))), None);
-        let big = "y".repeat(50_000);
+        let big = "y".repeat(2_000_000);
         let cut = out(done(json!({ "rawOutput": big }))).expect("output");
         assert!(cut.truncated);
-        assert_eq!(cut.bytes, 50_000);
+        assert_eq!(cut.bytes, 2_000_000);
     }
 
     #[test]

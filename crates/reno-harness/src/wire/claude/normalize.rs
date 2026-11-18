@@ -216,7 +216,7 @@ fn tool_result(
         id: b.tool_use_id.clone(),
         ok: !is_error,
         summary,
-        output: ToolOutput::from_text_opt(&result_text(&b.content)),
+        output: ToolOutput::from_raw_opt(&result_text(&b.content)),
     }
 }
 
@@ -717,7 +717,7 @@ mod tests {
     #[test]
     fn a_tool_result_keeps_its_output_cut_in_the_middle_when_huge() {
         let mut norm = Normalizer::new();
-        let big = format!("START\n{}\nEND", "line of output\n".repeat(5000));
+        let big = format!("START\n{}\nEND", "line of output\n".repeat(100_000));
         let frame = json!({"type":"user","message":{"content":[
             {"type":"tool_result","tool_use_id":"r1","content":big},
             {"type":"tool_result","tool_use_id":"r2","content":[

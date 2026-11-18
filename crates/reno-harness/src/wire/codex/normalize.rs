@@ -852,7 +852,7 @@ impl Normalizer {
                     id,
                     ok,
                     summary,
-                    output: ToolOutput::from_text_opt(&output_text(item)),
+                    output: ToolOutput::from_raw_opt(&output_text(item)),
                 });
             }
         }
@@ -1166,7 +1166,7 @@ mod tests {
             Some(ExecEvent::ToolResult { output, .. }) => output.map(|o| (o.text, o.truncated)),
             other => panic!("{other:?}"),
         };
-        let big = format!("TOP\n{}\nBOTTOM", "x".repeat(40_000));
+        let big = format!("TOP\n{}\nBOTTOM", "x".repeat(2_000_000));
         let (text, truncated) = out(
             json!({"id": "c", "type": "commandExecution", "command": "ls",
             "status": "completed", "exitCode": 0, "aggregatedOutput": big}),

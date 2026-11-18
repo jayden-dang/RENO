@@ -223,11 +223,12 @@ impl Supervisor {
         self.agent_seq += 1;
         let request_id = format!("agent-{}", self.agent_seq);
         self.agent_waiters.insert(request_id.clone(), reply);
-        self.approval_requested(ExecEvent::NeedsApproval {
+        // Unlike an executor's request, this one never passed the stream's redactor.
+        let event = self.redacted(ExecEvent::NeedsApproval {
             request_id,
             subject,
-        })
-        .await;
+        });
+        self.approval_requested(event).await;
     }
 
     /// Handle a `NeedsApproval`: judge it, answer or hold it, and journal it (before its

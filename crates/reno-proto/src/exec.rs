@@ -670,19 +670,61 @@ pub struct ExecutorDescriptor {
 }
 
 impl ToolOutput {
+    /// The most text a driver hands the supervisor for one call: a generous cut, so the
+    /// supervisor redacts secret values from the text before the journal's cut
+    /// ([`Self::recut`]) drops the middle. The cut of the raw form falls far from what the
+    /// journal keeps, so a value cut in half by it leaves nothing in the journal.
+    pub const RAW_MAX_BYTES: usize = 1024 * 1024;
+
+    /// Room above [`Self::MAX_BYTES`] for the `… N bytes cut …` line.
+    const MARKER_SLACK: usize = 64;
+
+    /// For the executors' normalizers: the text cut to [`Self::RAW_MAX_BYTES`] by the same head
+    /// and tail rule. It is not fit for the journal: the supervisor redacts it, then
+    /// [`recut`](Self::recut)s it.
+    pub fn from_raw(text: &str) -> Self {
+        Self::cut(text, text.len() as u64, Self::RAW_MAX_BYTES)
+    }
+
+    /// [`Self::from_raw`], or none for an empty text (nothing to show).
+    pub fn from_raw_opt(text: &str) -> Option<Self> {
+        (!text.is_empty()).then(|| Self::from_raw(text))
+    }
+
     /// Keeps `text` whole when it fits in [`Self::MAX_BYTES`]; otherwise keeps the first and the
     /// last half of the budget (cut on character boundaries) joined by a `… N bytes cut …` line.
     /// `bytes` is always the original size.
     pub fn from_text(text: &str) -> Self {
-        let bytes = text.len() as u64;
-        if text.len() <= Self::MAX_BYTES {
+        Self::cut(text, text.len() as u64, Self::MAX_BYTES)
+    }
+
+    /// [`Self::from_text`], or none for an empty text (nothing to show).
+    pub fn from_text_opt(text: &str) -> Option<Self> {
+        (!text.is_empty()).then(|| Self::from_text(text))
+    }
+
+    /// The journal form of a raw output: cut to [`Self::MAX_BYTES`] by the same head and tail
+    /// rule, `bytes` kept as the real size and the marker counting what is missing from the whole
+    /// output. Idempotent: what already fits, or was cut to fit, comes back as it is.
+    pub fn recut(self) -> Self {
+        let fits = self.text.len() <= Self::MAX_BYTES
+            || (self.truncated && self.text.len() <= Self::MAX_BYTES + Self::MARKER_SLACK);
+        if fits {
+            return self;
+        }
+        Self::cut(&self.text, self.bytes, Self::MAX_BYTES)
+    }
+
+    /// `text` (which stands for a whole output of `bytes`) cut to `limit`.
+    fn cut(text: &str, bytes: u64, limit: usize) -> Self {
+        if text.len() <= limit {
             return Self {
                 text: text.to_owned(),
                 bytes,
-                truncated: false,
+                truncated: bytes > text.len() as u64,
             };
         }
-        let half = Self::MAX_BYTES / 2;
+        let half = limit / 2;
         let mut head_end = half;
         while !text.is_char_boundary(head_end) {
             head_end -= 1;
@@ -691,8 +733,9 @@ impl ToolOutput {
         while !text.is_char_boundary(tail_start) {
             tail_start += 1;
         }
-        let cut = tail_start - head_end;
-        let mut out = String::with_capacity(Self::MAX_BYTES + 40);
+        let kept = (head_end + text.len() - tail_start) as u64;
+        let cut = bytes.saturating_sub(kept);
+        let mut out = String::with_capacity(limit + 40);
         out.push_str(&text[..head_end]);
         if !out.ends_with('\n') {
             out.push('\n');
@@ -704,11 +747,6 @@ impl ToolOutput {
             bytes,
             truncated: true,
         }
-    }
-
-    /// [`Self::from_text`], or none for an empty text (nothing to show).
-    pub fn from_text_opt(text: &str) -> Option<Self> {
-        (!text.is_empty()).then(|| Self::from_text(text))
     }
 }
 
@@ -763,5 +801,58 @@ mod tool_output_tests {
             .parse()
             .unwrap();
         assert!(cut > 9_900_000);
+    }
+
+    fn marker(text: &str) -> usize {
+        text.lines()
+            .find_map(|l| l.strip_prefix("… ")?.strip_suffix(" bytes cut …"))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_raw_output_keeps_up_to_a_mebibyte_and_recuts_to_the_journal_limit() {
+        let small = "a".repeat(ToolOutput::RAW_MAX_BYTES);
+        let o = ToolOutput::from_raw(&small);
+        assert!(!o.truncated);
+        assert_eq!(o.text.len(), ToolOutput::RAW_MAX_BYTES);
+
+        let s = format!("HEAD{}TAIL", "z".repeat(5_000_000));
+        let raw = ToolOutput::from_raw(&s);
+        assert!(raw.truncated && raw.text.len() <= ToolOutput::RAW_MAX_BYTES + 40);
+        assert_eq!(raw.bytes, s.len() as u64);
+
+        let journal = raw.recut();
+        assert!(journal.truncated);
+        assert_eq!(journal.bytes, s.len() as u64);
+        assert!(journal.text.starts_with("HEAD") && journal.text.ends_with("TAIL"));
+        assert!(journal.text.len() <= ToolOutput::MAX_BYTES + 40);
+        // The marker counts what is missing from the whole output, not from the raw cut.
+        assert!(marker(&journal.text) > 4_980_000);
+        assert_eq!(journal, ToolOutput::from_text(&s));
+    }
+
+    #[test]
+    fn recut_is_idempotent_and_leaves_a_small_output_alone() {
+        let small = ToolOutput::from_raw("hello");
+        assert_eq!(small.clone().recut(), small);
+        let s = "é€😀".repeat(100_000);
+        let once = ToolOutput::from_raw(&s).recut();
+        assert!(once.text.len() <= ToolOutput::MAX_BYTES + 40);
+        assert_eq!(once.clone().recut(), once);
+        assert_eq!(ToolOutput::from_text(&s).recut(), ToolOutput::from_text(&s));
+    }
+
+    #[test]
+    fn a_redacted_whole_output_between_the_limits_is_cut_down() {
+        let o = ToolOutput {
+            text: "b".repeat(100_000),
+            bytes: 100_000,
+            truncated: false,
+        };
+        let r = o.recut();
+        assert!(r.truncated && r.text.len() <= ToolOutput::MAX_BYTES + 40);
+        assert_eq!(r.bytes, 100_000);
     }
 }

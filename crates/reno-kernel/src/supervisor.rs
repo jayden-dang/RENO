@@ -209,6 +209,24 @@ impl std::fmt::Debug for Supervisor {
     }
 }
 
+/// `event` as the journal keeps it: a tool's output cut to [`reno_proto::ToolOutput::MAX_BYTES`].
+fn journal_form(event: ExecEvent) -> ExecEvent {
+    match event {
+        ExecEvent::ToolResult {
+            id,
+            ok,
+            summary,
+            output,
+        } => ExecEvent::ToolResult {
+            id,
+            ok,
+            summary,
+            output: output.map(reno_proto::ToolOutput::recut),
+        },
+        other => other,
+    }
+}
+
 /// Pending until `grace` is armed and elapses.
 async fn grace_elapsed(grace: &mut Option<Pin<Box<Sleep>>>) {
     match grace {
@@ -241,12 +259,16 @@ impl Supervisor {
     ) -> Self {
         let records = Records::take(&handle);
         let (model_answers_tx, model_answers) = mpsc::channel(crate::shared::CONTROL_QUEUE);
-        let stream = match info.redactor.clone() {
-            Some(redactor) => stream
-                .map(move |event| redactor.redact_event(event))
-                .boxed(),
-            None => stream,
-        };
+        // Redact first, cut second: the executors hand over tool output cut at a generous raw
+        // limit, so a secret value is whole in the text the redactor sees; the journal's cut
+        // falls on text that is already clean.
+        let redactor = info.redactor.clone();
+        let stream = stream
+            .map(move |event| match &redactor {
+                Some(redactor) => journal_form(redactor.redact_event(event)),
+                None => journal_form(event),
+            })
+            .boxed();
         Self {
             shared,
             run,
@@ -382,6 +404,15 @@ impl Supervisor {
         match appended {
             Ok(seq) => self.subs.retain(|sub| sub.offer(seq, event)),
             Err(error) => self.fail(format!("journal write failed: {error}")),
+        }
+    }
+
+    /// `event` with the run's secret values replaced, for what the run says outside the
+    /// executor's stream.
+    pub(super) fn redacted(&self, event: ExecEvent) -> ExecEvent {
+        match &self.info.redactor {
+            Some(redactor) => redactor.redact_event(event),
+            None => event,
         }
     }
 
@@ -628,6 +659,9 @@ impl Supervisor {
                 let _ = reply.send(outcome);
             }
             SupCmd::Report { event, reply } => {
+                // The run's own words (its MCP `report`) do not pass through the executor's
+                // stream, so they are redacted here before the journal and the report row.
+                let event = self.redacted(event);
                 self.publish(&event);
                 // Beside the run's status, clients see what the agent said about its work.
                 if let ExecEvent::AgentReport {

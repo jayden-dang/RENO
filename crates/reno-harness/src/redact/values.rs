@@ -15,11 +15,18 @@
 //!   prints it a line at a time is still caught. Lines shorter than [`MIN_LEN`] are left.
 //! - A value with characters JSON escapes (`"`, `\`, a newline) is also matched in its escaped
 //!   form, for text that carries JSON as a string.
+//! - A value is also matched percent-encoded (`%2F`, in upper and lower case hex), for a URL or
+//!   a form body that carries it.
 //! - Longer needles first, so a value that contains another is replaced whole.
 //!
-//! What it does not catch: a value the agent transforms (base64, URL-encoding, split across
-//! two events, or cut by a tool's own output limit). The fence is the allowlist and the
-//! Keychain, not this.
+//! Text that is cut after redaction needs care: a value cut in half leaves a fragment no exact
+//! match can see. A tool's output is therefore handed over in a generous raw cut and cut to the
+//! journal's size only after this runs (`ToolOutput::recut`); text that is cut before it is
+//! seen (a patch) is passed through [`ValueRedactor::without_cut_tail`].
+//!
+//! What it does not catch: a value the agent transforms otherwise (base64, hex, reversed,
+//! split across two events), or two values that overlap each other in the text. The fence is
+//! the allowlist and the Keychain, not this.
 
 use std::borrow::Cow;
 
@@ -59,6 +66,11 @@ impl ValueRedactor {
                 let quoted = Value::String(value.to_owned()).to_string();
                 add(&quoted[1..quoted.len() - 1], name);
             }
+            for encoded in [percent_encode(value, true), percent_encode(value, false)] {
+                if encoded != value {
+                    add(&encoded, name);
+                }
+            }
             if value.contains('\n') {
                 for line in value.lines() {
                     add(line.trim(), name);
@@ -83,6 +95,29 @@ impl ValueRedactor {
             }
         }
         out
+    }
+
+    /// `text`, which was cut short somewhere else, without a trailing fragment (four bytes or
+    /// more) of a secret value: the rest of it is gone, so no exact match would see it.
+    pub fn without_cut_tail<'t>(&self, text: &'t str) -> &'t str {
+        let mut end = text.len();
+        for (needle, _) in &self.needles {
+            for k in (4..needle.len()).rev() {
+                if k > text.len() {
+                    continue;
+                }
+                let at = text.len() - k;
+                if at < end
+                    && text.is_char_boundary(at)
+                    && needle.is_char_boundary(k)
+                    && text.ends_with(&needle[..k])
+                {
+                    end = at;
+                    break;
+                }
+            }
+        }
+        &text[..end]
     }
 
     /// `event` with every secret value replaced in every string it carries, however deep.
@@ -128,6 +163,21 @@ impl ValueRedactor {
             Value::Null | Value::Bool(_) | Value::Number(_) => false,
         }
     }
+}
+
+/// `value` percent-encoded: everything but the unreserved characters becomes `%XX`.
+fn percent_encode(value: &str, upper: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else if upper {
+            out.push_str(&format!("%{byte:02X}"));
+        } else {
+            out.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -250,6 +300,62 @@ mod tests {
             text: "nothing to hide".into(),
         };
         assert_eq!(redactor().redact_event(event.clone()), event);
+    }
+
+    #[test]
+    fn a_percent_encoded_value_is_caught_in_either_case() {
+        let value = "p@ss/word+with space&more";
+        let redactor = ValueRedactor::new([("PW", value)]);
+        assert_eq!(
+            redactor.redact_str("https://u:p%40ss%2Fword%2Bwith%20space%26more@host"),
+            "https://u:[secret:PW]@host"
+        );
+        assert_eq!(
+            redactor.redact_str("q=p%40ss%2fword%2bwith%20space%26more"),
+            "q=[secret:PW]"
+        );
+        // A value with nothing to encode has no second needle.
+        assert_eq!(ValueRedactor::new([("T", TOKEN)]).needles.len(), 1);
+    }
+
+    #[test]
+    fn a_json_escaped_value_in_a_structured_result_is_caught() {
+        let value = "pa\"ss\\wo\nrd-1234";
+        let redactor = ValueRedactor::new([("PW", value)]);
+        let inner = json!({"password": value}).to_string();
+        assert!(inner.contains(r#"pa\"ss\\wo\nrd"#), "{inner}");
+        let event = redactor.redact_event(ExecEvent::ToolResult {
+            id: "t".into(),
+            ok: true,
+            summary: None,
+            output: Some(reno_proto::ToolOutput::from_text(&inner)),
+        });
+        let ExecEvent::ToolResult { output, .. } = event else {
+            panic!("a result stays a result");
+        };
+        assert_eq!(output.unwrap().text, r#"{"password":"[secret:PW]"}"#);
+    }
+
+    #[test]
+    fn regex_characters_and_overlaps_are_plain_text() {
+        let redactor = ValueRedactor::new([("RE", "a.*b(c)[d]+$^"), ("A", "abcdefghij")]);
+        assert_eq!(redactor.redact_str("x a.*b(c)[d]+$^ y"), "x [secret:RE] y");
+        assert_eq!(redactor.redact_str("aXXb(c)[d]+$^"), "aXXb(c)[d]+$^");
+        assert_eq!(redactor.redact_str(""), "");
+    }
+
+    #[test]
+    fn a_trailing_fragment_of_a_value_is_dropped_from_cut_text() {
+        let redactor = redactor();
+        let cut = &TOKEN[..12];
+        let text = format!("diff --git a b\n+token = {cut}");
+        assert_eq!(
+            redactor.without_cut_tail(&text),
+            "diff --git a b\n+token = "
+        );
+        // A short tail is not a fragment worth dropping.
+        assert_eq!(redactor.without_cut_tail("ends with ghp"), "ends with ghp");
+        assert_eq!(redactor.without_cut_tail("fine"), "fine");
     }
 
     #[test]
