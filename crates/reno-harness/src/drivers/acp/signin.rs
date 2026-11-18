@@ -119,6 +119,9 @@ pub struct AuthMethodInfo {
     /// Where to get the key, when the agent says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// Why Reno cannot use this method (an agent method with no `id` cannot be authenticated).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unusable: Option<String>,
 }
 
 /// The methods `initialize` offers, each with its kind. (A method without a
@@ -130,11 +133,17 @@ pub(super) fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|m| {
-            let id = m
+        .enumerate()
+        .filter_map(|(at, m)| {
+            // A method with no `id` is kept (the protocol requires one, but an agent that
+            // forgets it still offers something): named by its place, and said unusable when
+            // it is one that has to be authenticated by id.
+            let given = m
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 128)?;
+                .filter(|id| !id.is_empty() && id.len() <= 128);
+            let id = given.map_or_else(|| format!("unnamed-{at}"), str::to_owned);
+            let id = id.as_str();
             let kind = m
                 .get("type")
                 .and_then(Value::as_str)
@@ -183,6 +192,13 @@ pub(super) fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
                     .and_then(Value::as_str)
                     .filter(|l| l.starts_with("https://"))
                     .map(str::to_owned),
+                unusable: (given.is_none() && kind == "agent").then(|| {
+                    tracing::warn!(
+                        target: "reno_harness::acp",
+                        "an agent offers a sign-in method with no id; it cannot be used"
+                    );
+                    "the agent gave this sign-in method no id, so it cannot be used".to_owned()
+                }),
             })
         })
         .collect()
@@ -243,7 +259,8 @@ fn choose_auth_method(initialized: &Value, wanted: Option<&str>) -> Option<AuthM
         .map(|m| m.iter().collect())
         .unwrap_or_default();
     let read = |m: &Value| -> Option<AuthMethod> {
-        let id = m.get("id").and_then(Value::as_str)?;
+        // (Only an agent method is authenticated by id: a terminal one runs without it.)
+        let id = m.get("id").and_then(Value::as_str);
         let kind = m
             .get("type")
             .and_then(Value::as_str)
@@ -258,9 +275,16 @@ fn choose_auth_method(initialized: &Value, wanted: Option<&str>) -> Option<AuthM
             .is_some();
         match kind {
             "agent" if reads_a_key && wanted.is_none() => None,
-            "agent" => Some(AuthMethod::Agent(id.to_owned())),
+            "agent" => Some(AuthMethod::Agent(id?.to_owned())),
             "terminal" => {
-                let legacy = m.pointer("/_meta/terminal-auth").filter(|v| v.is_object());
+                // The method's own `type: "terminal"` with its `args` is the standard form; the
+                // older `_meta["terminal-auth"]` object (its own `command`) is read only when the
+                // method does not say so itself: agents that offer both get the legacy one wrong
+                // (qoder's runs `node login`, kilo's names `opencode`).
+                let standard = m.get("type").and_then(Value::as_str) == Some("terminal");
+                let legacy = m
+                    .pointer("/_meta/terminal-auth")
+                    .filter(|v| v.is_object() && !standard);
                 let spec = legacy.unwrap_or(m);
                 let command = legacy
                     .and_then(|l| l.get("command"))
@@ -526,9 +550,16 @@ impl AcpExecutor {
         let chosen = choose_auth_method(&initialized, method.as_deref());
         let Some(chosen) = chosen else {
             shutdown_child(&mut child, self.kill_grace).await;
-            return Err(HarnessError::Protocol(format!(
-                "{display_name} offers no sign-in"
-            )));
+            let unusable = auth_methods(&initialized)
+                .iter()
+                .any(|m| m.unusable.is_some());
+            return Err(HarnessError::Protocol(if unusable {
+                format!(
+                    "{display_name} offers a sign-in method with no id, which Reno cannot use"
+                )
+            } else {
+                format!("{display_name} offers no sign-in")
+            }));
         };
         // How it signs in through its own command, if it does: a terminal
         // method, else, for an agent that says it signs in in a terminal
@@ -953,5 +984,95 @@ mod opener_path_tests {
             .and_then(|(_, v)| v)
             .unwrap();
         assert_eq!(std::env::split_paths(path).next().unwrap(), shim);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod method_tests {
+    use super::*;
+
+    fn offered(methods: Value) -> Value {
+        json!({ "authMethods": methods })
+    }
+
+    /// qoder offers both forms; its `_meta` one says `node login`, which cannot work. The
+    /// method's own `type: "terminal"` and `args` are the standard form and win.
+    #[test]
+    fn the_standard_terminal_form_wins_over_a_wrong_legacy_one() {
+        let qoder = offered(json!([{
+            "id": "qodercli-login-terminal", "name": "Login", "type": "terminal", "args": ["login"],
+            "_meta": { "terminal-auth": { "command": "node", "args": ["login"], "type": "terminal" } }
+        }]));
+        assert_eq!(
+            choose_auth_method(&qoder, None),
+            Some(AuthMethod::Terminal {
+                command: None,
+                args: vec!["login".into()],
+                env: Vec::new()
+            })
+        );
+        // kilo: the legacy form names another program (`opencode`).
+        let kilo = offered(json!([{
+            "id": "kilo-login", "name": "Login", "type": "terminal", "args": ["auth", "login"],
+            "env": { "KILO_X": "1" },
+            "_meta": { "terminal-auth": { "command": "opencode", "args": ["auth", "login"] } }
+        }]));
+        assert_eq!(
+            choose_auth_method(&kilo, None),
+            Some(AuthMethod::Terminal {
+                command: None,
+                args: vec!["auth".into(), "login".into()],
+                env: vec![("KILO_X".into(), "1".into())]
+            })
+        );
+    }
+
+    /// An agent that only has the older form (Kimi: no `type` on the method) still runs it.
+    #[test]
+    fn the_legacy_form_still_runs_when_it_is_the_only_one() {
+        let kimi = offered(json!([{
+            "id": "login", "name": "Login",
+            "_meta": { "terminal-auth": { "command": "/bin/kimi", "args": ["login"] } }
+        }]));
+        assert_eq!(
+            choose_auth_method(&kimi, None),
+            Some(AuthMethod::Terminal {
+                command: Some("/bin/kimi".into()),
+                args: vec!["login".into()],
+                env: Vec::new()
+            })
+        );
+    }
+
+    /// agoragentic's only method has no `id`. A terminal one runs without it; an agent one cannot
+    /// be authenticated, and is listed as unusable instead of vanishing.
+    #[test]
+    fn a_method_without_an_id_is_kept_and_said_unusable_when_it_cannot_be_used() {
+        let init = offered(json!([
+            { "name": "Sign in", "type": "agent" },
+            { "name": "Terminal", "type": "terminal", "args": ["login"] }
+        ]));
+        let listed = auth_methods(&init);
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(
+            listed[0]
+                .unusable
+                .as_deref()
+                .is_some_and(|why| why.contains("no id"))
+        );
+        assert!(listed[0].id.starts_with("unnamed-"));
+        assert_eq!(listed[1].unusable, None);
+        assert_eq!(
+            choose_auth_method(&init, None),
+            Some(AuthMethod::Terminal {
+                command: None,
+                args: vec!["login".into()],
+                env: Vec::new()
+            })
+        );
+        let agent_only = offered(json!([{ "name": "Sign in" }]));
+        assert_eq!(choose_auth_method(&agent_only, None), None);
+        assert_eq!(auth_methods(&agent_only).len(), 1);
     }
 }
