@@ -114,11 +114,16 @@ async fn the_mock_and_every_driver_pass_the_suite() {
             ("plan-mode", "skip"),
         ])
     );
-    // Muse asks the kernel about every action, so the approval cases run; it does not isolate the
-    // owner's tools, and its wire carries a deny message (as feedback on the refusing choice).
+    // Muse claims full access only, like Pi, and does not isolate the owner's tools.
     assert_eq!(
         labels("muse"),
-        pinned(&[("plan-mode", "skip"), ("user-config", "skip")])
+        pinned(&[
+            ("approval-allow", "skip"),
+            ("approval-deny", "skip"),
+            ("deny-message", "skip"),
+            ("plan-mode", "skip"),
+            ("user-config", "skip"),
+        ])
     );
     assert_eq!(
         labels("acp.registry"),

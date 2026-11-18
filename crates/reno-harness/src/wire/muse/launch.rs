@@ -12,10 +12,12 @@
 //! | `--disable-shell --disable-write --no-session-log` | the read-only host of a probe: no shell, no workspace writes, memory-only sessions |
 //! | `MUSE_NO_AUTO_UPDATE=1` | the launcher script (the installed `muse` is one) checks for a new release on every start and updates itself in the background; with this it does neither |
 //!
-//! Not set: `--trust-workspace`. A workspace's own skills and rules load only when the owner's
-//! trust store (`~/.config/muse/trust.json`) trusts it, which is the owner's decision, as for
-//! Pi; headless `serve` cannot ask. `--disable-sandbox`: the host's own sandbox stays on in
-//! every mode, so a run never has less than the sandbox the owner's Muse gives it.
+//! `--trust-workspace` (runs only): the run's workspace loads its own skills, rules, agents and
+//! MCP servers. It is a launch flag, never a write to the owner's `trust.json` (the throwaway
+//! probes passed it and left the config dir empty), and it covers the one session of the host,
+//! whose workspace is the run's cwd; the probe host does not get it. Not set: `--disable-sandbox`:
+//! the host's own sandbox stays on in every run, so a run never has less than the sandbox the
+//! owner's Muse gives it.
 //! `--approval-mode` does not exist for `serve`: the approval mode is chosen on the wire.
 
 use std::collections::BTreeMap;
@@ -43,8 +45,11 @@ pub(crate) enum Mode {
 /// The arguments after the program for `mode`, serving `provider`.
 pub(crate) fn serve_args(mode: Mode, provider: &str) -> Vec<String> {
     let mut args: Vec<String> = ["serve", "--provider", provider].map(String::from).into();
-    if mode == Mode::Probe {
-        args.extend(["--disable-shell", "--disable-write", "--no-session-log"].map(String::from));
+    match mode {
+        // The run's one session works in the run's cwd: that is the workspace trusted.
+        Mode::Run => args.push("--trust-workspace".to_owned()),
+        Mode::Probe => args
+            .extend(["--disable-shell", "--disable-write", "--no-session-log"].map(String::from)),
     }
     args
 }
@@ -167,7 +172,7 @@ mod tests {
     fn a_run_is_the_pinned_host_and_a_probe_is_read_only() {
         assert_eq!(
             serve_args(Mode::Run, "meta"),
-            ["serve", "--provider", "meta"]
+            ["serve", "--provider", "meta", "--trust-workspace"]
         );
         assert_eq!(
             serve_args(Mode::Probe, "meta"),
@@ -183,14 +188,14 @@ mod tests {
     }
 
     #[test]
-    fn no_run_trusts_a_workspace_or_leaves_the_sandbox() {
+    fn only_a_run_trusts_its_workspace_and_none_leaves_the_sandbox() {
+        assert!(
+            serve_args(Mode::Probe, "meta")
+                .iter()
+                .all(|a| a != "--trust-workspace")
+        );
         for mode in [Mode::Run, Mode::Probe] {
-            for refused in [
-                "--trust-workspace",
-                "--disable-sandbox",
-                "--listen",
-                "--join",
-            ] {
+            for refused in ["--disable-sandbox", "--listen", "--join"] {
                 assert!(
                     !serve_args(mode, "meta").iter().any(|a| a == refused),
                     "{refused}"

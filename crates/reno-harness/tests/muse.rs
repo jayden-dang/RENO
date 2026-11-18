@@ -103,7 +103,7 @@ impl Bench {
             instructions: None,
             effort: None,
             model_options: Default::default(),
-            access: AccessMode::Supervised,
+            access: AccessMode::FullAccess,
             sandbox: SandboxLevel::Unrestricted,
             resume: None,
             mcp: Vec::new(),
@@ -589,16 +589,15 @@ async fn the_fake_fails_a_run_that_sends_a_config_writer() {
 }
 
 #[tokio::test]
-async fn the_command_line_is_the_pinned_host_and_trusts_nothing() {
+async fn the_command_line_is_the_pinned_host_that_trusts_the_run_workspace_and_keeps_the_sandbox() {
     let bench = Bench::new();
     run(&bench, "hello").await;
-    assert_eq!(bench.argv(), ["serve", "--provider", "meta"]);
-    for refused in [
-        "--trust-workspace",
-        "--disable-sandbox",
-        "--listen",
-        "--join",
-    ] {
+    // The run's workspace (its cwd) is trusted by a launch flag, which writes no trust.json.
+    assert_eq!(
+        bench.argv(),
+        ["serve", "--provider", "meta", "--trust-workspace"]
+    );
+    for refused in ["--disable-sandbox", "--listen", "--join"] {
         assert!(!bench.argv().iter().any(|a| a == refused), "{refused}");
     }
 }
@@ -632,8 +631,8 @@ async fn the_childs_environment_stops_the_launchers_update_and_carries_only_what
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
-async fn every_run_asks_for_prompt_unmatched_and_ask_me_in_either_access_mode() {
-    for access in [AccessMode::Supervised, AccessMode::FullAccess] {
+async fn every_run_asks_for_prompt_unmatched_and_ask_me() {
+    for access in [AccessMode::FullAccess] {
         let bench = Bench::new();
         let mut spec = bench.spec("hello");
         spec.access = access;
@@ -1427,10 +1426,7 @@ fn the_descriptor_matches_what_the_driver_does() {
     assert_eq!(descriptor.cli_verified.min, "1.4.23");
     assert_eq!(descriptor.cli_verified.verified, "1.4.23");
     assert_eq!(descriptor.caps.steering, Steering::StepBoundary);
-    assert_eq!(
-        descriptor.caps.access_modes,
-        [AccessMode::Supervised, AccessMode::FullAccess]
-    );
+    assert_eq!(descriptor.caps.access_modes, [AccessMode::FullAccess]);
     assert_eq!(descriptor.caps.sandbox_levels, [SandboxLevel::Unrestricted]);
     assert!(!descriptor.caps.isolates_user_config);
     let declared = executor().maintenance().unwrap();
@@ -1470,14 +1466,17 @@ async fn a_real_muse_plays_a_run_over_its_echo_provider() {
     }
     let real = reno_harness::muse::resolve_muse_executable().expect("Muse installed");
     let wrapper = bench.dir.path().join("muse-echo");
+    let argv_log = bench.dir.path().join("argv.log");
     std::fs::write(
         &wrapper,
         format!(
             "#!/bin/sh\nexport HOME='{}' XDG_CONFIG_HOME='{}' XDG_DATA_HOME='{}'\n\
-             export MUSE_NO_AUTO_UPDATE=1 TBH_CREDENTIAL_BACKEND=file\nexec '{}' \"$@\"\n",
+             export MUSE_NO_AUTO_UPDATE=1 TBH_CREDENTIAL_BACKEND=file\n\
+             echo \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
             home.display(),
             config.display(),
             data.display(),
+            argv_log.display(),
             real.display()
         ),
     )
@@ -1496,6 +1495,13 @@ async fn a_real_muse_plays_a_run_over_its_echo_provider() {
     let (stop, result, _) = done(&events);
     assert_eq!(stop, StopReason::Completed);
     assert_eq!(result.as_deref(), Some("echo: hello reno"));
+    // The run's workspace was trusted by the launch flag, and the trust store was not written (see
+    // the config-dir check below).
+    assert!(
+        std::fs::read_to_string(&argv_log)
+            .unwrap()
+            .contains("--trust-workspace")
+    );
     // Muse wrote its sessions and logs under its own data directory, and no settings or
     // credentials file into the config directory.
     assert!(data.join("muse").exists());

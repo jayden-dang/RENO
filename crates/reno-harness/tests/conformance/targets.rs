@@ -682,9 +682,9 @@ pub(crate) fn pi_target() -> Target {
 
 // -- Muse Code ----------------------------------------------------------------------------------
 
-/// Muse over its fake `muse serve`. Every approval goes to the kernel, so it claims supervised
-/// and full access and the suite runs the approval cases; it does not claim to isolate the
-/// owner's tools (`muse serve` has no flag for it), so the user-config case is skipped.
+/// Muse over its fake `muse serve`. It claims full access only (no Muse mode is known to ask
+/// about every edit and command), so the suite skips the approval cases (`tests/muse.rs` plays
+/// them); it does not claim to isolate the owner's tools, so user-config is skipped too.
 pub(crate) fn muse_target() -> Target {
     let executor = MuseExecutor::new().with_executable(fixture("fake-muse.py"));
     let plan = Plan {
@@ -701,23 +701,9 @@ pub(crate) fn muse_target() -> Target {
                     class: ActionClass::Edit,
                 }),
         ),
-        approval: Some(ApprovalPlan {
-            scenario: Scenario::new("scenario:conf-approval-subjects")
-                .access(AccessMode::Supervised)
-                .expect(Expect::ApprovalClass(ActionClass::Command))
-                .expect(Expect::ApprovalClass(ActionClass::Edit)),
-            on_allow: vec![Expect::ResultContains("bash=allow edit=allow".into())],
-            on_deny: vec![Expect::ResultContains(
-                "bash=deny:The user did not allow this. edit=deny:The user did not allow this."
-                    .into(),
-            )],
-            on_deny_message: vec![Expect::ResultContains(format!(
-                "bash=deny:{DENY_MESSAGE} edit=deny:{DENY_MESSAGE}"
-            ))],
-        }),
+        approval: None,
         input: Some(
             Scenario::new("scenario:conf-question")
-                .access(AccessMode::Supervised)
                 .expect(Expect::ResultContains("answered:Changed".into())),
         ),
         steer: Some(
@@ -765,11 +751,7 @@ pub(crate) fn muse_target() -> Target {
     Target::new(
         "muse",
         Arc::new(executor),
-        // `approval/decide` takes `feedback` on a choice that accepts it: the model is told why.
-        Profile {
-            deny_message_on_wire: true,
-            ..Profile::driver()
-        },
+        Profile::driver(),
         cwd(),
         Limits::fake(),
     )

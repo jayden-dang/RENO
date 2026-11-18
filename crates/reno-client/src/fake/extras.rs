@@ -570,8 +570,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
         info(
             "muse",
             "Muse Code",
-            // Muse asks the kernel about every action: supervised and full access, unrestricted.
-            &[AccessMode::Supervised, AccessMode::FullAccess],
+            // No Muse mode is known to ask about every edit and command: full access only.
+            &[AccessMode::FullAccess],
             &unrestricted,
             ("1.4.23", "1.4.23"),
             ExecutorHealth {

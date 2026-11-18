@@ -28,13 +28,13 @@
 //!   some waits for it (a short grace for that turn to start), and a cancel stops it all.
 //! - Steering is `turn/start` with `ifBusy: "steer"`: one atomic command that steers the running
 //!   turn or starts one when idle. It lands at the turn's next model step.
-//! - EVERY APPROVAL MUSE RAISES GOES TO RENO'S KERNEL, in both access modes: the session runs
+//! - EVERY APPROVAL MUSE RAISES GOES TO RENO'S KERNEL: the session runs
 //!   with the `promptUnmatched` approval mode and the `:ask-me` permission profile (`allowAll`
 //!   and `:unrestricted` would take the decision away from the kernel), and the posture is read
 //!   back from the host and refused when it differs. What `:ask-me` asks about is Muse's own
 //!   call (its own words: "requires approval for protected writes, new network targets, and
 //!   other restricted actions"; it edits the workspace and runs sandboxed commands without
-//!   asking), so a supervised run is asked about those and not about every edit: the kernel's
+//!   asking), so a run is asked about those and not about every edit (which is why Supervised is not claimed): the kernel's
 //!   after-the-fact protected-path detector (`supervisor/protect.rs`, which looks at every run's
 //!   tool calls and worktree) covers what Muse does not ask. An allow is the single-use choice
 //!   the host offered; a choice that grants more or saves a rule is never taken, and a subject
@@ -51,7 +51,9 @@
 //!   daemon. A bot's own secret named `META_API_KEY` still reaches its runs.
 //! - Isolation from the owner's personal tools is NOT claimed (`isolates_user_config` is false):
 //!   `muse serve` has no flag that leaves out the owner's skills, plugins, hooks or MCP servers.
-//!   A workspace's own skills and rules load only if the owner's trust store trusts it.
+//!   The workspace is trusted by the launch flag (`--trust-workspace`, never a `trust.json` write), so
+//!   the repo's own skills, rules, agents and MCP load; it applies to the one session's workspace, the
+//!   run's cwd.
 //! - Process records: the host a run spawns is reported through `ExecControls::processes` at
 //!   once, in its own process group; at teardown its descendants (a tool's, a subagent's) are
 //!   traced and ended with it. The short-lived probe host is bounded by its own timeout and
@@ -187,12 +189,20 @@ fn parse_version(text: &str) -> Option<semver::Version> {
 ///
 /// # Access modes
 ///
-/// [`AccessMode::Supervised`] and [`AccessMode::FullAccess`], both with the unrestricted sandbox
-/// level: Muse's own sandbox stays on in either (a run never has less than the owner's Muse
-/// gives it), and every approval it raises goes to the kernel, which allows a full-access run's
-/// after the built-in protected paths and policy rules. [`AccessMode::AutoAcceptEdits`] and the
-/// read-only and workspace-write sandbox levels are not claimed: nothing here has seen a tool
-/// run, so nothing here says what Muse's profiles allow.
+/// [`AccessMode::FullAccess`] and the unrestricted sandbox level only, like Pi. SUPERVISED IS NOT
+/// CLAIMED, because nothing here shows a Muse mode that asks the person about every file edit and
+/// command. What 1.4.23 offers: four approval modes (`allowAll`, `promptUnmatched`, `onRequest`,
+/// `denyUnmatched`) selected on the wire, and permission profiles (`:read-only`, `:ask-me`,
+/// `:auto-review`, `:unrestricted`) selected by `session/start` or `session/resume`. Its own
+/// description of `:ask-me` is "Edits workspace and temporary files; requires approval for
+/// protected writes, new network targets, and other restricted actions": ordinary edits and
+/// sandboxed commands are not asked. No other mode or profile is described as asking for them,
+/// and without a model that calls tools (the `echo` provider calls none) none could be observed
+/// to. So a run is never `Supervised`: `start` refuses it before spawning (ARCH-15), as does
+/// `AutoAcceptEdits`. A full-access run still routes every approval Muse does raise to the kernel,
+/// which allows it after the built-in protected paths and policy rules, and the sandbox stays on.
+/// The read-only and workspace-write sandbox levels are not claimed either (`:read-only` exists,
+/// unobserved).
 pub struct MuseExecutor {
     executable: Option<PathBuf>,
     provider: String,
@@ -355,7 +365,7 @@ impl Executor for MuseExecutor {
                 // A steering message lands at the running turn's next model step.
                 steering: Steering::StepBoundary,
                 resume: true,
-                access_modes: vec![AccessMode::Supervised, AccessMode::FullAccess],
+                access_modes: vec![AccessMode::FullAccess],
                 sandbox_levels: vec![SandboxLevel::Unrestricted],
                 mcp_injection: true,
                 structured_output: false,
@@ -445,10 +455,7 @@ impl Executor for MuseExecutor {
         controls: ExecControls,
     ) -> Result<BoxStream<'static, ExecEvent>, ExecError> {
         // Fail closed before anything is resolved or spawned (ARCH-15).
-        require_access(
-            spec.access,
-            &[AccessMode::Supervised, AccessMode::FullAccess],
-        )?;
+        require_access(spec.access, &[AccessMode::FullAccess])?;
         require_sandbox(spec.sandbox, &[SandboxLevel::Unrestricted])?;
         if spec.output_schema.is_some() {
             return Err(ExecError::UnsupportedOutputSchema);
@@ -1669,10 +1676,7 @@ mod tests {
     #[test]
     fn the_descriptor_claims_only_what_the_driver_does() {
         let caps = MuseExecutor::new().descriptor().caps;
-        assert_eq!(
-            caps.access_modes,
-            [AccessMode::Supervised, AccessMode::FullAccess]
-        );
+        assert_eq!(caps.access_modes, [AccessMode::FullAccess]);
         assert_eq!(caps.sandbox_levels, [SandboxLevel::Unrestricted]);
         assert_eq!(caps.steering, Steering::StepBoundary);
         assert!(caps.resume && caps.mcp_injection && caps.deterministic_turn_end);
