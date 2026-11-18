@@ -15,7 +15,7 @@ a reason.
         └────┬────┘              │        │
         reno-kernel          reno-client ─┘
              │                ┌──┴───────────┐
-           renod ◄─ reno-rpc  reno (CLI+mcp) reno-app ◄─ reno-markdown, reno-syntax
+           renod ◄─ reno-rpc  reno (CLI+mcp) reno-app ◄─ reno-markdown, reno-syntax, reno-term
 ```
 
 `cargo xtask check` asserts this edge list from `cargo metadata`. The `xtask` tool itself sits

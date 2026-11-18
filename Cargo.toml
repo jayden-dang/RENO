@@ -21,6 +21,7 @@ reno-rpc = { path = "crates/reno-rpc" }
 reno-client = { path = "crates/reno-client" }
 reno-markdown = { path = "crates/reno-markdown" }
 reno-syntax = { path = "crates/reno-syntax" }
+reno-term = { path = "crates/reno-term" }
 reno-notify = { path = "crates/reno-notify" }
 
 serde = { version = "1", features = ["derive"] }
@@ -124,6 +125,9 @@ tree-sitter-luau = "=1.2.0"
 tree-sitter-nix = "=0.3.0"
 tree-sitter-make = "=1.1.1"
 tree-sitter-containerfile = "=0.9.2"
+
+# Imported terminal emulator (RP2). Apache-2.0; pinned as upstream tested it.
+alacritty_terminal = "0.26"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
