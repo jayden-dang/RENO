@@ -890,16 +890,12 @@ impl ExecutorsScreen {
                     .gap(px(6.0))
                     .text_size(px(12.0))
                     .text_color(theme.muted)
+                    // The daemon keeps the last 500 lines in memory (`executor.job.log`); there is
+                    // no log file, so the panel promises none.
                     .child(format!(
-                        "Source: {} \u{b7} Output is kept in",
+                        "Source: {} \u{b7} Its output shows under Show log while it runs",
                         recipe.source
-                    ))
-                    .child(
-                        mono(format!("~/.reno/logs/install-{}.log", row.id))
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(theme.raised),
-                    ),
+                    )),
             )
             .child(div().flex().gap(px(8.0)).child(run).child(cancel))
     }
