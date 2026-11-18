@@ -56,6 +56,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "reno-markdown",
             "reno-syntax",
             "reno-notify",
+            "reno-term",
         ],
     ),
     // The native macOS banner and Dock badge layer; names no workspace crate.

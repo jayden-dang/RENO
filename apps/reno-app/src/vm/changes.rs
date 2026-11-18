@@ -484,6 +484,7 @@ mod tests {
             files,
             patch: None,
             patch_truncated: false,
+            checksum: String::new(),
         }
     }
 

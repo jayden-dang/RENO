@@ -1888,3 +1888,102 @@ fn fs_and_git_status_read_a_runs_worktree_through_the_cli() {
     assert!(world.reno(&["run", "cancel", &run]).status.success());
     task.wait_with_output().expect("task run ends");
 }
+
+// ---- history (RP3) ------------------------------------------------------------------------
+
+#[test]
+fn git_log_and_show_read_a_runs_history_through_the_cli() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    let repo = world._root.path().canonicalize().unwrap().join("proj");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("src/lib.rs"), "fn alpha() {}\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base: alpha"]);
+    git(&repo, &["tag", "v0"]);
+    world.start_daemon();
+
+    let cwd = repo.to_str().unwrap();
+    let mut task = world
+        .command(&["task", "run", "--cwd", cwd, "work in a worktree"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut task, "Hello from the mock executor.");
+    let run = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let path = PathBuf::from(
+        world.json(&["workspace", "show", &run])["path"]
+            .as_str()
+            .unwrap(),
+    );
+    std::fs::write(path.join("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+    git(&path, &["add", "."]);
+    git(&path, &["commit", "-qm", "agent: add beta"]);
+    let sha = git(&path, &["rev-parse", "HEAD"]);
+    std::fs::write(path.join("scratch.txt"), "uncommitted\n").unwrap();
+
+    let log = text(&world.reno(&["git", "log", &run]).stdout);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].starts_with(&sha[..12])
+            && lines[0].contains("(HEAD, reno/")
+            && lines[0].ends_with("agent: add beta"),
+        "{log}"
+    );
+    assert!(
+        lines[1].contains("tag: v0") && lines[1].ends_with("base: alpha"),
+        "{log}"
+    );
+    let limited = text(&world.reno(&["git", "log", &run, "--limit", "1"]).stdout);
+    assert_eq!(limited.lines().count(), 1);
+    let own = text(&world.reno(&["git", "log", &run, "--rev", "thread"]).stdout);
+    assert_eq!(own.lines().count(), 1, "{own}");
+    let json = world.json(&["git", "log", &run]);
+    assert_eq!(json.as_array().unwrap().len(), 2);
+
+    let found = text(
+        &world
+            .reno(&["git", "log", &run, "--search", "ALPHA"])
+            .stdout,
+    );
+    assert!(found.contains("base: alpha"), "{found}");
+    let none = world.reno(&["git", "log", &run, "--search", "nothing-like-this"]);
+    assert_eq!(none.status.code(), Some(1));
+
+    let show = text(&world.reno(&["git", "show", &run, &sha]).stdout);
+    assert!(show.starts_with(&format!("commit {sha}")), "{show}");
+    assert!(show.contains("    agent: add beta"), "{show}");
+    assert!(show.contains("+fn beta() {}"), "{show}");
+    let stat = text(&world.reno(&["git", "show", &run, &sha, "--stat"]).stdout);
+    assert!(
+        stat.contains("src/lib.rs") && !stat.contains("+fn beta"),
+        "{stat}"
+    );
+    // A commit from before the thread, and a name that is no commit, are refused.
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        world.reno(&["git", "show", &run, &base]).status.code(),
+        Some(1)
+    );
+    assert_eq!(
+        world.reno(&["git", "show", &run, "nothex"]).status.code(),
+        Some(1)
+    );
+
+    // Only what is not committed.
+    let dirty = text(
+        &world
+            .reno(&["workspace", "diff", &run, "--scope", "working_tree"])
+            .stdout,
+    );
+    assert!(
+        dirty.contains("scratch.txt") && !dirty.contains("src/lib.rs"),
+        "{dirty}"
+    );
+
+    assert!(world.reno(&["run", "cancel", &run]).status.success());
+    task.wait_with_output().expect("task run ends");
+}

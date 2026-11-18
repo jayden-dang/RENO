@@ -116,7 +116,7 @@ fn rejected(why: Rejection, path: &str) -> FsError {
 
 /// The path's own parts, after the checks that need no file system: no `..`, not absolute, no
 /// NUL, no `.git`.
-fn lexical(rel: &str) -> Result<Vec<String>, FsError> {
+pub(crate) fn lexical(rel: &str) -> Result<Vec<String>, FsError> {
     if rel.len() > MAX_PATH_BYTES || rel.contains('\0') {
         return Err(rejected(Rejection::Malformed, rel));
     }

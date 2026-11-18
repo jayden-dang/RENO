@@ -469,6 +469,9 @@ async fn an_attempt_that_resumes_keeps_the_runs_model_options() {
         .await
         .unwrap();
     fx.wait_status(&run, RunStatus::Interrupted).await;
+    // The status commits before the supervisor lets go of the run; wait for its end marker, as
+    // the resume tests do, or a loaded machine refuses with `StillStopping`.
+    fx.journal_with_done(&run).await;
     fx.kernel.resume_run(&run, None).await.unwrap();
     until(async || (m.log().specs.len() == 2).then_some(())).await;
     let specs = m.log().specs;

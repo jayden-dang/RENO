@@ -34,7 +34,7 @@ fn the_names_and_the_feature() {
     assert_eq!(ThreadClose::NAME, "thread.close");
     // Appended: nothing earlier moved (later features follow it).
     let at = FEATURES.iter().position(|f| *f == FEATURE_THREADS).unwrap();
-    assert_eq!(at, FEATURES.len() - 3);
+    assert_eq!(at, FEATURES.len() - 4);
     const { assert!(THREAD_LIST_DEFAULT_LIMIT <= THREAD_LIST_MAX_LIMIT) };
 }
 

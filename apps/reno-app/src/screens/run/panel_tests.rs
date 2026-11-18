@@ -257,7 +257,7 @@ fn the_home_lists_its_rows_with_letters_and_opens_one_with_its_key(cx: &mut Test
     // Clicking a row works too, and + Add says it is not built.
     click(vcx, "home-row-terminal");
     draw(vcx);
-    assert_eq!(active(vcx, &screen), Surface::Planned(HomeKind::Terminal));
+    assert!(matches!(active(vcx, &screen), Surface::Terminal(_)));
     click(vcx, "panel-new-tab");
     click(vcx, "home-add-action");
     let toasts = vcx.update(|_, cx| crate::ui::toast::shown(cx));

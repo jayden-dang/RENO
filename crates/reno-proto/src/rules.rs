@@ -421,6 +421,28 @@ mod tests {
     }
 
     #[test]
+    fn an_allow_matches_a_pure_filter_stage_but_no_other_stage() {
+        let m = derived(&cmd("cargo test"));
+        // A listed side-effect-free filter after the command is part of the same approval...
+        for line in [
+            "cargo test | tail -40",
+            "cargo test|tr a",
+            "cargo test | sort",
+        ] {
+            assert!(holds(&m, StandingEffect::Allow, &cmd(line)), "{line:?}");
+        }
+        // ...anything else chained on is not.
+        for line in [
+            "cargo test | rm x",
+            "cargo test | tee out",
+            "cargo test; ls",
+            "cargo test | tr a > f",
+        ] {
+            assert!(!holds(&m, StandingEffect::Allow, &cmd(line)), "{line:?}");
+        }
+    }
+
+    #[test]
     fn a_rule_kept_from_a_wrapped_approval_stores_the_inner_command() {
         let wrapped = cmd("/usr/bin/zsh -lc 'git status'");
         let m = derived(&wrapped);
@@ -730,6 +752,16 @@ mod tests {
         .prop_map(|words| words.join(" "))
     }
 
+    /// Whether a generated tail is `| <filter> …`: a pure output-filter stage, which an allow
+    /// rule deliberately matches as its command (`cargo test | tail -40`, see
+    /// `defs::pipeline`). The "never matches a chain" properties are about everything else.
+    fn is_filter_stage(tail: &str) -> bool {
+        tail.strip_prefix('|')
+            .filter(|rest| !rest.starts_with('|'))
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|word| crate::defs::FILTERS.contains(&word))
+    }
+
     fn arb_tail() -> impl Strategy<Value = String> {
         (
             prop_oneof![
@@ -786,6 +818,7 @@ mod tests {
             line in arb_command(),
             tail in arb_tail(),
         ) {
+            prop_assume!(!is_filter_stage(&tail));
             let m = derived(&cmd(&line));
             let longer = format!("{line} {tail}");
             prop_assert!(!holds(&m, StandingEffect::Allow, &cmd(&longer)));
@@ -800,6 +833,7 @@ mod tests {
             word in "[a-z]{1,6}",
             tail in arb_tail(),
         ) {
+            prop_assume!(!is_filter_stage(&tail));
             let m = RuleMatcher {
                 action: ActionClass::Command,
                 tool: "bash".to_owned(),

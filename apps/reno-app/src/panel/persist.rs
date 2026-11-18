@@ -235,7 +235,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// [`MAX_TABS`], keep Session first, then the active tab, then the most recently used. The saved
 /// form has no use times, so later tabs count as more recent (a new tab is appended).
 fn clean(mut saved: Descriptors) -> Descriptors {
-    let readable = |d: &Descriptor| d.surface().is_some();
+    let readable = |d: &Descriptor| d.is_savable();
     saved.tabs.retain(readable);
     saved.closed.retain(readable);
     if saved.active.as_ref().is_some_and(|d| !readable(d)) {

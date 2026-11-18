@@ -126,7 +126,11 @@ impl RunScreen {
 
     /// The tabs changed: remember them under the panel's key, and write soon.
     pub(super) fn persist_panel(&self, cx: &mut Context<Self>) {
-        Saved::put(self.panel_key.clone(), self.panel.snapshot(), cx);
+        Saved::put(
+            self.panel_key.clone(),
+            self.terms.to_saved(self.panel.snapshot()),
+            cx,
+        );
     }
 
     // --- opening tabs ------------------------------------------------------------------------
@@ -165,7 +169,12 @@ impl RunScreen {
         if *self.panel.active() == Surface::Home {
             self.panel.close(&Surface::Home);
         }
-        self.open_surface(Surface::for_row(kind), window, cx);
+        // A terminal is a new shell each time, so it has no tab to find.
+        let surface = match kind {
+            HomeKind::Terminal => self.new_terminal_surface(),
+            other => Surface::for_row(other),
+        };
+        self.open_surface(surface, window, cx);
     }
 
     pub(super) fn panel_cmd(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
@@ -174,6 +183,10 @@ impl RunScreen {
                 self.panel_touched = true;
                 self.panel.activate(&surface);
                 self.persist_panel(cx);
+            }
+            Cmd::Close(Surface::Terminal(slot)) => {
+                self.panel_touched = true;
+                return self.request_close(slot, window, cx);
             }
             Cmd::Close(surface) => {
                 self.panel_touched = true;
@@ -262,6 +275,8 @@ impl RunScreen {
         let held = state.approvals_for(&self.run).next();
         let note = panel_home::finding_note(run, held, self.result.as_deref(), store.now_ms());
         let facts = HomeFacts {
+            files: store.supports_files(),
+            terminals: store.supports_terminals(),
             status: run.status,
             problem: summary::reported_problem(run),
             executor: run.executor.as_str(),
@@ -315,7 +330,10 @@ impl RunScreen {
         let shown = layout != Layout::Hidden;
         if self.panel_shown != shown {
             self.panel_shown = shown;
-            cx.defer_in(window, |this, _, cx| this.sync_files(cx));
+            cx.defer_in(window, |this, _, cx| {
+                this.sync_files(cx);
+                this.sync_terminals(cx);
+            });
         }
         match layout {
             Layout::Hidden => stage.into_any_element(),
@@ -387,6 +405,7 @@ impl RunScreen {
     ) -> AnyElement {
         let emit = self.emitter(cx);
         let counts = self.counts(cx);
+        let labels = self.terminal_labels(cx);
         let body = match self.panel.active().clone() {
             Surface::Home => match self.home(cx) {
                 Some(home) => {
@@ -400,7 +419,7 @@ impl RunScreen {
             Surface::Review => self.review_body(theme, cx),
             Surface::Planned(kind) => view::planned_page(theme, kind),
             Surface::History => view::planned_page(theme, HomeKind::History),
-            Surface::Terminal(_) => view::planned_page(theme, HomeKind::Terminal),
+            Surface::Terminal(slot) => self.terminal_body(theme, slot, cx),
             Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
             Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Files => self.files_body(theme, width, window, cx),
@@ -425,7 +444,7 @@ impl RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
-            .child(view::tab_strip(theme, &self.panel, &counts, &emit))
+            .child(view::tab_strip(theme, &self.panel, &counts, &labels, &emit))
             .child(div().id("panel-body").flex_1().min_h_0().child(body))
             .into_any_element()
     }

@@ -221,6 +221,9 @@ pub enum DiffScope {
         /// The commit (a hexadecimal object name, at least 7 characters).
         sha: String,
     },
+    /// Only what is not committed: the worktree against `HEAD`, staged, unstaged and untracked
+    /// files, no commits (`base_sha` is `HEAD`). Needs feature `history`.
+    WorkingTree,
 }
 
 /// Params of `workspace.diff`.
@@ -299,4 +302,9 @@ pub struct WorkspaceDiffResult {
     /// Whether `patch` was cut.
     #[serde(default, skip_serializing_if = "is_false")]
     pub patch_truncated: bool,
+    /// A digest of `files`, `patch` and `patch_truncated` as sent: it changes when the diff
+    /// does, so a client can tell that the diff it shows went stale (`workspace.file_sources`
+    /// takes it back). Empty from a daemon without feature `history`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checksum: String,
 }

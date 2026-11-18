@@ -165,6 +165,18 @@ pub(crate) struct Descriptor {
 }
 
 impl Descriptor {
+    /// Whether this can be kept in the saved file. A terminal is saved under its daemon id
+    /// (`term_...`), and the run screen turns it into a tab slot when it restores the panel, so
+    /// `surface()` alone would call every saved terminal unreadable.
+    pub(crate) fn is_savable(&self) -> bool {
+        match self.kind {
+            Kind::Terminal => {
+                self.surface().is_some() || self.key.parse::<reno_proto::TermId>().is_ok()
+            }
+            _ => self.surface().is_some(),
+        }
+    }
+
     /// The tab this describes, or `None` for a kind or key this build cannot read.
     pub(crate) fn surface(&self) -> Option<Surface> {
         let key = self.key.as_str();
@@ -251,6 +263,36 @@ mod tests {
             };
             assert_eq!(d.surface(), None, "{kind:?} {key:?}");
         }
+    }
+
+    #[test]
+    fn a_terminal_is_saved_under_its_daemon_id() {
+        let by_id = Descriptor {
+            kind: Kind::Terminal,
+            key: "term_a1".into(),
+        };
+        assert!(by_id.is_savable());
+        assert_eq!(
+            by_id.surface(),
+            None,
+            "a slot is made when the panel is restored"
+        );
+        let by_slot = Surface::Terminal(4).descriptor();
+        assert!(by_slot.is_savable());
+        assert!(
+            !Descriptor {
+                kind: Kind::Terminal,
+                key: "nope".into(),
+            }
+            .is_savable()
+        );
+        assert!(
+            !Descriptor {
+                kind: Kind::Unknown,
+                key: String::new(),
+            }
+            .is_savable()
+        );
     }
 
     #[test]

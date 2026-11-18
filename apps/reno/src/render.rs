@@ -1216,6 +1216,7 @@ mod tests {
             ],
             patch: None,
             patch_truncated: false,
+            checksum: String::new(),
         };
         let lines = diff_lines(&diff);
         assert!(

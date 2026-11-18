@@ -37,6 +37,7 @@ pub mod executors;
 pub mod files;
 pub mod fswatch;
 mod handlers;
+pub mod history;
 pub mod install;
 pub mod link;
 pub mod lock;
