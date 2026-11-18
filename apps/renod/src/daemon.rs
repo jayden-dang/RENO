@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 
 use reno_harness::exec::Executor;
 use reno_kernel::{
-    DefsSetup, Kernel, KernelConfig, KernelError, RunLink, Secrets, SystemClock, WakeSignal,
+    DefsSetup, Kernel, KernelConfig, KernelError, Limits, MaintenancePorts, RunLink, Secrets,
+    SystemClock, WakeSignal,
 };
 use reno_proto::defs::ValidationContext;
 use reno_proto::{ExecutorId, IdError};
@@ -106,6 +107,11 @@ pub struct DaemonConfig {
     /// How the platform file watchers (the definitions', and those of `fs` triggers) are
     /// started. The binary uses the platform's; tests may inject one that refuses or counts.
     pub watchers: Arc<dyn WatcherFactory>,
+    /// What installs and updates of executors run through: the command runner and the
+    /// self-updater switch. `None` (the default, so no test can reach a real command or file)
+    /// leaves the daemon without feature `executor.maintain`; the binary sets the real ones
+    /// ([`real_maintenance`]).
+    pub maintenance: Option<MaintenancePorts>,
 }
 
 impl DaemonConfig {
@@ -123,7 +129,15 @@ impl DaemonConfig {
             system_wake: false,
             secrets: None,
             watchers: Arc::new(NotifyWatchers),
+            maintenance: None,
         }
+    }
+
+    /// The same, installing and updating executors through `ports`.
+    #[must_use]
+    pub fn with_maintenance(mut self, ports: MaintenancePorts) -> Self {
+        self.maintenance = Some(ports);
+        self
     }
 
     /// The same, keeping secrets in `secrets`.
@@ -132,6 +146,23 @@ impl DaemonConfig {
         self.secrets = Some(secrets);
         self
     }
+}
+
+/// The real ports for installs and updates: commands through the person's login shell, and the
+/// self-updater files below their home directory. `None` when there is no login shell or no home
+/// directory (the daemon then runs without feature `executor.maintain`).
+pub fn real_maintenance() -> Option<MaintenancePorts> {
+    let runner = reno_harness::proc::shell_runner::ShellRunner::login()?;
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)?;
+    Some(MaintenancePorts {
+        runner: Arc::new(runner),
+        self_update: Arc::new(reno_harness::proc::self_update::SelfUpdateFiles::in_home(
+            &home,
+        )),
+        limits: Limits::default(),
+    })
 }
 
 /// Everything that can stop a daemon from starting, or end it badly.
@@ -210,6 +241,7 @@ impl Daemon {
             secrets,
             reno_bin,
             watchers,
+            maintenance,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -312,6 +344,14 @@ impl Daemon {
             }
         };
 
+        let can_maintain = maintenance.is_some();
+        if let Some(ports) = maintenance
+            && let Err(error) = kernel.attach_maintenance(ports).await
+        {
+            kernel.shutdown().await;
+            fs_defs.shutdown().await;
+            return Err(error.into());
+        }
         // The daemon's start is a definite signal to find out what each executor can do. The
         // probes run on the kernel's own tasks; what they find reaches clients as it lands.
         kernel.probe_executors_in_background();
@@ -337,6 +377,7 @@ impl Daemon {
             stop: stop.clone(),
             secrets,
             fs_defs: Arc::clone(&fs_defs),
+            maintenance: can_maintain,
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));
         drop(ctx);

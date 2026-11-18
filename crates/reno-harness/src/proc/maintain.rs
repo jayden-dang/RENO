@@ -197,6 +197,39 @@ pub async fn run_steps(
     Outcome::Done
 }
 
+/// Runs one read-only command (an update check) and returns its output lines when it exited with
+/// status zero inside `budget`; `None` otherwise. The command is killed when the budget ends.
+pub async fn run_capture(
+    runner: &dyn CommandRunner,
+    command: &str,
+    budget: Duration,
+) -> Option<Vec<String>> {
+    let (tx, mut lines) = mpsc::channel::<String>(256);
+    let mut run = std::pin::pin!(runner.run(command, tx));
+    let mut kept = LogTail::default();
+    let collected = tokio::time::timeout(budget, async {
+        let mut open = true;
+        loop {
+            tokio::select! {
+                biased;
+                line = lines.recv(), if open => match line {
+                    Some(line) => kept.push(line),
+                    None => open = false,
+                },
+                exit = &mut run => break exit,
+            }
+        }
+    })
+    .await;
+    let Ok(Ok(Exit::Code(0))) = collected else {
+        return None;
+    };
+    while let Ok(line) = lines.try_recv() {
+        kept.push(line);
+    }
+    Some(kept.snapshot().0)
+}
+
 fn with_last_line(reason: String, last: &Option<String>) -> String {
     match last {
         Some(line) => format!("{reason}: {line}"),
@@ -628,6 +661,22 @@ mod tests {
             outcome,
             failed(JobFailure::ExitCode, "`y` was ended by signal 9")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_capture_returns_the_lines_of_a_command_that_succeeded() {
+        let runner = ScriptedRunner::new()
+            .script("check", vec![Beat::Line("0.171.0".into()), Beat::Exit(0)])
+            .script("fails", vec![Beat::Line("nope".into()), Beat::Exit(1)])
+            .script("hangs", vec![]);
+        let budget = Duration::from_secs(60);
+        assert_eq!(
+            run_capture(&runner, "check", budget).await,
+            Some(vec!["0.171.0".to_owned()])
+        );
+        assert_eq!(run_capture(&runner, "fails", budget).await, None);
+        assert_eq!(run_capture(&runner, "hangs", budget).await, None);
+        assert_eq!(runner.stopped(), ["hangs"]);
     }
 
     #[test]

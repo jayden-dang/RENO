@@ -39,6 +39,7 @@ pub mod definitions;
 pub mod error;
 pub mod events;
 mod executor_health;
+mod executor_settings;
 pub mod journal;
 mod migrations;
 mod report_backfill;
@@ -58,6 +59,7 @@ pub use db::Store;
 pub use definitions::{Applied, DefStatus, DefinitionRecord, NewDefinition, PutOutcome};
 pub use error::{Result, StoreError};
 pub use events::EventRecord;
+pub use executor_settings::ExecutorSetting;
 pub use journal::{JournalWriter, Journals, Replay};
 pub use report_backfill::Backfill;
 pub use rules::NewRule;
@@ -75,6 +77,8 @@ mod budget_tests;
 mod definition_tests;
 #[cfg(test)]
 mod executor_health_tests;
+#[cfg(test)]
+mod executor_settings_tests;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]

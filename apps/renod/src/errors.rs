@@ -19,6 +19,10 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         | KernelError::TriggerNotFound(_)
         | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
         KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
+        KernelError::JobRunning(_) => ErrorCode::JobRunning,
+        KernelError::NothingToDo { .. } => ErrorCode::NothingToDo,
+        KernelError::NoUpdater(_) => ErrorCode::NoUpdater,
+        KernelError::MaintenanceOff | KernelError::SelfUpdate(_) => ErrorCode::Unavailable,
         KernelError::NoExecutor(_) => ErrorCode::InvalidParams,
         KernelError::NotCancellable { .. }
         | KernelError::NotResumable { .. }

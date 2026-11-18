@@ -53,6 +53,11 @@ pub enum SelfUpdateError {
 
 /// The port the daemon uses to move the switches. The kernel only calls it.
 pub trait SelfUpdateControl: Send + Sync + std::fmt::Debug {
+    /// What the key holds now, as the record [`restore`](Self::restore) takes, without changing
+    /// anything. The caller stores it first (the intent), then calls
+    /// [`turn_off`](Self::turn_off).
+    fn previous(&self, switch: SelfUpdateSwitch) -> Result<String, SelfUpdateError>;
+
     /// Turns the CLI's own updater off and returns what the key held before, as a record to
     /// store and later give to [`restore`](Self::restore).
     fn turn_off(&self, switch: SelfUpdateSwitch) -> Result<String, SelfUpdateError>;
@@ -105,6 +110,16 @@ impl SelfUpdateFiles {
 }
 
 impl SelfUpdateControl for SelfUpdateFiles {
+    fn previous(&self, switch: SelfUpdateSwitch) -> Result<String, SelfUpdateError> {
+        let path = self.path(switch);
+        let text = read(path)?;
+        let (_, previous) = match switch {
+            SelfUpdateSwitch::ClaudeSettings => claude_off(path, &text)?,
+            SelfUpdateSwitch::GrokConfig => grok_off(path, &text)?,
+        };
+        serde_json::to_string(&previous).map_err(|_| SelfUpdateError::BadRecord)
+    }
+
     fn turn_off(&self, switch: SelfUpdateSwitch) -> Result<String, SelfUpdateError> {
         let path = self.path(switch);
         let text = read(path)?;

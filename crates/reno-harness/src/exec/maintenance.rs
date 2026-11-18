@@ -102,6 +102,33 @@ fn is_plain_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
+/// Whether `latest` is a newer version than `installed`. Either one that does not read as a
+/// version (`1.2.3`, `v1.2.3`, `1.2`) says no: nothing is updated on a guess.
+pub fn is_newer(latest: &str, installed: &str) -> bool {
+    fn parse(text: &str) -> Option<semver::Version> {
+        let text = text.trim().trim_start_matches('v');
+        semver::Version::parse(text).ok().or_else(|| {
+            let mut parts = text.split('.');
+            let major = parts.next()?;
+            let minor = parts.next().unwrap_or("0");
+            let patch = parts.next().unwrap_or("0");
+            if parts.next().is_some() {
+                return None;
+            }
+            semver::Version::parse(&format!("{major}.{minor}.{patch}")).ok()
+        })
+    }
+    matches!((parse(latest), parse(installed)), (Some(l), Some(i)) if l > i)
+}
+
+/// The JSON object in `text`, from its first `{` to its last `}`: a CLI may print a notice
+/// before or after it.
+fn json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then(|| &text[start..=end])
+}
+
 /// A command that finds the newest version, and how to read its output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckDecl {
@@ -132,12 +159,12 @@ impl CheckParse {
                 is_plain_version(version).then(|| version.to_owned())
             }
             Self::GrokJson => {
-                let found: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+                let found: serde_json::Value = serde_json::from_str(json_object(stdout)?).ok()?;
                 let latest = found.get("latestVersion")?.as_str()?.trim();
                 is_plain_version(latest).then(|| latest.to_owned())
             }
             Self::BrewOutdatedJson => {
-                let found: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+                let found: serde_json::Value = serde_json::from_str(json_object(stdout)?).ok()?;
                 let casks = found.get("casks")?.as_array()?;
                 match casks.first() {
                     Some(cask) => {
@@ -320,6 +347,16 @@ mod tests {
     }
 
     #[test]
+    fn newer_means_a_higher_version_and_never_a_guess() {
+        assert!(is_newer("0.171.0", "0.170.0"));
+        assert!(is_newer("v1.2", "1.1.9"));
+        assert!(!is_newer("0.170.0", "0.170.0"));
+        assert!(!is_newer("0.169.0", "0.170.0"));
+        assert!(!is_newer("nightly", "0.170.0"));
+        assert!(!is_newer("0.171.0", "mock"));
+    }
+
+    #[test]
     fn grok_pins_with_the_update_command() {
         let grok = declaration(&HarnessId::Grok).unwrap();
         assert_eq!(
@@ -354,6 +391,13 @@ mod tests {
                 .latest("npm notice\n0.171.0\n", None)
                 .as_deref(),
             Some("0.171.0")
+        );
+        // A notice before the JSON does not hide it.
+        assert_eq!(
+            CheckParse::GrokJson
+                .latest(&format!("checking...\n{grok}\n"), None)
+                .as_deref(),
+            Some("1.0.46")
         );
         assert_eq!(CheckParse::GrokJson.latest("not json", None), None);
         assert_eq!(CheckParse::PlainVersion.latest("<html>", None), None);

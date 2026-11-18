@@ -160,6 +160,9 @@ pub(crate) struct LiveRun {
 pub(crate) struct Slot {
     shared: Arc<Shared>,
     run: RunId,
+    /// The executor the run stands on, which an install or update of it waits for (EX-5) and is
+    /// refused by (EX-4). Released with the slot.
+    claim: Option<crate::maintain::RunClaim>,
 }
 
 impl Slot {
@@ -169,7 +172,13 @@ impl Slot {
         Self {
             shared: Arc::clone(shared),
             run,
+            claim: None,
         }
+    }
+
+    /// Makes the run stand on the executor `claim` is for, releasing the one it stood on.
+    pub(crate) fn hold(&mut self, claim: Option<crate::maintain::RunClaim>) {
+        self.claim = claim;
     }
 }
 
@@ -223,6 +232,8 @@ pub(crate) struct Shared {
     /// What is paused. Written by `pause` and `resume` only; the dispatcher and the scheduler
     /// read it.
     pub(crate) pauses_tx: watch::Sender<Arc<Pauses>>,
+    /// Installs and updates of executors; set once by `Kernel::attach_maintenance`.
+    pub(crate) maint: OnceLock<Arc<crate::maintain::Maintainer>>,
 }
 
 impl std::fmt::Debug for Shared {
@@ -287,6 +298,7 @@ impl Shared {
             sched_rx: Mutex::new(Some(sched_rx)),
             triggers_tx: watch::channel(Arc::default()).0,
             pauses_tx: watch::channel(Arc::default()).0,
+            maint: OnceLock::new(),
         }
     }
 

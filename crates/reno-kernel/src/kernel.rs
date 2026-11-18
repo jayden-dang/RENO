@@ -739,6 +739,7 @@ impl Kernel {
         let candidate = Candidate {
             descriptor,
             health: self.shared.live_health(&record.executor),
+            busy: None,
         };
         if !knows_model(&candidate, &model) {
             return Err(KernelError::Invalid(format!(
@@ -1171,6 +1172,7 @@ pub(crate) fn plan_route(
             Some(Candidate {
                 descriptor: shared.executors.get(id)?.descriptor(),
                 health: shared.live_health(id),
+                busy: shared.busy_reason(id),
             })
         })
         .collect();

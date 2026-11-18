@@ -450,6 +450,21 @@ CREATE TRIGGER standing_rules_are_kept BEFORE DELETE ON standing_rules
 BEGIN SELECT RAISE(ABORT, 'a standing rule is never deleted'); END;
 ";
 
+/// Migration 17 (executors that Reno installs and updates, EX-10): what a person chose about
+/// auto-update for each executor. A missing row means the defaults (auto-update on, verified only
+/// off). `prev_self_update` is what a self-updating CLI's own updater switch held before Reno
+/// turned it off (a JSON record, NULL when Reno has not), so turning auto-update back on restores
+/// it. `last_checked_at` is when the daily check last ran, so a restart does not run it again.
+const V17: &str = "
+CREATE TABLE executor_settings (
+    executor         TEXT PRIMARY KEY,
+    auto_update      INTEGER NOT NULL DEFAULT 1 CHECK (auto_update IN (0, 1)),
+    verified_only    INTEGER NOT NULL DEFAULT 0 CHECK (verified_only IN (0, 1)),
+    prev_self_update TEXT CHECK (prev_self_update IS NULL OR json_valid(prev_self_update)),
+    last_checked_at  INTEGER
+) WITHOUT ROWID;
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -469,6 +484,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V14),
         M::up(V15),
         M::up(V16),
+        M::up(V17),
     ])
 }
 
@@ -517,7 +533,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
