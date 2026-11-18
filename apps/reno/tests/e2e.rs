@@ -1100,7 +1100,12 @@ fn workspace_list_show_and_clean_through_the_cli() {
 
     let shown = world.json(&["workspace", "show", &run]);
     assert_eq!(shown["status"], "active");
-    assert_eq!(shown["branch"], format!("reno/{run}"));
+    // The worktree and its branch are the thread's, named by the thread.
+    let thread = world.json(&["thread", "list"])["threads"][0]["threadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(shown["branch"], format!("reno/{thread}"));
     let path = PathBuf::from(shown["path"].as_str().unwrap());
     assert!(path.starts_with(world.data_dir.join("worktrees")));
     assert!(path.join("README.md").exists());
@@ -1141,9 +1146,10 @@ fn workspace_list_show_and_clean_through_the_cli() {
     );
     std::fs::remove_file(path.join("later.txt")).unwrap();
 
+    // The run's end released nothing: the thread may be continued, so the worktree is in use.
     let listed = text(&world.reno(&["workspace", "list"]).stdout);
     assert!(
-        listed.contains(&run) && listed.contains("kept") && listed.contains("1 commit(s)"),
+        listed.contains(&run) && listed.contains("active"),
         "{listed}"
     );
     let only = world.json(&["workspace", "list", "--status", "removed"]);
@@ -1190,6 +1196,167 @@ fn workspace_list_show_and_clean_through_the_cli() {
         text(&ghost.stderr).contains("has no workspace"),
         "{}",
         text(&ghost.stderr)
+    );
+}
+
+/// A thread end to end, over a real repository and the real daemon: run one commits a file in the
+/// thread's worktree, run two (`--thread`) works in the same worktree and so sees it, each run's
+/// own diff is its own, and closing the thread keeps the work and then, forced, removes it.
+#[test]
+fn a_follow_up_run_sees_what_the_threads_first_run_committed() {
+    let mut world = World::new();
+    world.hold_mock = true;
+    let repo = world._root.path().canonicalize().unwrap().join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    world.start_daemon();
+    let cwd = repo.to_str().unwrap();
+
+    // Run one: the agent (this test, in its worktree) commits a file, then the run ends.
+    let mut first = world
+        .command(&["task", "run", "--cwd", cwd, "make the file"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn task run");
+    read_until(&mut first, "Hello from the mock executor.");
+    let run_one = world.runs()[0]["runId"].as_str().unwrap().to_owned();
+    let threads = world.json(&["thread", "list"]);
+    assert_eq!(threads["threads"].as_array().unwrap().len(), 1);
+    let thread = threads["threads"][0]["threadId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(threads["threads"][0]["status"], "active");
+    let worktree = PathBuf::from(threads["threads"][0]["worktree"].as_str().unwrap());
+    assert!(worktree.starts_with(world.data_dir.join("worktrees")));
+    assert!(worktree.ends_with(&thread));
+    std::fs::write(worktree.join("agent.txt"), "from run one\n").unwrap();
+    git(&worktree, &["add", "agent.txt"]);
+    git(&worktree, &["commit", "-qm", "run one"]);
+    let after_one = git(&worktree, &["rev-parse", "HEAD"]);
+
+    // A run of the thread is live: another is refused, and the thread cannot be closed under it.
+    let busy = world.reno(&["task", "run", "--thread", &thread, "too soon"]);
+    assert_eq!(busy.status.code(), Some(1), "{}", text(&busy.stderr));
+    assert!(
+        text(&busy.stderr).contains("in progress"),
+        "{}",
+        text(&busy.stderr)
+    );
+    let early = world.reno(&["thread", "close", &thread]);
+    assert_eq!(early.status.code(), Some(1), "{}", text(&early.stderr));
+    assert!(world.reno(&["run", "cancel", &run_one]).status.success());
+    first.wait_with_output().expect("task run ends");
+
+    // Run two continues the thread.
+    let mut second = world
+        .command(&["task", "run", "--thread", &thread, "use the file"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the follow-up");
+    read_until(&mut second, "Hello from the mock executor.");
+    let runs = world.runs();
+    assert_eq!(runs.len(), 2);
+    let run_two = runs[0]["runId"].as_str().unwrap().to_owned();
+    assert_ne!(run_two, run_one);
+
+    // The same worktree, on the same branch, holding run one's commit.
+    let shown_two = world.json(&["workspace", "show", &run_two]);
+    assert_eq!(PathBuf::from(shown_two["path"].as_str().unwrap()), worktree);
+    assert_eq!(shown_two["branch"], format!("reno/{thread}"));
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("agent.txt")).unwrap(),
+        "from run one\n"
+    );
+    let info = world.json(&["thread", "show", &thread]);
+    assert_eq!(info["status"], "active");
+    assert_eq!(info["baseSha"], base);
+    let listed_runs = info["runs"].as_array().unwrap();
+    assert_eq!(listed_runs.len(), 2);
+    assert_eq!(listed_runs[0]["runId"], run_one);
+    assert_eq!(listed_runs[0]["startSha"], base);
+    assert_eq!(listed_runs[1]["runId"], run_two);
+    assert_eq!(listed_runs[1]["parentRun"], run_one);
+    // Run two started where run one left the branch.
+    assert_eq!(listed_runs[1]["startSha"], after_one);
+
+    // Run two commits too. The thread holds both commits; each run's own diff is its own.
+    std::fs::write(worktree.join("second.txt"), "from run two\n").unwrap();
+    git(&worktree, &["add", "second.txt"]);
+    git(&worktree, &["commit", "-qm", "run two"]);
+    let paths = |args: &[&str]| -> Vec<String> {
+        world.json(args)["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        paths(&["workspace", "diff", &run_two]),
+        ["agent.txt", "second.txt"],
+        "by default, the whole thread"
+    );
+    assert_eq!(
+        paths(&["workspace", "diff", &run_two, "--scope", "run"]),
+        ["second.txt"]
+    );
+    assert_eq!(
+        paths(&["workspace", "diff", &run_one, "--scope", "run"]),
+        ["agent.txt", "second.txt"],
+        "run one's scope runs from where it started, up to now"
+    );
+    assert_eq!(
+        paths(&["workspace", "diff", &run_two, "--scope", &after_one]),
+        ["agent.txt"],
+        "one commit of the thread's branch"
+    );
+    let bad = world.reno(&["workspace", "diff", &run_two, "--scope", "HEAD"]);
+    assert!(!bad.status.success());
+
+    assert!(world.reno(&["run", "cancel", &run_two]).status.success());
+    second.wait_with_output().expect("the follow-up ends");
+
+    // The thread is idle, and closing it keeps a worktree that holds unmerged commits.
+    let idle = world.json(&["thread", "show", &thread]);
+    assert_eq!(idle["status"], "idle");
+    assert!(idle["idleExpiresAtMs"].is_u64(), "{idle}");
+    let kept = world.json(&["thread", "close", &thread]);
+    assert_eq!(kept["thread"]["status"], "closed");
+    assert_eq!(kept["workspace"], "kept");
+    assert!(worktree.exists());
+    assert!(
+        git(&repo, &["branch", "--list", &format!("reno/{thread}")]).contains(&thread),
+        "the branch stays with the kept worktree"
+    );
+    // The person's checkout was never touched.
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base);
+    assert!(!repo.join("agent.txt").exists());
+
+    // Forced, it goes, and a removed worktree takes no follow-up.
+    let gone = world.json(&["thread", "close", &thread, "--force"]);
+    assert_eq!(gone["workspace"], "removed");
+    assert!(!worktree.exists());
+    assert_eq!(git(&repo, &["branch", "--list", "reno/*"]), "");
+    let refused = world.reno(&["task", "run", "--thread", &thread, "again"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        text(&refused.stderr).contains("worktree is gone"),
+        "{}",
+        text(&refused.stderr)
+    );
+    let ghost = world.reno(&["thread", "show", "thr_ghost"]);
+    assert_eq!(ghost.status.code(), Some(1));
+    let listed = text(&world.reno(&["thread", "list"]).stdout);
+    assert!(
+        listed.contains(&thread) && listed.contains("closed"),
+        "{listed}"
     );
 }
 

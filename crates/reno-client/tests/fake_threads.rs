@@ -58,11 +58,17 @@ async fn the_fake_daemon_has_threads_and_every_seeded_run_is_its_own() {
     let workspace = client.get_workspace(run("builder1")).await.unwrap();
     assert_eq!(builder.branch.as_deref(), Some(workspace.branch.as_str()));
     assert_eq!(builder.worktree.as_deref(), Some(workspace.path.as_path()));
-    assert_eq!(builder.base_sha.as_deref(), Some(workspace.base_sha.as_str()));
+    assert_eq!(
+        builder.base_sha.as_deref(),
+        Some(workspace.base_sha.as_str())
+    );
 
     // A run that never had a worktree has a thread without one.
     let reviewer = client.get_thread(thread("reviewer1")).await.unwrap();
-    assert_eq!((reviewer.worktree, reviewer.branch, reviewer.workspace), (None, None, None));
+    assert_eq!(
+        (reviewer.worktree, reviewer.branch, reviewer.workspace),
+        (None, None, None)
+    );
 
     let missing = client.get_thread(thread("nope")).await.unwrap_err();
     assert_eq!(missing.code(), Some(ErrorCode::NotFound));
@@ -76,8 +82,14 @@ async fn the_fake_daemon_has_threads_and_every_seeded_run_is_its_own() {
 #[tokio::test(start_paused = true)]
 async fn a_follow_up_joins_the_thread_of_its_run_and_only_when_that_run_is_not_live() {
     let client = FakeDaemon::spawn().await.unwrap();
-    let first = client.submit_task(task("/long start a feature")).await.unwrap();
-    let thread_id = first.thread_id.clone().expect("the daemon names the thread");
+    let first = client
+        .submit_task(task("/long start a feature"))
+        .await
+        .unwrap();
+    let thread_id = first
+        .thread_id
+        .clone()
+        .expect("the daemon names the thread");
     assert_eq!(
         client.get_thread(thread_id.clone()).await.unwrap().status,
         ThreadStatus::Active
@@ -88,11 +100,17 @@ async fn a_follow_up_joins_the_thread_of_its_run_and_only_when_that_run_is_not_l
     follow.thread_id = Some(thread_id.clone());
     let busy = client.submit_task(follow.clone()).await.unwrap_err();
     assert_eq!(busy.code(), Some(ErrorCode::Conflict), "{busy}");
-    let busy_close = client.close_thread(thread_id.clone(), false).await.unwrap_err();
+    let busy_close = client
+        .close_thread(thread_id.clone(), false)
+        .await
+        .unwrap_err();
     assert_eq!(busy_close.code(), Some(ErrorCode::Conflict), "{busy_close}");
 
     // Sending to a live run steers it; the run then finishes.
-    client.steer(&first.run_id, "carry on".into()).await.unwrap();
+    client
+        .steer(&first.run_id, "carry on".into())
+        .await
+        .unwrap();
     settle().await;
     assert_eq!(
         client.get_run(&first.run_id).await.unwrap().status,
@@ -128,7 +146,11 @@ async fn closing_a_thread_removes_or_keeps_its_worktree_and_a_removed_one_takes_
     assert_eq!(closed.workspace, Some(CleanOutcome::Kept));
     assert!(closed.reason.unwrap().contains("--force"));
     assert_eq!(
-        client.get_workspace(made.run_id.clone()).await.unwrap().status,
+        client
+            .get_workspace(made.run_id.clone())
+            .await
+            .unwrap()
+            .status,
         WorkspaceStatus::Kept
     );
     // Kept work can still be continued, which opens the thread again.
@@ -155,7 +177,10 @@ async fn closing_a_thread_removes_or_keeps_its_worktree_and_a_removed_one_takes_
     assert_eq!(refused.code(), Some(ErrorCode::Conflict));
 
     // A thread with no worktree closes with nothing to release.
-    let reviewer = client.close_thread(thread("reviewer1"), false).await.unwrap();
+    let reviewer = client
+        .close_thread(thread("reviewer1"), false)
+        .await
+        .unwrap();
     assert_eq!((reviewer.workspace, reviewer.reason), (None, None));
 }
 
@@ -170,7 +195,10 @@ async fn the_diff_scopes_are_additive_and_the_default_is_the_whole_thread() {
     settle().await;
 
     // No scope is the thread against its base, exactly what the method did before.
-    let before = client.workspace_diff(second.run_id.clone(), None).await.unwrap();
+    let before = client
+        .workspace_diff(second.run_id.clone(), None)
+        .await
+        .unwrap();
     let whole = client
         .workspace_diff_scoped(second.run_id.clone(), None, DiffScope::Thread)
         .await

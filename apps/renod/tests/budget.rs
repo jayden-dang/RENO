@@ -29,6 +29,7 @@ macro_rules! daemon_test {
 
 fn bot_task(bot: &str) -> TaskRunParams {
     TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "go".into(),

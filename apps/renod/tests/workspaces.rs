@@ -84,6 +84,7 @@ fn snapshot(repo: &Path) -> BTreeMap<String, Vec<u8>> {
 
 async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
     within(fx.client.run_task(TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "work".into(),
@@ -272,6 +273,7 @@ async fn a_bot_less_task_opts_in_to_in_place_writes_and_a_repository_is_still_ne
     let plain = fx.dir.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let in_place = |cwd: &Path| TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "work".into(),
@@ -364,6 +366,7 @@ async fn workspace_diff_lists_what_a_run_changed_and_patches_one_file() {
     // A clean worktree has nothing yet.
     let diff = |path: Option<&str>| {
         rpc.call::<WorkspaceDiff>(WorkspaceDiffParams {
+            scope: None,
             run_id: run.clone(),
             path: path.map(str::to_owned),
         })
@@ -409,6 +412,7 @@ async fn workspace_diff_lists_what_a_run_changed_and_patches_one_file() {
     }
     let err = rpc
         .call::<WorkspaceDiff>(WorkspaceDiffParams {
+            scope: None,
             run_id: RunId::from_suffix("nope").unwrap(),
             path: None,
         })

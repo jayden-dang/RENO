@@ -13,15 +13,17 @@ use reno_proto::{
     ApprovalDecision, ApprovalHistoryResult, ApprovalListResult, CleanOutcome, CleanTarget,
     ExecEvent, ExecutorFramesResult, ExecutorListResult, RUN_LIST_MAX_LIMIT, RoutingDecision,
     RunCancelResult, RunId, RunListParams, RunListResult, RunSummary, Seq, StopReason,
-    TaskRunParams, TriggerListResult, WorkspaceCleanResult, WorkspaceListResult,
+    TaskRunParams, ThreadId, ThreadListResult, TriggerListResult, WorkspaceCleanResult,
+    WorkspaceListResult,
 };
 use serde::Serialize;
 
 use crate::cli::{
     ApprovalCommand, ApprovalHistory, Decide, ExecutorCommand, ExecutorFrames, ExecutorInstall,
     ExecutorRefresh, Pause, Resume, RunCancel, RunCommand, RunList, RunModel, RunResume, RunShow,
-    RunTail, TaskCommand, TaskRun, TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand,
-    WorkspaceDiffArgs, WorkspaceList, WorkspaceShow,
+    RunTail, TaskCommand, TaskRun, ThreadClose, ThreadCommand, ThreadList, ThreadShow,
+    TriggerCommand, TriggerFire, WorkspaceClean, WorkspaceCommand, WorkspaceDiffArgs,
+    WorkspaceList, WorkspaceShow,
 };
 use crate::env::{Env, print_json, print_line, print_note};
 use crate::render::{self, Finished, Transcript};
@@ -68,6 +70,14 @@ pub(crate) async fn workspace(env: &Env, command: WorkspaceCommand) -> anyhow::R
     }
 }
 
+pub(crate) async fn thread(env: &Env, command: ThreadCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        ThreadCommand::List(args) => thread_list(env, args).await,
+        ThreadCommand::Show(args) => thread_show(env, args).await,
+        ThreadCommand::Close(args) => thread_close(env, args).await,
+    }
+}
+
 pub(crate) async fn approval(env: &Env, command: ApprovalCommand) -> anyhow::Result<ExitCode> {
     match command {
         ApprovalCommand::List => approval_list(env).await,
@@ -79,6 +89,9 @@ pub(crate) async fn approval(env: &Env, command: ApprovalCommand) -> anyhow::Res
 #[serde(rename_all = "camelCase")]
 struct Submitted<'a> {
     run_id: &'a RunId,
+    /// The thread the run belongs to; absent from a daemon that predates threads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a ThreadId>,
     /// Where the router sent the run and why; absent from a daemon that predates routing.
     #[serde(skip_serializing_if = "Option::is_none")]
     routing: Option<&'a RoutingDecision>,
@@ -103,6 +116,12 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
         .with_context(|| format!("cannot make {} absolute", cwd.display()))?;
 
     let client = env.connect().await?;
+    if args.thread.is_some() && !client.supports(reno_proto::FEATURE_THREADS) {
+        anyhow::bail!(
+            "this daemon does not support --thread (feature {}); update it",
+            reno_proto::FEATURE_THREADS
+        );
+    }
     if args.effort.is_some() && !client.supports(reno_proto::FEATURE_RUN_EFFORT) {
         anyhow::bail!(
             "this daemon does not support --effort (feature {}); update it",
@@ -111,6 +130,7 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
     }
     let submitted = client
         .submit_task(TaskRunParams {
+            thread_id: args.thread,
             model_options: Default::default(),
             effort: args.effort,
             prompt: args.prompt,
@@ -127,11 +147,17 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
     if env.json {
         print_json(&Submitted {
             run_id: &run,
+            thread_id: submitted.thread_id.as_ref(),
             routing: submitted.routing.as_ref(),
         })?;
-    } else if let Some(decision) = &submitted.routing {
+    } else {
         // On stderr, so stdout stays the transcript that `run tail` prints too.
-        print_note(format!("routed to {}", decision.explain()))?;
+        if let Some(thread) = &submitted.thread_id {
+            print_note(format!("thread {thread}"))?;
+        }
+        if let Some(decision) = &submitted.routing {
+            print_note(format!("routed to {}", decision.explain()))?;
+        }
     }
     follow(env, &client, run, None).await
 }
@@ -552,10 +578,15 @@ async fn workspace_show(env: &Env, args: WorkspaceShow) -> anyhow::Result<ExitCo
 
 async fn workspace_diff(env: &Env, args: WorkspaceDiffArgs) -> anyhow::Result<ExitCode> {
     let client = env.connect().await?;
-    let diff = client
-        .workspace_diff(args.run, args.path.clone())
-        .await
-        .map_err(|e| env.explain(e))?;
+    // `thread` is what the method has always shown; only another scope needs the new feature.
+    let diff = if args.scope == reno_proto::DiffScope::Thread {
+        client.workspace_diff(args.run, args.path.clone()).await
+    } else {
+        client
+            .workspace_diff_scoped(args.run, args.path.clone(), args.scope)
+            .await
+    }
+    .map_err(|e| env.explain(e))?;
     if env.json {
         print_json(&diff)?;
         return Ok(ExitCode::SUCCESS);
@@ -578,13 +609,14 @@ async fn workspace_diff(env: &Env, args: WorkspaceDiffArgs) -> anyhow::Result<Ex
 }
 
 async fn workspace_clean(env: &Env, args: WorkspaceClean) -> anyhow::Result<ExitCode> {
-    let target = match (args.run, args.merged, args.all_clean) {
-        (Some(run_id), false, false) => CleanTarget::Run { run_id },
-        (None, true, false) => CleanTarget::Merged,
-        (None, false, true) => CleanTarget::AllClean,
-        _ => bail!("give one of: a run, --merged or --all-clean"),
+    let target = match (args.run, args.thread, args.merged, args.all_clean) {
+        (Some(run_id), None, false, false) => CleanTarget::Run { run_id },
+        (None, Some(thread_id), false, false) => CleanTarget::Thread { thread_id },
+        (None, None, true, false) => CleanTarget::Merged,
+        (None, None, false, true) => CleanTarget::AllClean,
+        _ => bail!("give one of: a run, --thread, --merged or --all-clean"),
     };
-    let named_run = matches!(target, CleanTarget::Run { .. });
+    let named_run = matches!(target, CleanTarget::Run { .. } | CleanTarget::Thread { .. });
     let client = env.connect().await?;
     let items = client
         .clean_workspaces(target, args.force)
@@ -607,6 +639,55 @@ async fn workspace_clean(env: &Env, args: WorkspaceClean) -> anyhow::Result<Exit
     } else {
         ExitCode::SUCCESS
     })
+}
+
+async fn thread_list(env: &Env, args: ThreadList) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let status = (!args.status.is_empty()).then_some(args.status);
+    let threads = client
+        .list_threads(status)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&ThreadListResult { threads })?;
+    } else if threads.is_empty() {
+        print_line("no threads")?;
+    } else {
+        for thread in &threads {
+            print_line(render::thread_line(thread))?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn thread_show(env: &Env, args: ThreadShow) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let thread = client
+        .get_thread(args.thread)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&thread)?;
+    } else {
+        for line in render::thread_detail(&thread) {
+            print_line(line)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn thread_close(env: &Env, args: ThreadClose) -> anyhow::Result<ExitCode> {
+    let client = env.connect().await?;
+    let closed = client
+        .close_thread(args.thread, args.force)
+        .await
+        .map_err(|e| env.explain(e))?;
+    if env.json {
+        print_json(&closed)?;
+    } else {
+        print_line(render::thread_closed_line(&closed))?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn approval_list(env: &Env) -> anyhow::Result<ExitCode> {

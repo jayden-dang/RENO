@@ -1162,10 +1162,17 @@ mod tests {
         let list = vec![thread("t1", &["a", "b"], 5), thread("t2", &["c"], 9)];
         let c = s.apply(Update::Threads(list.clone()));
         assert!(c.threads && c.feeds);
-        assert!(c.run(&run_id("a")) && c.run(&run_id("c")), "its runs are touched");
+        assert!(
+            c.run(&run_id("a")) && c.run(&run_id("c")),
+            "its runs are touched"
+        );
         assert_eq!(s.feed(Feed::Threads), FeedState::Live);
         // Newest change first.
-        let order: Vec<_> = s.threads().iter().map(|t| t.thread_id.to_string()).collect();
+        let order: Vec<_> = s
+            .threads()
+            .iter()
+            .map(|t| t.thread_id.to_string())
+            .collect();
         assert_eq!(order, ["thr_t2", "thr_t1"]);
         let t1 = ThreadId::from_suffix("t1").unwrap();
         assert_eq!(s.thread_of(&run_id("b")), Some(&t1));

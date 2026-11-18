@@ -702,6 +702,7 @@ fn task_run_params_old_and_new_shapes() {
     // A client that predates `bot` sends exactly this, and it still parses.
     golden(
         &TaskRunParams {
+            thread_id: None,
             model_options: Default::default(),
             effort: None,
             prompt: "go".into(),
@@ -716,6 +717,7 @@ fn task_run_params_old_and_new_shapes() {
     );
     golden(
         &TaskRunParams {
+            thread_id: None,
             model_options: Default::default(),
             effort: None,
             prompt: "go".into(),

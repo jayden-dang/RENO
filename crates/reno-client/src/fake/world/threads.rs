@@ -88,10 +88,7 @@ impl World {
     }
 
     /// The worktree `run` works in: its thread's, as `workspace.get` shows it.
-    pub(in crate::fake) fn workspace_of(
-        &self,
-        run: &RunId,
-    ) -> Option<reno_proto::WorkspaceInfo> {
+    pub(in crate::fake) fn workspace_of(&self, run: &RunId) -> Option<reno_proto::WorkspaceInfo> {
         let record = self.run(run)?;
         let owner = self.owner_of(&record.thread)?;
         let owner_status = self.run(&owner)?.summary.status;
@@ -165,9 +162,7 @@ impl World {
             }
         }
         let mut all: Vec<ThreadInfo> = ids.iter().filter_map(|t| self.thread_info(t)).collect();
-        all.sort_by(|a, b| {
-            (b.updated_at_ms, &b.thread_id).cmp(&(a.updated_at_ms, &a.thread_id))
-        });
+        all.sort_by(|a, b| (b.updated_at_ms, &b.thread_id).cmp(&(a.updated_at_ms, &a.thread_id)));
         all
     }
 
@@ -256,19 +251,12 @@ impl World {
         }
         let keep: Option<(usize, usize, &str, u32)> = match scope {
             DiffScope::Thread => None,
-            DiffScope::Run if record.parent.is_some() => {
-                Some((3, 6, changes::FOLLOW_UP_START, 1))
-            }
+            DiffScope::Run if record.parent.is_some() => Some((3, 6, changes::FOLLOW_UP_START, 1)),
             DiffScope::Run => None,
             DiffScope::Commit { sha } => Some((0, 1, sha.as_str(), 1)),
         };
         if let Some((from, to, base, commits)) = keep {
-            whole.files = whole
-                .files
-                .into_iter()
-                .skip(from)
-                .take(to - from)
-                .collect();
+            whole.files = whole.files.into_iter().skip(from).take(to - from).collect();
             whole.commits = commits;
             base.clone_into(&mut whole.base_sha);
             if path.is_some_and(|p| !whole.files.iter().any(|f| f.path == p)) {
