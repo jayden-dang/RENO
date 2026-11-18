@@ -737,6 +737,17 @@ impl Store {
         self.state.supports(reno_proto::FEATURE_RUN_CHANGES)
     }
 
+    /// Whether the daemon serves the Files tab (feature `files`).
+    pub(crate) fn supports_files(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_FILES)
+    }
+
+    /// The connected client, for the Files tab's own requests: it reads and watches through the
+    /// client directly, since its answers live in the tab and not in the mirror.
+    pub(crate) fn files_client(&self) -> Option<Client> {
+        self.client()
+    }
+
     /// Whether the daemon has threads (feature `threads`).
     pub(crate) fn supports_threads(&self) -> bool {
         self.state.supports(reno_proto::FEATURE_THREADS)

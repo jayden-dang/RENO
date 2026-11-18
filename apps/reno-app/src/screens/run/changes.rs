@@ -178,6 +178,8 @@ impl RunScreen {
     /// parses each answer once. Then it tells the lists their new rows. Called when the store
     /// changes and when the panel or a file section does.
     pub(super) fn ensure_patches(&mut self, cx: &mut Context<Self>) {
+        // The Files tab starts or stops its watch with the same events.
+        self.sync_files(cx);
         let review = self.review_is_showing(cx);
         let file_tab = self.file_tab_showing(cx);
         if !review && file_tab.is_none() {
@@ -847,6 +849,30 @@ impl RunScreen {
                     .text_size(px(11.5))
                     .text_color(theme.faint)
                     .child("binary"),
+            })
+            .when(foldable, |d| {
+                // The file itself, in the Files tab, beside the diff's own tab.
+                let selector = format!("{prefix}change-files-{}", row.path);
+                let hover = theme.text.opacity(0.06);
+                let path = path.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .flex_none()
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(6.0))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.open_file_at(&path, None, window, cx);
+                        }))
+                        .child(icon(Icon::Folder, 13.0, theme.muted)),
+                )
             })
             .when(foldable, |d| {
                 let selector = format!("{prefix}change-open-{}", row.path);
