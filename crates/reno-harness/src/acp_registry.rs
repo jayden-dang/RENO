@@ -1055,14 +1055,17 @@ fn enclosed(dest: &Path, name: &Path) -> Result<PathBuf, HarnessError> {
 /// Whether `path`'s folder really is under `dest`, however links on the way resolve: a file or
 /// folder never lands outside it through a link an archive made earlier.
 fn inside(dest: &Path, path: &Path) -> Result<(), HarnessError> {
-    let root = dest.canonicalize()?;
-    let folder = path.parent().unwrap_or(path).canonicalize()?;
-    if folder.starts_with(&root) {
+    folder_inside(dest, path.parent().unwrap_or(path))
+}
+
+/// [`inside`] for a folder itself.
+fn folder_inside(dest: &Path, folder: &Path) -> Result<(), HarnessError> {
+    if folder.canonicalize()?.starts_with(dest.canonicalize()?) {
         Ok(())
     } else {
         Err(HarnessError::Install(format!(
             "the archive writes outside its folder ({})",
-            path.display()
+            folder.display()
         )))
     }
 }
@@ -1127,7 +1130,7 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         let kind = entry.header().entry_type();
         if kind.is_dir() {
             std::fs::create_dir_all(&output)?;
-            inside(dest, &output)?;
+            folder_inside(dest, &output)?;
             continue;
         }
         if kind.is_pax_global_extensions()
@@ -1541,6 +1544,13 @@ mod tests {
         for (name, link) in entries {
             let mut header = tar::Header::new_gnu();
             header.set_mode(0o755);
+            if name.ends_with('/') {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_cksum();
+                built.append_data(&mut header, name, &b""[..]).unwrap();
+                continue;
+            }
             match link {
                 Some(target) => {
                     header.set_entry_type(tar::EntryType::Symlink);
@@ -1564,6 +1574,8 @@ mod tests {
     fn tar_links_that_stay_inside_the_archive_unpack_and_the_rest_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let ok = tar_of(&[
+            // (Archives often start with their own folder.)
+            ("./", None),
             ("harn", None),
             ("harn-dap", Some("harn")),
             ("fw/Versions/3.12/Py", None),
