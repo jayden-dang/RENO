@@ -61,7 +61,9 @@ impl ReviewScope {
         match self {
             Self::Thread => "",
             Self::Run => "This daemon has no threads. Update renod to compare one run.",
-            Self::WorkingTree => "This daemon is too old to show uncommitted changes. Update renod.",
+            Self::WorkingTree => {
+                "This daemon is too old to show uncommitted changes. Update renod."
+            }
         }
     }
 }

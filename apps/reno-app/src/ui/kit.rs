@@ -391,7 +391,9 @@ impl gpui::Render for Tip {
 }
 
 /// `.tooltip(...)` for an element: `text` on hover.
-pub(crate) fn tip(text: impl Into<SharedString>) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
+pub(crate) fn tip(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
     let text: SharedString = text.into();
     move |_, cx| cx.new(|_| Tip(text.clone())).into()
 }

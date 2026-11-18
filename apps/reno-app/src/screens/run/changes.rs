@@ -17,12 +17,12 @@ use crate::panel::surface::Surface;
 use crate::panel::view::{Prefs, finding_text};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
+use crate::ui::markdown_view;
 use crate::ui::theme::Theme;
 use crate::vm::changes::{
     self as facts, DiffRow, FileRow, KindTone, Loaded, Overview, Pane, PatchPane, ReviewScope,
     RowKind,
 };
-use crate::ui::markdown_view;
 use crate::vm::diff_syntax::FileSyntax;
 use crate::vm::review::{Note, ReviewRow, review_rows};
 
@@ -306,6 +306,16 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn review_row_count(&self) -> usize {
         self.review.rows.len()
+    }
+
+    /// How many of Review's rows are side-by-side pairs.
+    #[cfg(test)]
+    pub(crate) fn review_pair_rows(&self) -> usize {
+        self.review
+            .rows
+            .iter()
+            .filter(|r| matches!(r, ReviewRow::Pair { .. }))
+            .count()
     }
 
     #[cfg(test)]
@@ -654,7 +664,9 @@ impl RunScreen {
             .into_any_element(),
             Pane::Empty { .. } => note(
                 match self.effective_scope(cx) {
-                    ReviewScope::WorkingTree => "Nothing is uncommitted: the worktree matches its latest commit.",
+                    ReviewScope::WorkingTree => {
+                        "Nothing is uncommitted: the worktree matches its latest commit."
+                    }
                     _ => "This run made no changes.",
                 }
                 .to_owned(),
@@ -836,7 +848,9 @@ impl RunScreen {
         loaded: &facts::Loaded<facts::Patch>,
     ) -> Option<std::sync::Arc<FileSyntax>> {
         match loaded {
-            facts::Loaded::Ready(patch) => self.syntax.ready(origin, path, &patch.checksum).cloned(),
+            facts::Loaded::Ready(patch) => {
+                self.syntax.ready(origin, path, &patch.checksum).cloned()
+            }
             _ => None,
         }
     }
@@ -1036,9 +1050,9 @@ impl RunScreen {
             .when_some(fold, |d, (scope, open, _)| {
                 let path = path.clone();
                 d.cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_in(&scope, path.clone(), cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_in(&scope, path.clone(), cx)),
+                    )
                     .child(icon(
                         if open { Icon::ChevDown } else { Icon::Fwd },
                         13.0,
@@ -1232,7 +1246,13 @@ fn diff_line(
         .when_some(wash, |d, wash| d.bg(wash))
         .child(number(row.old))
         .child(number(row.new))
-        .child(div().flex_none().w(px(14.0)).text_color(sign_ink).child(sign))
+        .child(
+            div()
+                .flex_none()
+                .w(px(14.0))
+                .text_color(sign_ink)
+                .child(sign),
+        )
         .child(
             div()
                 .flex_none()

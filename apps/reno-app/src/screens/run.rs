@@ -109,6 +109,8 @@ pub(crate) struct RunScreen {
     terms: terminal::Terms,
     /// The History tab's log, search and selection, made when it first shows.
     history: Option<history::HistoryTab>,
+    /// Commits per page of the log (a test makes it small to see paging).
+    history_page: u32,
     /// The Commit tabs, by commit, each made when it first shows.
     commits: HashMap<String, history::CommitTab>,
     /// Syntax colour of the files in diffs, by file and patch.
@@ -191,6 +193,7 @@ impl RunScreen {
             files: None,
             terms,
             history: None,
+            history_page: crate::vm::git_graph::PAGE,
             commits: HashMap::new(),
             syntax: syntax::Syntax::default(),
             review_folded: HashSet::new(),
@@ -705,6 +708,8 @@ mod changes_tests;
 
 #[cfg(test)]
 mod files_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]

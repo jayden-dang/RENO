@@ -138,10 +138,7 @@ fn geometry(lanes: usize, panel: f32) -> (f32, f32) {
         return (natural.min(cap.max(natural)), LANE);
     }
     let spacing = ((cap - PAD * 2.0 - NODE) / (lanes - 1) as f32).clamp(3.0, LANE);
-    (
-        PAD * 2.0 + NODE + (lanes - 1) as f32 * spacing,
-        spacing,
-    )
+    (PAD * 2.0 + NODE + (lanes - 1) as f32 * spacing, spacing)
 }
 
 /// Paints the lines and the node of one row of the graph into `bounds`.
@@ -159,9 +156,18 @@ fn paint_graph(
     let bottom = bounds.origin.y + bounds.size.height + px(0.5);
     for segment in &row.segments {
         let (from, to) = match segment.shape {
-            SegmentShape::Through => (point(x(segment.from_lane), top), point(x(segment.to_lane), bottom)),
-            SegmentShape::Incoming => (point(x(segment.from_lane), top), point(x(row.node_lane), mid)),
-            SegmentShape::Outgoing => (point(x(row.node_lane), mid), point(x(segment.to_lane), bottom)),
+            SegmentShape::Through => (
+                point(x(segment.from_lane), top),
+                point(x(segment.to_lane), bottom),
+            ),
+            SegmentShape::Incoming => (
+                point(x(segment.from_lane), top),
+                point(x(row.node_lane), mid),
+            ),
+            SegmentShape::Outgoing => (
+                point(x(row.node_lane), mid),
+                point(x(segment.to_lane), bottom),
+            ),
         };
         let mut path = PathBuilder::stroke(px(1.5));
         path.move_to(from);
@@ -189,11 +195,8 @@ fn paint_graph(
         );
     }
     window.paint_quad(
-        fill(
-            Bounds::centered_at(center, size(px(NODE), px(NODE))),
-            color,
-        )
-        .corner_radii(Corners::all(px(NODE / 2.0))),
+        fill(Bounds::centered_at(center, size(px(NODE), px(NODE))), color)
+            .corner_radii(Corners::all(px(NODE / 2.0))),
     );
 }
 
@@ -261,7 +264,7 @@ impl RunScreen {
                 .ok();
         });
         HistoryTab {
-            model: HistoryModel::default(),
+            model: HistoryModel::with_page_size(self.history_page),
             search,
             _search_events: [observed, events],
             search_timer: None,
@@ -420,19 +423,6 @@ impl RunScreen {
             self.run_history(vec![request], cx);
         }
         cx.notify();
-    }
-
-    /// Types `text` in the search box, as a person would (screenshots, reviews).
-    pub(crate) fn type_history_search(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(tab) = &self.history {
-            tab.search
-                .update(cx, |field, cx| field.fill(text, window, cx));
-        }
     }
 
     /// The list scrolled to rows up to `end`: near its end, the next page is asked for.
@@ -785,7 +775,10 @@ impl RunScreen {
                 Some(SearchState::Ready { .. }) if model.rows().is_empty() => (
                     "nomatch",
                     note(
-                        format!("No commit matches \u{201c}{}\u{201d}.", model.query().trim()),
+                        format!(
+                            "No commit matches \u{201c}{}\u{201d}.",
+                            model.query().trim()
+                        ),
                         theme.muted,
                     )
                     .into_any_element(),
@@ -887,10 +880,9 @@ impl RunScreen {
             .pr(px(12.0))
             .when(selected, |d| d.bg(theme.text.opacity(0.07)))
             .when(openable == Openable::BeforeBase, |d| {
-                d.opacity(0.6)
-                    .tooltip(kit::tip(
-                        "Before this thread's base: the daemon shows no diff for it.",
-                    ))
+                d.opacity(0.6).tooltip(kit::tip(
+                    "Before this thread's base: the daemon shows no diff for it.",
+                ))
             })
             .when(openable != Openable::BeforeBase, |d| {
                 d.cursor_pointer().hover(move |s| s.bg(hover))
@@ -1042,7 +1034,9 @@ impl RunScreen {
                 .into_any_element();
         }
         let text = match model.search_state() {
-            Some(SearchState::Ready { truncated: true }) => "More commits match: refine the search.",
+            Some(SearchState::Ready { truncated: true }) => {
+                "More commits match: refine the search."
+            }
             Some(_) => "",
             None if model.shallow => "Shallow clone: the history stops short of its first commit.",
             None => "That is every commit.",
@@ -1105,9 +1099,11 @@ impl RunScreen {
                                         "Try again",
                                         Tone::Quiet,
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.commit_retry(&at, cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.commit_retry(&at, cx);
+                                        },
+                                    )),
                                 ),
                             )
                             .into_any_element(),
@@ -1115,11 +1111,8 @@ impl RunScreen {
                 }
                 Some(Loaded::Ready(diff)) if diff.files.is_empty() => (
                     "empty",
-                    note(
-                        "This commit changes no files.".to_owned(),
-                        theme.muted,
-                    )
-                    .into_any_element(),
+                    note("This commit changes no files.".to_owned(), theme.muted)
+                        .into_any_element(),
                 ),
                 Some(Loaded::Ready(_)) => {
                     let state = self.commits.get(sha).map(|t| t.flat.list.clone());
@@ -1171,13 +1164,10 @@ impl RunScreen {
                 div()
                     .text_size(px(14.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(SharedString::from(
-                        commit
-                            .as_ref()
-                            .map_or_else(|| format!("Commit {}", graph::short(sha)), |c| {
-                                c.subject.clone()
-                            }),
-                    )),
+                    .child(SharedString::from(commit.as_ref().map_or_else(
+                        || format!("Commit {}", graph::short(sha)),
+                        |c| c.subject.clone(),
+                    ))),
             )
             .child(
                 div()

@@ -90,6 +90,7 @@ impl FileSyntax {
     }
 
     /// How many of `rows` have colours.
+    #[cfg(test)]
     pub(crate) fn coloured(&self, rows: &[DiffRow]) -> usize {
         rows.iter().filter(|r| self.spans(r).is_some()).count()
     }

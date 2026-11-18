@@ -103,7 +103,10 @@ impl RunScreen {
             scope,
             checksum: Some(checksum.to_owned()),
         };
-        let task = Tokio::spawn(cx, async move { client.workspace_file_sources(params).await });
+        let task = Tokio::spawn(
+            cx,
+            async move { client.workspace_file_sources(params).await },
+        );
         cx.spawn(async move |this, cx| {
             let answer = task.await;
             let mut stale = false;

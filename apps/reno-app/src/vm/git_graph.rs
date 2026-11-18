@@ -422,7 +422,10 @@ pub(crate) fn author_hue(key: &str) -> f32 {
     let n = key
         .get(..8)
         .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .unwrap_or_else(|| key.bytes().fold(0u32, |a, b| a.wrapping_mul(31) ^ u32::from(b)));
+        .unwrap_or_else(|| {
+            key.bytes()
+                .fold(0u32, |a, b| a.wrapping_mul(31) ^ u32::from(b))
+        });
     (n % 360) as f32 / 360.0
 }
 
@@ -660,11 +663,9 @@ impl HistoryModel {
         }
         self.thread = match result {
             // A page that did not hold them all cannot say what is missing.
-            Ok(log) if log.repo && !log.in_place && log.next_cursor.is_none() => {
-                ThreadSet::Known {
-                    shas: log.commits.into_iter().map(|c| c.sha).collect(),
-                }
-            }
+            Ok(log) if log.repo && !log.in_place && log.next_cursor.is_none() => ThreadSet::Known {
+                shas: log.commits.into_iter().map(|c| c.sha).collect(),
+            },
             _ => ThreadSet::Unknown,
         };
     }
@@ -744,6 +745,7 @@ impl HistoryModel {
         self.rebuild();
     }
 
+    #[cfg(test)]
     pub(crate) fn searching(&self) -> bool {
         self.search.is_some()
     }
@@ -787,6 +789,7 @@ impl HistoryModel {
         self.rebuild();
     }
 
+    #[cfg(test)]
     pub(crate) fn is_collapsed(&self, key: &str) -> bool {
         self.collapsed.contains(key)
     }
@@ -829,10 +832,6 @@ impl HistoryModel {
         &self.hidden
     }
 
-    pub(crate) fn head(&self) -> Option<&str> {
-        self.head.as_deref()
-    }
-
     pub(crate) fn commit(&self, sha: &str) -> Option<&GitCommit> {
         self.commits
             .iter()
@@ -841,6 +840,7 @@ impl HistoryModel {
     }
 
     /// How many commits of the log are loaded.
+    #[cfg(test)]
     pub(crate) fn loaded(&self) -> usize {
         self.commits.len()
     }
@@ -1062,7 +1062,10 @@ mod tests {
         m.apply_page(
             ticket,
             true,
-            Ok(log(vec![commit("c", &["b"]), commit("b", &["a"])], Some("n1"))),
+            Ok(log(
+                vec![commit("c", &["b"]), commit("b", &["a"])],
+                Some("n1"),
+            )),
         );
         assert_eq!(m.status, Status::Ready);
         assert!(m.has_more());
@@ -1151,7 +1154,11 @@ mod tests {
             m.search_state(),
             Some(&SearchState::Ready { truncated: true })
         );
-        assert_eq!(lanes(m.graph()), [0, 0], "matches are not laid out as a graph");
+        assert_eq!(
+            lanes(m.graph()),
+            [0, 0],
+            "matches are not laid out as a graph"
+        );
         assert!(m.rows().iter().all(|c| c.parents.is_empty()));
 
         // Typing nothing goes back to the log without asking the daemon.
