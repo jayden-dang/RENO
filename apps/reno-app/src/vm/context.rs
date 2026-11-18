@@ -5,12 +5,9 @@
 //! `crates/ui/src/context_usage.rs`; plan usage thresholds (0.80 / 0.95) come from
 //! `reno_proto::usage_level`.
 
-use reno_proto::{
-    ContextUsage, MODEL_OPTION_CONTEXT_WINDOW, ModelOption, PlanUsage, UsageLevel, UsageWindow,
-};
+use reno_proto::{ContextUsage, MODEL_OPTION_CONTEXT_WINDOW, ModelOption, UsageLevel, UsageWindow};
 
 use super::models::ModelChoice;
-use crate::summary;
 
 /// How loud a ring is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,25 +163,42 @@ pub(crate) fn options_for_model(
 
 // ---- plan usage ---------------------------------------------------------------------------------
 
-/// One meter's line on the usage card: "Session 54% \u{b7} resets 16:00 UTC".
-pub(crate) fn window_line(window: &UsageWindow) -> String {
+/// When a window resets, in `zone`: "16:00" on the day of `now_ms`, "Thu 10:00" on another.
+pub(crate) fn reset_clock<Tz>(at_ms: u64, now_ms: u64, zone: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let local = |ms: u64| {
+        i64::try_from(ms)
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.with_timezone(zone))
+    };
+    match (local(at_ms), local(now_ms)) {
+        (Some(at), Some(now)) if at.date_naive() == now.date_naive() => {
+            at.format("%H:%M").to_string()
+        }
+        (Some(at), _) => at.format("%a %H:%M").to_string(),
+        (None, _) => "soon".to_owned(),
+    }
+}
+
+/// One meter's line on the Account row: "Session 54% \u{b7} resets 16:00", in `zone`.
+pub(crate) fn window_line<Tz>(window: &UsageWindow, now_ms: u64, zone: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
     let used = percent(f64::from(window.used_fraction()));
     match window.resets_at_ms {
         Some(at) => format!(
             "{} {used} \u{b7} resets {}",
             window.label,
-            summary::clock_utc(at)
+            reset_clock(at, now_ms, zone)
         ),
         None => format!("{} {used}", window.label),
     }
-}
-
-/// The usage card's heading: the plan's name, else "Plan usage".
-pub(crate) fn usage_heading(usage: &PlanUsage) -> String {
-    usage
-        .plan_label
-        .clone()
-        .unwrap_or_else(|| "Plan usage".to_owned())
 }
 
 #[cfg(test)]
@@ -315,25 +329,26 @@ mod tests {
     }
 
     #[test]
-    fn a_meter_reads_label_percent_and_reset() {
-        let window = UsageWindow::new("Session", 0.54, Some(16 * 3_600_000));
-        assert_eq!(window_line(&window), "Session 54% \u{b7} resets 16:00 UTC");
+    fn a_meter_reads_label_percent_and_reset_in_the_given_zone() {
+        use chrono::FixedOffset;
+        const HOUR: u64 = 3_600_000;
+        // 2026-11-18 12:00 UTC; the zone is UTC+2, so it is 14:00 there.
+        let now = 1_795_003_200_000;
+        let zone = FixedOffset::east_opt(2 * 3600).unwrap();
+        let today = UsageWindow::new("Session", 0.54, Some(now + 4 * HOUR));
         assert_eq!(
-            window_line(&UsageWindow::new("Week", 0.21, None)),
-            "Week 21%"
+            window_line(&today, now, &zone),
+            "Session 54% \u{b7} resets 18:00"
         );
-        let plan = PlanUsage {
-            plan_label: Some("ChatGPT Plus".into()),
-            windows: vec![window],
-            fetched_at_ms: 1,
-        };
-        assert_eq!(usage_heading(&plan), "ChatGPT Plus");
+        // 22:00 UTC is already the next day at UTC+2: shown with its weekday.
+        let tomorrow = UsageWindow::new("Week", 0.21, Some(now + 10 * HOUR));
         assert_eq!(
-            usage_heading(&PlanUsage {
-                plan_label: None,
-                ..plan
-            }),
-            "Plan usage"
+            window_line(&tomorrow, now, &zone),
+            "Week 21% \u{b7} resets Thu 00:00"
+        );
+        assert_eq!(
+            window_line(&UsageWindow::new("Week", 0.21, None), now, &zone),
+            "Week 21%"
         );
     }
 }

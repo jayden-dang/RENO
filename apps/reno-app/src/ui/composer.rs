@@ -294,15 +294,14 @@ pub(crate) struct Composer {
     picker_keyboard: bool,
     /// The picker's own focus, so typing goes to its search and not to the text.
     picker_focus: FocusHandle,
-    /// A card is open: the context ring's on the run's foot, the account's plan usage inside
-    /// the picker.
+    /// The context ring's card on the run's foot is open.
     context_card_open: bool,
+    /// The Account row shows its plan meters.
     usage_card_open: bool,
     /// The Context window row's sizes are showing.
     picker_window_open: bool,
-    /// Where the context ring and the usage ring were last painted, for their cards.
+    /// Where the context ring was last painted, for its card.
     ring_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    usage_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The picker closed: the next frame puts the keyboard back in the text.
     refocus: bool,
     /// Whether the class menu is open.
@@ -370,7 +369,6 @@ impl Composer {
             usage_card_open: false,
             picker_window_open: false,
             ring_bounds: Rc::default(),
-            usage_bounds: Rc::default(),
             class_open: false,
             chip_bounds: Rc::default(),
             class_bounds: Rc::default(),
@@ -1758,9 +1756,6 @@ impl Render for Composer {
         let cards = (self.context_card_open && self.mode != Mode::Home)
             .then(|| self.context_card(&theme, cx))
             .flatten();
-        let usage_card = (self.usage_card_open && self.picker_open)
-            .then(|| self.usage_card(&theme, cx))
-            .flatten();
         let classes = (self.class_open && self.mode == Mode::Home)
             .then(|| {
                 let content = self.class_menu(&theme, cx);
@@ -1858,7 +1853,6 @@ impl Render for Composer {
             .children(note)
             .child(boxed)
             .children(picker)
-            .children(usage_card)
             .children(cards)
     }
 }

@@ -868,14 +868,14 @@ impl Composer {
         theme: &Theme,
         harness: &HarnessChoice,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> gpui::Div {
         let (words, tone): (String, Hsla) = match &harness.account {
             Account::SignedIn(Some(who)) => (who.clone(), theme.muted),
             Account::SignedIn(None) => ("signed in".to_owned(), theme.muted),
             Account::SignedOut => ("signed out".to_owned(), theme.warning),
             Account::NotReported => ("not reported".to_owned(), theme.faint),
         };
-        menu_row(theme, "picker-account".to_owned(), true)
+        let row = menu_row(theme, "picker-account".to_owned(), true)
             .child(div().flex_none().text_color(theme.muted).child("Account"))
             .child(
                 div()
@@ -894,7 +894,37 @@ impl Composer {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.close_picker(cx);
                 cx.emit(OpenExecutors);
-            }))
+            }));
+        let meters = harness
+            .usage
+            .as_ref()
+            .filter(|_| self.usage_card_open && matches!(harness.account, Account::SignedIn(_)))
+            .map(|usage| {
+                let now = self.store.read(cx).now_ms();
+                div()
+                    .id("picker-usage-meters")
+                    .debug_selector(|| "picker-usage-meters".to_owned())
+                    .px(px(10.0))
+                    .pb(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .children(usage.plan_label.clone().map(|plan| {
+                        div()
+                            .text_color(theme.faint)
+                            .child(SharedString::from(plan))
+                    }))
+                    .children(usage.windows.iter().map(|w| {
+                        div().child(SharedString::from(context::window_line(
+                            w,
+                            now,
+                            &chrono::Local,
+                        )))
+                    }))
+            });
+        div().flex().flex_col().child(row).children(meters)
     }
 
     /// The Context window row, when the shown model offers a choice of sizes: the size chosen

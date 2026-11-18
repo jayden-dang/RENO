@@ -277,6 +277,11 @@ pub(super) fn seed() -> Ids<Seed> {
             )?,
             journal: vec![
                 started(),
+                // The live demo run reports how full its context is, so the ring shows.
+                ExecEvent::ContextUsage {
+                    tokens: Some(84_213),
+                    window: Some(200_000),
+                },
                 text("Three crates have minor updates. I will bump them and open a branch."),
                 ls(),
                 tool_ok("t1", "Cargo.toml, Cargo.lock, src/"),

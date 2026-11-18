@@ -5114,6 +5114,7 @@ dependencies = [
 name = "reno-app"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "futures",
  "gpui",
  "gpui_platform",

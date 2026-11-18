@@ -78,7 +78,7 @@ impl Composer {
     }
 
     /// The Account row's usage ring: the most-used meter, for a signed-in harness the daemon has
-    /// meters for.
+    /// meters for. A click folds the meters out under the row.
     pub(super) fn usage_ring(
         &self,
         theme: &Theme,
@@ -90,7 +90,6 @@ impl Composer {
         }
         let usage = harness.usage.as_ref()?;
         let fraction = usage.used_fraction()?;
-        let bounds = self.usage_bounds.clone();
         let executor = harness.id.clone();
         Some(
             ring_chip(
@@ -100,12 +99,6 @@ impl Composer {
                 context::percent(f64::from(fraction)),
                 self.usage_card_open,
                 theme,
-            )
-            .relative()
-            .child(
-                canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
-                    .absolute()
-                    .size_full(),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -118,29 +111,6 @@ impl Composer {
                 }
                 cx.notify();
             })),
-        )
-    }
-
-    /// The usage card: the plan and each meter with its reset.
-    pub(super) fn usage_card(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Deferred> {
-        let view = self.picker_view(cx);
-        let usage = Self::footer_harness(&view)?.usage.clone()?;
-        let lines: Vec<String> = usage.windows.iter().map(context::window_line).collect();
-        let content = card(theme, "usage-card", &context::usage_heading(&usage), &lines);
-        let at = self.usage_bounds.clone();
-        self.popover(
-            &at,
-            content,
-            |this, cx| {
-                this.usage_card_open = false;
-                cx.notify();
-            },
-            Some(true),
-            cx,
         )
     }
 }

@@ -1058,12 +1058,42 @@ fn the_account_row_carries_a_usage_ring_for_a_signed_in_harness_and_its_card(
     let (_store, _root, vcx) = open_picker_on(cx, "claude-code");
     wait_drawn(vcx, |vcx| painted(vcx, "picker-usage"));
     assert!(!painted(vcx, "usage-card"));
+    assert!(!painted(vcx, "picker-usage-meters"));
     click(vcx, "picker-usage");
-    wait_drawn(vcx, |vcx| painted(vcx, "usage-card"));
-    assert!(painted(vcx, "model-picker"), "the picker stays under it");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-usage-meters"));
+    assert!(painted(vcx, "model-picker"), "the picker stays open");
+    click(vcx, "picker-usage-meters");
+    draw(vcx);
+    assert!(
+        painted(vcx, "model-picker"),
+        "a click inside does not close it"
+    );
+    click(vcx, "picker-usage");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "picker-usage-meters"),
+        "the ring folds it away"
+    );
+    click(vcx, "picker-usage");
+    draw(vcx);
     // Codex is signed out in the demo: no meter, whatever the daemon carries.
     click(vcx, "picker-tab-codex");
     draw(vcx);
     assert!(!painted(vcx, "picker-usage"));
-    assert!(!painted(vcx, "usage-card"));
+    assert!(!painted(vcx, "picker-usage-meters"));
+}
+
+#[gpui::test]
+fn a_live_run_with_a_reported_window_shows_the_context_ring(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-ring"));
+    click(vcx, "context-ring");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-card"));
 }
