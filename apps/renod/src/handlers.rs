@@ -34,6 +34,7 @@
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `thread.list`, `thread.get`, `thread.close` | `threads`, `thread`, `close_thread` |
 //! | `fs.list`, `fs.read`, `fs.read_image`, `fs.search_files`, `fs.search_content`, `git.status`, `fs.watch` | `workspace`, `run_thread`, `thread` (which tree), then the `files` service |
+//! | `git.log`, `git.log_search`, `workspace.file_sources` | `workspace`, `run_thread`, `thread` (which tree, and the range), `workspace_diff_scoped` and `run_redactor`, then the `history` module |
 //! | `term.open`, `term.attach`, `term.write`, `term.resize`, `term.close`, `term.status`, `term.list` | `workspace`, `run_thread`, `thread`, `get_run` (which tree, and whether the run is live), then the `terminals` service |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
