@@ -449,7 +449,10 @@ async fn a_missing_configuration_reads_as_needs_setup_with_the_variables() {
     match health.signed_in {
         SignedIn::No { hint } => {
             assert!(hint.contains("needs setup"), "{hint}");
-            assert!(hint.contains("GOOSE_PROVIDER") && hint.contains("GOOSE_MODEL"), "{hint}");
+            assert!(
+                hint.contains("GOOSE_PROVIDER") && hint.contains("GOOSE_MODEL"),
+                "{hint}"
+            );
         }
         other => panic!("needs setup, not {other:?}"),
     }

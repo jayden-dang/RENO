@@ -402,12 +402,17 @@ pub(super) fn needs_setup(error: &HarnessError) -> Option<String> {
     let at = lower.find("configuration value not found")?;
     let mut vars: Vec<String> = text[at..]
         .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-        .filter(|w| w.len() >= 4 && w.contains('_') && w.starts_with(|c: char| c.is_ascii_uppercase()))
+        .filter(|w| {
+            w.len() >= 4 && w.contains('_') && w.starts_with(|c: char| c.is_ascii_uppercase())
+        })
         .map(str::to_owned)
         .take(1)
         .collect();
     // goose names the first missing one; it needs the pair.
-    if vars.iter().any(|v| v == "GOOSE_PROVIDER" || v == "GOOSE_MODEL") {
+    if vars
+        .iter()
+        .any(|v| v == "GOOSE_PROVIDER" || v == "GOOSE_MODEL")
+    {
         vars = vec!["GOOSE_PROVIDER".into(), "GOOSE_MODEL".into()];
     }
     Some(if vars.is_empty() {
@@ -585,9 +590,7 @@ impl AcpExecutor {
                 .iter()
                 .any(|m| m.unusable.is_some());
             return Err(HarnessError::Protocol(if unusable {
-                format!(
-                    "{display_name} offers a sign-in method with no id, which Reno cannot use"
-                )
+                format!("{display_name} offers a sign-in method with no id, which Reno cannot use")
             } else {
                 format!("{display_name} offers no sign-in")
             }));

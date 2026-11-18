@@ -334,7 +334,10 @@ pub(crate) fn run_bounded(path: &Path, args: &[&str], timeout: std::time::Durati
         .stderr(Stdio::piped());
     // A `#!/usr/bin/env node` CLI (Pi) needs its own directory, and the user's, on the PATH it
     // runs with: a launchd daemon's is the bare system one.
-    crate::compose_path(&mut command, path.parent().filter(|d| !d.as_os_str().is_empty()));
+    crate::compose_path(
+        &mut command,
+        path.parent().filter(|d| !d.as_os_str().is_empty()),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -558,10 +561,7 @@ mod tests {
         };
         // The "interpreter" sits beside the script, as a version manager's node sits beside pi.
         exec("reno-fake-node-for-pi-test", "#!/bin/sh\necho 1.5.0\n");
-        let pi = exec(
-            "pi-script",
-            "#!/usr/bin/env reno-fake-node-for-pi-test\n",
-        );
+        let pi = exec("pi-script", "#!/usr/bin/env reno-fake-node-for-pi-test\n");
         let version = binary_version_with(&pi, std::time::Duration::from_secs(5));
         assert_eq!(version, Some(semver::Version::new(1, 5, 0)));
     }

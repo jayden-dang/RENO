@@ -888,28 +888,8 @@ async fn stage(
             let uv = find_uv().ok_or_else(|| {
                 HarnessError::NotInstalled(format!("uv, to install {}", entry.name))
             })?;
-            let mut cmd = crate::process::Command::new(&uv);
-            cmd.args(["tool", "install", "--force", "--quiet", &p.package])
-                .env("UV_TOOL_DIR", tmp.join("tools"))
-                .env("UV_TOOL_BIN_DIR", tmp.join("bin"))
-                .stdin(crate::process::Stdio::null())
-                .stdout(crate::process::Stdio::piped())
-                .stderr(crate::process::Stdio::piped())
-                .kill_on_drop(true);
-            crate::compose_child_path(&mut cmd, &uv);
-            let output = tokio::time::timeout(UV_TIMEOUT, cmd.output())
-                .await
-                .map_err(|_| {
-                    HarnessError::Install(format!("uv took too long to install {}", entry.name))
-                })??;
-            if !output.status.success() {
-                let err = String::from_utf8_lossy(&output.stderr);
-                return Err(HarnessError::Install(format!(
-                    "uv couldn't install {}: {}",
-                    p.package,
-                    err.trim().lines().last().unwrap_or("no reason given")
-                )));
-            }
+            let root = agents_root().unwrap_or_else(|| tmp.join(".uv"));
+            uv_tool_install(&uv, &p.package, tmp, &root, &entry.name).await?;
             let bin = tmp.join("bin");
             let named = bin.join(name);
             let program = if named.is_file() {
@@ -939,6 +919,81 @@ async fn stage(
                 false,
             ))
         }
+    }
+}
+
+/// The Python a uv install falls back to when the machine's default cannot build the package's
+/// dependencies from wheels (`UV_NO_BUILD`): 3.12, which the audited packages (fast-agent) had
+/// wheels for.
+const UV_FALLBACK_PYTHON: &str = "3.12";
+
+/// `uv tool install`s `package` into `tmp` (its `tools` and `bin`). Reno's uv installs depend on
+/// nothing of the machine's but uv itself:
+///
+/// 1. uv's own pick first (the machine's default Python, or whatever uv manages), and
+/// 2. when that fails (a dependency with no wheel for that Python, which `UV_NO_BUILD` refuses to
+///    build: building would run the package's build code), again with a pinned
+///    [`UV_FALLBACK_PYTHON`] that uv downloads and manages.
+///
+/// uv's cache and its managed Pythons live under the agents `root` (`.uv-cache`, `.uv-python`,
+/// shared by every uv agent and kept when one is removed), never in `~/.cache/uv` or
+/// `~/.local/share/uv`.
+async fn uv_tool_install(
+    uv: &Path,
+    package: &str,
+    tmp: &Path,
+    root: &Path,
+    name: &str,
+) -> Result<(), HarnessError> {
+    let run = |python: Option<&'static str>| {
+        let mut cmd = crate::process::Command::new(uv);
+        cmd.args(["tool", "install", "--force", "--quiet"]);
+        if let Some(python) = python {
+            cmd.args(["--python", python]);
+        }
+        cmd.arg(package)
+            .env("UV_TOOL_DIR", tmp.join("tools"))
+            .env("UV_TOOL_BIN_DIR", tmp.join("bin"))
+            .env("UV_CACHE_DIR", root.join(".uv-cache"))
+            .env("UV_PYTHON_INSTALL_DIR", root.join(".uv-python"))
+            // Wheels only: a package's build step is code Reno never runs (as npm's
+            // `--ignore-scripts`).
+            .env("UV_NO_BUILD", "1")
+            .stdin(crate::process::Stdio::null())
+            .stdout(crate::process::Stdio::piped())
+            .stderr(crate::process::Stdio::piped())
+            .kill_on_drop(true);
+        crate::compose_child_path(&mut cmd, uv);
+        async move {
+            let output = tokio::time::timeout(UV_TIMEOUT, cmd.output())
+                .await
+                .map_err(|_| {
+                    HarnessError::Install(format!("uv took too long to install {name}"))
+                })??;
+            if output.status.success() {
+                return Ok(());
+            }
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(HarnessError::Install(format!(
+                "uv couldn't install {package}: {}",
+                err.trim().lines().last().unwrap_or("no reason given")
+            )))
+        }
+    };
+    match run(None).await {
+        Ok(()) => Ok(()),
+        Err(first @ HarnessError::Install(_)) if !first.to_string().contains("took too long") => {
+            tracing::info!(
+                target: "reno_harness::acp_registry",
+                "{package} did not install with uv's default Python ({first}); trying Python {UV_FALLBACK_PYTHON}"
+            );
+            let _ = std::fs::remove_dir_all(tmp.join("tools"));
+            let _ = std::fs::remove_dir_all(tmp.join("bin"));
+            run(Some(UV_FALLBACK_PYTHON)).await.map_err(|second| {
+                HarnessError::Install(format!("{second} (with uv's default Python: {first})"))
+            })
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -1659,5 +1714,78 @@ mod tests {
         );
         assert_eq!(relative_cmd("../sh"), None);
         assert_eq!(relative_cmd("C:/x"), None);
+    }
+
+    /// A fake `uv` that records how it was run and, like uv under `UV_NO_BUILD`, fails for the
+    /// machine's default Python (no wheel) and installs once a Python is pinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_uv_install_falls_back_to_a_pinned_python_kept_under_the_agents_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (root, tmp) = (dir.path().join("agents"), dir.path().join("tmp"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log = dir.path().join("uv.log");
+        let uv = dir.path().join("uv");
+        std::fs::write(
+            &uv,
+            format!(
+                "#!/bin/sh\necho \"$*|$UV_PYTHON_INSTALL_DIR|$UV_CACHE_DIR|$UV_NO_BUILD\" >> '{}'\n\
+                 case \"$*\" in *\"--python 3.12\"*) mkdir -p \"$UV_TOOL_BIN_DIR\"; : > \"$UV_TOOL_BIN_DIR/fake-tool\"; exit 0;; esac\n\
+                 echo 'error: no wheel for the default Python' >&2\nexit 1\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        uv_tool_install(&uv, "fake-tool==1.0.0", &tmp, &root, "Fake")
+            .await
+            .unwrap();
+
+        let calls: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            !calls[0].contains("--python"),
+            "uv's own pick first: {calls:?}"
+        );
+        assert!(calls[1].contains("--python 3.12"), "{calls:?}");
+        for call in &calls {
+            let parts: Vec<&str> = call.split('|').collect();
+            assert_eq!(
+                parts[1],
+                root.join(".uv-python").to_str().unwrap(),
+                "{call}"
+            );
+            assert_eq!(parts[2], root.join(".uv-cache").to_str().unwrap(), "{call}");
+            assert_eq!(parts[3], "1", "no source builds: {call}");
+        }
+        assert!(tmp.join("bin/fake-tool").is_file());
+    }
+
+    /// When the default Python works there is no second try, and no Python is pinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_uv_install_that_works_the_first_time_pins_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let log = dir.path().join("uv.log");
+        let uv = dir.path().join("uv");
+        std::fs::write(
+            &uv,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 0\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        uv_tool_install(&uv, "fake-tool==1.0.0", &tmp, dir.path(), "Fake")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
     }
 }
