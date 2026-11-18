@@ -332,6 +332,12 @@ async fn happy_path_maps_notifications_to_exec_events() {
             text("\n\n"),
             text("unstreamed tail"),
             text("\n\n"),
+            // The occupancy of the context, reported as the notification arrives; the billing
+            // `Usage` is the turn's and comes just before `Done`.
+            ExecEvent::ContextUsage {
+                tokens: Some(49),
+                window: Some(258_400)
+            },
             ExecEvent::Usage {
                 input_tokens: 42,
                 output_tokens: 7,
