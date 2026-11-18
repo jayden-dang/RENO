@@ -648,3 +648,110 @@ async fn a_read_only_follow_up_still_works_in_the_threads_worktree() {
     assert!(matches!(placed, crate::Placement::Isolated(_)));
     assert!(info.cwd().ends_with(thread.as_str()), "{:?}", info.cwd());
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_idle_limit_closes_a_threads_terminals_before_it_removes_the_worktree() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let (fx, _m) = rig(&ws, vec![]).await;
+    let run = start(&fx, "/repo").await;
+    ended(&fx, &run, RunStatus::Succeeded).await;
+    let thread = thread_of(&fx, &run).await;
+    ws.set_terminals(&run, vec![term("one"), term("two")]);
+
+    let ttl = DEFAULT_THREAD_IDLE_TTL;
+    fx.clock
+        .advance(i64::try_from(ttl.as_millis()).unwrap() + 1_000);
+    tokio::time::advance(ttl + Duration::from_secs(1)).await;
+    until(async || {
+        (fx.kernel.workspace(&run).await.unwrap().status == WorkspaceStatus::Removed).then_some(())
+    })
+    .await;
+
+    let calls = ws.calls();
+    assert!(
+        at(&calls, &format!("closing {run}")) < at(&calls, &format!("release {run}")),
+        "the hook runs before the release: {calls:?}"
+    );
+    assert_eq!(
+        fx.kernel.thread(&thread).await.unwrap().status,
+        ThreadStatus::Closed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_a_thread_reports_the_terminals_the_hook_closed_even_when_the_worktree_is_kept() {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let (fx, _m) = rig(&ws, vec![]).await;
+    let run = start(&fx, "/repo").await;
+    ended(&fx, &run, RunStatus::Succeeded).await;
+    ws.set_changes(&run, changes(1, false));
+    ws.set_terminals(&run, vec![term("one")]);
+    let thread = thread_of(&fx, &run).await;
+
+    let closed = fx.kernel.close_thread(&thread, false).await.unwrap();
+    assert_eq!(closed.workspace, Some(CleanOutcome::Kept));
+    assert_eq!(closed.closed_terminals, vec![term("one")]);
+    let calls = ws.calls();
+    assert!(at(&calls, &format!("closing {run}")) < at(&calls, &format!("release {run}")));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("closing"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_of_a_named_worktree_closes_terminals_first_and_a_bulk_clean_only_for_what_it_removes()
+ {
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let (fx, _m) = rig(&ws, vec![]).await;
+    let named = start(&fx, "/repo").await;
+    let kept = start(&fx, "/repo").await;
+    let removed = start(&fx, "/repo").await;
+    for run in [&named, &kept, &removed] {
+        ended(&fx, run, RunStatus::Succeeded).await;
+    }
+    ws.set_terminals(&named, vec![term("named")]);
+    ws.set_terminals(&kept, vec![term("kept")]);
+    ws.set_terminals(&removed, vec![term("removed")]);
+    ws.set_changes(&kept, changes(2, false));
+
+    let items = fx
+        .kernel
+        .clean_workspaces(
+            CleanTarget::Run {
+                run_id: named.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(items[0].closed_terminals, vec![term("named")]);
+    let calls = ws.calls();
+    assert!(at(&calls, &format!("closing {named}")) < at(&calls, &format!("release {named}")));
+
+    let items = fx
+        .kernel
+        .clean_workspaces(CleanTarget::AllClean, false)
+        .await
+        .unwrap();
+    let of = |run: &RunId| items.iter().find(|item| &item.run_id == run).unwrap();
+    assert_eq!(of(&removed).outcome, CleanOutcome::Removed);
+    assert_eq!(of(&removed).closed_terminals, vec![term("removed")]);
+    assert_eq!(of(&kept).outcome, CleanOutcome::Kept);
+    assert!(of(&kept).closed_terminals.is_empty());
+}
+
+fn term(suffix: &str) -> reno_proto::TermId {
+    reno_proto::TermId::from_suffix(suffix).unwrap()
+}
+
+/// The position of the first call that starts with `prefix`.
+fn at(calls: &[String], prefix: &str) -> usize {
+    calls
+        .iter()
+        .position(|call| call.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no `{prefix}` in {calls:?}"))
+}

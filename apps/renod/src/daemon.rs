@@ -53,6 +53,7 @@ use crate::link::{FsRunLink, resolve_reno};
 use crate::lock::{DataDirLock, LockError};
 use crate::paths::{Paths, ensure_private_dir};
 use crate::power::{self, PowerWatch};
+use crate::terminals::{self, PtySpawner};
 use crate::watcher::{NotifyWatchers, WatcherFactory};
 use crate::worktrees::GitWorkspace;
 
@@ -112,6 +113,15 @@ pub struct DaemonConfig {
     /// leaves the daemon without feature `executor.maintain`; the binary sets the real ones
     /// ([`real_maintenance`]).
     pub maintenance: Option<MaintenancePorts>,
+    /// What starts the terminals' shells. `None` (the default, so no test can open a real shell)
+    /// leaves the daemon without feature `terminals`; the binary sets the real PTY
+    /// ([`RealPty`](crate::terminals::RealPty)).
+    pub pty: Option<Arc<dyn PtySpawner>>,
+    /// How long terminal things take; tests shorten them.
+    pub terminal_timing: terminals::Timing,
+    /// The environment a terminal's shell starts from (minus `RENO_*`). The binary passes its
+    /// own; the default is empty, so a test's shell inherits nothing of the test runner's.
+    pub terminal_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 impl DaemonConfig {
@@ -130,6 +140,9 @@ impl DaemonConfig {
             secrets: None,
             watchers: Arc::new(NotifyWatchers),
             maintenance: None,
+            pty: None,
+            terminal_timing: terminals::Timing::default(),
+            terminal_env: Vec::new(),
         }
     }
 
@@ -243,6 +256,9 @@ impl Daemon {
             reno_bin,
             watchers,
             maintenance,
+            pty,
+            terminal_timing,
+            terminal_env,
         } = config;
 
         for dir in [paths.data_dir.clone(), paths.workspace(), paths.worktrees()] {
@@ -307,6 +323,7 @@ impl Daemon {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from);
         let files = crate::files::Files::new(Arc::clone(&watchers), kernel.watch_retry);
+        let terminals = terminals::Terminals::new(pty, terminal_env, terminal_timing);
         let fs_watch = Arc::new(FsWatch::with_watchers(watchers));
         let wake = WakeSignal::new();
         let mut setup = DefsSetup::new(fs_defs.clone(), context)
@@ -334,7 +351,9 @@ impl Daemon {
             registry,
             Arc::new(SystemClock),
             Some(setup),
-            Some(Arc::new(GitWorkspace::new(paths.worktrees()))),
+            Some(Arc::new(
+                GitWorkspace::new(paths.worktrees()).with_terminals(terminals.clone()),
+            )),
             link,
         )
         .await
@@ -381,6 +400,7 @@ impl Daemon {
             fs_defs: Arc::clone(&fs_defs),
             maintenance: can_maintain,
             files,
+            terminals: terminals.clone(),
         });
         let server = Arc::new(Server::new(handlers::router(&ctx)));
         drop(ctx);
@@ -420,6 +440,7 @@ impl Daemon {
             kernel,
             fs_defs,
             fs_watch,
+            terminals,
             power,
             harnesses,
             installs,
@@ -469,6 +490,7 @@ struct Shutdown {
     kernel: Kernel,
     fs_defs: Arc<FsDefinitions>,
     fs_watch: Arc<FsWatch>,
+    terminals: terminals::Terminals,
     power: Option<PowerWatch>,
     harnesses: Vec<Arc<dyn Executor>>,
     installs: TaskTracker,
@@ -489,6 +511,8 @@ async fn shutdown_sequence(mut s: Shutdown) -> Stopped {
     // `interrupted`, within its own deadline.
     s.installs.close();
     s.installs.wait().await;
+    // The shells are the daemon's children: they end with it.
+    s.terminals.shutdown().await;
     drop(s.power.take());
     let report = s.kernel.shutdown().await;
     s.fs_defs.shutdown().await;

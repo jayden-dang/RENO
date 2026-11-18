@@ -34,6 +34,7 @@
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `thread.list`, `thread.get`, `thread.close` | `threads`, `thread`, `close_thread` |
 //! | `fs.list`, `fs.read`, `fs.read_image`, `fs.search_files`, `fs.search_content`, `git.status`, `fs.watch` | `workspace`, `run_thread`, `thread` (which tree), then the `files` service |
+//! | `term.open`, `term.attach`, `term.write`, `term.resize`, `term.close`, `term.status`, `term.list` | `workspace`, `run_thread`, `thread`, `get_run` (which tree, and whether the run is live), then the `terminals` service |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.frames` | `executor_frames` |
@@ -107,6 +108,11 @@ use reno_proto::{
     ExecutorsWatchParams,
 };
 use reno_proto::{
+    FEATURE_TERMINALS, TermAttach, TermAttachParams, TermClose, TermDone, TermEvent, TermList,
+    TermListParams, TermListResult, TermOpen, TermOpenParams, TermOpened, TermRef, TermResize,
+    TermResizeParams, TermStatus, TermStatusResult, TermWrite, TermWriteParams,
+};
+use reno_proto::{
     FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
     FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
     FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
@@ -166,6 +172,8 @@ pub(crate) struct Ctx {
     pub(crate) maintenance: bool,
     /// The Files tab's service: `fs.*` and `git.status`.
     pub(crate) files: crate::files::Files,
+    /// The Terminal tab's service: `term.*`.
+    pub(crate) terminals: crate::terminals::Terminals,
 }
 
 /// Adapts `handler(ctx, params)` to the closure shape `Router` takes.
@@ -251,6 +259,13 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<FsSearchContent, _, _>(bind(ctx, fs_search_content))
         .method::<GitStatus, _, _>(bind(ctx, git_status))
         .subscription::<FsWatch, _, _, _>(bind(ctx, fs_watch))
+        .method::<TermOpen, _, _>(bind(ctx, term_open))
+        .method::<TermWrite, _, _>(bind(ctx, term_write))
+        .method::<TermResize, _, _>(bind(ctx, term_resize))
+        .method::<TermClose, _, _>(bind(ctx, term_close))
+        .method::<TermStatus, _, _>(bind(ctx, term_status))
+        .method::<TermList, _, _>(bind(ctx, term_list))
+        .subscription::<TermAttach, _, _, _>(bind(ctx, term_attach))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
@@ -409,6 +424,8 @@ async fn hello(ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
             // Offered only when the daemon can do it: a client that sees the feature shows
             // Update and Install buttons.
             .filter(|feature| ctx.maintenance || **feature != FEATURE_EXECUTOR_MAINTAIN)
+            // The same for terminals: a daemon started without a PTY spawner has none.
+            .filter(|feature| ctx.terminals.enabled() || **feature != FEATURE_TERMINALS)
             .map(|feature| (*feature).to_owned())
             .collect(),
         pid: std::process::id(),
@@ -983,9 +1000,30 @@ async fn fs_list(ctx: Arc<Ctx>, p: FsListParams) -> Reply<FsListResult> {
         .map_err(|e| e.object())
 }
 
+/// A file may hold a value of the run's secrets (a `.env` the agent wrote, say): what the Files
+/// tab shows has them redacted like the journal and `workspace.diff`. When the values cannot be
+/// read now the text is withheld (an error), never shown raw. `content_hash` is of the bytes
+/// read, as is the size.
 async fn fs_read(ctx: Arc<Ctx>, p: FsReadParams) -> Reply<FsReadResult> {
     let tree = served(&ctx, &p.run_id).await?;
-    ctx.files.read(&tree, p.path).await.map_err(|e| e.object())
+    let mut read = ctx
+        .files
+        .read(&tree, p.path)
+        .await
+        .map_err(|e| e.object())?;
+    if let Some(text) = read.text.take() {
+        let redactor = ctx
+            .kernel
+            .run_redactor(&p.run_id)
+            .await
+            .map_err(|e| kernel_error(&e))?;
+        read.text = Some(if read.truncated {
+            redactor.redact_cut(&text)
+        } else {
+            redactor.redact(&text)
+        });
+    }
+    Ok(read)
 }
 
 async fn fs_read_image(ctx: Arc<Ctx>, p: FsReadImageParams) -> Reply<reno_proto::FsImageChunk> {
@@ -1009,10 +1047,24 @@ async fn fs_search_content(
     p: FsSearchContentParams,
 ) -> Reply<FsSearchContentResult> {
     let tree = served(&ctx, &p.run_id).await?;
-    ctx.files
+    let mut found = ctx
+        .files
         .search_content(&tree, &p.query, p.regex, p.ignore_case, p.limit)
         .await
-        .map_err(|e| e.object())
+        .map_err(|e| e.object())?;
+    if !found.matches.is_empty() {
+        // Redacted like `fs.read`; a line is cut at 500 characters, so a value cut in two at the
+        // end of one loses its fragment too.
+        let redactor = ctx
+            .kernel
+            .run_redactor(&p.run_id)
+            .await
+            .map_err(|e| kernel_error(&e))?;
+        for hit in &mut found.matches {
+            hit.text = redactor.redact_cut(&hit.text);
+        }
+    }
+    Ok(found)
 }
 
 async fn git_status(ctx: Arc<Ctx>, p: GitStatusParams) -> Reply<GitStatusResult> {
@@ -1032,6 +1084,105 @@ async fn fs_watch(
     Ok(changes
         .enumerate()
         .map(|(n, change)| SubItem::seq(Seq(n as u64 + 1), change)))
+}
+
+// ----- The Terminal tab (RP2). Person-only, like the Files tab: the guard refuses these to a run's
+// connection (the test of `run_connection_may_call` walks every method in the schema).
+
+/// Whether the thread of `run` has a run that is queued, live or interrupted (so it may be
+/// resumed): the one the protected-path guard watches, so a shell in its worktree must not be
+/// able to write what the guard looks at. The thread's latest run decides, not `run`: a person opens a terminal from any of its runs.
+async fn thread_is_live(ctx: &Ctx, run: &RunId) -> Reply<bool> {
+    let thread = ctx
+        .kernel
+        .run_thread(run)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    let info = ctx
+        .kernel
+        .thread(&thread)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    let Some(latest) = info.latest_run() else {
+        return Ok(false);
+    };
+    let summary = ctx
+        .kernel
+        .get_run(&latest.run_id)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    // An interrupted run counts too: the daemon may resume it on its own (or a person may),
+    // into this same worktree, and the guard would watch it again. Safer limited than not.
+    Ok(summary.status == RunStatus::Queued
+        || summary.status == RunStatus::Interrupted
+        || ACTIVE.contains(&summary.status))
+}
+
+async fn term_open(ctx: Arc<Ctx>, p: TermOpenParams) -> Reply<TermOpened> {
+    if !ctx.terminals.enabled() {
+        return Err(crate::terminals::TermError::Disabled.object());
+    }
+    let tree = served(&ctx, &p.run_id).await?;
+    let live = !tree.in_place && thread_is_live(&ctx, &p.run_id).await?;
+    tracing::info!(run = %p.run_id, live, in_place = tree.in_place, "opening a terminal");
+    ctx.terminals
+        .open(crate::terminals::OpenRequest {
+            dir: tree.dir,
+            in_place: tree.in_place,
+            live,
+            cols: p.cols,
+            rows: p.rows,
+            command: p.command,
+        })
+        .await
+        .map_err(|e| e.object())
+}
+
+async fn term_write(ctx: Arc<Ctx>, p: TermWriteParams) -> Reply<TermDone> {
+    ctx.terminals
+        .write(&p.id, &p.data)
+        .map(|()| TermDone {})
+        .map_err(|e| e.object())
+}
+
+async fn term_resize(ctx: Arc<Ctx>, p: TermResizeParams) -> Reply<TermDone> {
+    ctx.terminals
+        .resize(&p.id, p.cols, p.rows)
+        .map(|()| TermDone {})
+        .map_err(|e| e.object())
+}
+
+async fn term_close(ctx: Arc<Ctx>, p: TermRef) -> Reply<TermDone> {
+    tracing::info!(terminal = %p.id, "closing a terminal");
+    ctx.terminals
+        .close(&p.id)
+        .map(|()| TermDone {})
+        .map_err(|e| e.object())
+}
+
+async fn term_status(ctx: Arc<Ctx>, p: TermRef) -> Reply<TermStatusResult> {
+    ctx.terminals.status(&p.id).map_err(|e| e.object())
+}
+
+async fn term_list(ctx: Arc<Ctx>, p: TermListParams) -> Reply<TermListResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    Ok(TermListResult {
+        terminals: ctx.terminals.list(&tree.dir),
+    })
+}
+
+/// `term.attach`: items are numbered with the terminal's own sequence, so a reader that falls
+/// behind is cut off with `sub.gap` (ARCH-12) and attaches again from the number before the one
+/// it missed.
+async fn term_attach(
+    ctx: Arc<Ctx>,
+    p: TermAttachParams,
+) -> Reply<impl Stream<Item = SubItem<TermEvent>> + Send + use<>> {
+    let events = ctx
+        .terminals
+        .attach(&p.id, p.after_seq)
+        .map_err(|e| e.object())?;
+    Ok(events.map(|event| SubItem::seq(Seq(event.seq()), event)))
 }
 
 async fn workspace_diff(ctx: Arc<Ctx>, p: WorkspaceDiffParams) -> Reply<WorkspaceDiffResult> {
@@ -1106,13 +1257,16 @@ async fn secret_delete(ctx: Arc<Ctx>, p: SecretDeleteParams) -> Reply<SecretDele
 
 async fn workspace_clean(ctx: Arc<Ctx>, p: WorkspaceCleanParams) -> Reply<WorkspaceCleanResult> {
     tracing::info!(target = ?p.target, force = p.force, "workspace clean requested");
-    Ok(WorkspaceCleanResult {
-        items: ctx
-            .kernel
-            .clean_workspaces(p.target, p.force)
-            .await
-            .map_err(|e| kernel_error(&e))?,
-    })
+    // The kernel closes the shells of a worktree it releases (the release hook of the
+    // `Workspace` port, implemented over `terminals`), first for a named worktree and after a
+    // removal for a bulk clean, and reports them as `closed_terminals`: one path for every way a
+    // worktree is released.
+    let items = ctx
+        .kernel
+        .clean_workspaces(p.target, p.force)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(WorkspaceCleanResult { items })
 }
 
 async fn thread_list(ctx: Arc<Ctx>, p: ThreadListParams) -> Reply<ThreadListResult> {
@@ -1136,6 +1290,8 @@ async fn thread_get(ctx: Arc<Ctx>, p: ThreadGetParams) -> Reply<ThreadInfo> {
 /// router's guard), so a run's own token cannot close a thread, its own or another's.
 async fn thread_close(ctx: Arc<Ctx>, p: ThreadCloseParams) -> Reply<ThreadCloseResult> {
     tracing::info!(thread = %p.thread_id, force = p.force, "thread close requested");
+    // The kernel closes the thread's shells before it releases the worktree (the release hook),
+    // as it does when the idle limit closes the thread.
     ctx.kernel
         .close_thread(&p.thread_id, p.force)
         .await
@@ -1319,6 +1475,13 @@ mod tests {
             "fs.search_content",
             "git.status",
             "fs.watch",
+            "term.open",
+            "term.attach",
+            "term.write",
+            "term.resize",
+            "term.close",
+            "term.status",
+            "term.list",
         ] {
             assert!(!run_connection_may_call(name), "{name}");
         }

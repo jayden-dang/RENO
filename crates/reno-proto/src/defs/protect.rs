@@ -47,7 +47,10 @@ use crate::exec::{ActionClass, ApprovalSubject, ToolCall};
 /// The name the denial carries in place of a policy rule.
 pub const PROTECTED_RULE: &str = "built-in protected paths";
 
-const PROTECTED_DIRS: &[&str] = &[".git", ".reno"];
+/// The directory names protected at any depth. The one list the guard and the Terminal tab's
+/// sandbox (D7) both read, so they cannot drift apart. A project's harness config (`.claude`,
+/// `.codex`, `.mcp.json`, ...) is deliberately not on it.
+pub const PROTECTED_DIRS: &[&str] = &[".git", ".reno"];
 
 /// Why `subject` is refused by the built-in protection, or `None`. `cwd` must be lexical.
 pub(super) fn violation(cwd: &Path, subject: &ApprovalSubject) -> Option<String> {

@@ -109,7 +109,9 @@ pub use registry::ExecutorRegistry;
 pub use router::{
     BotPreference, Candidate, RouteRequest, fall_back, ineligibilities, ineligibility, route,
 };
-pub use secrets::{FakeSecrets, SecretValue, Secrets, SecretsError, check_name, check_secret};
+pub use secrets::{
+    FakeSecrets, RunRedactor, SecretValue, Secrets, SecretsError, check_name, check_secret,
+};
 pub use wake::WakeSignal;
 pub use watch::{Watch, WatchBackoff, WatchSpec, WatchStream};
 pub use workspace::{

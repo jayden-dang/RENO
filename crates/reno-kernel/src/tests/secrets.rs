@@ -584,6 +584,48 @@ async fn a_workspace_patch_and_paths_are_redacted_and_a_cut_value_is_dropped() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn text_a_person_reads_from_a_run_is_redacted_with_its_secrets() {
+    let m = mock([MockStep::Sleep(std::time::Duration::from_secs(3600))]);
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]"),
+        Some(secrets.clone()),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Running).await;
+
+    let line = format!("GITHUB_TOKEN={TOKEN} and {TOKEN}");
+    let got = fx.kernel.redact_for_run(&run, &line).await.unwrap();
+    assert_eq!(
+        got,
+        "GITHUB_TOKEN=[secret:GITHUB_TOKEN] and [secret:GITHUB_TOKEN]"
+    );
+
+    // One redactor serves many lines, and a line cut inside a value loses the fragment.
+    let redactor = fx.kernel.run_redactor(&run).await.unwrap();
+    assert_eq!(redactor.redact("plain"), "plain");
+    assert_eq!(redactor.redact_cut(&format!("x {}", &TOKEN[..12])), "x ");
+
+    // The values cannot be read now: nothing is shown raw.
+    secrets.set_unavailable(Some("locked"));
+    assert!(fx.kernel.redact_for_run(&run, &line).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_without_secrets_reads_its_text_unchanged() {
+    let m = mock([MockStep::Sleep(std::time::Duration::from_secs(3600))]);
+    let fx = fx_with(bot_with_secrets(""), Some(Arc::new(FakeSecrets::new())), &m).await;
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    assert_eq!(
+        fx.kernel.redact_for_run(&run, "text").await.unwrap(),
+        "text"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn what_the_run_says_through_its_own_mcp_tools_is_redacted_too() {
     use reno_proto::{AgentApprovalParams, AgentReportParams, ReportStatus, token_digest};
     let m = mock([

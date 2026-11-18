@@ -120,13 +120,13 @@ fn status_files() -> Vec<GitFileStatus> {
 }
 
 /// Where a run is served from, or why not.
-struct Place {
-    in_place: bool,
+pub(super) struct Place {
+    pub(super) in_place: bool,
     repo: bool,
     branch: String,
 }
 
-fn place(s: &Shared, run: &RunId) -> Result<Place, ErrorObject> {
+pub(super) fn place(s: &Shared, run: &RunId) -> Result<Place, ErrorObject> {
     if s.read(|w| w.run(run).is_none()) {
         return Err(ErrorObject::new(ErrorCode::NotFound, "no such run"));
     }

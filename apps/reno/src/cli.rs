@@ -59,6 +59,10 @@ pub(crate) enum Command {
     /// Git state of a run's worktree.
     #[command(subcommand)]
     Git(crate::files::GitCommand),
+    /// Shells the daemon holds in a run's worktree: open, list, attach to and close them. On a
+    /// run that is live a shell is sandboxed against writing the paths the guard protects.
+    #[command(subcommand)]
+    Term(crate::term::TermCommand),
     /// List the executors (the agent CLIs Reno drives) with what the daemon found out about
     /// each, and ask it to look again.
     #[command(subcommand)]

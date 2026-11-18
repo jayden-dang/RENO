@@ -213,6 +213,7 @@ impl World {
             thread,
             workspace: outcome,
             reason,
+            closed_terminals: Vec::new(),
         })
     }
 

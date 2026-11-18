@@ -25,7 +25,7 @@ use crate::error::{KernelError, Result};
 use crate::shared::Shared;
 use crate::wake::{WakeSignal, system_woke};
 use crate::workspace::{ReleasePolicy, Released};
-use crate::workspaces;
+use crate::workspaces::{self, Hook};
 
 const OPEN: [WorkspaceStatus; 3] = [
     WorkspaceStatus::Preparing,
@@ -116,11 +116,15 @@ pub(crate) async fn close_with(
 
     let mut outcome = None;
     let mut reason = None;
+    let mut closed_terminals = Vec::new();
     if let Some(port) = shared.workspace.as_ref()
         && let Some(info) = shared.db.get_thread_workspace(thread).await?
         && OPEN.contains(&info.status)
     {
-        match workspaces::release(shared, port, &info, policy).await? {
+        let (released, closed) =
+            workspaces::release_hooked(shared, port, &info, policy, Hook::Before).await?;
+        closed_terminals = closed;
+        match released {
             Released::Removed => outcome = Some(CleanOutcome::Removed),
             Released::Kept(changes) => {
                 outcome = Some(CleanOutcome::Kept);
@@ -139,6 +143,7 @@ pub(crate) async fn close_with(
         thread: get(shared, thread).await?,
         workspace: outcome,
         reason,
+        closed_terminals,
     })
 }
 

@@ -721,7 +721,8 @@ expression: protocol_schema()
     "run.changes",
     "executor.usage",
     "threads",
-    "files"
+    "files",
+    "terminals"
   ],
   "methods": [
     {
@@ -2013,6 +2014,10 @@ expression: protocol_schema()
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
             "type": "string"
           },
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
           "ThreadId": {
             "pattern": "^thr_[A-Za-z0-9]{1,64}$",
             "type": "string"
@@ -2197,6 +2202,13 @@ expression: protocol_schema()
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Result of `thread.close`.",
         "properties": {
+          "closedTerminals": {
+            "description": "The terminals that were open in the worktree and were closed with it (it was removed).\nNeeds feature `terminals`.",
+            "items": {
+              "$ref": "#/$defs/TermId"
+            },
+            "type": "array"
+          },
           "reason": {
             "description": "Why the worktree was kept, in words.",
             "type": [
@@ -7581,6 +7593,13 @@ expression: protocol_schema()
           "CleanItem": {
             "description": "One workspace `workspace.clean` looked at.",
             "properties": {
+              "closedTerminals": {
+                "description": "The terminals that were open in a removed worktree and were closed with it. Needs feature\n`terminals`.",
+                "items": {
+                  "$ref": "#/$defs/TermId"
+                },
+                "type": "array"
+              },
               "outcome": {
                 "$ref": "#/$defs/CleanOutcome",
                 "description": "What was done."
@@ -7620,6 +7639,10 @@ expression: protocol_schema()
           },
           "RunId": {
             "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
             "type": "string"
           }
         },
@@ -8334,6 +8357,345 @@ expression: protocol_schema()
           "files"
         ],
         "title": "GitStatusResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.open",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.open`.",
+        "properties": {
+          "cols": {
+            "description": "The width, in cells.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "command": {
+            "description": "A command to run in the shell once it starts (an action): the shell stays open when it\nends.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rows": {
+            "description": "The height, in cells.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree the shell starts in (its thread's worktree; for a run with none,\nits own folder, flagged `inPlace`)."
+          }
+        },
+        "required": [
+          "runId",
+          "cols",
+          "rows"
+        ],
+        "title": "TermOpenParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.open`.",
+        "properties": {
+          "cwd": {
+            "description": "Where the shell started: the real path of the worktree.",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          },
+          "inPlace": {
+            "description": "The run has no worktree of its own and the shell is in its folder, which is the person's\nown. Never sandboxed.",
+            "type": "boolean"
+          },
+          "sandboxed": {
+            "description": "The shell runs under the D7 sandbox: it cannot write protected paths. Opened on a live\nrun, it keeps this for good.",
+            "type": "boolean"
+          },
+          "shell": {
+            "description": "The shell's name (`zsh`, `bash`), for the tab's label.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "cwd",
+          "shell",
+          "sandboxed"
+        ],
+        "title": "TermOpened",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.write",
+      "params": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.write`.",
+        "properties": {
+          "data": {
+            "description": "The input, standard base64, at most [`TERM_MAX_INPUT_BYTES`] bytes decoded. Writes to one\nterminal are applied one at a time, in the order the daemon accepts them; requests of one\nconnection are handled concurrently, so a viewer keeps one write in flight and awaits it\nbefore sending the next.",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          }
+        },
+        "required": [
+          "id",
+          "data"
+        ],
+        "title": "TermWriteParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.write`, `term.resize` and `term.close`.",
+        "title": "TermDone",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.resize",
+      "params": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.resize`.",
+        "properties": {
+          "cols": {
+            "description": "The width, in cells.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          },
+          "rows": {
+            "description": "The height, in cells.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "cols",
+          "rows"
+        ],
+        "title": "TermResizeParams",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.write`, `term.resize` and `term.close`.",
+        "title": "TermDone",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.close",
+      "params": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.close` and `term.status`.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TermRef",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.write`, `term.resize` and `term.close`.",
+        "title": "TermDone",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.status",
+      "params": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.close` and `term.status`.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TermRef",
+        "type": "object"
+      },
+      "result": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.status`.",
+        "properties": {
+          "busy": {
+            "description": "A program other than the shell is in the foreground, so closing the terminal would end\nit.",
+            "type": "boolean"
+          },
+          "exited": {
+            "description": "The shell has exited.",
+            "type": "boolean"
+          },
+          "sandboxed": {
+            "description": "See [`TermOpened::sandboxed`].",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "busy",
+          "exited",
+          "sandboxed"
+        ],
+        "title": "TermStatusResult",
+        "type": "object"
+      }
+    },
+    {
+      "name": "term.list",
+      "params": {
+        "$defs": {
+          "RunId": {
+            "pattern": "^run_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of `term.list`.",
+        "properties": {
+          "runId": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose worktree's terminals to list: every terminal in that tree, whichever run of\nthe thread opened it."
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "title": "TermListParams",
+        "type": "object"
+      },
+      "result": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          },
+          "TermInfo": {
+            "description": "One terminal, as `term.list` shows it.",
+            "properties": {
+              "cwd": {
+                "description": "Where the shell started.",
+                "type": "string"
+              },
+              "exited": {
+                "description": "The shell has exited; the terminal stays for [`TERM_EXITED_TTL_SECS`] so a viewer can show\nits last output.",
+                "type": "boolean"
+              },
+              "id": {
+                "$ref": "#/$defs/TermId",
+                "description": "The terminal."
+              },
+              "inPlace": {
+                "description": "See [`TermOpened::in_place`].",
+                "type": "boolean"
+              },
+              "openedAtMs": {
+                "description": "When it was opened, in milliseconds since the Unix epoch.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "sandboxed": {
+                "description": "See [`TermOpened::sandboxed`]. Still true after the run ended.",
+                "type": "boolean"
+              },
+              "shell": {
+                "description": "The shell's name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "cwd",
+              "shell",
+              "sandboxed",
+              "exited",
+              "openedAtMs"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Result of `term.list`, oldest first.",
+        "properties": {
+          "terminals": {
+            "description": "The terminals.",
+            "items": {
+              "$ref": "#/$defs/TermInfo"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "terminals"
+        ],
+        "title": "TermListResult",
         "type": "object"
       }
     },
@@ -22033,6 +22395,133 @@ expression: protocol_schema()
           "runId"
         ],
         "title": "FsWatchParams",
+        "type": "object"
+      }
+    },
+    {
+      "item": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "One item of `term.attach`. Data and exit items are numbered 1, 2, 3 ... per terminal; a `Gap`\ncarries the number of the item that follows it. The stream ends after `Exit`. Detaching\nleaves the shell running.",
+        "oneOf": [
+          {
+            "description": "Output of the shell. `data` is standard base64: terminal output is bytes, not UTF-8.",
+            "properties": {
+              "data": {
+                "description": "The bytes, base64.",
+                "type": "string"
+              },
+              "seq": {
+                "description": "Its place in the terminal's output.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "data",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "seq",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The shell exited.",
+            "properties": {
+              "code": {
+                "description": "The exit code; absent when a signal ended the shell, or the status was unreadable.",
+                "format": "int32",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "seq": {
+                "description": "Its place in the terminal's output.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "signal": {
+                "description": "The signal that ended it, by name.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "exit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "seq"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Output from `lostFrom` up to `seq - 1` is no longer held (the viewer asked from before\nthe replay window, or fell behind it): its screen is unreliable. The item after the gap\nhas sequence number `seq`.",
+            "properties": {
+              "lostFrom": {
+                "description": "The first sequence number the viewer missed (`afterSeq + 1`).",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "seq": {
+                "description": "The sequence number of the first item that follows.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "gap",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "lostFrom",
+              "seq"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "TermEvent"
+      },
+      "name": "term.attach",
+      "params": {
+        "$defs": {
+          "TermId": {
+            "pattern": "^term_[A-Za-z0-9]{1,64}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "Params of the `term.attach` subscription.",
+        "properties": {
+          "afterSeq": {
+            "description": "The last sequence number the viewer has seen; output after it is replayed first, then\nlive. Absent or 0: everything the replay window holds. When that is older than the window,\nthe first item is [`TermEvent::Gap`].",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/TermId",
+            "description": "The terminal."
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "TermAttachParams",
         "type": "object"
       }
     }

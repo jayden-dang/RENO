@@ -126,6 +126,7 @@ async fn a_write_run_works_in_its_threads_worktree_which_stays_until_the_thread_
         [
             format!("plan {run}"),
             format!("create {run}"),
+            format!("closing {run}"),
             format!("release {run} IfMerged")
         ]
     );
