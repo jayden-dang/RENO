@@ -234,6 +234,7 @@ pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunPa
         executor: Some(run.executor.clone()),
         bot,
         cwd: run.cwd.clone(),
+        thread_id: None,
         model: run.model.clone(),
         in_place: false,
         attachments: Vec::new(),
