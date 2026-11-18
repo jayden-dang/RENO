@@ -139,6 +139,8 @@ struct Shared {
     retry: Notify,
     /// Asks the session to refetch `daemon.status`.
     status: Notify,
+    /// Asks the session to refetch `thread.list`.
+    threads: Notify,
 }
 
 impl Shared {
@@ -208,6 +210,7 @@ impl Mirror {
             follows: Mutex::new(HashMap::new()),
             retry: Notify::new(),
             status: Notify::new(),
+            threads: Notify::new(),
         });
         shared
             .tracker
@@ -251,6 +254,12 @@ impl Mirror {
     /// Asks for a fresh `daemon.status`. Answered through [`Update::Daemon`].
     pub fn refresh_status(&self) {
         self.shared.status.notify_one();
+    }
+
+    /// Asks for a fresh `thread.list`, for example after a `thread.close`. Answered through
+    /// [`Update::Threads`].
+    pub fn refresh_threads(&self) {
+        self.shared.threads.notify_one();
     }
 
     /// Ends the wait before the next connection attempt. Does nothing while connected.
@@ -377,6 +386,7 @@ fn start_session(shared: &Arc<Shared>, client: Client) -> Session {
     };
     spawn_bootstrap(shared, &session);
     spawn_status(shared, &session);
+    spawn_threads(shared, &session);
     spawn_feeds(shared, &session);
     // Runs followed before the loss, or while offline, continue where they stopped.
     let pending: Vec<(RunId, Option<Seq>)> = {
@@ -430,6 +440,7 @@ fn spawn_bootstrap(shared: &Arc<Shared>, session: &Session) {
             (Feed::Executors, reno_proto::FEATURE_EXECUTORS),
             (Feed::Defs, reno_proto::FEATURE_DEFS),
             (Feed::ApprovalHistory, reno_proto::FEATURE_APPROVAL_HISTORY),
+            (Feed::Threads, reno_proto::FEATURE_THREADS),
         ] {
             if !client.supports(feature)
                 && !send(&mut tx, &cancel, Update::Feed(feed, FeedState::Unavailable)).await
@@ -437,8 +448,9 @@ fn spawn_bootstrap(shared: &Arc<Shared>, session: &Session) {
                 return;
             }
         }
-        // The first `daemon.status`.
+        // The first `daemon.status` and the first `thread.list`.
         shared.status.notify_one();
+        shared.threads.notify_one();
     });
 }
 
@@ -475,6 +487,41 @@ fn spawn_status(shared: &Arc<Shared>, session: &Session) {
                     return;
                 }
                 Err(e) => tracing::warn!(error = %e, "daemon.status failed"),
+            }
+        }
+    });
+}
+
+/// Refetches `thread.list` whenever asked: when the daemon is first reached, when the runs
+/// change (a run is added to a thread or ends), and on [`Mirror::refresh_threads`]. A thread
+/// has no watch of its own: its state changes with its runs, and the runs feed says when.
+fn spawn_threads(shared: &Arc<Shared>, session: &Session) {
+    if !session.client.supports(reno_proto::FEATURE_THREADS) {
+        return;
+    }
+    let client = session.client.clone();
+    let mut tx = session.tx.clone();
+    let cancel = session.cancel.clone();
+    let lost = session.lost.clone();
+    let shared = Arc::clone(shared);
+    session.tracker.spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                () = shared.threads.notified() => {}
+            }
+            let threads = tokio::select! {
+                () = cancel.cancelled() => return,
+                threads = client.list_threads(None) => threads,
+            };
+            match threads {
+                Ok(threads) => {
+                    if !send(&mut tx, &cancel, Update::Threads(threads)).await {
+                        return;
+                    }
+                }
+                Err(e) => report(&mut tx, &cancel, &lost, Feed::Threads, &e).await,
             }
         }
     });
@@ -611,6 +658,9 @@ async fn pump_latest(
                     pending = Some(update);
                     if let Some(shared) = &poke {
                         shared.status.notify_one();
+                        if which == Feed::Runs {
+                            shared.threads.notify_one();
+                        }
                     }
                 }
                 Some(Err(e)) => break e,

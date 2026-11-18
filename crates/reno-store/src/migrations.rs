@@ -1004,15 +1004,18 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("run_ended".into(), "thr_ended".into(), Some("abc123".into()), None),
+                (
+                    "run_ended".into(),
+                    "thr_ended".into(),
+                    Some("abc123".into()),
+                    None
+                ),
                 ("run_paused".into(), "thr_paused".into(), None, None),
                 ("run_queued".into(), "thr_queued".into(), None, None),
             ]
         );
         let threads: Vec<(String, Option<String>, Option<i64>, i64, i64)> = conn
-            .prepare(
-                "SELECT id, cwd, closed_at, created_at, updated_at FROM threads ORDER BY id",
-            )
+            .prepare("SELECT id, cwd, closed_at, created_at, updated_at FROM threads ORDER BY id")
             .unwrap()
             .query_map([], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -1030,7 +1033,13 @@ mod tests {
                     10,
                     12
                 ),
-                ("thr_paused".into(), Some("/work/app/sub".into()), None, 30, 32),
+                (
+                    "thr_paused".into(),
+                    Some("/work/app/sub".into()),
+                    None,
+                    30,
+                    32
+                ),
                 ("thr_queued".into(), None, None, 20, 20),
             ]
         );

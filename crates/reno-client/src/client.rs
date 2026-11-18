@@ -611,7 +611,71 @@ impl Client {
         self.require(reno_proto::FEATURE_RUN_CHANGES)?;
         Ok(self
             .rpc
-            .call::<reno_proto::WorkspaceDiff>(reno_proto::WorkspaceDiffParams { run_id, path })
+            .call::<reno_proto::WorkspaceDiff>(reno_proto::WorkspaceDiffParams {
+                run_id,
+                path,
+                scope: None,
+            })
+            .await?)
+    }
+
+    /// `workspace.diff` for what `scope` compares: the whole thread (what
+    /// [`Client::workspace_diff`] shows), this run alone, or one commit. Needs feature
+    /// `threads`.
+    pub async fn workspace_diff_scoped(
+        &self,
+        run_id: reno_proto::RunId,
+        path: Option<String>,
+        scope: reno_proto::DiffScope,
+    ) -> Result<reno_proto::WorkspaceDiffResult, ClientError> {
+        self.require(reno_proto::FEATURE_THREADS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::WorkspaceDiff>(reno_proto::WorkspaceDiffParams {
+                run_id,
+                path,
+                scope: Some(scope),
+            })
+            .await?)
+    }
+
+    /// `thread.list`: the conversations, most recently changed first; only those in one of
+    /// `status` when given. Needs feature `threads`.
+    pub async fn list_threads(
+        &self,
+        status: Option<Vec<reno_proto::ThreadStatus>>,
+    ) -> Result<Vec<reno_proto::ThreadInfo>, ClientError> {
+        self.require(reno_proto::FEATURE_THREADS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ThreadList>(reno_proto::ThreadListParams { status })
+            .await?
+            .threads)
+    }
+
+    /// `thread.get`: one thread. Needs feature `threads`.
+    pub async fn get_thread(
+        &self,
+        thread_id: reno_proto::ThreadId,
+    ) -> Result<reno_proto::ThreadInfo, ClientError> {
+        self.require(reno_proto::FEATURE_THREADS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ThreadGet>(reno_proto::ThreadGetParams { thread_id })
+            .await?)
+    }
+
+    /// `thread.close`: closes a thread and releases its worktree (kept when it holds unmerged
+    /// work, unless `force`). A person's call. Needs feature `threads`.
+    pub async fn close_thread(
+        &self,
+        thread_id: reno_proto::ThreadId,
+        force: bool,
+    ) -> Result<reno_proto::ThreadCloseResult, ClientError> {
+        self.require(reno_proto::FEATURE_THREADS)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ThreadClose>(reno_proto::ThreadCloseParams { thread_id, force })
             .await?)
     }
 

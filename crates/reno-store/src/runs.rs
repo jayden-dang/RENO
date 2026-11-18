@@ -261,7 +261,9 @@ fn run_from_row(row: &Row<'_>) -> rusqlite::Result<Result<RunRecord>> {
                 Some(thread) => parse_id(&thread, "thread id")?,
                 None => return Err(StoreError::Corrupt(format!("run {id} has no thread"))),
             },
-            parent_run: parent_run.map(|run| parse_id(&run, "parent run id")).transpose()?,
+            parent_run: parent_run
+                .map(|run| parse_id(&run, "parent run id"))
+                .transpose()?,
             start_sha,
             created_at,
             started_at,

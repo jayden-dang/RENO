@@ -28,10 +28,10 @@ use reno_proto::defs::{
 use reno_proto::{
     APPROVAL_HISTORY_DEFAULT_LIMIT, APPROVAL_HISTORY_MAX_LIMIT, APPROVAL_MESSAGE_MAX_CHARS,
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
-    CleanTarget, DiffScope, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
-    RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, ThreadCloseResult,
-    ThreadId, ThreadInfo, ThreadStatus, TriggerFireResult, TriggerInfo, WorkspaceDiffResult,
-    WorkspaceInfo, WorkspaceStatus,
+    CleanTarget, DiffScope, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember,
+    RoutingDecision, RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId,
+    ThreadCloseResult, ThreadId, ThreadInfo, ThreadStatus, TriggerFireResult, TriggerInfo,
+    WorkspaceDiffResult, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_proto::{
     ActionClass, CommandPattern, RULE_ADD_COMMAND_MAX_CHARS, RULE_ADD_DEFAULT_TOOL, RuleMatcher,
@@ -707,12 +707,13 @@ impl Kernel {
             WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept
         );
         let changes = match (&self.shared.workspace, live, scope) {
-            (Some(port), true, DiffScope::Commit { sha }) => {
-                port.commit_changes(&shown, sha, path).await.map_err(|error| match error {
+            (Some(port), true, DiffScope::Commit { sha }) => port
+                .commit_changes(&shown, sha, path)
+                .await
+                .map_err(|error| match error {
                     WorkspaceError::Unsafe(why) => KernelError::Invalid(why),
                     other => other.into(),
-                })?
-            }
+                })?,
             (Some(port), true, _) => port.changes_since_base(&shown, path).await?,
             _ => crate::workspace::RunChanges::default(),
         };

@@ -11,9 +11,9 @@ use reno_harness::proc::git_workspace::{
     Released as GitReleased,
 };
 use reno_kernel::{Inspection, ReleasePolicy, Released, RunChanges, Workspace, WorkspaceError};
-use reno_proto::{RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
+use reno_proto::{RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 
-/// Git worktrees under `<data dir>/worktrees/<repo key>/<run id>`.
+/// Git worktrees under `<data dir>/worktrees/<repo key>/<thread id>`.
 #[derive(Debug)]
 pub struct GitWorkspace {
     git: GitWorktrees,
@@ -62,8 +62,14 @@ fn error(error: GitError) -> WorkspaceError {
 
 #[async_trait]
 impl Workspace for GitWorkspace {
-    async fn plan(&self, run: &RunId, dir: &Path) -> Result<Option<WorkspaceInfo>, WorkspaceError> {
-        let planned = self.git.plan(run.as_str(), dir).await.map_err(error)?;
+    async fn plan(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        dir: &Path,
+    ) -> Result<Option<WorkspaceInfo>, WorkspaceError> {
+        // The worktree and its branch are the thread's, named by its id.
+        let planned = self.git.plan(thread.as_str(), dir).await.map_err(error)?;
         Ok(planned.map(|loc| WorkspaceInfo {
             run_id: run.clone(),
             repo: loc.repo,
@@ -160,6 +166,29 @@ impl Workspace for GitWorkspace {
         let found = self
             .git
             .changes_since_base(&location(workspace), path)
+            .await
+            .map_err(error)?;
+        Ok(RunChanges {
+            commits: found.commits,
+            files: found.files,
+            patch: found.patch,
+            patch_truncated: found.patch_truncated,
+        })
+    }
+
+    async fn head(&self, workspace: &WorkspaceInfo) -> Result<String, WorkspaceError> {
+        self.git.head(&location(workspace)).await.map_err(error)
+    }
+
+    async fn commit_changes(
+        &self,
+        workspace: &WorkspaceInfo,
+        sha: &str,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError> {
+        let found = self
+            .git
+            .commit_changes(&location(workspace), sha, path)
             .await
             .map_err(error)?;
         Ok(RunChanges {

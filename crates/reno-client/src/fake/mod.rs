@@ -529,14 +529,19 @@ fn router(shared: &Arc<Shared>) -> Router {
             if let Some(why) = s.read(|w| w.refuse_model_options(&routed)) {
                 return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
             }
+            if let Some(thread) = &p.thread_id {
+                s.read(|w| w.check_thread_follow_up(thread))?;
+            }
             let run_id = s
                 .with(|w| w.create_run(&p, executor, routing.clone(), &s.cancel))
                 .map_err(internal)?;
+            let thread_id = s.read(|w| w.run(&run_id).map(|r| r.thread.clone()));
             s.tracker
                 .spawn(script::run_new(Arc::clone(&s), run_id.clone(), p.prompt));
             Ok(TaskRunResult {
                 run_id,
                 routing: Some(routing),
+                thread_id,
             })
         }
     };
@@ -1106,11 +1111,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         let s = Arc::clone(&s);
         async move {
             injected(&s, "workspace.get")?;
-            s.read(|w| {
-                let status = w.run(&p.run_id)?.summary.status;
-                changes::info(&p.run_id, status)
-            })
-            .ok_or_else(|| not_found("workspace"))
+            s.read(|w| w.workspace_of(&p.run_id))
+                .ok_or_else(|| not_found("workspace"))
         }
     };
 
@@ -1119,9 +1121,44 @@ fn router(shared: &Arc<Shared>) -> Router {
         let s = Arc::clone(&s);
         async move {
             injected(&s, "workspace.diff")?;
-            s.read(|w| w.run(&p.run_id).map(|_| ()))
-                .and_then(|()| changes::diff(&p.run_id, p.path.as_deref()))
+            let scope = p.scope.clone().unwrap_or_default();
+            s.read(|w| w.diff_for(&p.run_id, p.path.as_deref(), &scope))?
                 .ok_or_else(|| not_found("workspace"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let thread_list = move |p: reno_proto::ThreadListParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "thread.list")?;
+            let wanted = p.status.unwrap_or_default();
+            let threads = s.read(|w| w.thread_infos());
+            Ok(reno_proto::ThreadListResult {
+                threads: threads
+                    .into_iter()
+                    .filter(|t| wanted.is_empty() || wanted.contains(&t.status))
+                    .collect(),
+            })
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let thread_get = move |p: reno_proto::ThreadGetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "thread.get")?;
+            s.read(|w| w.thread_info(&p.thread_id))
+                .ok_or_else(|| not_found("thread"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let thread_close = move |p: reno_proto::ThreadCloseParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "thread.close")?;
+            s.with(|w| w.close_thread(&p.thread_id, p.force))
         }
     };
 
@@ -1134,6 +1171,9 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<RunGet, _, _>(run_get)
         .method::<reno_proto::WorkspaceGet, _, _>(workspace_get)
         .method::<reno_proto::WorkspaceDiff, _, _>(workspace_diff)
+        .method::<reno_proto::ThreadList, _, _>(thread_list)
+        .method::<reno_proto::ThreadGet, _, _>(thread_get)
+        .method::<reno_proto::ThreadClose, _, _>(thread_close)
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
         .method::<reno_proto::RuleList, _, _>(rule_list)

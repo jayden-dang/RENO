@@ -28,6 +28,7 @@ mod routing;
 mod rules;
 mod runs;
 mod secrets;
+mod threads;
 mod triggers;
 mod usage;
 mod workspaces;

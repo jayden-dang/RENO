@@ -180,9 +180,7 @@ fn load_runs(conn: &Connection, thread: &ThreadId) -> Result<Vec<ThreadRun>> {
 /// One thread as the wire shows it, without the idle deadline (the kernel owns the limit).
 pub(crate) fn load_info(conn: &Connection, thread: &ThreadId) -> Result<Option<ThreadInfo>> {
     let row: Option<(Option<String>, Option<i64>, i64, i64)> = conn
-        .prepare_cached(
-            "SELECT cwd, closed_at, created_at, updated_at FROM threads WHERE id = ?1",
-        )
+        .prepare_cached("SELECT cwd, closed_at, created_at, updated_at FROM threads WHERE id = ?1")
         .db()?
         .query_row([thread.as_str()], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -243,7 +241,9 @@ impl Store {
         let statuses = statuses.to_vec();
         self.read(move |c| {
             let ids: Vec<String> = c
-                .prepare_cached("SELECT id FROM threads ORDER BY updated_at DESC, created_at DESC, id DESC")
+                .prepare_cached(
+                    "SELECT id FROM threads ORDER BY updated_at DESC, created_at DESC, id DESC",
+                )
                 .db()?
                 .query_map([], |r| r.get(0))
                 .db()?
@@ -280,11 +280,10 @@ impl Store {
             match info.status {
                 ThreadStatus::Closed => return Ok(info),
                 ThreadStatus::Active => {
-                    let run = info
-                        .runs
-                        .last()
-                        .map(|r| r.run_id.clone())
-                        .ok_or_else(|| StoreError::Corrupt("an active thread has no run".into()))?;
+                    let run =
+                        info.runs.last().map(|r| r.run_id.clone()).ok_or_else(|| {
+                            StoreError::Corrupt("an active thread has no run".into())
+                        })?;
                     return Err(StoreError::ThreadBusy { thread, run });
                 }
                 ThreadStatus::Idle => {}
@@ -402,7 +401,9 @@ impl Store {
         self.write(Durability::Normal, move |c| {
             crate::runs::load_fenced(c, &run, fence)?;
             let changed = c
-                .prepare_cached("UPDATE runs SET start_sha = ?2 WHERE id = ?1 AND start_sha IS NULL")
+                .prepare_cached(
+                    "UPDATE runs SET start_sha = ?2 WHERE id = ?1 AND start_sha IS NULL",
+                )
                 .db()?
                 .execute(params![run.as_str(), sha])
                 .db()?;

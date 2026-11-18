@@ -120,7 +120,10 @@ async fn a_run_with_no_thread_starts_one_of_its_own() {
 
     let thread = store.get_thread(&record.thread_id).await.unwrap().unwrap();
     assert_eq!(thread.status, ThreadStatus::Active);
-    assert_eq!(thread.cwd.as_deref().and_then(|p| p.to_str()), Some("/work/app"));
+    assert_eq!(
+        thread.cwd.as_deref().and_then(|p| p.to_str()),
+        Some("/work/app")
+    );
     assert_eq!(thread.runs.len(), 1);
     assert_eq!(thread.runs[0].run_id, run);
     assert_eq!((thread.created_at_ms, thread.updated_at_ms), (10, 10));
@@ -144,7 +147,10 @@ async fn a_follow_up_joins_the_thread_after_its_run_ended() {
     let info = store.get_thread(&thread).await.unwrap().unwrap();
     assert_eq!(info.status, ThreadStatus::Active);
     assert_eq!(
-        info.runs.iter().map(|r| r.run_id.clone()).collect::<Vec<_>>(),
+        info.runs
+            .iter()
+            .map(|r| r.run_id.clone())
+            .collect::<Vec<_>>(),
         [first, second]
     );
 }
@@ -174,7 +180,10 @@ async fn a_thread_that_does_not_exist_is_refused() {
     let (_dir, store) = open().await;
     let nobody = ThreadId::from_suffix("nobody").unwrap();
     let refused = queue(&store, 1, Some(&nobody), 10).await.unwrap_err();
-    assert!(matches!(refused, StoreError::NotFound { kind: "thread", .. }));
+    assert!(matches!(
+        refused,
+        StoreError::NotFound { kind: "thread", .. }
+    ));
 }
 
 #[tokio::test]
@@ -264,7 +273,10 @@ async fn the_idle_limit_runs_from_the_end_of_the_last_run() {
     finish(&store, &b, 200).await;
     assert_eq!(store.oldest_idle_since().await.unwrap(), Some(100));
     let due = store.idle_threads_since(150).await.unwrap();
-    assert_eq!(due.iter().map(ThreadId::as_str).collect::<Vec<_>>(), ["thr_r1"]);
+    assert_eq!(
+        due.iter().map(ThreadId::as_str).collect::<Vec<_>>(),
+        ["thr_r1"]
+    );
     let thread = store.get_run(&a).await.unwrap().unwrap().thread_id;
     store.close_thread(&thread, 160).await.unwrap();
     assert_eq!(store.oldest_idle_since().await.unwrap(), Some(200));

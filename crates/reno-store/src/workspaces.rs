@@ -103,12 +103,14 @@ pub(crate) fn load_for_thread(
     conn: &Connection,
     thread: &reno_proto::ThreadId,
 ) -> Result<Option<WorkspaceInfo>> {
-    conn.prepare_cached(&format!("SELECT {COLS} FROM workspaces WHERE thread_id = ?1"))
-        .db()?
-        .query_row(params![thread.as_str()], from_row)
-        .optional()
-        .db()?
-        .transpose()
+    conn.prepare_cached(&format!(
+        "SELECT {COLS} FROM workspaces WHERE thread_id = ?1"
+    ))
+    .db()?
+    .query_row(params![thread.as_str()], from_row)
+    .optional()
+    .db()?
+    .transpose()
 }
 
 fn event_data(info: &WorkspaceInfo) -> serde_json::Value {

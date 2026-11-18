@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use reno_proto::defs::DefKind;
 use reno_proto::{
     ApprovalId, ApprovalOutcome, ExecutorHealth, ExecutorId, LocalZone, NotResumed, ResolvedBy,
-    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule,
-    ThreadId, ThreadInfo, ThreadStatus, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
+    RoutingDecision, RuleId, RunId, RunReport, RunStatus, SessionRef, StandingRule, ThreadId,
+    ThreadInfo, ThreadStatus, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::{
     Applied, BoardRow, BoardWrite, Claim, ClaimFilter, DefinitionRecord, ExpireScope, Expired,

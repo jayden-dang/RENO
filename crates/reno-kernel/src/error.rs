@@ -1,9 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{
-    ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq, ThreadId,
-};
+use reno_proto::{ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq, ThreadId};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;

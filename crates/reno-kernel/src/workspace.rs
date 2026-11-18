@@ -29,9 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
-use reno_proto::{
-    ChangedFile, RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
-};
+use reno_proto::{ChangedFile, RunId, ThreadId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 
 /// Why a workspace could not be prepared, inspected or released. Typed, so the run's diagnostic
 /// and the wire error say which rule applied.
@@ -466,8 +464,13 @@ impl Workspace for FakeWorkspace {
         path: Option<&str>,
     ) -> Result<RunChanges, WorkspaceError> {
         let mut state = self.lock();
-        state.calls.push(format!("commit {} {sha}", workspace.run_id));
-        let Some(found) = state.commits.get(&(workspace.run_id.clone(), sha.to_owned())) else {
+        state
+            .calls
+            .push(format!("commit {} {sha}", workspace.run_id));
+        let Some(found) = state
+            .commits
+            .get(&(workspace.run_id.clone(), sha.to_owned()))
+        else {
             return Err(WorkspaceError::Unsafe(format!(
                 "{sha} is not a commit of this thread"
             )));

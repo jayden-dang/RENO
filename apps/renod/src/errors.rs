@@ -17,8 +17,11 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         | KernelError::ApprovalNotFound(_)
         | KernelError::RuleNotFound(_)
         | KernelError::TriggerNotFound(_)
-        | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
-        KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
+        | KernelError::ExecutorNotFound(_)
+        | KernelError::ThreadNotFound(_) => ErrorCode::NotFound,
+        KernelError::TriggerDisabled(_)
+        | KernelError::ThreadBusy { .. }
+        | KernelError::ThreadClosed(_) => ErrorCode::Conflict,
         KernelError::JobRunning(_) => ErrorCode::JobRunning,
         KernelError::NothingToDo { .. } => ErrorCode::NothingToDo,
         KernelError::NoUpdater(_) => ErrorCode::NoUpdater,

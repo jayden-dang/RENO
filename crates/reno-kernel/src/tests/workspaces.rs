@@ -91,7 +91,10 @@ async fn a_write_run_works_in_its_threads_worktree_which_stays_until_the_thread_
 
     let specs = m.log().specs;
     assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].cwd, worktree(thread.as_str(), "repo").join("crates/x"));
+    assert_eq!(
+        specs[0].cwd,
+        worktree(thread.as_str(), "repo").join("crates/x")
+    );
     assert_ne!(specs[0].cwd, PathBuf::from("/repo/crates/x"));
 
     // The run's end releases nothing: the thread may be continued.

@@ -46,8 +46,8 @@ mod report_backfill;
 mod routing;
 pub mod rules;
 pub mod runs;
-pub mod triggers;
 mod threads;
+pub mod triggers;
 mod workspaces;
 mod writer;
 
@@ -88,9 +88,9 @@ mod routing_tests;
 #[cfg(test)]
 mod rule_tests;
 #[cfg(test)]
-mod thread_tests;
-#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thread_tests;
 #[cfg(test)]
 mod trigger_tests;
 #[cfg(test)]

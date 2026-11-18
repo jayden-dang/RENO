@@ -44,6 +44,8 @@ pub(super) fn fixture(run: &RunId) -> Fixture {
 }
 
 const BASE: &str = "3f9c2a1b7d4e5f60718293a4b5c6d7e8f9012345";
+/// Where a follow-up run's branch stood when it started.
+pub(super) const FOLLOW_UP_START: &str = "7c1e90ab23d45f6718293a4b5c6d7e8f90123456";
 const COMMITS: u32 = 3;
 
 type FileRow = (

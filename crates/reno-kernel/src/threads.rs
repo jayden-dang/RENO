@@ -158,7 +158,9 @@ async fn next_delay(shared: &Shared) -> Result<Option<Duration>> {
     let left = since
         .saturating_add(ttl_ms(shared))
         .saturating_sub(shared.db.now_ms());
-    Ok(Some(Duration::from_millis(u64::try_from(left).unwrap_or(0))))
+    Ok(Some(Duration::from_millis(
+        u64::try_from(left).unwrap_or(0),
+    )))
 }
 
 /// The idle-limit timer: one deadline, for the thread idle the longest.

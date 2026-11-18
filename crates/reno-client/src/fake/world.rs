@@ -17,6 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::data::{self, Seed};
 
+mod threads;
+use threads::{ThreadState, thread_of_run};
+
 /// Logical milliseconds added to the clock by every change.
 const TICK_MS: u64 = 1_000;
 
@@ -32,6 +35,10 @@ pub(super) struct RunRecord {
     pub(super) steered: Arc<Notify>,
     /// The routing decision the run was made with.
     pub(super) routing: Option<reno_proto::RoutingDecision>,
+    /// The thread the run belongs to.
+    pub(super) thread: reno_proto::ThreadId,
+    /// The run it follows, when it is a follow-up.
+    pub(super) parent: Option<RunId>,
 }
 
 impl RunRecord {
@@ -75,6 +82,8 @@ pub(super) struct World {
     secrets: std::collections::BTreeSet<String>,
     /// Executor jobs.
     pub(super) jobs: super::jobs::Jobs,
+    /// What threads have been through that their runs do not say.
+    threads: ThreadState,
 }
 
 /// Why the fake daemon refuses an install.
@@ -92,6 +101,8 @@ impl World {
             .runs
             .into_iter()
             .map(|r| RunRecord {
+                thread: thread_of_run(&r.summary.run_id),
+                parent: None,
                 journal_tx: watch::channel(r.journal.len()).0,
                 summary: r.summary,
                 journal: r.journal,
@@ -116,6 +127,7 @@ impl World {
             paused_bots: std::collections::BTreeSet::new(),
             secrets: std::collections::BTreeSet::new(),
             jobs: super::jobs::Jobs::default(),
+            threads: ThreadState::default(),
         };
         // Codex has a run waiting for approval, as on the machine the demo mirrors.
         if let Ok(codex) = "codex".parse::<ExecutorId>()
@@ -388,6 +400,17 @@ impl World {
         self.next_id += 1;
         let run_id = RunId::from_suffix(&format!("fake{n}"))?;
         let now = self.tick();
+        let thread = params
+            .thread_id
+            .clone()
+            .unwrap_or_else(|| thread_of_run(&run_id));
+        let parent = params
+            .thread_id
+            .as_ref()
+            .and_then(|thread| self.latest_run_of(thread));
+        if params.thread_id.is_some() {
+            self.reopen_thread(&thread);
+        }
         let title = params
             .prompt
             .lines()
@@ -426,6 +449,8 @@ impl World {
             cancel: root.child_token(),
             steered: Arc::new(Notify::new()),
             routing: Some(routing),
+            thread,
+            parent,
         });
         Ok(run_id)
     }
@@ -892,6 +917,7 @@ impl World {
             model: None,
             in_place: false,
             attachments: Vec::new(),
+            thread_id: None,
         };
         let executor = params.executor.clone().ok_or("no executor")?;
         let routing = self.route(&params);

@@ -186,12 +186,7 @@ pub(crate) fn run_ended(shared: &Arc<Shared>, run: &RunId) {
 /// Records where the run's branch stood when it started, for its guard and its "this run" diff.
 /// A run that works in place has none. A failure is logged: the guard then falls back to the
 /// thread's base commit.
-pub(crate) async fn record_start(
-    shared: &Shared,
-    run: &RunId,
-    fence: u64,
-    placement: &Placement,
-) {
+pub(crate) async fn record_start(shared: &Shared, run: &RunId, fence: u64, placement: &Placement) {
     let (Some(port), Placement::Isolated(info)) = (shared.workspace.as_ref(), placement) else {
         return;
     };
@@ -322,10 +317,7 @@ pub(crate) async fn clean(
         ),
     };
     let policy = if force { ReleasePolicy::Force } else { policy };
-    let single = matches!(
-        target,
-        CleanTarget::Run { .. } | CleanTarget::Thread { .. }
-    );
+    let single = matches!(target, CleanTarget::Run { .. } | CleanTarget::Thread { .. });
 
     let mut items = Vec::new();
     for info in candidates {
