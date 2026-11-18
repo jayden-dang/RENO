@@ -411,3 +411,216 @@ async fn a_secret_in_a_tools_output_is_redacted_before_it_is_journaled() {
         "{shown}"
     );
 }
+
+// ---- a value split across streamed events ----
+
+const PROBE: &str = "sk-probe-9f3a7c21d4e85b60";
+
+fn text_of(journal: &[(reno_proto::Seq, ExecEvent)]) -> String {
+    journal
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ExecEvent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Runs `steps` with `PROBE_TOKEN` as the bot's secret, to the end. Returns the journal and what
+/// a subscriber saw.
+async fn run_streamed(steps: Vec<MockStep>) -> (Vec<(reno_proto::Seq, ExecEvent)>, Vec<ExecEvent>) {
+    let secrets = Arc::new(FakeSecrets::new().with("PROBE_TOKEN", PROBE));
+    let m = mock(steps);
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"PROBE_TOKEN\"]"),
+        Some(secrets),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    let live: Vec<ExecEvent> = fx
+        .events(&run, None)
+        .await
+        .into_iter()
+        .map(|item| item.unwrap().event)
+        .collect();
+    let journal = fx.journal_with_done(&run).await;
+    (journal, live)
+}
+
+fn assert_no_secret(journal: &[(reno_proto::Seq, ExecEvent)], live: &[ExecEvent]) {
+    let shown = serde_json::to_string(journal).unwrap();
+    assert!(!shown.contains(PROBE), "{shown}");
+    let seen = serde_json::to_string(live).unwrap();
+    assert!(!seen.contains(PROBE), "{seen}");
+    let joined: String = live
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!joined.contains(PROBE), "{joined}");
+    assert!(!text_of(journal).contains(PROBE));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_live_probe_split_across_text_events_is_redacted() {
+    let (journal, live) = run_streamed(vec![
+        MockStep::text("token="),
+        MockStep::text("sk-probe-9f"),
+        MockStep::text("3a7c21d4e85b60\n"),
+    ])
+    .await;
+    assert_no_secret(&journal, &live);
+    assert_eq!(text_of(&journal), "token=[secret:PROBE_TOKEN]\n");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_split_at_every_offset_or_one_char_at_a_time_never_reaches_the_journal() {
+    let whole = format!("say {PROBE} ok");
+    for cut in 0..=whole.len() {
+        let (a, b) = whole.split_at(cut);
+        let (journal, live) = run_streamed(vec![MockStep::text(a), MockStep::text(b)]).await;
+        assert_no_secret(&journal, &live);
+        assert_eq!(
+            text_of(&journal),
+            "say [secret:PROBE_TOKEN] ok",
+            "cut {cut}"
+        );
+    }
+    let chars: Vec<MockStep> = whole
+        .chars()
+        .map(|c| MockStep::text(c.to_string()))
+        .collect();
+    let (journal, live) = run_streamed(chars).await;
+    assert_no_secret(&journal, &live);
+    assert_eq!(text_of(&journal), "say [secret:PROBE_TOKEN] ok");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_prefix_is_journaled_before_the_tool_that_follows_it() {
+    let tool = ExecEvent::Tool {
+        id: "t1".into(),
+        call: ToolCall::new(
+            "Bash",
+            serde_json::json!({"command": "ls"}),
+            ActionClass::Command,
+        ),
+    };
+    let (journal, _) = run_streamed(vec![
+        MockStep::text("see sk-probe-9f"),
+        MockStep::Emit(tool.clone()),
+        MockStep::text("after"),
+    ])
+    .await;
+    let kinds: Vec<&ExecEvent> = journal.iter().map(|(_, e)| e).collect();
+    let tool_at = kinds.iter().position(|e| **e == tool).unwrap();
+    assert_eq!(text_of(&journal[..tool_at]), "see sk-probe-9f");
+    assert_eq!(text_of(&journal[tool_at..]), "after");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_prefix_is_journaled_when_the_run_ends() {
+    let (journal, _) = run_streamed(vec![MockStep::text("tail sk-probe-9f3a")]).await;
+    assert_eq!(text_of(&journal), "tail sk-probe-9f3a");
+    assert!(matches!(journal.last().unwrap().1, ExecEvent::Done { .. }));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_prefix_is_journaled_after_the_quiet_timer() {
+    let secrets = Arc::new(FakeSecrets::new().with("PROBE_TOKEN", PROBE));
+    let m = mock([
+        MockStep::text("wait sk-probe"),
+        MockStep::Sleep(std::time::Duration::from_secs(3600)),
+    ]);
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"PROBE_TOKEN\"]"),
+        Some(secrets),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    // Only the safe part first; the tail follows once the run has been quiet.
+    let journal = until(async || {
+        let journal = fx.journal(&run);
+        (text_of(&journal) == "wait sk-probe").then_some(journal)
+    })
+    .await;
+    assert!(!matches!(journal.last().unwrap().1, ExecEvent::Done { .. }));
+    assert_eq!(
+        journal
+            .iter()
+            .filter(|(_, e)| matches!(e, ExecEvent::Text { .. }))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lookalike_that_never_completes_is_journaled_intact() {
+    let (journal, live) = run_streamed(vec![
+        MockStep::text("a sk-probe-9f"),
+        MockStep::text("zzz b sk-pr"),
+    ])
+    .await;
+    assert_no_secret(&journal, &live);
+    assert_eq!(text_of(&journal), "a sk-probe-9fzzz b sk-pr");
+}
+
+#[tokio::test(start_paused = true)]
+async fn text_that_cannot_start_a_secret_is_journaled_at_once() {
+    let (journal, _) = run_streamed(vec![MockStep::text("one"), MockStep::text("two")]).await;
+    let texts: Vec<&str> = journal
+        .iter()
+        .filter_map(|(_, e)| match e {
+            ExecEvent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["one", "two"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_json_escaped_secret_split_across_events_is_redacted() {
+    let key = "line-one-secret\nline-two-secret";
+    let secrets = Arc::new(FakeSecrets::new().with("PROBE_TOKEN", key));
+    let m = mock([
+        MockStep::text(r"k: line-one-sec"),
+        MockStep::text(r"ret\nline-two"),
+        MockStep::text(r"-secret!"),
+    ]);
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"PROBE_TOKEN\"]"),
+        Some(secrets),
+        &m,
+    )
+    .await;
+    let run = go(&fx).await;
+    let journal = fx.journal_with_done(&run).await;
+    assert_eq!(text_of(&journal), "k: [secret:PROBE_TOKEN]!");
+}
+
+#[tokio::test(start_paused = true)]
+async fn random_chunkings_of_a_secret_never_leak() {
+    let whole = format!("a {PROBE} b {PROBE}{PROBE} sk-probe c");
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    for _ in 0..20 {
+        let mut steps = Vec::new();
+        let mut at = 0;
+        while at < whole.len() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let end = (at + 1 + (seed % 11) as usize).min(whole.len());
+            steps.push(MockStep::text(&whole[at..end]));
+            at = end;
+        }
+        let (journal, live) = run_streamed(steps).await;
+        assert_no_secret(&journal, &live);
+        assert_eq!(
+            text_of(&journal),
+            "a [secret:PROBE_TOKEN] b [secret:PROBE_TOKEN][secret:PROBE_TOKEN] sk-probe c"
+        );
+    }
+}
