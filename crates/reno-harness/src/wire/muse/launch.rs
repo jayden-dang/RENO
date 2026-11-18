@@ -256,24 +256,37 @@ mod tests {
 
     #[test]
     fn the_posture_checks_read_what_a_real_1_4_23_reported() {
-        // `session/start` and `session/resume` results as a real Muse Code 1.4.23 answered them
-        // over its echo provider (trimmed to the members read here). The resumed session had last
-        // been set to allowAll, which is what `session/setApprovalMode` then replaces.
-        let started = json!({"sessionId": "s", "providerId": "echo", "modelId": null,
-            "approvalMode": {"mode": "promptUnmatched", "source": "startup", "lastCommandId": null},
-            "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
-                "axes": {"filesystem": "sandboxed", "network": "off", "approval": "onRequest",
-                         "reviewer": "human"}, "reviewerAttached": true}});
+        // Captured from a real Muse Code 1.4.23 over its echo provider (`tests/fixtures/muse/`).
+        let load = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        let started = load(include_str!(
+            "../../../tests/fixtures/muse/session-start-experimental-1.4.23.json"
+        ));
         assert!(Posture::ASK.confirmed_start(&started).is_ok());
-        let resumed = json!({"sessionId": "s", "modelId": "echo",
-            "approvalMode": {"mode": "allowAll", "source": "replay", "lastCommandId": null},
-            "permissionState": {"profileId": ":ask-me", "reviewerAuthority": "human",
-                "reviewerAttached": true}});
+        let resumed = load(include_str!(
+            "../../../tests/fixtures/muse/session-resume-1.4.23.json"
+        ));
         assert!(Posture::ASK.confirmed_profile(&resumed).is_ok());
-        let applied = json!({"commandId": "c", "status": "accepted", "applyOutcome": "completed",
-            "effectiveMode": {"mode": "promptUnmatched", "source": "approvalReconfigure",
-                              "lastCommandId": "c"}});
+        let applied = load(include_str!(
+            "../../../tests/fixtures/muse/set-approval-mode-1.4.23.json"
+        ));
         assert!(Posture::ASK.mode_applied(&applied).is_ok());
+    }
+
+    #[test]
+    fn a_stable_surface_session_cannot_prove_its_profile_so_it_is_refused() {
+        // Without `experimentalApi` the same host leaves `permissionState` out: the check fails
+        // closed, which is why a run opts in.
+        let stable: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/muse/session-start-stable-1.4.23.json"
+        ))
+        .unwrap();
+        assert!(stable.get("permissionState").is_none());
+        assert!(
+            Posture::ASK
+                .confirmed_start(&stable)
+                .unwrap_err()
+                .contains("(none)")
+        );
     }
 
     #[test]

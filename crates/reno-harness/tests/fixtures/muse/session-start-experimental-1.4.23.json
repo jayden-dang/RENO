@@ -1,0 +1,35 @@
+{
+ "sessionId": "01a1ee99-08c3-7ef0-9220-d98cd10dd38a",
+ "path": "/scrubbed/muse/sessions/2026/11/18/01a1ee99-08c3-7ef0-9220-d98cd10dd38a/session.jsonl",
+ "status": "idle",
+ "activeTurnId": null,
+ "createdAt": "2026-11-18T12:19:29.317721Z",
+ "updatedAt": "2026-11-18T12:19:29.344985Z",
+ "workspaceRoot": "/scrubbed/ws",
+ "providerId": "echo",
+ "modelId": null,
+ "turnCount": 0,
+ "forkedFrom": null,
+ "sideFrom": null,
+ "approvalMode": {
+  "mode": "promptUnmatched",
+  "source": "startup",
+  "lastCommandId": null
+ },
+ "createdByClient": {
+  "name": "reno",
+  "version": "0"
+ },
+ "kind": "root",
+ "permissionState": {
+  "profileId": ":ask-me",
+  "reviewerAuthority": "human",
+  "axes": {
+   "filesystem": "sandboxed",
+   "network": "off",
+   "approval": "onRequest",
+   "reviewer": "human"
+  },
+  "reviewerAttached": true
+ }
+}

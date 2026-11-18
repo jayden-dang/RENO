@@ -138,6 +138,14 @@ def uid():
 # ---------------------------------------------------------------------------------------------
 
 def session_obj(session_id, params, source="startup", mode=None):
+    info = _session_obj(session_id, params, source, mode)
+    if not EXPERIMENTAL:
+        # As a real 1.4.23: the stable surface does not carry the permission state.
+        info.pop("permissionState")
+    return info
+
+
+def _session_obj(session_id, params, source="startup", mode=None):
     wrong_profile = os.environ.get("FAKE_MUSE_POSTURE") == "profile"
     wrong_mode = os.environ.get("FAKE_MUSE_POSTURE") == "mode"
     profile = ":unrestricted" if wrong_profile else params.get("permissionProfile", ":ask-me")

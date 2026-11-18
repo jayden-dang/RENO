@@ -829,7 +829,9 @@ impl Run {
         let resume = self.spec.resume.clone();
         let model = (!catalog::is_default_model(self.spec.model.as_deref()))
             .then(|| self.spec.model.clone().unwrap_or_default());
-        let hello = match self.host.initialize(false, !mcp.is_empty()).await {
+        // Experimental: the stable surface strips `permissionState` from the session, and without
+        // it the profile cannot be read back (1.4.23 echoes it only to an opted-in client).
+        let hello = match self.host.initialize(true, !mcp.is_empty()).await {
             Ok(hello) => hello,
             Err(error) => return Err(self.explain(error).await),
         };

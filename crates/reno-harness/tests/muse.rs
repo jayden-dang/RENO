@@ -657,6 +657,16 @@ async fn every_run_asks_for_prompt_unmatched_and_ask_me_in_either_access_mode() 
 }
 
 #[tokio::test]
+async fn a_run_opts_into_the_experimental_surface_which_is_where_the_posture_is_reported() {
+    let bench = Bench::new();
+    run(&bench, "hello").await;
+    assert_eq!(
+        bench.params("initialize")[0]["capabilities"]["experimentalApi"],
+        true
+    );
+}
+
+#[tokio::test]
 async fn a_posture_muse_did_not_report_back_is_refused_before_the_prompt() {
     for (posture, wanted) in [("profile", ":unrestricted"), ("mode", "allowAll")] {
         let bench = Bench::new();

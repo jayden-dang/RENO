@@ -1,0 +1,24 @@
+{
+ "sessionId": "01a1ee99-6542-74e5-8996-5d2ac070830e",
+ "path": "/scrubbed/muse/sessions/2026/11/18/01a1ee99-6542-74e5-8996-5d2ac070830e/session.jsonl",
+ "status": "idle",
+ "activeTurnId": null,
+ "createdAt": "2026-11-18T12:19:52.870308Z",
+ "updatedAt": "2026-11-18T12:19:52.879537Z",
+ "workspaceRoot": "/scrubbed/work",
+ "providerId": "echo",
+ "modelId": null,
+ "turnCount": 0,
+ "forkedFrom": null,
+ "sideFrom": null,
+ "approvalMode": {
+  "mode": "promptUnmatched",
+  "source": "startup",
+  "lastCommandId": null
+ },
+ "createdByClient": {
+  "name": "reno",
+  "version": "0.0.0"
+ },
+ "kind": "root"
+}
