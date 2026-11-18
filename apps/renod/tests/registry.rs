@@ -12,7 +12,6 @@ mod common;
 use std::io::Write;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use common::{Fixture, within};
 use reno_harness::acp_registry as reg;
 use reno_harness::proc::maintain::ScriptedRunner;

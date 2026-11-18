@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::io;
+use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -101,7 +102,7 @@ async fn executor_add(env: &Env, args: crate::cli::ExecutorAdd) -> anyhow::Resul
             let json = env.json;
             crate::registry::add(&client, id, |line| {
                 if json {
-                    eprintln!("{line}");
+                    let _ = writeln!(std::io::stderr(), "{line}");
                 } else {
                     let _ = print_line(line);
                 }

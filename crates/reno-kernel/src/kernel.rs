@@ -207,7 +207,7 @@ impl Kernel {
         let has_definitions = definitions.is_some();
         let context = match &definitions {
             Some(setup) => setup.context.clone(),
-            None => ValidationContext::with_builtin(executors.ids().into_iter()),
+            None => ValidationContext::with_builtin(executors.ids()),
         };
         let mut shared = Shared::new(
             Db::new(store, clock),
