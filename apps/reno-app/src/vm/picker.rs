@@ -5,9 +5,6 @@
 //! `clamp_reasoning`) and `popover::match_rank`, onto Reno's types: a harness is an
 //! [`ExecutorId`], a model is what that harness's CLI reported ([`models::ModelChoice`]).
 
-// The popover that draws this lands in the commits after this one.
-#![allow(dead_code)]
-
 use reno_proto::{Effort, ExecutorId};
 
 use super::models::{HarnessChoice, ModelChoice, Pick};

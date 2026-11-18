@@ -8,9 +8,6 @@
 //!
 //! The file is `app-composer.json` beside the daemon socket (`local::composer_path`).
 
-// The picker that reads and writes these lands in the next commit.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use reno_proto::{Effort, ExecutorId};
@@ -92,11 +89,13 @@ impl ComposerPrefs {
     }
 
     /// The options last chosen for this model.
+    #[allow(dead_code)] // the context window row of the next commit uses it
     pub(crate) fn options_for(&self, harness: &ExecutorId, model: &str) -> Option<&Options> {
         self.model_options.get(harness.as_str())?.get(model)
     }
 
     /// The choice last made for one option of a model.
+    #[allow(dead_code)] // the context window row of the next commit uses it
     pub(crate) fn option_for(
         &self,
         harness: &ExecutorId,
@@ -109,6 +108,7 @@ impl ComposerPrefs {
     }
 
     /// Remembers one option's choice for a model.
+    #[allow(dead_code)] // the context window row of the next commit uses it
     pub(crate) fn remember_option(
         &mut self,
         harness: &ExecutorId,

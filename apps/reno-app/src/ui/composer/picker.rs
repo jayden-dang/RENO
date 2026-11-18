@@ -1,15 +1,37 @@
-//! The harness · model picker of the composer: the chip, its popover and the effort control.
+//! The harness · model picker of the composer: the chip, and the popover with its glyph rail,
+//! search, list and the Account and Effort rows (ui-brief 2026-11-18, "v2 — Rail").
 
-use gpui::{App, Context, FontWeight, SharedString, canvas, div, prelude::*, px};
-use reno_proto::ExecutorId;
+use gpui::{
+    App, Context, FontWeight, Hsla, KeyDownEvent, MouseButton, SharedString, Window, canvas, div,
+    prelude::*, px,
+};
+use reno_proto::{Effort, ExecutorId};
 
-use super::menu::{check, menu, menu_row};
-use super::{Composer, Mode};
+use super::menu::{Tip, check, menu, menu_row};
+use super::{Composer, Mode, OpenExecutors};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::theme::Theme;
+use crate::vm::models;
+use crate::vm::models::{Account, HarnessChoice, Pick};
+use crate::vm::picker::{self, Listing, Row, Tab, TabView};
 use crate::vm::routing::{self, Preview};
-use crate::vm::{models, picker};
+
+/// The popover's width.
+const WIDTH: f32 = 344.0;
+/// The list's tallest height; longer lists scroll.
+const LIST_MAX: f32 = 248.0;
+
+/// What the open picker shows, worked out once per frame and per key.
+struct View {
+    harnesses: Vec<HarnessChoice>,
+    /// The harness of the live run this box steers: the only one it lists.
+    live: Option<ExecutorId>,
+    shown: Option<Pick>,
+    tabs: Vec<TabView>,
+    tab: Tab,
+    listing: Listing,
+}
 
 impl Composer {
     /// Whether the chip opens the picker: on Home and on an ended run (the next task's harness
@@ -44,6 +66,35 @@ impl Composer {
             model: models::in_use(state, run),
             effort: r.effort,
         })
+    }
+
+    /// What the picker shows now: the rail, the viewed tab and its rows for the query.
+    fn picker_view(&self, cx: &App) -> View {
+        let store = self.store.read(cx);
+        let live = self.live_run(cx).map(|r| r.executor.clone());
+        let harnesses: Vec<_> = models::harnesses(store.state())
+            .into_iter()
+            .filter(|h| live.as_ref().is_none_or(|l| &h.id == l))
+            .collect();
+        let shown = self.shown_pick(cx);
+        let tabs = picker::tabs(&harnesses, live.as_ref(), self.mode == Mode::Home);
+        let tab = tabs
+            .iter()
+            .find(|t| t.tab == self.picker_tab)
+            .or(tabs.first())
+            .map_or(Tab::Favourites, |t| t.tab.clone());
+        let prefs = store.composer_prefs();
+        let listing = picker::listing(&self.picker_query, &tab, &harnesses, |h, m| {
+            prefs.is_favourite(h, m)
+        });
+        View {
+            harnesses,
+            live,
+            shown,
+            tabs,
+            tab,
+            listing,
+        }
     }
 
     pub(super) fn model_chip(
@@ -111,10 +162,12 @@ impl Composer {
                     .when_some(extra, |c, extra| {
                         c.child(
                             div()
+                                .id("chip-effort")
+                                .debug_selector(|| "chip-effort".to_owned())
                                 .flex_none()
                                 .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.faint)
-                                .child(extra),
+                                .child(SharedString::from(extra)),
                         )
                     });
             }
@@ -143,32 +196,58 @@ impl Composer {
                 12.0,
                 theme.faint,
             ))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.picker_open = !this.picker_open;
-                this.picker_for_live = this.live_run(cx).is_some();
-                this.picker_drill = None;
-                this.class_open = false;
-                cx.notify();
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.picker_open {
+                    this.close_picker(cx);
+                } else {
+                    this.open_picker(window, cx);
+                }
             }))
+    }
+
+    /// Opens the picker on the tab of what is shown, with its search empty and the keyboard in
+    /// it.
+    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (tab, live) = {
+            let live = self.live_run(cx).map(|r| r.executor.clone());
+            let harnesses = models::harnesses(self.store.read(cx).state());
+            let tab = picker::opening_tab(
+                self.shown_pick(cx).as_ref(),
+                &harnesses,
+                live.as_ref(),
+                self.mode == Mode::Home,
+            );
+            (tab, live.is_some())
+        };
+        self.picker_open = true;
+        self.picker_for_live = live;
+        self.picker_tab = tab;
+        self.picker_query.clear();
+        self.picker_cursor = None;
+        self.picker_keyboard = false;
+        self.class_open = false;
+        window.focus(&self.picker_focus, cx);
+        cx.notify();
     }
 
     pub(super) fn close_picker(&mut self, cx: &mut Context<Self>) {
         if self.picker_open {
             self.picker_open = false;
-            self.picker_drill = None;
+            // The next frame gives the keyboard back to the text.
+            self.refocus = true;
             cx.notify();
         }
     }
 
-    /// Choose a model: on a live run the daemon switches it; otherwise it is the next task's,
-    /// keeping the effort chosen before when this model takes it too.
+    /// Choose a model: on a live run the daemon switches it; otherwise it is the next task's. The
+    /// picker stays open. The effort becomes the one remembered for this model, else the one
+    /// chosen before when this model takes it too.
     pub(super) fn choose_model(
         &mut self,
         executor: ExecutorId,
         model: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.close_picker(cx);
         if let (Some(run), Some(model)) =
             (self.live_run(cx).map(|r| r.run_id.clone()), model.clone())
         {
@@ -177,19 +256,22 @@ impl Composer {
             cx.notify();
             return;
         }
-        let levels = {
-            let state = self.store.read(cx).state();
-            model
+        let effort = {
+            let store = self.store.read(cx);
+            let listed = model
                 .as_deref()
-                .and_then(|m| models::model(state, &executor, m))
-                .map(|m| m.efforts)
-                .unwrap_or_default()
+                .and_then(|m| models::model(store.state(), &executor, m));
+            let remembered = model
+                .as_deref()
+                .and_then(|m| store.composer_prefs().effort_for(&executor, m));
+            let carried = self.shown_pick(cx).and_then(|p| p.effort);
+            picker::effort_on_pick(
+                remembered,
+                carried,
+                &listed.map(|m| m.efforts).unwrap_or_default(),
+            )
         };
-        let effort = self
-            .shown_pick(cx)
-            .and_then(|p| p.effort)
-            .filter(|e| levels.contains(e));
-        self.pick = Some(models::Pick {
+        self.pick = Some(Pick {
             executor,
             model,
             effort,
@@ -198,8 +280,16 @@ impl Composer {
         cx.notify();
     }
 
-    /// A click on an effort dot: that level, or the model's default when it was the chosen one.
-    pub(super) fn click_effort(&mut self, clicked: reno_proto::Effort, cx: &mut Context<Self>) {
+    /// Choose Auto: Reno picks.
+    fn choose_auto(&mut self, cx: &mut Context<Self>) {
+        self.pick = None;
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
+    /// A click on an effort cell: that level, or the model's default when it was the chosen one.
+    /// What is chosen is remembered for the model.
+    fn click_effort(&mut self, clicked: Effort, cx: &mut Context<Self>) {
         if self.live_run(cx).is_some() {
             return;
         }
@@ -207,334 +297,743 @@ impl Composer {
             return;
         };
         pick.effort = picker::next_effort(pick.effort, clicked);
+        if let Some(model) = pick.model.clone() {
+            let (executor, effort) = (pick.executor.clone(), pick.effort);
+            self.store.update(cx, |store, cx| {
+                store.update_composer_prefs(|p| p.remember_effort(&executor, &model, effort), cx);
+            });
+        }
         self.pick = Some(pick);
         self.refresh_preview(cx);
         cx.notify();
     }
 
-    /// The effort dots beside the chip: one per level the shown model lists. None when it lists
-    /// none. On a live run they are dimmed and do nothing: effort is set when a run starts.
-    pub(super) fn effort_dots(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<gpui::Div>> {
-        let shown = self.shown_pick(cx)?;
-        let state = self.store.read(cx).state();
-        let model = models::model(state, &shown.executor, shown.model.as_deref()?)?;
-        if model.efforts.is_empty() {
-            return None;
-        }
-        let editable = self.live_run(cx).is_none();
-        let word = shown.effort.map_or("default", |e| e.as_str());
-        let dots = picker::effort_cells(&model.efforts, shown.effort, model.default_effort);
-        let (accent, ring) = (theme.accent, theme.text.opacity(0.28));
-        Some(
-            div()
-                .id("effort-dots")
-                .debug_selector(|| "effort-dots".to_owned())
-                .flex_none()
-                .h(px(28.0))
-                .pl(px(4.0))
-                .pr(px(2.0))
-                .flex()
-                .items_center()
-                .gap(px(1.0))
-                .when(!editable, |d| d.opacity(0.5))
-                .children(dots.into_iter().map(|dot| {
-                    let effort = dot.effort;
-                    let id = format!("effort-dot-{}", effort.as_str());
-                    let mark = div()
-                        .size(px(8.0))
-                        .rounded_full()
-                        .border_1()
-                        .when(dot.filled, |m| m.bg(accent).border_color(accent))
-                        .when(!dot.filled, |m| {
-                            m.border_color(if dot.default { accent } else { ring })
-                        });
-                    div()
-                        .id(SharedString::from(id.clone()))
-                        .debug_selector(move || id.clone())
-                        .size(px(14.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(mark)
-                        .when(editable, |d| {
-                            d.cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.click_effort(effort, cx);
-                                }))
-                        })
-                }))
-                .child(
-                    div()
-                        .id("effort-word")
-                        .debug_selector(|| "effort-word".to_owned())
-                        .ml(px(4.0))
-                        .font_family(kit::MONO)
-                        .text_size(px(11.0))
-                        .text_color(theme.muted)
-                        .child(word),
-                ),
-        )
+    fn toggle_star(&mut self, executor: &ExecutorId, model: &str, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| {
+            store.update_composer_prefs(
+                |prefs| {
+                    prefs.toggle_favourite(executor, model);
+                },
+                cx,
+            );
+        });
+        cx.notify();
     }
 
-    /// The picker: Auto (Home only), then each harness's first models, "More …" drilling in
-    /// place to all of one harness's models. A live run lists only its own harness.
+    fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.picker_tab = tab;
+        self.picker_query.clear();
+        self.picker_cursor = None;
+        cx.notify();
+    }
+
+    /// Whether the viewed tab has a search field (Auto has none).
+    fn searchable(tab: &Tab) -> bool {
+        !matches!(tab, Tab::Auto)
+    }
+
+    /// The picker's keyboard: type to search, Up and Down to move over the rows, Enter to pick,
+    /// Tab and Shift-Tab to change the tab, Escape to close.
+    fn on_picker_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        let view = self.picker_view(cx);
+        let rows: Vec<&Row> = view
+            .listing
+            .rows
+            .iter()
+            .chain(&view.listing.others)
+            .collect();
+        match key.key.as_str() {
+            "escape" => return self.close_picker(cx),
+            "tab" => {
+                let at = view
+                    .tabs
+                    .iter()
+                    .position(|t| t.tab == view.tab)
+                    .unwrap_or(0);
+                let n = view.tabs.len().max(1);
+                let next = if key.modifiers.shift {
+                    at + n - 1
+                } else {
+                    at + 1
+                } % n;
+                self.picker_keyboard = true;
+                if let Some(t) = view.tabs.get(next) {
+                    self.show_tab(t.tab.clone(), cx);
+                }
+                return;
+            }
+            "down" | "up" if !rows.is_empty() => {
+                let n = rows.len();
+                let down = key.key == "down";
+                self.picker_cursor = Some(match self.picker_cursor {
+                    None if down => 0,
+                    None => n - 1,
+                    Some(at) if down => (at + 1) % n,
+                    Some(at) => (at + n - 1) % n,
+                });
+            }
+            "enter" => {
+                if let Some(row) = self.picker_cursor.and_then(|at| rows.get(at))
+                    && row.usable
+                {
+                    let (harness, model) = (row.harness.clone(), row.model.id.clone());
+                    self.choose_model(harness, Some(model), cx);
+                }
+            }
+            "backspace" if Self::searchable(&view.tab) => {
+                self.picker_query.pop();
+                self.picker_cursor = None;
+            }
+            _ => {
+                let m = key.modifiers;
+                if let Some(text) = key.key_char.as_deref()
+                    && Self::searchable(&view.tab)
+                    && !(m.platform || m.control || m.alt)
+                    && !text.chars().any(char::is_control)
+                {
+                    self.picker_query.push_str(text);
+                    self.picker_cursor = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// One model row: its harness's glyph, the name, a check when chosen and a star. `named`
+    /// puts the harness's name after the model's (Favourites and other harnesses' matches).
+    fn model_row(
+        &self,
+        theme: &Theme,
+        row: &Row,
+        chosen: bool,
+        named: bool,
+        highlighted: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let key = format!("{}/{}", row.harness, row.model.id);
+        let selector = format!("pick-model-{}", row.model.id);
+        let star_selector = format!("star-{}", row.model.id);
+        let group = SharedString::from(format!("row-{key}"));
+        let (hover, starred) = (theme.row_selected(), row.starred);
+        let (harness, model) = (row.harness.clone(), row.model.id.clone());
+        let (star_harness, star_model) = (row.harness.clone(), row.model.id.clone());
+        let star = div()
+            .id(SharedString::from(format!("star-{key}")))
+            .debug_selector(move || star_selector.clone())
+            .flex_none()
+            .size(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .when(!starred && !highlighted, |s| {
+                s.opacity(0.0)
+                    .group_hover(group.clone(), |s| s.opacity(1.0))
+            })
+            .child(if starred {
+                icon(Icon::StarFill, 13.0, theme.warning)
+            } else {
+                icon(Icon::Star, 13.0, theme.faint)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_star(&star_harness, &star_model, cx);
+            }));
+        div()
+            .id(SharedString::from(key))
+            .debug_selector(move || selector.clone())
+            .group(group)
+            .w_full()
+            .h(px(32.0))
+            .flex_none()
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(7.0))
+            .when(highlighted, |r| r.bg(hover))
+            .when(row.usable, |r| {
+                r.cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_model(harness.clone(), Some(model.clone()), cx);
+                    }))
+            })
+            .when(!row.usable, |r| r.text_color(theme.faint))
+            .when_some(row.model.description.clone(), |r, about| {
+                r.tooltip(move |_, cx| {
+                    let about = SharedString::from(about.clone());
+                    cx.new(|_| Tip(about)).into()
+                })
+            })
+            .child(kit::exec_glyph(theme, row.harness.as_str(), 15.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(row.model.name.clone())),
+            )
+            .when(named, |r| {
+                r.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(theme.faint)
+                        .child(SharedString::from(row.harness_name.clone())),
+                )
+            })
+            .when(!named, |r| r.child(div().flex_1()))
+            .when(chosen, |r| r.child(check(theme)))
+            .child(star)
+    }
+
+    /// The row that picks a harness's default model, for a harness that listed none.
+    fn default_row(
+        &self,
+        theme: &Theme,
+        harness: &HarnessChoice,
+        chosen: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let id = harness.id.clone();
+        menu_row(
+            theme,
+            format!("pick-harness-{}", harness.id),
+            harness.usable,
+        )
+        .child(kit::exec_glyph(theme, harness.id.as_str(), 15.0))
+        .child(div().min_w_0().truncate().child("Default model"))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.0))
+                .text_color(theme.faint)
+                .child(SharedString::from(format!(
+                    "\u{b7} {} reports no list",
+                    harness.name
+                ))),
+        )
+        .when(chosen, |r| r.child(check(theme)))
+        .when(harness.usable, |r| {
+            r.on_click(cx.listener(move |this, _, _, cx| {
+                this.choose_model(id.clone(), None, cx);
+            }))
+        })
+    }
+
+    /// The Auto tab: Auto's row, what Reno would pick now, and "why?".
+    fn auto_row(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let now = match &self.preview {
+            Preview::Ready(d) => routing::view(d)
+                .chosen
+                .map_or("Reno picks".to_owned(), |c| {
+                    format!("Reno picks \u{2014} now {}", c.name)
+                }),
+            Preview::Unavailable(_) => "Route unavailable".to_owned(),
+            _ => "Reno picks".to_owned(),
+        };
+        menu_row(theme, "pick-harness-auto".to_owned(), true)
+            .flex_wrap()
+            .py(px(5.0))
+            .child(icon(Icon::Route, 13.0, theme.muted))
+            .child(div().flex_1().child("Auto"))
+            .when(self.pick.is_none(), |r| r.child(check(theme)))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .child(SharedString::from(now))
+                    .child(
+                        div()
+                            .id("why")
+                            .debug_selector(|| "why".to_owned())
+                            .text_color(theme.warning)
+                            .border_b_1()
+                            .border_color(theme.warning.opacity(0.6))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.why_open = !this.why_open;
+                                this.close_picker(cx);
+                            }))
+                            .child("why?"),
+                    ),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.choose_auto(cx)))
+    }
+
+    /// The glyph tabs: names appear on hover, and on the tab the keyboard is on.
+    fn rail(&self, theme: &Theme, view: &View, cx: &mut Context<Self>) -> gpui::Div {
+        let tabs = view.tabs.iter().map(|t| {
+            let active = t.tab == view.tab;
+            let key = t.tab.key();
+            let selector = format!("picker-tab-{key}");
+            let group = SharedString::from(format!("tab-{key}"));
+            let tab = t.tab.clone();
+            let glyph = match &t.tab {
+                Tab::Favourites => icon(Icon::Star, 16.0, theme.muted).into_any_element(),
+                Tab::Auto => icon(Icon::Route, 16.0, theme.muted).into_any_element(),
+                Tab::Harness(id) => div()
+                    .when(t.empty, |d| d.opacity(0.4))
+                    .child(kit::logo(theme, id.as_str(), 16.0))
+                    .into_any_element(),
+            };
+            let (hover, name_shown) = (theme.row_selected(), active && self.picker_keyboard);
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(move || selector.clone())
+                .group(group.clone())
+                .relative()
+                .flex_none()
+                .size(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(glyph)
+                .when(active, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .bottom(px(-4.0))
+                            .left(px(6.0))
+                            .right(px(6.0))
+                            .h(px(2.0))
+                            .rounded(px(1.0))
+                            .bg(theme.accent),
+                    )
+                })
+                .when(t.signed_out, |d| {
+                    d.child(
+                        kit::dot(theme.warning, 6.0)
+                            .debug_selector({
+                                let id = format!("picker-tab-warn-{key}");
+                                move || id.clone()
+                            })
+                            .absolute()
+                            .top(px(3.0))
+                            .right(px(3.0)),
+                    )
+                })
+                .child(
+                    div()
+                        .id(SharedString::from(format!("picker-tab-name-{key}")))
+                        .absolute()
+                        .top(px(36.0))
+                        .left_0()
+                        .px(px(7.0))
+                        .py(px(3.0))
+                        .rounded(px(6.0))
+                        .bg(theme.raised)
+                        .border_1()
+                        .border_color(theme.hairline)
+                        .text_size(px(11.5))
+                        .whitespace_nowrap()
+                        .text_color(theme.text)
+                        .opacity(if name_shown { 1.0 } else { 0.0 })
+                        .group_hover(group, |s| s.opacity(1.0))
+                        .child(SharedString::from(t.name.clone())),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.picker_keyboard = false;
+                    this.show_tab(tab.clone(), cx);
+                }))
+        });
+        div()
+            .flex_none()
+            .h(px(40.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .border_b_1()
+            .border_color(theme.hairline)
+            .children(tabs)
+    }
+
+    /// The search field, scoped to the viewed tab. The caret is a bar after the text.
+    fn search_field(
+        &self,
+        theme: &Theme,
+        view: &View,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let placeholder = match &view.tab {
+            Tab::Favourites => "Search favourites\u{2026}".to_owned(),
+            Tab::Auto => String::new(),
+            Tab::Harness(id) => {
+                let name = view
+                    .harnesses
+                    .iter()
+                    .find(|h| &h.id == id)
+                    .map_or_else(|| id.to_string(), |h| h.name.clone());
+                format!("Search {name} models\u{2026}")
+            }
+        };
+        div()
+            .id("picker-search")
+            .debug_selector(|| "picker-search".to_owned())
+            .flex_none()
+            .h(px(38.0))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(13.0))
+            .child(icon(Icon::Search, 13.0, theme.faint))
+            .child(if self.picker_query.is_empty() {
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_color(theme.faint)
+                    .child(SharedString::from(placeholder))
+            } else {
+                div()
+                    .flex_1()
+                    .truncate()
+                    .text_color(theme.text)
+                    .child(SharedString::from(self.picker_query.clone()))
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                window.focus(&this.picker_focus, cx);
+            }))
+    }
+
+    /// The list under the rail for the viewed tab.
+    fn picker_list(
+        &self,
+        theme: &Theme,
+        view: &View,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let chosen = |h: &ExecutorId, m: Option<&str>| {
+            view.shown
+                .as_ref()
+                .is_some_and(|p| &p.executor == h && p.model.as_deref() == m)
+                && (self.pick.is_some() || view.live.is_some())
+        };
+        let list = div()
+            .id("picker-list")
+            .debug_selector(|| "picker-list".to_owned())
+            .max_h(px(LIST_MAX))
+            .p(px(6.0))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll();
+        if view.tab == Tab::Auto {
+            return list.child(self.auto_row(theme, cx));
+        }
+        let named = view.tab == Tab::Favourites;
+        let note = |text: String| {
+            div()
+                .px(px(10.0))
+                .py(px(14.0))
+                .text_size(px(12.5))
+                .text_color(theme.faint)
+                .child(SharedString::from(text))
+        };
+        let mut list = list;
+        let mut at = 0;
+        if let Tab::Harness(id) = &view.tab
+            && let Some(h) = view.harnesses.iter().find(|h| &h.id == id)
+            && h.models.is_empty()
+            && view.live.is_none()
+            && self.picker_query.is_empty()
+        {
+            list = list.child(self.default_row(theme, h, chosen(&h.id, None), cx));
+        }
+        for row in &view.listing.rows {
+            let is_chosen = chosen(&row.harness, Some(&row.model.id));
+            list = list.child(self.model_row(
+                theme,
+                row,
+                is_chosen,
+                named,
+                self.picker_cursor == Some(at),
+                cx,
+            ));
+            at += 1;
+        }
+        if view.listing.rows.is_empty() && view.listing.others.is_empty() {
+            let text = match (&view.tab, self.picker_query.is_empty()) {
+                (Tab::Favourites, true) => "Star a model in any harness to keep it here.",
+                (Tab::Harness(_), true) if view.live.is_some() => "No models listed.",
+                (Tab::Harness(_), true) => "",
+                _ => "No models match.",
+            };
+            if !text.is_empty() {
+                list = list.child(note(text.to_owned()));
+            }
+        }
+        if !view.listing.others.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(10.0))
+                    .pt(px(8.0))
+                    .pb(px(2.0))
+                    .text_size(px(11.5))
+                    .text_color(theme.faint)
+                    .child("In other harnesses"),
+            );
+            for row in &view.listing.others {
+                let is_chosen = chosen(&row.harness, Some(&row.model.id));
+                list = list.child(self.model_row(
+                    theme,
+                    row,
+                    is_chosen,
+                    true,
+                    self.picker_cursor == Some(at),
+                    cx,
+                ));
+                at += 1;
+            }
+        }
+        list
+    }
+
+    /// The harness the footer speaks about: the viewed tab's, else the shown pick's.
+    fn footer_harness(view: &View) -> Option<&HarnessChoice> {
+        let id = match &view.tab {
+            Tab::Harness(id) => Some(id),
+            _ => view.shown.as_ref().map(|p| &p.executor),
+        }?;
+        view.harnesses.iter().find(|h| &h.id == id)
+    }
+
+    /// The Account row: who is signed in to the harness, and a way to the Executors screen.
+    fn account_row(
+        &self,
+        theme: &Theme,
+        harness: &HarnessChoice,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let (words, tone): (String, Hsla) = match &harness.account {
+            Account::SignedIn(Some(who)) => (who.clone(), theme.muted),
+            Account::SignedIn(None) => ("signed in".to_owned(), theme.muted),
+            Account::SignedOut => ("signed out".to_owned(), theme.warning),
+            Account::NotReported => ("not reported".to_owned(), theme.faint),
+        };
+        menu_row(theme, "picker-account".to_owned(), true)
+            .child(div().flex_none().text_color(theme.muted).child("Account"))
+            .child(
+                div()
+                    .id("picker-account-value")
+                    .debug_selector(|| "picker-account-value".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_right()
+                    .text_size(px(12.0))
+                    .text_color(tone)
+                    .child(SharedString::from(words)),
+            )
+            .child(icon(Icon::Fwd, 12.0, theme.faint))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_picker(cx);
+                cx.emit(OpenExecutors);
+            }))
+    }
+
+    /// EFFORT and its track: one cell per level the shown model lists.
+    fn effort_section(
+        &self,
+        theme: &Theme,
+        view: &View,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let live = view.live.is_some();
+        let state = self.store.read(cx).state();
+        let shown = view.shown.as_ref();
+        let model = shown.and_then(|p| {
+            let id = p.model.as_deref()?;
+            Some((id, models::model(state, &p.executor, id)))
+        });
+        let (levels, default) = model
+            .as_ref()
+            .and_then(|(_, m)| m.as_ref())
+            .map_or((Vec::new(), None), |m| {
+                (m.efforts.clone(), m.default_effort)
+            });
+        let chosen = shown.and_then(|p| p.effort);
+        let word = if levels.is_empty() {
+            String::new()
+        } else {
+            let mut w = picker::effort_words(chosen, default);
+            if live {
+                w.push_str(" \u{b7} next run");
+            }
+            w
+        };
+        let body: gpui::AnyElement =
+            match (&model, levels.is_empty()) {
+                (None, _) => div()
+                    .text_size(px(12.0))
+                    .text_color(theme.faint)
+                    .child("pick a model to set it")
+                    .into_any_element(),
+                (Some((id, listed)), true) => {
+                    let name = listed.as_ref().map_or_else(
+                        || {
+                            shown.map_or_else(
+                                || (*id).to_owned(),
+                                |p| models::model_name(state, &p.executor, id),
+                            )
+                        },
+                        |m| m.name.clone(),
+                    );
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.faint)
+                        .child(SharedString::from(format!("{name} has no levels")))
+                        .into_any_element()
+                }
+                (Some(_), false) => {
+                    let cells = picker::effort_cells(&levels, chosen, default);
+                    div()
+                        .flex()
+                        .gap(px(3.0))
+                        .when(live, |d| d.opacity(0.5))
+                        .children(cells.into_iter().map(|cell| {
+                            let effort = cell.effort;
+                            let id = format!("effort-cell-{}", effort.as_str());
+                            let selector = id.clone();
+                            let (accent, faint) = (theme.accent, theme.faint);
+                            div()
+                                .id(SharedString::from(id))
+                                .debug_selector(move || selector.clone())
+                                .flex_1()
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.0))
+                                .border_1()
+                                .font_family(kit::MONO)
+                                .text_size(px(11.0))
+                                .when(cell.filled, |c| {
+                                    c.bg(accent.opacity(0.18 + 0.62 * cell.strength))
+                                        .border_color(accent.opacity(0.0))
+                                        .text_color(theme.text)
+                                })
+                                .when(!cell.filled, |c| {
+                                    c.bg(theme.row_selected())
+                                        .text_color(theme.muted)
+                                        .border_color(if cell.default {
+                                            accent
+                                        } else {
+                                            faint.opacity(0.0)
+                                        })
+                                })
+                                .when(!live, |c| {
+                                    c.cursor_pointer().on_click(cx.listener(
+                                        move |this, _, _, cx| this.click_effort(effort, cx),
+                                    ))
+                                })
+                                .child(effort_word(effort))
+                        }))
+                        .into_any_element()
+                }
+            };
+        div()
+            .id("picker-effort")
+            .debug_selector(|| "picker-effort".to_owned())
+            .px(px(10.0))
+            .pt(px(6.0))
+            .pb(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.faint)
+                            .child("EFFORT"),
+                    )
+                    .child(
+                        div()
+                            .id("effort-word")
+                            .debug_selector(|| "effort-word".to_owned())
+                            .text_size(px(12.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(word)),
+                    ),
+            )
+            .child(body)
+    }
+
+    /// The picker's popover content: rail, search, list and the footer.
     pub(super) fn picker(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let state = self.store.read(cx).state();
-        let live = self.live_run(cx).map(|r| r.executor.clone());
-        let shown = self.shown_pick(cx);
-        let home = self.mode == Mode::Home;
-        let chosen = |h: &ExecutorId, m: Option<&str>| {
-            shown
-                .as_ref()
-                .is_some_and(|p| &p.executor == h && p.model.as_deref() == m)
-                && (self.pick.is_some() || live.is_some())
-        };
-        let harnesses: Vec<_> = models::harnesses(state)
-            .into_iter()
-            .filter(|h| live.as_ref().is_none_or(|l| &h.id == l))
-            .collect();
-        let model_row = |h: &models::HarnessChoice, m: &models::ModelChoice, two_lines: bool| {
-            let (id, model) = (h.id.clone(), m.id.clone());
-            let row = menu_row(theme, format!("pick-model-{}", m.id), h.usable)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(m.name.clone())),
-                )
-                .when(chosen(&h.id, Some(&m.id)), |r| r.child(check(theme)))
-                .when(h.usable, |r| {
-                    r.on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_model(id.clone(), Some(model.clone()), cx);
-                    }))
-                });
-            match (two_lines, &m.description) {
-                (true, Some(about)) => row.flex_wrap().py(px(5.0)).child(
-                    div()
-                        .w_full()
-                        .text_size(px(12.0))
-                        .text_color(theme.muted)
-                        .child(SharedString::from(about.clone())),
-                ),
-                _ => row,
-            }
-        };
-        let default_row = |h: &models::HarnessChoice| {
-            let id = h.id.clone();
-            menu_row(theme, format!("pick-harness-{}", h.id), h.usable)
-                .child(div().flex_1().child("Default model"))
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.faint)
-                        .child(SharedString::from(format!("{} decides", h.name))),
-                )
-                .when(chosen(&h.id, None), |r| r.child(check(theme)))
-                .when(h.usable, |r| {
-                    r.on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_model(id.clone(), None, cx);
-                    }))
-                })
-        };
-
-        let panel = menu(theme, "model-picker", 296.0);
-        // "More …": every model of one harness, with what the CLI says each is for.
-        if let Some(h) = self
-            .picker_drill
+        let view = self.picker_view(cx);
+        let switch_note = view
+            .live
             .as_ref()
-            .and_then(|id| harnesses.iter().find(|h| &h.id == id))
-        {
-            return panel
-                .child(
-                    menu_row(theme, "picker-back".to_owned(), true)
-                        .text_color(theme.muted)
-                        .child(icon(Icon::Back, 12.0, theme.muted))
-                        .child(SharedString::from(format!(
-                            "{} \u{b7} {} models",
-                            h.name,
-                            h.models.len()
-                        )))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.picker_drill = None;
-                            cx.notify();
-                        })),
-                )
-                .when(live.is_none(), |p| p.child(default_row(h)))
-                .child(
-                    div()
-                        .id("picker-scroll")
-                        .max_h(px(320.0))
-                        .overflow_y_scroll()
-                        .children(h.models.iter().map(|m| model_row(h, m, true))),
-                );
-        }
-
-        let title = if live.is_some() {
-            "Model \u{b7} this run"
-        } else if home {
-            "Model \u{b7} new task"
-        } else {
-            "Model \u{b7} next run"
-        };
-        let auto = home.then(|| {
-            let now = match &self.preview {
-                Preview::Ready(d) => routing::view(d)
-                    .chosen
-                    .map_or("Reno picks".to_owned(), |c| {
-                        format!("Reno picks \u{2014} now {}", c.name)
-                    }),
-                Preview::Unavailable(_) => "Route unavailable".to_owned(),
-                _ => "Reno picks".to_owned(),
-            };
-            menu_row(theme, "pick-harness-auto".to_owned(), true)
-                .flex_wrap()
-                .py(px(5.0))
-                .child(icon(Icon::Route, 13.0, theme.muted))
-                .child(div().flex_1().child("Auto"))
-                .when(self.pick.is_none(), |r| r.child(check(theme)))
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(4.0))
-                        .text_size(px(12.0))
-                        .text_color(theme.muted)
-                        .child(SharedString::from(now))
-                        .child(
-                            div()
-                                .id("why")
-                                .debug_selector(|| "why".to_owned())
-                                .text_color(theme.warning)
-                                .border_b_1()
-                                .border_color(theme.warning.opacity(0.6))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.why_open = !this.why_open;
-                                    this.close_picker(cx);
-                                }))
-                                .child("why?"),
-                        ),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.pick = None;
-                    this.close_picker(cx);
-                    this.refresh_preview(cx);
-                }))
-        });
-        let sections = harnesses.iter().map(|h| {
-            let status: Option<(String, gpui::Hsla)> = if !h.usable {
-                Some(("signed out".to_owned(), theme.warning))
-            } else if !h.live {
-                Some((format!("{}'s own list", h.name), theme.faint))
-            } else {
-                None
-            };
-            let current = shown
-                .as_ref()
-                .filter(|p| p.executor == h.id)
-                .and_then(|p| p.model.as_deref());
-            let (listed, hidden) = models::folded(&h.models, current);
-            let id = h.id.clone();
-            div()
-                .flex()
-                .flex_col()
-                .child(div().h(px(1.0)).mx(px(6.0)).my(px(5.0)).bg(theme.hairline))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("harness-head-{}", h.id)))
-                        .debug_selector({
-                            let id = format!("harness-head-{}", h.id);
-                            move || id.clone()
-                        })
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .px(px(10.0))
-                        .pt(px(4.0))
-                        .pb(px(2.0))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.muted)
-                        .child(kit::exec_glyph(theme, h.id.as_str(), 13.0))
-                        .child(div().flex_1().child(SharedString::from(h.name.clone())))
-                        .when_some(status, |d, (words, tone)| {
-                            d.child(
-                                div()
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_color(tone)
-                                    .child(SharedString::from(words)),
-                            )
-                        }),
-                )
-                .when(h.models.is_empty() && live.is_none(), |d| {
-                    d.child(default_row(h))
-                })
-                .children(listed.into_iter().map(|m| model_row(h, m, false)))
-                .when(hidden > 0, |d| {
-                    d.child(
-                        menu_row(theme, format!("more-{}", h.id), true)
-                            .text_color(theme.muted)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(SharedString::from(format!("More {} models", h.name))),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.faint)
-                                    .child(SharedString::from(hidden.to_string())),
-                            )
-                            .child(icon(Icon::Fwd, 12.0, theme.faint))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.picker_drill = Some(id.clone());
-                                cx.notify();
-                            })),
-                    )
-                })
-        });
-        let switch_note = live
-            .as_ref()
-            .and_then(|l| harnesses.iter().find(|h| &h.id == l))
+            .and_then(|l| view.harnesses.iter().find(|h| &h.id == l))
             .is_some_and(|h| h.switches)
             .then(|| {
                 div()
-                    .px(px(10.0))
-                    .pt(px(4.0))
-                    .pb(px(4.0))
+                    .px(px(16.0))
+                    .pb(px(6.0))
                     .text_size(px(12.0))
                     .text_color(theme.muted)
                     .child("Switching keeps the conversation; it applies from its next step.")
             });
-        panel
-            .child(
-                div()
-                    .px(px(10.0))
-                    .pt(px(4.0))
-                    .pb(px(2.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.muted)
-                    .child(title),
+        let account = Self::footer_harness(&view).map(|h| self.account_row(theme, h, cx));
+        menu(theme, "model-picker", WIDTH)
+            .p_0()
+            .key_context("ModelPicker")
+            .track_focus(&self.picker_focus)
+            .on_key_down(cx.listener(Self::on_picker_key))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| window.focus(&this.picker_focus, cx)),
             )
-            .children(auto)
-            .child(
-                div()
-                    .id("picker-list")
-                    .max_h(px(340.0))
-                    .overflow_y_scroll()
-                    .children(sections),
-            )
+            .child(self.rail(theme, &view, cx))
+            .when(Self::searchable(&view.tab), |p| {
+                p.child(self.search_field(theme, &view, cx))
+            })
+            .child(self.picker_list(theme, &view, cx))
             .children(switch_note)
+            .child(
+                div()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(theme.hairline)
+                    .p(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .children(account)
+                    .child(self.effort_section(theme, &view, cx)),
+            )
+    }
+}
+
+/// The short word a cell shows: `med` for medium, `xhigh` and `max` as the harness says them.
+fn effort_word(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Minimal => "min",
+        Effort::Medium => "med",
+        other => other.as_str(),
     }
 }

@@ -165,25 +165,6 @@ pub(crate) fn chip_words(state: &State, pick: &Pick) -> (String, Option<String>)
     (model_name(state, &pick.executor, model), extra)
 }
 
-/// How many of a harness's models the picker lists before "More …" (in the CLI's order).
-pub(crate) const FOLD: usize = 4;
-
-/// The models listed before "More …": the first [`FOLD`], plus the chosen one when it is further
-/// down, so a choice is never hidden. Also how many stay behind "More".
-pub(crate) fn folded<'a>(
-    models: &'a [ModelChoice],
-    chosen: Option<&str>,
-) -> (Vec<&'a ModelChoice>, usize) {
-    let shown: Vec<_> = models
-        .iter()
-        .enumerate()
-        .filter(|(i, m)| *i < FOLD || chosen == Some(m.id.as_str()))
-        .map(|(_, m)| m)
-        .collect();
-    let hidden = models.len() - shown.len();
-    (shown, hidden)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -308,44 +289,5 @@ mod tests {
         assert_eq!(haiku.efforts, [Effort::Low, Effort::Medium, Effort::High]);
         assert_eq!(haiku.default_effort, Some(Effort::Medium));
         assert_eq!(model_name(&state, &claude, "sonnet"), "sonnet");
-    }
-
-    fn choice(id: &str) -> ModelChoice {
-        ModelChoice {
-            id: id.to_owned(),
-            name: id.to_owned(),
-            efforts: Vec::new(),
-            default_effort: None,
-            description: None,
-        }
-    }
-
-    #[test]
-    fn the_picker_folds_after_four_but_never_hides_the_choice() {
-        let all: Vec<_> = ["a", "b", "c", "d", "e", "f", "g"]
-            .iter()
-            .map(|id| choice(id))
-            .collect();
-        let ids = |(shown, hidden): (Vec<&ModelChoice>, usize)| {
-            (
-                shown.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
-                hidden,
-            )
-        };
-        assert_eq!(
-            ids(folded(&all, None)),
-            (vec!["a".into(), "b".into(), "c".into(), "d".into()], 3)
-        );
-        assert_eq!(
-            ids(folded(&all, Some("f"))),
-            (
-                vec!["a".into(), "b".into(), "c".into(), "d".into(), "f".into()],
-                2
-            )
-        );
-        assert_eq!(
-            ids(folded(&all[..2], None)),
-            (vec!["a".into(), "b".into()], 0)
-        );
     }
 }

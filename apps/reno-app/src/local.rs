@@ -98,7 +98,6 @@ pub(crate) fn load_composer(path: &Path) -> ComposerPrefs {
 /// Writes the composer's picks to `path` through a temporary file, so a crash never leaves half
 /// a file. A failure only costs the memory; it is logged, not shown.
 #[allow(clippy::print_stderr)]
-#[allow(dead_code)] // the picker saves in the next commit
 pub(crate) fn save_composer(path: &Path, prefs: &ComposerPrefs) {
     let write = || -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(prefs)?;

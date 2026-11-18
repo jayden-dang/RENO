@@ -132,7 +132,6 @@ impl RunScreen {
         &self.run
     }
 
-    #[cfg(test)]
     pub(crate) fn steer_input(&self) -> &Entity<Composer> {
         &self.steer
     }

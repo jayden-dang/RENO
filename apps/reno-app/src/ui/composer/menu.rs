@@ -111,3 +111,24 @@ pub(super) fn menu_row(theme: &Theme, id: String, enabled: bool) -> gpui::Statef
 pub(super) fn check(theme: &Theme) -> gpui::Svg {
     icon(Icon::Check, 14.0, theme.accent)
 }
+
+/// A tooltip: one line of text on the popover's surface.
+pub(super) struct Tip(pub(super) SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = crate::ui::theme::current(cx);
+        div()
+            .max_w(px(280.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(7.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
+            .shadow_md()
+            .text_size(px(12.0))
+            .text_color(theme.muted)
+            .child(self.0.clone())
+    }
+}

@@ -547,16 +547,22 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
     assert!(painted(vcx, "model-chip"));
     assert!(!painted(vcx, "model-picker"), "the picker starts closed");
     assert!(
-        !painted(vcx, "effort-dots"),
+        !painted(vcx, "chip-effort"),
         "Auto has no model, so no effort"
     );
     click(vcx, "model-chip");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
-    assert!(painted(vcx, "pick-harness-auto"), "Auto is first on Home");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-auto"));
     assert!(
-        painted(vcx, "harness-head-codex"),
-        "every installed harness is offered"
+        painted(vcx, "picker-tab-favourites") && painted(vcx, "picker-tab-auto"),
+        "the rail starts with Favourites and Auto on Home"
     );
+    assert!(
+        painted(vcx, "picker-tab-codex"),
+        "every installed harness has a tab"
+    );
+    assert!(!painted(vcx, "picker-search"), "Auto has no search");
+    click(vcx, "picker-tab-claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
     click(vcx, "pick-model-claude-sonnet-5-5");
     draw(vcx);
     let composer = home_composer(vcx, &root);
@@ -568,11 +574,17 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
             effort: None,
         })
     );
-    assert!(!painted(vcx, "model-picker"), "a choice closes the picker");
     assert!(
-        painted(vcx, "effort-dot-low") && painted(vcx, "effort-dot-max"),
-        "the dots are the model's own levels"
+        painted(vcx, "model-picker"),
+        "a choice keeps the picker open"
     );
+    assert!(
+        painted(vcx, "effort-cell-low") && painted(vcx, "effort-cell-max"),
+        "the cells are the model's own levels"
+    );
+    click(vcx, "model-chip");
+    draw(vcx);
+    assert!(!painted(vcx, "model-picker"), "the chip closes it");
 
     composer.update_in(vcx, |c, window, cx| c.fill("pick test", window, cx));
     draw(vcx);
@@ -606,8 +618,10 @@ fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     assert!(
-        !painted(vcx, "harness-head-codex") && !painted(vcx, "pick-harness-auto"),
-        "a live run keeps its harness: only its models are offered"
+        !painted(vcx, "picker-tab-codex")
+            && !painted(vcx, "picker-tab-auto")
+            && !painted(vcx, "picker-tab-favourites"),
+        "a live run keeps its harness: only its own tab is on the rail"
     );
     click(vcx, "pick-model-claude-haiku-5-5");
     let keeper = crate::tests::run_id("keeper1");
@@ -686,37 +700,40 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
     });
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    assert!(!painted(vcx, "effort-dot-high"), "no effort before a model");
     click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
+    assert!(
+        painted(vcx, "picker-effort") && !painted(vcx, "effort-cell-high"),
+        "no levels before a model"
+    );
+    click(vcx, "picker-tab-claude-code");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     // Haiku takes low to high: no xhigh.
     click(vcx, "pick-model-claude-haiku-5-5");
-    wait_drawn(vcx, |vcx| painted(vcx, "effort-dot-high"));
-    assert!(!painted(vcx, "effort-dot-xhigh"));
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
+    assert!(!painted(vcx, "effort-cell-xhigh"));
     let composer = home_composer(vcx, &root);
-    click(vcx, "effort-dot-high");
+    click(vcx, "effort-cell-high");
     draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
         Some(reno_proto::Effort::High)
     );
-    // Sonnet goes to max; high carries over, since Sonnet takes it too.
-    click(vcx, "model-chip");
-    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
+    // Sonnet goes to max; high carries over, since Sonnet takes it too. The picker stays open.
     click(vcx, "pick-model-claude-sonnet-5-5");
-    wait_drawn(vcx, |vcx| painted(vcx, "effort-dot-xhigh"));
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-xhigh"));
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
         Some(reno_proto::Effort::High)
     );
-    // The chosen dot again goes back to the model's default; then xhigh.
-    click(vcx, "effort-dot-high");
+    // The chosen cell again goes back to the model's default; then xhigh.
+    click(vcx, "effort-cell-high");
     draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
         None
     );
-    click(vcx, "effort-dot-xhigh");
+    click(vcx, "effort-cell-xhigh");
     draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().cloned()),
@@ -725,6 +742,20 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
             model: Some("claude-sonnet-5-5".into()),
             effort: Some(reno_proto::Effort::XHigh),
         })
+    );
+    // Going back to Haiku restores the effort it was left at (high), not Sonnet's.
+    click(vcx, "pick-model-claude-haiku-5-5");
+    draw(vcx);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        Some(reno_proto::Effort::High)
+    );
+    click(vcx, "pick-model-claude-sonnet-5-5");
+    draw(vcx);
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
+        Some(reno_proto::Effort::XHigh),
+        "and Sonnet its own"
     );
     composer.update_in(vcx, |c, window, cx| c.fill("effort test", window, cx));
     draw(vcx);
@@ -760,19 +791,20 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
     let keeper = crate::tests::run_id("keeper1");
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
-    // The demo run reports an alias the harness does not list, so it shows no dots until it
+    // The demo run reports an alias the harness does not list, so it has no levels until it
     // is switched to a listed model.
-    assert!(!painted(vcx, "effort-dots"));
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(!painted(vcx, "effort-cell-high"));
     click(vcx, "pick-model-claude-haiku-5-5");
-    // A live run: the dots show its model's levels, and a click changes nothing.
-    wait_drawn(vcx, |vcx| painted(vcx, "effort-dots"));
+    // A live run: the cells show its model's levels, and a click changes nothing.
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
+    assert!(painted(vcx, "effort-word"));
     let before = composer.read_with(vcx, |c, _| c.pick().cloned());
-    click(vcx, "effort-dot-high");
+    click(vcx, "effort-cell-high");
     draw(vcx);
     assert_eq!(composer.read_with(vcx, |c, _| c.pick().cloned()), before);
-    // Ended: a dot picks the effort the next run starts with.
+    // Ended: a cell picks the effort the next run starts with.
     store.update(vcx, |s, cx| s.cancel_run(keeper.clone(), cx));
     wait_until(vcx, |cx| {
         store.read_with(cx, |s, _| {
@@ -782,10 +814,165 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
         })
     });
     draw(vcx);
-    click(vcx, "effort-dot-high");
+    assert!(!painted(vcx, "model-picker"), "the run ending closes it");
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
+    click(vcx, "effort-cell-high");
     draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
         Some(reno_proto::Effort::High)
+    );
+}
+
+// --- The v2 rail (2026-11-18) ------------------------------------------------------------------
+
+/// Home with the fake daemon's executors loaded and the picker open on `tab`.
+fn open_picker_on<'a>(
+    cx: &'a mut TestAppContext,
+    tab: &str,
+) -> (
+    gpui::Entity<crate::store::Store>,
+    gpui::Entity<crate::app::RootView>,
+    &'a mut gpui::VisualTestContext,
+) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
+    click(vcx, &format!("picker-tab-{tab}"));
+    draw(vcx);
+    (store, root, vcx)
+}
+
+#[gpui::test]
+fn the_search_is_scoped_to_the_tab_and_offers_other_harnesses_apart(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = open_picker_on(cx, "claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-sonnet-5-5"));
+    assert!(painted(vcx, "picker-search"));
+    vcx.simulate_input("haiku");
+    draw(vcx);
+    assert!(painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(
+        !painted(vcx, "pick-model-claude-sonnet-5-5"),
+        "only what matches"
+    );
+    assert_eq!(
+        home_composer(vcx, &root).read_with(vcx, |c, _| c.text().to_owned()),
+        "",
+        "typing goes to the search, not to the text"
+    );
+    vcx.simulate_keystrokes("backspace backspace backspace backspace backspace");
+    draw(vcx);
+    assert!(painted(vcx, "pick-model-claude-sonnet-5-5"));
+    // A name only another harness has is offered under "In other harnesses".
+    vcx.simulate_input("astra");
+    draw(vcx);
+    assert!(painted(vcx, "pick-model-gpt-6-astra"));
+    assert!(!painted(vcx, "pick-model-claude-haiku-5-5"));
+}
+
+#[gpui::test]
+fn escape_and_a_click_outside_close_the_picker_and_the_text_keeps_its_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let (_store, root, vcx) = open_picker_on(cx, "claude-code");
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(!painted(vcx, "model-picker"));
+    // The keyboard is back in the text.
+    draw(vcx);
+    vcx.simulate_input("hi");
+    draw(vcx);
+    assert_eq!(
+        home_composer(vcx, &root).read_with(vcx, |c, _| c.text().to_owned()),
+        "hi"
+    );
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-picker"));
+    vcx.simulate_click(
+        gpui::point(gpui::px(6.0), gpui::px(6.0)),
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    draw(vcx);
+    assert!(!painted(vcx, "model-picker"));
+}
+
+#[gpui::test]
+fn a_starred_model_is_kept_on_the_favourites_tab(cx: &mut TestAppContext) {
+    let (store, _root, vcx) = open_picker_on(cx, "favourites");
+    assert!(
+        !painted(vcx, "pick-model-claude-haiku-5-5"),
+        "nothing is starred yet"
+    );
+    click(vcx, "picker-tab-claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "star-claude-haiku-5-5"));
+    click(vcx, "star-claude-haiku-5-5");
+    draw(vcx);
+    let claude: reno_proto::ExecutorId = "claude-code".parse().unwrap();
+    assert!(store.read_with(vcx, |s, _| {
+        s.composer_prefs().is_favourite(&claude, "claude-haiku-5-5")
+    }));
+    assert!(
+        !painted(vcx, "pick-harness-auto"),
+        "a star is not a pick: the star's click does not reach the row"
+    );
+    click(vcx, "picker-tab-favourites");
+    draw(vcx);
+    assert!(painted(vcx, "pick-model-claude-haiku-5-5"));
+    assert!(!painted(vcx, "pick-model-claude-sonnet-5-5"));
+    // Starred rows lead their harness's own list.
+    click(vcx, "picker-tab-claude-code");
+    draw(vcx);
+    click(vcx, "star-claude-haiku-5-5");
+    draw(vcx);
+    assert!(!store.read_with(vcx, |s, _| {
+        s.composer_prefs().is_favourite(&claude, "claude-haiku-5-5")
+    }));
+}
+
+#[gpui::test]
+fn a_signed_out_harness_wears_a_dot_and_the_account_row_says_who_is_signed_in(
+    cx: &mut TestAppContext,
+) {
+    let (_store, root, vcx) = open_picker_on(cx, "claude-code");
+    assert!(painted(vcx, "picker-tab-warn-codex"), "Codex is signed out");
+    assert!(!painted(vcx, "picker-tab-warn-claude-code"));
+    assert!(painted(vcx, "picker-account-value"));
+    click(vcx, "picker-tab-codex");
+    draw(vcx);
+    assert!(painted(vcx, "picker-account"));
+    click(vcx, "picker-account");
+    draw(vcx);
+    assert!(!painted(vcx, "model-picker"), "it leaves the picker");
+    assert_eq!(
+        root.read_with(vcx, |r, _| r.nav()),
+        crate::nav::Nav::Executors
+    );
+}
+
+#[gpui::test]
+fn the_keyboard_walks_the_tabs_and_the_rows_and_enter_picks(cx: &mut TestAppContext) {
+    let (_store, root, vcx) = open_picker_on(cx, "claude-code");
+    vcx.simulate_keystrokes("down down enter");
+    draw(vcx);
+    let picked = home_composer(vcx, &root).read_with(vcx, |c, _| c.pick().cloned());
+    assert_eq!(
+        picked.map(|p| p.executor.to_string()),
+        Some("claude-code".to_owned())
+    );
+    assert!(painted(vcx, "model-picker"), "a pick keeps it open");
+    vcx.simulate_keystrokes("shift-tab");
+    draw(vcx);
+    assert_eq!(
+        home_composer(vcx, &root).read_with(vcx, |c, _| c.picker_tab().clone()),
+        crate::vm::picker::Tab::Harness("acp.grok".parse().unwrap()),
+        "Shift-Tab goes back one tab: Grok is listed before Claude Code"
     );
 }

@@ -270,7 +270,7 @@ pub(crate) struct RootView {
     appearance_override: Option<Appearance>,
     palette: Option<Entity<Palette>>,
     /// Hears the open run screen ("Open Executors").
-    _run_events: Option<Subscription>,
+    _run_events: Vec<Subscription>,
     /// The run a trigger just started; the Triggers screen keeps showing, the toast says so.
     pending_fired: Option<RunId>,
     focus_handle: FocusHandle,
@@ -291,6 +291,11 @@ impl RootView {
         let executors = cx.new(|cx| ExecutorsScreen::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
         let subscriptions = vec![
+            cx.subscribe_in(
+                &home.read(cx).composer().clone(),
+                window,
+                Self::on_open_executors,
+            ),
             cx.subscribe_in(&runs, window, Self::on_screen_event),
             cx.subscribe_in(&triggers, window, Self::on_screen_event),
             cx.subscribe_in(&executors, window, Self::on_screen_event),
@@ -406,10 +411,21 @@ impl RootView {
             folders_toggled: std::collections::HashSet::new(),
             appearance_override,
             palette: None,
-            _run_events: None,
+            _run_events: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The picker's Account row: look at the harness's login on the Executors screen.
+    fn on_open_executors(
+        &mut self,
+        _: &Entity<composer::Composer>,
+        _: &composer::OpenExecutors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(Nav::Executors, window, cx);
     }
 
     fn on_screen_event(
@@ -528,7 +544,11 @@ impl RootView {
             .update(cx, |store, cx| store.look_at(Some(run.clone()), cx));
         let store = self.store.clone();
         let screen = cx.new(|cx| RunScreen::new(store, run, cx));
-        self._run_events = Some(cx.subscribe_in(&screen, window, Self::on_screen_event));
+        let steer = screen.read(cx).steer_input().clone();
+        self._run_events = vec![
+            cx.subscribe_in(&screen, window, Self::on_screen_event),
+            cx.subscribe_in(&steer, window, Self::on_open_executors),
+        ];
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
         cx.notify();

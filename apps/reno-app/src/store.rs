@@ -293,12 +293,10 @@ impl Store {
     }
 
     /// What the composer's picker remembers.
-    #[allow(dead_code)] // the picker reads it in the next commit
     pub(crate) fn composer_prefs(&self) -> &crate::vm::composer_prefs::ComposerPrefs {
         &self.composer
     }
 
-    #[allow(dead_code)] // the picker writes it in the next commit
     /// Changes what the composer remembers and saves it, when there is a file for it.
     pub(crate) fn update_composer_prefs(
         &mut self,

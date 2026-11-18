@@ -81,6 +81,8 @@ icons! {
     Sidebar => "sidebar",
     Sliders => "sliders",
     Spark => "spark",
+    Star => "star",
+    StarFill => "star-fill",
     Stop => "stop",
     Team => "team",
     Terminal => "terminal",

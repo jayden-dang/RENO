@@ -52,6 +52,7 @@ use crate::attach;
 use crate::store::{Store, StoreEvent};
 use crate::summary;
 use crate::vm::models;
+use crate::vm::picker::Tab;
 use crate::vm::routing::{self, Class, Preview};
 use menu::{check, menu, menu_row};
 
@@ -174,6 +175,11 @@ pub(crate) enum ReasonEvent {
 
 impl EventEmitter<ReasonEvent> for Composer {}
 
+/// The picker's Account row asks for the Executors screen.
+pub(crate) struct OpenExecutors;
+
+impl EventEmitter<OpenExecutors> for Composer {}
+
 /// What a steer box can do for a run in this state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SteerState {
@@ -276,9 +282,18 @@ pub(crate) struct Composer {
     /// The harness · model chosen for the next task (`None`: Auto). On a live run's steer box
     /// it is unused: a live run's model is changed on the daemon (`run.set_model`).
     pick: Option<models::Pick>,
-    /// Whether the harness · model picker is open, and the harness whose "More …" it shows.
+    /// Whether the harness · model picker is open, the tab it views, what is typed in its search,
+    /// and the row the keyboard is on.
     picker_open: bool,
-    picker_drill: Option<ExecutorId>,
+    picker_tab: Tab,
+    picker_query: String,
+    picker_cursor: Option<usize>,
+    /// The keyboard moved the tab: its name shows, as it does on hover.
+    picker_keyboard: bool,
+    /// The picker's own focus, so typing goes to its search and not to the text.
+    picker_focus: FocusHandle,
+    /// The picker closed: the next frame puts the keyboard back in the text.
+    refocus: bool,
     /// Whether the class menu is open.
     class_open: bool,
     /// Where the model chip and the class button were last painted, for their menus to attach
@@ -301,7 +316,7 @@ impl Composer {
         let mut composer = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 if this.picker_open && this.live_run(cx).is_some() != this.picker_for_live {
-                    this.picker_open = false;
+                    this.close_picker(cx);
                 }
                 this.refresh_preview(cx);
                 cx.notify();
@@ -334,7 +349,12 @@ impl Composer {
             labels: None,
             pick: None,
             picker_open: false,
-            picker_drill: None,
+            picker_tab: Tab::Favourites,
+            picker_query: String::new(),
+            picker_cursor: None,
+            picker_keyboard: false,
+            picker_focus: cx.focus_handle(),
+            refocus: false,
             class_open: false,
             chip_bounds: Rc::default(),
             class_bounds: Rc::default(),
@@ -380,6 +400,12 @@ impl Composer {
     #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         self.model.text()
+    }
+
+    /// The tab the picker views.
+    #[cfg(test)]
+    pub(crate) fn picker_tab(&self) -> &Tab {
+        &self.picker_tab
     }
 
     /// The harness · model chosen for the next task; `None` is Auto.
@@ -699,7 +725,7 @@ impl Composer {
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.class_open = !this.class_open;
-                this.picker_open = false;
+                this.close_picker(cx);
                 cx.notify();
             }))
     }
@@ -1589,6 +1615,9 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
+        if std::mem::take(&mut self.refocus) {
+            window.focus(&self.focus_handle, cx);
+        }
         let focused = self.focus_handle.is_focused(window);
         let entity = cx.entity();
         let reason = self.mode == Mode::Reason;
@@ -1649,7 +1678,6 @@ impl Render for Composer {
                 .child(self.class_button(&theme, cx))
                 .child(div().flex_1())
                 .child(self.model_chip(&theme, cx))
-                .children(self.effort_dots(&theme, cx))
                 .child(div().w(px(4.0)))
                 .child(self.action_button(&theme, cx)),
             Mode::Reason => div()
@@ -1668,7 +1696,6 @@ impl Render for Composer {
                 .px(px(14.0))
                 .pb(px(12.0))
                 .child(self.model_chip(&theme, cx))
-                .children(self.effort_dots(&theme, cx))
                 .child(div().flex_1())
                 .child(self.action_button(&theme, cx)),
         };
@@ -1796,9 +1823,16 @@ impl Render for Composer {
             .when(home && self.why_open, |c| {
                 c.child(self.why_panel(&theme, connected))
             })
-            .children(picker)
             .children(classes);
-        div().w_full().flex().flex_col().children(note).child(boxed)
+        // The picker is a sibling of the box, not inside it: it has its own keyboard (a search
+        // field), which the box's key bindings (Backspace, Enter, Escape) must not see.
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(note)
+            .child(boxed)
+            .children(picker)
     }
 }
 
