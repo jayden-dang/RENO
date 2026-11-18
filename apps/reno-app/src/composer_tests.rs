@@ -569,6 +569,7 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().cloned()),
         Some(crate::vm::models::Pick {
+            options: Default::default(),
             executor: "claude-code".parse().unwrap(),
             model: Some("claude-sonnet-5-5".into()),
             effort: None,
@@ -738,6 +739,7 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().cloned()),
         Some(crate::vm::models::Pick {
+            options: Default::default(),
             executor: "claude-code".parse().unwrap(),
             model: Some("claude-sonnet-5-5".into()),
             effort: Some(reno_proto::Effort::XHigh),
@@ -975,4 +977,93 @@ fn the_keyboard_walks_the_tabs_and_the_rows_and_enter_picks(cx: &mut TestAppCont
         crate::vm::picker::Tab::Harness("acp.grok".parse().unwrap()),
         "Shift-Tab goes back one tab: Grok is listed before Claude Code"
     );
+}
+
+// --- Context window and plan usage ---------------------------------------------------------------
+
+#[gpui::test]
+fn the_context_window_is_chosen_per_model_goes_with_the_task_and_shows_on_the_run(
+    cx: &mut TestAppContext,
+) {
+    let (store, root, vcx) = open_picker_on(cx, "claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-opus-5-5"));
+    assert!(!painted(vcx, "picker-context"), "no model, no row");
+    click(vcx, "pick-model-claude-haiku-5-5");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "picker-context"),
+        "Haiku offers no choice of window"
+    );
+    click(vcx, "pick-model-claude-opus-5-5");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-context"));
+    assert!(!painted(vcx, "context-choice-200k"), "the sizes are folded");
+    click(vcx, "picker-context");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-choice-200k"));
+    click(vcx, "context-choice-200k");
+    draw(vcx);
+    let composer = home_composer(vcx, &root);
+    let window = |vcx: &mut gpui::VisualTestContext| {
+        composer.read_with(vcx, |c, _| {
+            c.pick()
+                .and_then(|p| p.options.get("contextWindow").cloned())
+        })
+    };
+    assert_eq!(window(vcx).as_deref(), Some("200k"));
+    // Remembered for the model: another model and back.
+    click(vcx, "pick-model-claude-sonnet-5-5");
+    draw(vcx);
+    assert_eq!(window(vcx), None, "Sonnet has none of its own yet");
+    click(vcx, "pick-model-claude-opus-5-5");
+    draw(vcx);
+    assert_eq!(window(vcx).as_deref(), Some("200k"), "Opus kept its own");
+    let claude: reno_proto::ExecutorId = "claude-code".parse().unwrap();
+    assert_eq!(
+        store.read_with(vcx, |s, _| s
+            .composer_prefs()
+            .options_for(&claude, "claude-opus-5-5")
+            .and_then(|o| o.get("contextWindow").cloned())),
+        Some("200k".to_owned())
+    );
+
+    composer.update_in(vcx, |c, window, cx| c.fill("context test", window, cx));
+    draw(vcx);
+    click(vcx, "send");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+    let run = root
+        .read_with(vcx, |r, cx| {
+            r.run_screen().map(|s| s.read(cx).run_id().clone())
+        })
+        .unwrap();
+    store.read_with(vcx, |s, _| {
+        assert_eq!(
+            s.state().run(&run).unwrap().model_options["contextWindow"],
+            "200k"
+        );
+    });
+    // The harness reports the fill: a ring appears beside the chip, with its card.
+    wait_drawn(vcx, |vcx| painted(vcx, "context-ring"));
+    click(vcx, "context-ring");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-card"));
+    click(vcx, "context-ring");
+    draw(vcx);
+    assert!(!painted(vcx, "context-card"), "the ring toggles its card");
+}
+
+#[gpui::test]
+fn the_account_row_carries_a_usage_ring_for_a_signed_in_harness_and_its_card(
+    cx: &mut TestAppContext,
+) {
+    let (_store, _root, vcx) = open_picker_on(cx, "claude-code");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-usage"));
+    assert!(!painted(vcx, "usage-card"));
+    click(vcx, "picker-usage");
+    wait_drawn(vcx, |vcx| painted(vcx, "usage-card"));
+    assert!(painted(vcx, "model-picker"), "the picker stays under it");
+    // Codex is signed out in the demo: no meter, whatever the daemon carries.
+    click(vcx, "picker-tab-codex");
+    draw(vcx);
+    assert!(!painted(vcx, "picker-usage"));
+    assert!(!painted(vcx, "usage-card"));
 }

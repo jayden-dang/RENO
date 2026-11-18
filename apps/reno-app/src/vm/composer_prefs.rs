@@ -89,26 +89,11 @@ impl ComposerPrefs {
     }
 
     /// The options last chosen for this model.
-    #[allow(dead_code)] // the context window row of the next commit uses it
     pub(crate) fn options_for(&self, harness: &ExecutorId, model: &str) -> Option<&Options> {
         self.model_options.get(harness.as_str())?.get(model)
     }
 
-    /// The choice last made for one option of a model.
-    #[allow(dead_code)] // the context window row of the next commit uses it
-    pub(crate) fn option_for(
-        &self,
-        harness: &ExecutorId,
-        model: &str,
-        option: &str,
-    ) -> Option<&str> {
-        self.options_for(harness, model)?
-            .get(option)
-            .map(String::as_str)
-    }
-
     /// Remembers one option's choice for a model.
-    #[allow(dead_code)] // the context window row of the next commit uses it
     pub(crate) fn remember_option(
         &mut self,
         harness: &ExecutorId,
@@ -176,14 +161,26 @@ mod tests {
         prefs.remember_option(&claude, "opus", "contextWindow", "200k");
         prefs.remember_option(&claude, "sonnet", "contextWindow", "1m");
         assert_eq!(
-            prefs.option_for(&claude, "opus", "contextWindow"),
+            prefs
+                .options_for(&claude, "opus")
+                .and_then(|o| o.get("contextWindow"))
+                .map(String::as_str),
             Some("200k")
         );
         assert_eq!(
-            prefs.option_for(&claude, "sonnet", "contextWindow"),
+            prefs
+                .options_for(&claude, "sonnet")
+                .and_then(|o| o.get("contextWindow"))
+                .map(String::as_str),
             Some("1m")
         );
-        assert_eq!(prefs.option_for(&claude, "haiku", "contextWindow"), None);
+        assert_eq!(
+            prefs
+                .options_for(&claude, "haiku")
+                .and_then(|o| o.get("contextWindow"))
+                .map(String::as_str),
+            None
+        );
     }
 
     #[test]

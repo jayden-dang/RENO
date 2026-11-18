@@ -1048,6 +1048,28 @@ impl Store {
         );
     }
 
+    /// `executor.refresh` for usage only: reads the account's plan meters again. The daemon
+    /// reads at most once per 30 s, so a person looking at the picker may call this freely;
+    /// nothing calls it on a timer (ARCH-10). A failure is silent: the meters stay as they were.
+    pub(crate) fn refresh_usage(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.state.supports(reno_proto::FEATURE_EXECUTOR_USAGE) {
+            return;
+        }
+        self.call(
+            "Could not read the plan usage",
+            move |client| async move { client.refresh_executor_usage(Some(id)).await },
+            cx,
+            D {
+                ok: Box::new(|store, list, cx| {
+                    store.apply(Update::Executors(list), cx);
+                    cx.notify();
+                }),
+                err: Box::new(|_, cx| cx.notify()),
+                quiet: true,
+            },
+        );
+    }
+
     /// `executor.install`: fetches the executor's adapter. It waits for the daemon, which can
     /// take minutes; the new health arrives through `executors.watch`.
     pub(crate) fn install_executor(&mut self, id: ExecutorId, cx: &mut Context<Self>) {

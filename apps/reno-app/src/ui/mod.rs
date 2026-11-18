@@ -9,6 +9,7 @@ pub(crate) mod motion;
 pub(crate) mod notice;
 pub(crate) mod page;
 pub(crate) mod palette;
+pub(crate) mod ring;
 pub(crate) mod running_pill;
 pub(crate) mod sidebar;
 pub(crate) mod text_area;

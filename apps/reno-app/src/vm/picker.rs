@@ -299,6 +299,7 @@ mod tests {
 
     fn model(id: &str, name: &str, about: Option<&str>) -> ModelChoice {
         ModelChoice {
+            options: Vec::new(),
             id: id.to_owned(),
             name: name.to_owned(),
             efforts: Vec::new(),
@@ -309,6 +310,7 @@ mod tests {
 
     fn harness(id: &str, usable: bool, models: Vec<ModelChoice>) -> HarnessChoice {
         HarnessChoice {
+            usage: None,
             id: id.parse().unwrap(),
             name: id.to_owned(),
             models,
@@ -355,6 +357,7 @@ mod tests {
     fn the_picker_opens_on_the_shown_harness_else_auto_else_favourites() {
         let all = [harness("claude-code", true, vec![])];
         let pick = Pick {
+            options: Default::default(),
             executor: id("claude-code"),
             model: None,
             effort: None,

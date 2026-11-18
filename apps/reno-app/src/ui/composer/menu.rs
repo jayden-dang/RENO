@@ -15,16 +15,18 @@ use crate::ui::theme::Theme;
 impl Composer {
     /// An open menu, attached to the element whose bounds are in `at`: below it on Home (the
     /// composer sits high), above it on a run; it flips when it would leave the window. A click
-    /// outside it, but not on its own trigger (which toggles), closes it.
+    /// outside it, but not on its own trigger (which toggles), closes it. `below` overrides the
+    /// side: a card opened from inside the picker always hangs below its ring.
     pub(super) fn popover(
         &self,
         at: &Rc<Cell<Option<Bounds<Pixels>>>>,
         content: gpui::Stateful<gpui::Div>,
         close: fn(&mut Self, &mut Context<Self>),
+        below: Option<bool>,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Deferred> {
         let bounds = at.get()?;
-        let below = self.mode == Mode::Home;
+        let below = below.unwrap_or(self.mode == Mode::Home);
         let (corner, anchor, dy) = if below {
             (Anchor::BottomRight, Anchor::TopRight, 6.0)
         } else {
@@ -131,4 +133,30 @@ impl gpui::Render for Tip {
             .text_color(theme.muted)
             .child(self.0.clone())
     }
+}
+
+/// A card: a heading and lines of words, on the popover's surface.
+pub(super) fn card(
+    theme: &Theme,
+    id: &'static str,
+    heading: &str,
+    lines: &[String],
+) -> gpui::Stateful<gpui::Div> {
+    menu(theme, id, 232.0)
+        .p(px(8.0))
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(SharedString::from(heading.to_owned())),
+        )
+        .children(lines.iter().map(|line| {
+            div()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .whitespace_nowrap()
+                .text_color(theme.muted)
+                .child(SharedString::from(line.clone()))
+        }))
 }

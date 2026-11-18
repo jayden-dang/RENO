@@ -5,13 +5,14 @@ use gpui::{
     App, Context, FontWeight, Hsla, KeyDownEvent, MouseButton, SharedString, Window, canvas, div,
     prelude::*, px,
 };
-use reno_proto::{Effort, ExecutorId};
+use reno_proto::{Effort, ExecutorId, MODEL_OPTION_CONTEXT_WINDOW};
 
 use super::menu::{Tip, check, menu, menu_row};
 use super::{Composer, Mode, OpenExecutors};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit;
 use crate::ui::theme::Theme;
+use crate::vm::context;
 use crate::vm::models;
 use crate::vm::models::{Account, HarnessChoice, Pick};
 use crate::vm::picker::{self, Listing, Row, Tab, TabView};
@@ -23,14 +24,14 @@ const WIDTH: f32 = 344.0;
 const LIST_MAX: f32 = 248.0;
 
 /// What the open picker shows, worked out once per frame and per key.
-struct View {
-    harnesses: Vec<HarnessChoice>,
+pub(super) struct View {
+    pub(super) harnesses: Vec<HarnessChoice>,
     /// The harness of the live run this box steers: the only one it lists.
-    live: Option<ExecutorId>,
-    shown: Option<Pick>,
-    tabs: Vec<TabView>,
-    tab: Tab,
-    listing: Listing,
+    pub(super) live: Option<ExecutorId>,
+    pub(super) shown: Option<Pick>,
+    pub(super) tabs: Vec<TabView>,
+    pub(super) tab: Tab,
+    pub(super) listing: Listing,
 }
 
 impl Composer {
@@ -65,11 +66,12 @@ impl Composer {
             executor: r.executor.clone(),
             model: models::in_use(state, run),
             effort: r.effort,
+            options: r.model_options.clone(),
         })
     }
 
     /// What the picker shows now: the rail, the viewed tab and its rows for the query.
-    fn picker_view(&self, cx: &App) -> View {
+    pub(super) fn picker_view(&self, cx: &App) -> View {
         let store = self.store.read(cx);
         let live = self.live_run(cx).map(|r| r.executor.clone());
         let harnesses: Vec<_> = models::harnesses(store.state())
@@ -219,7 +221,15 @@ impl Composer {
             );
             (tab, live.is_some())
         };
+        if let Tab::Harness(id) = &tab {
+            // The picker is being looked at: read the account's usage again (the daemon reads
+            // at most once per 30 s; nothing polls, ARCH-10).
+            let id = id.clone();
+            self.store
+                .update(cx, |store, cx| store.refresh_usage(id, cx));
+        }
         self.picker_open = true;
+        self.picker_window_open = false;
         self.picker_for_live = live;
         self.picker_tab = tab;
         self.picker_query.clear();
@@ -233,6 +243,8 @@ impl Composer {
     pub(super) fn close_picker(&mut self, cx: &mut Context<Self>) {
         if self.picker_open {
             self.picker_open = false;
+            self.usage_card_open = false;
+            self.picker_window_open = false;
             // The next frame gives the keyboard back to the text.
             self.refocus = true;
             cx.notify();
@@ -256,26 +268,37 @@ impl Composer {
             cx.notify();
             return;
         }
-        let effort = {
+        let (effort, options) = {
             let store = self.store.read(cx);
             let listed = model
                 .as_deref()
                 .and_then(|m| models::model(store.state(), &executor, m));
+            let options = listed.as_ref().map_or_else(Default::default, |m| {
+                context::options_for_model(
+                    m,
+                    model
+                        .as_deref()
+                        .and_then(|id| store.composer_prefs().options_for(&executor, id)),
+                )
+            });
             let remembered = model
                 .as_deref()
                 .and_then(|m| store.composer_prefs().effort_for(&executor, m));
             let carried = self.shown_pick(cx).and_then(|p| p.effort);
-            picker::effort_on_pick(
+            let effort = picker::effort_on_pick(
                 remembered,
                 carried,
                 &listed.map(|m| m.efforts).unwrap_or_default(),
-            )
+            );
+            (effort, options)
         };
         self.pick = Some(Pick {
             executor,
             model,
             effort,
+            options,
         });
+        self.picker_window_open = false;
         self.refresh_preview(cx);
         cx.notify();
     }
@@ -308,6 +331,32 @@ impl Composer {
         cx.notify();
     }
 
+    /// A click on a size of the context window: the next task's, remembered for the model.
+    fn choose_option(&mut self, option: &str, choice: &str, cx: &mut Context<Self>) {
+        if self.live_run(cx).is_some() {
+            return;
+        }
+        let Some(mut pick) = self.shown_pick(cx) else {
+            return;
+        };
+        let Some(model) = pick.model.clone() else {
+            return;
+        };
+        pick.options.insert(option.to_owned(), choice.to_owned());
+        let (executor, option, choice) =
+            (pick.executor.clone(), option.to_owned(), choice.to_owned());
+        self.store.update(cx, |store, cx| {
+            store.update_composer_prefs(
+                |p| p.remember_option(&executor, &model, &option, &choice),
+                cx,
+            );
+        });
+        self.pick = Some(pick);
+        self.picker_window_open = false;
+        self.refresh_preview(cx);
+        cx.notify();
+    }
+
     fn toggle_star(&mut self, executor: &ExecutorId, model: &str, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| {
             store.update_composer_prefs(
@@ -321,6 +370,7 @@ impl Composer {
     }
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.usage_card_open = false;
         self.picker_tab = tab;
         self.picker_query.clear();
         self.picker_cursor = None;
@@ -804,7 +854,7 @@ impl Composer {
     }
 
     /// The harness the footer speaks about: the viewed tab's, else the shown pick's.
-    fn footer_harness(view: &View) -> Option<&HarnessChoice> {
+    pub(super) fn footer_harness(view: &View) -> Option<&HarnessChoice> {
         let id = match &view.tab {
             Tab::Harness(id) => Some(id),
             _ => view.shown.as_ref().map(|p| &p.executor),
@@ -839,11 +889,85 @@ impl Composer {
                     .text_color(tone)
                     .child(SharedString::from(words)),
             )
+            .children(self.usage_ring(theme, harness, cx))
             .child(icon(Icon::Fwd, 12.0, theme.faint))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.close_picker(cx);
                 cx.emit(OpenExecutors);
             }))
+    }
+
+    /// The Context window row, when the shown model offers a choice of sizes: the size chosen
+    /// for the next task (a click lists the sizes), or on a live run the live fill with the
+    /// choice locked until the next run.
+    fn context_row(&self, theme: &Theme, view: &View, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let shown = view.shown.as_ref()?;
+        let state = self.store.read(cx).state();
+        let model = models::model(state, &shown.executor, shown.model.as_deref()?)?;
+        let option = context::window_option(&model)?;
+        let chosen = shown.options.get(&option.id).map(String::as_str);
+        let label = context::chosen_label(option, chosen);
+        let live = self.live_run(cx);
+        let value = live
+            .and_then(|run| context::live_words(models::context_usage(state, &run.run_id)))
+            .unwrap_or_else(|| label.clone());
+        let open = self.picker_window_open && live.is_none();
+        let row = menu_row(theme, "picker-context".to_owned(), live.is_none())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.muted)
+                    .child("Context window"),
+            )
+            .child(
+                div()
+                    .id("picker-context-value")
+                    .debug_selector(|| "picker-context-value".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_right()
+                    .text_size(px(12.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(value)),
+            )
+            .when(live.is_none(), |r| {
+                r.child(icon(
+                    if open { Icon::ChevDown } else { Icon::Fwd },
+                    12.0,
+                    theme.faint,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.picker_window_open = !this.picker_window_open;
+                    cx.notify();
+                }))
+            });
+        let mut section = div().flex().flex_col().child(row);
+        if live.is_some() {
+            section = section.child(
+                div()
+                    .px(px(10.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.5))
+                    .text_color(theme.faint)
+                    .child(SharedString::from(format!("{label} \u{b7} next run"))),
+            );
+        }
+        if open {
+            let current = context::chosen_choice(option, chosen).to_owned();
+            section = section.children(option.choices.iter().map(|choice| {
+                let (id, name) = (choice.id.clone(), choice.label.clone());
+                let selected = choice.id == current;
+                menu_row(theme, format!("context-choice-{}", choice.id), true)
+                    .pl(px(22.0))
+                    .child(div().flex_1().child(SharedString::from(name)))
+                    .when(selected, |r| r.child(check(theme)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_option(MODEL_OPTION_CONTEXT_WINDOW, &id, cx);
+                    }))
+            }));
+        }
+        Some(section)
     }
 
     /// EFFORT and its track: one cell per level the shown model lists.
@@ -1024,6 +1148,7 @@ impl Composer {
                     .flex()
                     .flex_col()
                     .children(account)
+                    .children(self.context_row(theme, &view, cx))
                     .child(self.effort_section(theme, &view, cx)),
             )
     }

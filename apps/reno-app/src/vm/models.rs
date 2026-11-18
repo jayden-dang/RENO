@@ -4,6 +4,8 @@
 //!
 //! `None` as a pick is "Auto": the router chooses the harness and the harness its default model.
 
+use std::collections::BTreeMap;
+
 use reno_client::State;
 use reno_proto::{
     Effort, ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
@@ -19,6 +21,8 @@ pub(crate) struct Pick {
     pub(crate) executor: ExecutorId,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<Effort>,
+    /// The launch options chosen (`contextWindow` to `1m`); empty: the model's defaults.
+    pub(crate) options: BTreeMap<String, String>,
 }
 
 /// One model on offer.
@@ -33,6 +37,8 @@ pub(crate) struct ModelChoice {
     pub(crate) default_effort: Option<Effort>,
     /// What the CLI says it is for ("Fastest for quick answers"), when it says.
     pub(crate) description: Option<String>,
+    /// What else it offers at launch (the context window of a Claude model).
+    pub(crate) options: Vec<reno_proto::ModelOption>,
 }
 
 /// One harness on offer.
@@ -49,6 +55,8 @@ pub(crate) struct HarnessChoice {
     pub(crate) switches: bool,
     /// Who is signed in, as the harness reported it.
     pub(crate) account: Account,
+    /// The account's plan meters, when the daemon has them.
+    pub(crate) usage: Option<reno_proto::PlanUsage>,
 }
 
 /// The harness's login, for the picker's Account row.
@@ -93,6 +101,7 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
                 efforts: m.efforts,
                 default_effort: m.default_effort,
                 description: m.description,
+                options: m.options,
                 id: m.id,
             })
             .collect(),
@@ -100,6 +109,7 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
         usable: !signed_out,
         switches: info.descriptor.caps.model_switch,
         account,
+        usage: health.and_then(|h| h.plan_usage.clone()),
     })
 }
 
@@ -139,6 +149,13 @@ pub(crate) fn in_use(state: &State, run: &RunId) -> Option<String> {
         })
     });
     reported.or_else(|| state.run(run).and_then(|r| r.model.clone()))
+}
+
+/// How full the run's context is: the latest the harness reported.
+pub(crate) fn context_usage(state: &State, run: &RunId) -> reno_proto::ContextUsage {
+    state.transcript(run).map_or_else(Default::default, |t| {
+        reno_proto::ContextUsage::latest(t.events.iter().map(|(_, event)| event))
+    })
 }
 
 /// One model of a harness, when the harness lists it.
@@ -263,6 +280,7 @@ mod tests {
         let state = state();
         let claude: ExecutorId = "claude-code".parse().unwrap();
         let pick = |model: Option<&str>| Pick {
+            options: Default::default(),
             executor: claude.clone(),
             model: model.map(str::to_owned),
             effort: Some(Effort::High),
