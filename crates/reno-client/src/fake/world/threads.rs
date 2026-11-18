@@ -21,9 +21,13 @@ pub(in crate::fake) struct ThreadState {
 }
 
 /// The thread a run starts: `thr_` plus the run's suffix, as the daemon names it.
+#[allow(
+    clippy::expect_used,
+    reason = "a run id's suffix is always a valid thread suffix"
+)]
 pub(in crate::fake) fn thread_of_run(run: &RunId) -> ThreadId {
     let suffix = run.as_str().trim_start_matches("run_");
-    ThreadId::from_suffix(suffix).unwrap_or_else(|_| ThreadId::from_suffix("x").expect("an id"))
+    ThreadId::from_suffix(suffix).expect("a run id's suffix is a valid thread suffix")
 }
 
 /// The idle limit the fake shows: seven days, as the daemon's default.
