@@ -191,7 +191,7 @@ unsafe extern "C-unwind" fn bundle_identifier_override(
 /// system can resolve `id` to an installed app. Once per process.
 pub(crate) fn adopt_bundle_id(id: &str) {
     static ATTEMPTED: OnceLock<()> = OnceLock::new();
-    if ATTEMPTED.set(()).is_err() || id.is_empty() {
+    if id.is_empty() || ATTEMPTED.set(()).is_err() {
         return;
     }
     if NSBundle::mainBundle().bundleIdentifier().is_some() {
@@ -209,8 +209,9 @@ pub(crate) fn adopt_bundle_id(id: &str) {
     let override_fn: BundleIdentifierFn = bundle_identifier_override;
     // SAFETY: the replacement has the replaced method's signature (object, selector -> object).
     let replacement: Imp = unsafe { std::mem::transmute(override_fn) };
-    let original = unsafe { method.set_implementation(replacement) };
-    ORIGINAL.store(original as usize, Ordering::Relaxed);
+    // The original is recorded before the swap, so the override never sees an empty slot.
+    ORIGINAL.store(method.implementation() as usize, Ordering::Relaxed);
+    unsafe { method.set_implementation(replacement) };
 }
 
 #[cfg(test)]
