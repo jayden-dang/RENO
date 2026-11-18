@@ -44,6 +44,10 @@ daemon_test! {
             if *feature == reno_proto::FEATURE_EXECUTOR_MAINTAIN {
                 continue;
             }
+            // Likewise for a daemon given a registry index (`registry`).
+            if *feature == reno_proto::FEATURE_EXECUTOR_REGISTRY {
+                continue;
+            }
             // Likewise for a daemon given a PTY spawner (`terminals`).
             if *feature == reno_proto::FEATURE_TERMINALS {
                 continue;
