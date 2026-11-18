@@ -889,6 +889,7 @@ fn shown_in_registry_group(
 }
 
 /// What the Executors screen shows.
+#[cfg(test)]
 pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
     build_with(state, now_ms, None)
 }

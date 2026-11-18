@@ -39,14 +39,15 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, FiringOutcome, JobFailure, JobKind,
-    JobPhase, RoutingDecision, RunId, RunListParams, RunStatus, SignedIn, TaskRunParams, ThreadId,
-    WorkspaceDiffResult, WorkspaceInfo,
+    ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
+    FiringOutcome, JobFailure, JobKind, JobPhase, RoutingDecision, RunId, RunListParams, RunStatus,
+    SignedIn, TaskRunParams, ThreadId, WorkspaceDiffResult, WorkspaceInfo,
 };
 
 use crate::summary;
 use crate::vm;
 use crate::vm::changes::{Loaded, Patch, ReviewScope};
+use crate::vm::registry::RegistryData;
 
 /// How many runs one page of the runs list asks for.
 pub(crate) const RUNS_PAGE: u32 = 50;
@@ -72,6 +73,8 @@ pub(crate) enum StoreEvent {
         kind: JobKind,
         version: Option<String>,
         sign_in: bool,
+        /// The executor was added from the ACP registry: an install reads "added".
+        registry: bool,
     },
     /// A person stopped an install or update.
     ExecutorJobStopped(String),
@@ -100,6 +103,10 @@ pub(crate) enum RunRouting {
     Failed(String),
 }
 
+/// The daemon feature for signing an agent in in the browser (`executor.signin.start`). The name
+/// is the one branch `registry-signin` defines; until that lands no daemon offers it.
+const BROWSER_SIGN_IN_FEATURE: &str = "executor.signin";
+
 /// The last lines of output of an executor's job, as `executor.job.log` answered.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobLog {
@@ -110,7 +117,11 @@ pub(crate) struct JobLog {
 
 /// What a new executor list says about jobs that ended since `before`: done (the job is gone and
 /// the health shows the result) or stopped by a person. A failure is shown on the line.
-fn job_events(before: &[ExecutorInfo], after: &[ExecutorInfo]) -> Vec<StoreEvent> {
+fn job_events(
+    before: &[ExecutorInfo],
+    after: &[ExecutorInfo],
+    registry: Option<&ExecutorRegistryListResult>,
+) -> Vec<StoreEvent> {
     let live = |info: &ExecutorInfo| {
         info.job
             .as_ref()
@@ -125,7 +136,14 @@ fn job_events(before: &[ExecutorInfo], after: &[ExecutorInfo]) -> Vec<StoreEvent
         let Some((kind, was_queued)) = live(old) else {
             continue;
         };
-        let name = summary::executor_name(new.descriptor.id.as_str());
+        let from_registry = new.source == reno_proto::ExecutorSource::Registry;
+        let name = registry
+            .filter(|_| from_registry)
+            .and_then(|l| l.entries.iter().find(|e| e.executor == new.descriptor.id))
+            .map_or_else(
+                || summary::executor_name(new.descriptor.id.as_str()),
+                |e| e.name.clone(),
+            );
         match &new.job {
             None => {
                 let health = new.health.as_ref();
@@ -135,6 +153,7 @@ fn job_events(before: &[ExecutorInfo], after: &[ExecutorInfo]) -> Vec<StoreEvent
                     version: health.and_then(|h| h.installed.version().map(str::to_owned)),
                     sign_in: kind == JobKind::Install
                         && health.is_some_and(|h| matches!(h.signed_in, SignedIn::No { .. })),
+                    registry: from_registry,
                 });
             }
             // Cancelling an update that only waited is not worth a toast: the line says so.
@@ -196,6 +215,14 @@ pub(crate) struct Store {
     log_open: BTreeSet<ExecutorId>,
     /// Log fetches in flight.
     log_fetching: BTreeSet<ExecutorId>,
+    /// The ACP registry's list: the last answer and how the next one went. Read when the
+    /// Executors screen opens, on Refresh, after a reconnect and when a registry executor
+    /// appears, goes or ends a job (ARCH-10: nothing polls).
+    registry: RegistryData,
+    /// Registry removals in flight, by registry id.
+    registry_removing: BTreeSet<String>,
+    /// Why a removal was refused, shown on the agent's line until the next try.
+    registry_refused: BTreeMap<String, String>,
     /// Filters whose page request is in flight.
     paging: BTreeSet<Vec<RunStatus>>,
     /// Runs being fetched with `run.get`.
@@ -276,6 +303,9 @@ impl Store {
             job_logs: BTreeMap::new(),
             log_open: BTreeSet::new(),
             log_fetching: BTreeSet::new(),
+            registry: RegistryData::default(),
+            registry_removing: BTreeSet::new(),
+            registry_refused: BTreeMap::new(),
             paging: BTreeSet::new(),
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
@@ -443,8 +473,19 @@ impl Store {
             matches!(update, Update::Executors(_)).then(|| self.state.executors().to_vec());
         let changed = self.state.apply(update);
         if let Some(before) = before {
-            for event in job_events(&before, self.state.executors()) {
+            let events = job_events(
+                &before,
+                self.state.executors(),
+                self.registry.listing.as_ref(),
+            );
+            let registry_moved = !events.is_empty()
+                || registry_agents(&before) != registry_agents(self.state.executors());
+            for event in events {
                 cx.emit(event);
+            }
+            // What is added, gone or finished changes the registry's list.
+            if registry_moved && self.registry.listing.is_some() {
+                self.load_registry(false, cx);
             }
             if changed.executors {
                 for id in self.log_open.clone() {
@@ -944,6 +985,10 @@ impl Store {
             self.load_history(cx);
         }
         self.ensure_def_records(cx);
+        if self.registry.listing.is_some() || self.registry.failure.is_some() {
+            self.registry.fetching = false;
+            self.load_registry(false, cx);
+        }
         if self.rules.is_some() {
             self.load_rules(cx);
         }
@@ -1258,6 +1303,143 @@ impl Store {
                 quiet: true,
             },
         );
+    }
+
+    /// Whether the daemon has the ACP registry (feature `executor.registry`).
+    pub(crate) fn supports_registry(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_EXECUTOR_REGISTRY)
+    }
+
+    /// Whether the daemon can sign an agent in in the browser: the agent's own ACP
+    /// `authenticate`. Branch `registry-signin` adds `executor.signin.start`; until its feature
+    /// is negotiated nothing offers the button.
+    pub(crate) fn supports_browser_sign_in(&self) -> bool {
+        self.state.supports(BROWSER_SIGN_IN_FEATURE)
+    }
+
+    pub(crate) fn registry(&self) -> &RegistryData {
+        &self.registry
+    }
+
+    /// Why this agent's last removal was refused, if it was.
+    pub(crate) fn registry_refusal(&self, id: &str) -> Option<&str> {
+        self.registry_refused.get(id).map(String::as_str)
+    }
+
+    pub(crate) fn is_removing(&self, id: &str) -> bool {
+        self.registry_removing.contains(id)
+    }
+
+    /// `executor.registry.list`: reads the index (`refresh` skips the daemon's cache). One at a
+    /// time; the last good answer stays on screen while the next comes and when it fails. Quiet:
+    /// the group says offline or failed itself, so no toast. Does nothing for a daemon without
+    /// `executor.registry`.
+    pub(crate) fn load_registry(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        if !self.supports_registry() || self.client().is_none() || self.registry.fetching {
+            return;
+        }
+        self.registry.fetching = true;
+        cx.notify();
+        self.call(
+            "Could not read the registry",
+            move |client| async move { client.registry_list(refresh).await },
+            cx,
+            D {
+                ok: Box::new(|store, list, cx| {
+                    store.registry = RegistryData {
+                        listing: Some(list),
+                        failure: None,
+                        fetching: false,
+                    };
+                    cx.notify();
+                }),
+                err: Box::new(|store, cx| {
+                    store.registry.fetching = false;
+                    store.registry.failure = Some(
+                        store
+                            .last_failure
+                            .clone()
+                            .unwrap_or_else(|| "could not read the registry".to_owned()),
+                    );
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+    }
+
+    /// The Executors screen opened: reads the list once if it has none.
+    pub(crate) fn ensure_registry(&mut self, cx: &mut Context<Self>) {
+        if self.registry.listing.is_none() {
+            self.load_registry(false, cx);
+        }
+    }
+
+    /// `executor.registry.add`: adds agent `id`, or updates it, as an install job. The progress
+    /// is the executor's job in `executors.watch`.
+    pub(crate) fn registry_add(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Ok(executor) = format!("acp.{id}").parse::<ExecutorId>() else {
+            return;
+        };
+        let id = id.to_owned();
+        self.job_call(
+            executor,
+            "Could not add the agent",
+            move |client| async move { client.registry_add(&id).await },
+            cx,
+        );
+    }
+
+    /// `executor.registry.remove`: deletes an added agent's install and keys. A refusal (a run
+    /// is queued or live) is put on the agent's line, not in a toast.
+    pub(crate) fn registry_remove(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.registry_removing.insert(id.to_owned()) {
+            return;
+        }
+        self.registry_refused.remove(id);
+        cx.notify();
+        let (ok_id, err_id, request) = (id.to_owned(), id.to_owned(), id.to_owned());
+        self.call(
+            "Could not remove the agent",
+            move |client| async move { client.registry_remove(&request).await },
+            cx,
+            D {
+                ok: Box::new(move |store, _, cx| {
+                    store.registry_removing.remove(&ok_id);
+                    store.load_registry(false, cx);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.registry_removing.remove(&err_id);
+                    let reason = store.last_failure.clone().unwrap_or_default();
+                    store.registry_refused.insert(err_id, reason);
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+    }
+
+    /// A registry request whose answer the caller owns (the env editor, the own-agent form):
+    /// the caller shows the failure where the person is looking, never in a toast, so a value
+    /// typed in cannot reach one. Dropping the task cancels the wait.
+    pub(crate) fn registry_task<T, Fut>(
+        &self,
+        request: impl FnOnce(Client) -> Fut,
+        cx: &gpui::App,
+    ) -> Task<Result<T, String>>
+    where
+        T: Send + 'static,
+        Fut: Future<Output = Result<T, ClientError>> + Send + 'static,
+    {
+        let Some(client) = self.client() else {
+            return Task::ready(Err("the daemon is not connected".to_owned()));
+        };
+        if !self.supports_registry() {
+            return Task::ready(Err("this daemon has no ACP registry".to_owned()));
+        }
+        let call = Tokio::spawn(cx, request(client));
+        cx.background_spawn(async move { flatten(call.await) })
     }
 
     /// `executor.install`: fetches the executor's adapter. It waits for the daemon, which can
@@ -1986,6 +2168,15 @@ fn flatten<T>(result: Result<Result<T, ClientError>, gpui_tokio::JoinError>) -> 
         Ok(Err(e)) => Err(e.to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The registry agents among `executors`, by id: when this set moves, the registry list is stale.
+fn registry_agents(executors: &[ExecutorInfo]) -> BTreeSet<&str> {
+    executors
+        .iter()
+        .filter(|e| e.source == reno_proto::ExecutorSource::Registry)
+        .map(|e| e.descriptor.id.as_str())
+        .collect()
 }
 
 fn system_now_ms() -> u64 {

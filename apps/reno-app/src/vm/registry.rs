@@ -273,14 +273,6 @@ impl RegistryLine {
         !self.built_in()
     }
 
-    pub(crate) fn adding(&self) -> bool {
-        matches!(self.phase, Phase::Adding(_))
-    }
-
-    fn can_run(&self) -> bool {
-        !matches!(self.phase, Phase::CantRun(_) | Phase::BuiltIn { .. })
-    }
-
     /// What the middle of the line says while an add runs or has failed:
     /// "Adding \u{b7} Downloading 97 MiB", "Add failed".
     pub(crate) fn progress_words(&self) -> Option<String> {

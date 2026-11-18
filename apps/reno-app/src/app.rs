@@ -504,8 +504,15 @@ impl RootView {
                         kind,
                         version,
                         sign_in,
+                        registry,
                     } => {
                         let (label, message) = match kind {
+                            // An agent from the ACP registry is "added", and says whether it
+                            // can take runs now.
+                            reno_proto::JobKind::Install if *registry => (
+                                "Agent added",
+                                crate::vm::registry::added_words(name, *sign_in),
+                            ),
                             reno_proto::JobKind::Install => (
                                 "Executor installed",
                                 if *sign_in {
@@ -694,7 +701,10 @@ impl RootView {
                 Screen::Runs
             }
             Nav::Triggers => Screen::Triggers,
-            Nav::Executors => Screen::Executors,
+            Nav::Executors => {
+                self.executors.update(cx, |screen, cx| screen.shown(cx));
+                Screen::Executors
+            }
             Nav::Settings => {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Settings

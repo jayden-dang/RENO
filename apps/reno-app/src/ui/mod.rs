@@ -2,6 +2,7 @@
 
 pub(crate) mod attention;
 pub(crate) mod composer;
+pub(crate) mod field;
 pub(crate) mod icon;
 pub(crate) mod kit;
 pub(crate) mod markdown_view;
