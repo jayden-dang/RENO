@@ -19739,6 +19739,13 @@ expression: protocol_schema()
                 ],
                 "description": "Set when Reno drives this agent itself: the built-in executor to use instead (`codex`).\nSuch an entry is listed so a search finds it, and is never added from the registry."
               },
+              "checkedVersion": {
+                "description": "Set when the curated `signIn` was checked at this version and the entry lists another: the\nfacts are likely, not certain (\"checked on 1.3.0\").",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "checksum": {
                 "description": "For a binary: whether the registry publishes a sha256 the download is checked against\n(`false`: it installs unchecked). Absent for a package, which npm or PyPI checks.",
                 "type": [
@@ -19821,6 +19828,28 @@ expression: protocol_schema()
                   "null"
                 ]
               },
+              "signIn": {
+                "description": "How the agent signs in, best first: curated from Reno's audit of the registry, or, once the\nagent is added and has had a full probe, what its own handshake offered\n(`signInFromProbe`). Empty when nothing is known.",
+                "items": {
+                  "$ref": "#/$defs/RegistrySignInOption"
+                },
+                "type": "array"
+              },
+              "signInFromProbe": {
+                "description": "`signIn` comes from the agent's own handshake, which wins over the curated facts.",
+                "type": "boolean"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RegistryStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Whether the agent works, from the audit. Absent when it was audited at another version\n(`checkedVersion`), when it is not in the audit, and for a person's own agent."
+              },
               "version": {
                 "description": "The version the index lists (the installed one for a delisted or own agent).",
                 "type": "string"
@@ -19863,6 +19892,156 @@ expression: protocol_schema()
                 "const": "no_build",
                 "description": "The entry has no build for this platform.",
                 "type": "string"
+              }
+            ]
+          },
+          "RegistrySignInOption": {
+            "description": "One way an agent signs in, as the curated table or the agent's own handshake says it.",
+            "oneOf": [
+              {
+                "description": "It needs no sign-in.",
+                "properties": {
+                  "kind": {
+                    "const": "none",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Keys the agent reads from its environment (all of `vars` are set together).",
+                "properties": {
+                  "kind": {
+                    "const": "env",
+                    "type": "string"
+                  },
+                  "vars": {
+                    "description": "The variable names, upper case.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "vars"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "A command to run in a terminal on the agent's device.",
+                "properties": {
+                  "command": {
+                    "description": "The exact command.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "terminal",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "command"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "The agent signs in itself, in the browser (ACP's `authenticate`).",
+                "properties": {
+                  "kind": {
+                    "const": "browser",
+                    "type": "string"
+                  },
+                  "methods": {
+                    "description": "The `authenticate` method ids it offers.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "methods"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Set up by hand, in words.",
+                "properties": {
+                  "kind": {
+                    "const": "setup",
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "What to do.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RegistryStatus": {
+            "description": "Whether an agent works, from Reno's own audit of the registry (at `checkedVersion`, or at the\nlisted version when that is absent).",
+            "oneOf": [
+              {
+                "description": "It started and answered the handshake.",
+                "properties": {
+                  "state": {
+                    "const": "ok",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It does not work, and the fault is the agent's. Only ever sent for the version audited.",
+                "properties": {
+                  "reason": {
+                    "description": "Why, in words.",
+                    "type": "string"
+                  },
+                  "state": {
+                    "const": "broken_upstream",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "It does not work yet, and the fix is Reno's.",
+                "properties": {
+                  "reason": {
+                    "description": "Why, in words.",
+                    "type": "string"
+                  },
+                  "state": {
+                    "const": "needs_reno_fix",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ],
+                "type": "object"
               }
             ]
           }
@@ -26909,7 +27088,7 @@ expression: protocol_schema()
             "type": "object"
           },
           {
-            "description": "The sign-in ended.",
+            "description": "The sign-in ended. The last event: the subscription ends after it.",
             "properties": {
               "message": {
                 "description": "In words: why it failed, or what is left to do. Absent on success.",
