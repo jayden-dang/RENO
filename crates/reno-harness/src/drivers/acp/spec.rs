@@ -458,7 +458,7 @@ fn grok_enriched(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
 
 /// The id of a context window of `tokens`: `256k`, `500k`, `1m`.
 fn window_id(tokens: u64) -> String {
-    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
         format!("{}m", tokens / 1_000_000)
     } else {
         format!("{}k", tokens / 1000)
