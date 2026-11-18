@@ -146,6 +146,10 @@ async fn serve(
     };
     let mut config = DaemonConfig::new(paths, executors);
     config.system_wake = true;
+    // The one place the real runner and the real settings files are wired. Tests never get them.
+    if harnesses {
+        config.maintenance = renod::real_maintenance();
+    }
     let keychain: Arc<dyn secrets::Keychain> = if memory_secrets {
         Arc::new(secrets::MemoryKeychain::new())
     } else {

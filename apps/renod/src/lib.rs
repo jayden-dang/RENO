@@ -45,6 +45,7 @@ pub mod worktrees;
 
 pub use daemon::{
     CONNECTION_GRACE, Daemon, DaemonConfig, DaemonError, ExecutorSource, SERVER_DEADLINE, Stopped,
+    real_maintenance,
 };
 pub use defs::{Bootstrapped, FsDefinitions, GitInit, GitOutcome};
 pub use executors::ExecutorSet;

@@ -107,6 +107,14 @@ CREATE TABLE executor_health (
     checked_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 
+CREATE TABLE executor_settings (
+    executor         TEXT PRIMARY KEY,
+    auto_update      INTEGER NOT NULL DEFAULT 1 CHECK (auto_update IN (0, 1)),
+    verified_only    INTEGER NOT NULL DEFAULT 0 CHECK (verified_only IN (0, 1)),
+    prev_self_update TEXT CHECK (prev_self_update IS NULL OR json_valid(prev_self_update)),
+    last_checked_at  INTEGER
+) WITHOUT ROWID;
+
 CREATE TABLE firings (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     nonce        TEXT NOT NULL UNIQUE,

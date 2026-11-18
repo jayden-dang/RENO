@@ -34,6 +34,8 @@
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.frames` | `executor_frames` |
 //! | `executor.install` | `install_executor` |
+//! | `executor.job.start`, `.cancel`, `.dismiss`, `.log` | `start_job`, `cancel_job`, `dismiss_job`, `job_log` |
+//! | `executor.auto_update.set` | `set_auto_update` |
 //! | `executors.watch` | `watch_executors` |
 //! | `agent.auth` | `agent_authenticate` |
 //! | `agent.report`, `agent.request_approval` | `agent_report`, `agent_request_approval` |
@@ -89,6 +91,11 @@ use reno_proto::{
     TriggersWatchParams,
 };
 use reno_proto::{
+    ExecutorAutoUpdateSet, ExecutorAutoUpdateSetParams, ExecutorJobCancel, ExecutorJobDismiss,
+    ExecutorJobLog, ExecutorJobLogResult, ExecutorJobParams, ExecutorJobResult, ExecutorJobStart,
+    ExecutorJobStartParams, FEATURE_EXECUTOR_MAINTAIN,
+};
+use reno_proto::{
     ExecutorFrames, ExecutorFramesParams, ExecutorFramesResult, ExecutorInfo, ExecutorInstall,
     ExecutorInstallParams, ExecutorInstallResult, ExecutorList, ExecutorListResult,
     ExecutorRefresh, ExecutorRefreshParams, ExecutorsSnapshot, ExecutorsWatch,
@@ -141,6 +148,9 @@ pub(crate) struct Ctx {
     pub(crate) secrets: Option<Arc<dyn Secrets>>,
     /// The definitions port, for whether its file watch is running.
     pub(crate) fs_defs: Arc<crate::defs::FsDefinitions>,
+    /// The kernel was given the means to install and update executors, so the daemon offers
+    /// feature `executor.maintain`.
+    pub(crate) maintenance: bool,
 }
 
 /// Adapts `handler(ctx, params)` to the closure shape `Router` takes.
@@ -203,6 +213,11 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ExecutorRefresh, _, _>(bind(ctx, executor_refresh))
         .method::<ExecutorInstall, _, _>(bind(ctx, executor_install))
         .method::<ExecutorFrames, _, _>(bind(ctx, executor_frames))
+        .method::<ExecutorJobStart, _, _>(bind(ctx, executor_job_start))
+        .method::<ExecutorJobCancel, _, _>(bind(ctx, executor_job_cancel))
+        .method::<ExecutorJobDismiss, _, _>(bind(ctx, executor_job_dismiss))
+        .method::<ExecutorJobLog, _, _>(bind(ctx, executor_job_log))
+        .method::<ExecutorAutoUpdateSet, _, _>(bind(ctx, executor_auto_update_set))
         .method::<SecretList, _, _>(bind(ctx, secret_list))
         .method::<SecretSet, _, _>(bind(ctx, secret_set))
         .method::<SecretDelete, _, _>(bind(ctx, secret_delete))
@@ -347,7 +362,7 @@ async fn agent_board_write(
     Ok(AgentBoardWriteResult { scope, version })
 }
 
-async fn hello(_ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
+async fn hello(ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
     if p.protocol_version < PROTOCOL_VERSION {
         return Err(ErrorObject::new(
             ErrorCode::ProtocolVersionMismatch,
@@ -364,6 +379,9 @@ async fn hello(_ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
         features: FEATURES
             .iter()
             .filter(|feature| p.features.iter().any(|offered| offered == *feature))
+            // Offered only when the daemon can do it: a client that sees the feature shows
+            // Update and Install buttons.
+            .filter(|feature| ctx.maintenance || **feature != FEATURE_EXECUTOR_MAINTAIN)
             .map(|feature| (*feature).to_owned())
             .collect(),
         pid: std::process::id(),
@@ -778,6 +796,63 @@ async fn executor_install(ctx: Arc<Ctx>, p: ExecutorInstallParams) -> Reply<Exec
         .await
         .map_err(|e| install_error(&e))?;
     Ok(ExecutorInstallResult { executor })
+}
+
+// Installs and updates of executors. These run OUTSIDE the policy engine, on purpose: they are
+// not agent actions. A person pressed Install or Update (or turned auto-update on), and the
+// commands are compiled into Reno per adapter; an RPC names an executor and a kind and never
+// carries a command string. They run as the user with no stdin and no sudo (see the runner).
+
+/// Starts or queues an install or update and answers once it is started or queued.
+async fn executor_job_start(ctx: Arc<Ctx>, p: ExecutorJobStartParams) -> Reply<ExecutorJobResult> {
+    tracing::info!(executor = %p.id, kind = ?p.kind, force = p.force, "executor job requested");
+    let executor = ctx
+        .kernel
+        .start_job(&p.id, p.kind, p.force)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(ExecutorJobResult { executor })
+}
+
+/// Cancels the job of an executor: kills what it runs and ends it cancelled.
+async fn executor_job_cancel(ctx: Arc<Ctx>, p: ExecutorJobParams) -> Reply<ExecutorJobResult> {
+    tracing::info!(executor = %p.id, "executor job cancel requested");
+    let executor = ctx
+        .kernel
+        .cancel_job(&p.id)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(ExecutorJobResult { executor })
+}
+
+/// Clears a failed job.
+async fn executor_job_dismiss(ctx: Arc<Ctx>, p: ExecutorJobParams) -> Reply<ExecutorJobResult> {
+    let executor = ctx
+        .kernel
+        .dismiss_job(&p.id)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(ExecutorJobResult { executor })
+}
+
+/// The last 500 lines of the current or last job.
+async fn executor_job_log(ctx: Arc<Ctx>, p: ExecutorJobParams) -> Reply<ExecutorJobLogResult> {
+    let (lines, truncated) = ctx.kernel.job_log(&p.id).map_err(|e| kernel_error(&e))?;
+    Ok(ExecutorJobLogResult { lines, truncated })
+}
+
+/// Stores an executor's auto-update choice (and moves a self-updating CLI's own updater).
+async fn executor_auto_update_set(
+    ctx: Arc<Ctx>,
+    p: ExecutorAutoUpdateSetParams,
+) -> Reply<ExecutorJobResult> {
+    tracing::info!(executor = %p.id, on = p.on, verified_only = p.verified_only, "auto-update setting requested");
+    let executor = ctx
+        .kernel
+        .set_auto_update(&p.id, p.on, p.verified_only)
+        .await
+        .map_err(|e| kernel_error(&e))?;
+    Ok(ExecutorJobResult { executor })
 }
 
 async fn workspace_list(ctx: Arc<Ctx>, p: WorkspaceListParams) -> Reply<WorkspaceListResult> {

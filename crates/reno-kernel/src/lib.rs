@@ -78,6 +78,7 @@ mod ids;
 mod kernel;
 mod lifecycle;
 mod link;
+mod maintain;
 mod procs;
 mod recovery;
 mod registry;
@@ -100,6 +101,7 @@ pub use defs::{CurrentDefs, DefSnapshot, Definitions, DefsSetup, StoredVersion};
 pub use error::{KernelError, Result};
 pub use kernel::{Kernel, ShutdownReport, TaskRequest};
 pub use link::{FakeRunLink, IssuedLink, LinkError, RunLink};
+pub use maintain::{CommandRunner, Limits, MaintenancePorts, SelfUpdateControl};
 pub use registry::ExecutorRegistry;
 pub use router::{
     BotPreference, Candidate, RouteRequest, fall_back, ineligibilities, ineligibility, route,

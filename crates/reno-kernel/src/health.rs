@@ -169,12 +169,16 @@ impl Shared {
                 {
                     descriptor.caps.models.clone_from(&found.models.models);
                 }
-                Some(ExecutorInfo {
+                let mut info = ExecutorInfo {
                     descriptor,
                     health,
                     maintenance: None,
                     job: None,
-                })
+                };
+                if let Some(maintainer) = self.maint.get() {
+                    maintainer.decorate(self, &mut info);
+                }
+                Some(info)
             })
             .collect();
         self.health.tx.send_replace(Arc::new(list));
@@ -254,6 +258,10 @@ impl Shared {
             .insert(id.clone(), Entry { health, live: true });
         gate.finished.fetch_add(1, Ordering::SeqCst);
         self.publish_executors();
+        // What the health says decides which executors the maintenance task looks at.
+        if let Some(maintainer) = self.maint.get() {
+            maintainer.wake();
+        }
         Ok(())
     }
 
@@ -405,6 +413,24 @@ impl Shared {
                     .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))
             })
             .collect()
+    }
+
+    /// The health the board holds for `id` (this process's probe, or the previous daemon's).
+    pub(crate) fn any_health(&self, id: &ExecutorId) -> Option<ExecutorHealth> {
+        self.health
+            .entries()
+            .get(id)
+            .map(|entry| entry.health.clone())
+    }
+
+    /// `id` as the last published list shows it.
+    pub(crate) fn published(&self, id: &ExecutorId) -> Option<ExecutorInfo> {
+        self.health
+            .tx
+            .borrow()
+            .iter()
+            .find(|info| &info.descriptor.id == id)
+            .cloned()
     }
 
     /// The health a probe of this process found for `id`, or `None` when it has not probed it.

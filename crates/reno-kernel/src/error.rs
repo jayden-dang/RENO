@@ -106,6 +106,26 @@ pub enum KernelError {
         /// The scope.
         scope: String,
     },
+    /// The executor already has an install or update that is not over.
+    #[error("executor {0} already has an install or update that is not over")]
+    JobRunning(ExecutorId),
+    /// The install or update would do nothing, for the reason given.
+    #[error("nothing to do for executor {executor}: {why}")]
+    NothingToDo {
+        /// The executor.
+        executor: ExecutorId,
+        /// Why, in words.
+        why: String,
+    },
+    /// The executor has no updater of its own.
+    #[error("executor {0} has no updater")]
+    NoUpdater(ExecutorId),
+    /// The daemon was not given the means to run installs and updates.
+    #[error("this daemon cannot install or update executors")]
+    MaintenanceOff,
+    /// A CLI's own updater switch could not be moved.
+    #[error("could not change the CLI's own updater: {0}")]
+    SelfUpdate(String),
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]
     Invalid(String),

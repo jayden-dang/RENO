@@ -602,6 +602,25 @@ impl Db {
             .await
     }
 
+    pub(crate) async fn put_executor_setting(
+        &self,
+        setting: &reno_store::ExecutorSetting,
+    ) -> Result<()> {
+        self.wrote();
+        self.store
+            .put_executor_setting(setting, self.now_ms())
+            .await
+    }
+
+    pub(crate) async fn put_executor_checked(&self, executor: &ExecutorId, at: i64) -> Result<()> {
+        self.wrote();
+        self.store.put_executor_checked(executor, at).await
+    }
+
+    pub(crate) async fn executor_settings(&self) -> Result<Vec<reno_store::ExecutorSetting>> {
+        self.store.executor_settings().await
+    }
+
     pub(crate) async fn executor_health(&self) -> Result<Vec<(ExecutorId, ExecutorHealth)>> {
         self.store.executor_health().await
     }

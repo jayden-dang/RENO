@@ -43,6 +43,8 @@ unicode-segmentation = "1"
 
 # Definitions (T1.4): TOML files, globs, time zones, and the file watcher (renod, and the CLI for `daemon logs -f`).
 toml = "1"
+# Edits a person's config file in place (a CLI's own updater switch), keeping its comments.
+toml_edit = "0.22"
 globset = { version = "0.4", default-features = false }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
 # Cron (T1.8): the one parser behind both validation and firing. It runs on jiff, so no second

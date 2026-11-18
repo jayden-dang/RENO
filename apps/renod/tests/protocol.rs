@@ -40,6 +40,10 @@ daemon_test! {
         assert_eq!(hello.pid, std::process::id());
         assert_eq!(hello.server_version, env!("CARGO_PKG_VERSION"));
         for feature in FEATURES {
+            // Offered only by a daemon given the means to install and update (`executor_jobs`).
+            if *feature == reno_proto::FEATURE_EXECUTOR_MAINTAIN {
+                continue;
+            }
             assert!(fx.client.supports(feature), "{feature} was not negotiated");
         }
 

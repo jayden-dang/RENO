@@ -40,6 +40,9 @@ pub struct Candidate {
     /// What this process last found out about it, when it has probed it. `None` is eligible: an
     /// executor nobody has probed is let through and says so itself if it cannot run.
     pub health: Option<ExecutorHealth>,
+    /// Why no run may start on it now: an install or update of it is running (EX-4). Not a
+    /// verdict on the executor, so it comes after every other reason.
+    pub busy: Option<String>,
 }
 
 /// The bot a task runs as, as far as routing is concerned.
@@ -131,6 +134,16 @@ pub fn ineligibilities(
     found
 }
 
+/// The reason an executor with a running install or update is passed over. It reuses
+/// `StartFailed` (an older client reads it) rather than a variant of its own: a variant a client
+/// does not know would make its whole routing decision unreadable.
+pub(crate) fn busy_reason(why: &str) -> RejectReason {
+    RejectReason::StartFailed {
+        failure: StartFailureKind::NoEligibleExecutor,
+        detail: why.to_owned(),
+    }
+}
+
 /// Decides where a task goes. `candidates` are the registered executors; `at_ms` is the time to
 /// stamp on the decision.
 pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> RoutingDecision {
@@ -173,12 +186,16 @@ pub fn route(request: &RouteRequest, candidates: &[Candidate], at_ms: u64) -> Ro
             None => vec![RejectReason::NotRegistered],
             Some(candidate) => match excluded(request, &id) {
                 Some(left_out) => vec![left_out],
-                None => ineligibilities(
-                    &candidate.descriptor,
-                    candidate.health.as_ref(),
-                    request.access,
-                    request.sandbox,
-                ),
+                None => {
+                    let mut found = ineligibilities(
+                        &candidate.descriptor,
+                        candidate.health.as_ref(),
+                        request.access,
+                        request.sandbox,
+                    );
+                    found.extend(candidate.busy.as_deref().map(busy_reason));
+                    found
+                }
             },
         }
         .into_iter();
@@ -313,6 +330,7 @@ mod tests {
                 &[SandboxLevel::Unrestricted],
             ),
             health,
+            busy: None,
         }
     }
 
@@ -364,6 +382,7 @@ mod tests {
                 &[SandboxLevel::Unrestricted],
             ),
             health: Some(missing),
+            busy: None,
         };
         let named = RouteRequest {
             explicit: Some(id("acp.devin")),
@@ -603,6 +622,7 @@ mod tests {
                 &[SandboxLevel::Unrestricted],
             ),
             health: None,
+            busy: None,
         };
         let decision = route(&request(), std::slice::from_ref(&full_only), 1);
         assert_eq!(decision.chosen, None);

@@ -651,7 +651,7 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
     let cancel = shared.root.child_token();
     let cause = StopCause::default();
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_QUEUE);
-    let slot = Slot::take(
+    let mut slot = Slot::take(
         shared,
         run_id.clone(),
         LiveRun {
@@ -662,6 +662,10 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
             fence,
         },
     );
+    // The run stands on its executor from the moment it runs, so an update of it that starts
+    // while the workspace is prepared waits for it. Best effort here: the attempt below claims
+    // again, and refuses the run when an install or update is already running.
+    slot.hold(shared.claim_run(&row.executor).ok().flatten());
     if let Err(error) = shared
         .db
         .transition(&run_id, fence, RunStatus::Running)
@@ -804,7 +808,26 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot).await;
     }
     let (stream, handle) = loop {
-        match attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await {
+        // The run stands on the executor it tries, which an install or update of it waits for,
+        // and which is refused to the run while one of those runs (EX-4, EX-5). One step, so a
+        // job cannot start between the check and the claim.
+        slot.hold(None);
+        let attempted = match shared.claim_run(&current) {
+            Ok(claim) => {
+                let attempted =
+                    attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await;
+                if matches!(attempted, Attempt::Started(..)) {
+                    slot.hold(claim);
+                }
+                attempted
+            }
+            Err(why) => Attempt::Declined {
+                reason: router::busy_reason(&why),
+                why,
+                account: StartFailure::NoEligibleExecutor,
+            },
+        };
+        match attempted {
             Attempt::Started(stream, handle) => {
                 if let Some(decision) = decision.as_mut()
                     && decision.chosen.is_none()
