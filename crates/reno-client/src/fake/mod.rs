@@ -517,9 +517,6 @@ fn router(shared: &Arc<Shared>) -> Router {
             let mut p = p;
             p.prompt
                 .push_str(&reno_proto::Attachment::prompt_suffix(&p.attachments));
-            if let Some(why) = s.read(|w| w.refuse_model_options(&p)) {
-                return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
-            }
             let routing = s.read(|w| w.route(&p));
             let Some(executor) = routing.chosen.clone().or_else(|| p.executor.clone()) else {
                 return Err(ErrorObject::new(
@@ -527,6 +524,11 @@ fn router(shared: &Arc<Shared>) -> Router {
                     "the fake daemon has no executor for this task",
                 ));
             };
+            let mut routed = p.clone();
+            routed.executor = Some(executor.clone());
+            if let Some(why) = s.read(|w| w.refuse_model_options(&routed)) {
+                return Err(ErrorObject::new(ErrorCode::InvalidParams, why));
+            }
             let run_id = s
                 .with(|w| w.create_run(&p, executor, routing.clone(), &s.cancel))
                 .map_err(internal)?;

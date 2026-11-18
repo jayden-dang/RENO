@@ -17,6 +17,22 @@ fn listed(candidate: &Candidate) -> &[ModelInfo] {
         .unwrap_or(candidate.descriptor.caps.models.as_slice())
 }
 
+/// The model of `candidate` that `model` names: a listed id (a `[1m]` suffix aside) or an alias
+/// (the first listed model whose id contains it). `None` when it names none.
+pub(crate) fn listed_model<'a>(candidate: &'a Candidate, model: &str) -> Option<&'a ModelInfo> {
+    let caps = &candidate.descriptor.caps;
+    let base = caps.base_model(model);
+    let models = listed(candidate);
+    models
+        .iter()
+        .find(|m| m.id == model || m.id == base)
+        .or_else(|| {
+            caps.is_model_alias(model)
+                .then(|| models.iter().find(|m| m.id.contains(base)))
+                .flatten()
+        })
+}
+
 fn levels(efforts: &[Effort]) -> String {
     if efforts.is_empty() {
         "no effort levels".to_owned()

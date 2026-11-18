@@ -683,3 +683,52 @@ async fn run_configure_refuses_what_the_model_does_not_list_or_a_run_that_ended(
         Err(KernelError::RunEnded(_))
     ));
 }
+
+// ---- set_model and the run's options ------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn switching_models_carries_the_window_choice_or_drops_what_the_model_lacks() {
+    let m = lister(
+        "mock",
+        vec![windowed("mock-1"), windowed("mock-3"), model("plain", &LMH)],
+        &["fast"],
+    );
+    let mut descriptor = reno_harness::exec::Executor::descriptor(&m);
+    descriptor.caps.model_switch = true;
+    let m = m.with_descriptor(descriptor).with_steps([
+        MockStep::started("s1", "mock-1"),
+        MockStep::AwaitModel,
+        MockStep::AwaitModel,
+        MockStep::AwaitSteer,
+    ]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(with_window(request("mock", Some("mock-1"), None), "1m"))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Running).await;
+    // To a model that offers the window: its 1M is asked for in the model's name.
+    fx.kernel.set_model(&run, "mock-3").await.unwrap();
+    assert_eq!(m.log().model_requests, ["mock-3[1m]"]);
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model_options["contextWindow"],
+        "1m"
+    );
+    // To one that does not: the choice no longer exists, and the run says so.
+    fx.kernel.set_model(&run, "plain").await.unwrap();
+    assert_eq!(m.log().model_requests[1], "plain");
+    assert!(
+        fx.kernel
+            .get_run(&run)
+            .await
+            .unwrap()
+            .model_options
+            .is_empty()
+    );
+    fx.kernel.steer(&run, "finish").await.unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let changes = journal_changes(&fx, &run);
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].1.is_empty());
+}
