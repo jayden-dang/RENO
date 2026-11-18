@@ -62,11 +62,28 @@ impl Composer {
             return None;
         };
         let state = self.store.read(cx).state();
-        state.run(run).map(|r| models::Pick {
-            executor: r.executor.clone(),
-            model: models::in_use(state, run),
-            effort: r.effort,
-            options: r.model_options.clone(),
+        state.run(run).map(|r| {
+            // What the harness reported is resolved to the model it lists, so the chip, the
+            // effort levels, the window row and the check mark all find it ("opus-5.5" and
+            // "claude-opus-5-5[1m]" are Opus 5.5, the latter at 1M).
+            let reported = models::in_use(state, run);
+            let mut options = r.model_options.clone();
+            let model = match reported
+                .as_deref()
+                .and_then(|m| models::resolve(state, &r.executor, m))
+            {
+                Some((listed, implied)) => {
+                    options.extend(implied);
+                    Some(listed.id)
+                }
+                None => reported,
+            };
+            models::Pick {
+                executor: r.executor.clone(),
+                model,
+                effort: r.effort,
+                options,
+            }
         })
     }
 

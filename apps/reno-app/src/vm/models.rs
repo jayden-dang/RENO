@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use reno_client::State;
 use reno_proto::{
-    Effort, ExecEvent, ExecutorId, ExecutorInfo, InstallStatus, ModelSource, RunId, SignedIn,
+    CONTEXT_WINDOW_1M, Effort, ExecEvent, ExecutorId, ExecutorInfo, InstallStatus,
+    MODEL_OPTION_CONTEXT_WINDOW, ModelSource, RunId, SignedIn,
 };
 
 use super::picker;
@@ -149,6 +150,63 @@ pub(crate) fn in_use(state: &State, run: &RunId) -> Option<String> {
         })
     });
     reported.or_else(|| state.run(run).and_then(|r| r.model.clone()))
+}
+
+/// What a harness calls a model, folded so spellings compare equal: lowercase, `-` `.` `_` and
+/// spaces all one separator, a leading `claude-` dropped ("Opus 5.5", "opus-5.5" and
+/// "claude-opus-5-5" are one model).
+fn folded_name(name: &str) -> String {
+    let folded: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if matches!(c, '.' | '_' | ' ') { '-' } else { c })
+        .collect();
+    folded.strip_prefix("claude-").unwrap_or(&folded).to_owned()
+}
+
+/// The model a harness reported, as the model the harness lists: the exact id; the id with Claude's
+/// context hint (`[1m]`, `-1m`) taken off, which implies the 1M window; else a match of the
+/// folded id or display name (see [`folded_name`]). Alongside it, the options the spelling
+/// implies. `None` when the harness lists no such model: the caller keeps what was reported.
+///
+/// zeron folds `<model>[1m]` into the base model and the `contextWindow` option the same way
+/// (`normalize_model_rows`, `pickers.rs`).
+pub(crate) fn resolve(
+    state: &State,
+    executor: &ExecutorId,
+    reported: &str,
+) -> Option<(ModelChoice, BTreeMap<String, String>)> {
+    let listed = harness(state, executor)?.models;
+    let stripped = reported
+        .strip_suffix("[1m]")
+        .or_else(|| reported.strip_suffix("-1m"));
+    let attempts = std::iter::once((reported, false)).chain(stripped.map(|base| (base, true)));
+    for (name, one_m) in attempts {
+        let folded = folded_name(name);
+        let found = listed.iter().find(|m| m.id == name).or_else(|| {
+            listed
+                .iter()
+                .find(|m| folded_name(&m.id) == folded || folded_name(&m.name) == folded)
+        });
+        if let Some(model) = found {
+            let implied = (one_m
+                && model.options.iter().any(|o| {
+                    o.id == MODEL_OPTION_CONTEXT_WINDOW
+                        && o.choices.iter().any(|c| c.id == CONTEXT_WINDOW_1M)
+                }))
+            .then(|| {
+                (
+                    MODEL_OPTION_CONTEXT_WINDOW.to_owned(),
+                    CONTEXT_WINDOW_1M.to_owned(),
+                )
+            })
+            .into_iter()
+            .collect();
+            return Some((model.clone(), implied));
+        }
+    }
+    None
 }
 
 /// How full the run's context is: the latest the harness reported.
@@ -308,5 +366,34 @@ mod tests {
         assert_eq!(haiku.efforts, [Effort::Low, Effort::Medium, Effort::High]);
         assert_eq!(haiku.default_effort, Some(Effort::Medium));
         assert_eq!(model_name(&state, &claude, "sonnet"), "sonnet");
+    }
+
+    #[test]
+    fn every_spelling_of_a_listed_model_resolves_to_it() {
+        let state = state();
+        let claude: ExecutorId = "claude-code".parse().unwrap();
+        let id_of = |reported: &str| {
+            resolve(&state, &claude, reported).map(|(m, implied)| (m.id, implied.len()))
+        };
+        let opus = Some(("claude-opus-5-5".to_owned(), 0));
+        assert_eq!(id_of("claude-opus-5-5"), opus, "the exact id");
+        assert_eq!(id_of("opus-5.5"), opus, "the alias");
+        assert_eq!(id_of("Opus 5.5"), opus, "the display name");
+        assert_eq!(id_of("claude_opus_5.5"), opus);
+        let one_m = Some(("claude-opus-5-5".to_owned(), 1));
+        assert_eq!(id_of("claude-opus-5-5[1m]"), one_m, "the context hint");
+        assert_eq!(id_of("opus-5.5[1m]"), one_m);
+        assert_eq!(id_of("claude-opus-5-5-1m"), one_m);
+        let (_, implied) = resolve(&state, &claude, "claude-opus-5-5[1m]").unwrap();
+        assert_eq!(implied["contextWindow"], "1m");
+        // Another model of the harness is not mistaken for it.
+        assert_eq!(
+            id_of("sonnet-5.5"),
+            Some(("claude-sonnet-5-5".to_owned(), 0))
+        );
+        // A model the harness does not list, or another harness's, stays unresolved.
+        assert_eq!(id_of("gpt-9"), None);
+        assert_eq!(id_of("opus-9"), None);
+        assert!(resolve(&state, &"nope".parse().unwrap(), "opus-5.5").is_none());
     }
 }

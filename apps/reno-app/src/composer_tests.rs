@@ -793,11 +793,12 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
     let keeper = crate::tests::run_id("keeper1");
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
-    // The demo run reports an alias the harness does not list, so it has no levels until it
-    // is switched to a listed model.
+    // The demo run reports the alias `opus-5.5`; it resolves to the listed Opus 5.5, so its
+    // levels and window show before anything is switched.
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
-    assert!(!painted(vcx, "effort-cell-high"));
+    assert!(painted(vcx, "effort-cell-high"));
+    assert!(painted(vcx, "picker-context"));
     click(vcx, "pick-model-claude-haiku-5-5");
     // A live run: the cells show its model's levels, and a click changes nothing.
     wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
