@@ -97,6 +97,8 @@
 //! never runs in its place. The descriptor declares only the models the driver has seen the
 //! agent advertise (Grok's and Antigravity's); any model a session advertises can be asked for.
 
+#[cfg(test)]
+mod audit;
 mod antigravity_paths;
 mod config;
 mod install;

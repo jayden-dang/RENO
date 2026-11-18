@@ -27,6 +27,15 @@ use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Command, Stdio};
 use crate::shutdown_child;
 
+/// A registry agent started and initialized: its process, its client, what
+/// it sends unasked, and its `initialize` answer.
+pub(super) type Started = (
+    crate::process::owned::Child,
+    RpcClient,
+    mpsc::Receiver<Incoming>,
+    Value,
+);
+
 /// Builds the sign-in command from the program's arguments and its extra environment.
 type CommandBuilder<'a> = dyn Fn(&[String], &[(String, String)]) -> Command + Sync + 'a;
 
@@ -115,7 +124,7 @@ pub struct AuthMethodInfo {
 /// The methods `initialize` offers, each with its kind. (A method without a
 /// `type` is the agent's own; one with `_meta["terminal-auth"]` a terminal
 /// one.)
-fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
+pub(super) fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
     initialized
         .get("authMethods")
         .and_then(Value::as_array)
@@ -347,7 +356,7 @@ impl Drop for AbortOnDrop {
 
 /// Whether an ACP error says the agent isn't signed in: the protocol's
 /// `auth_required` (-32000), or its words.
-fn still_signed_out(error: &HarnessError) -> bool {
+pub(super) fn still_signed_out(error: &HarnessError) -> bool {
     let text = error.to_string().to_ascii_lowercase();
     text.contains("-32000")
         || text.contains("auth_required")
@@ -771,17 +780,13 @@ impl AcpExecutor {
 
     /// A registry agent started and initialized as a sign-in client
     /// (terminal sign-ins offered), its output discarded.
-    async fn start_registry(
-        &self,
-    ) -> Result<
-        (
-            crate::process::owned::Child,
-            RpcClient,
-            mpsc::Receiver<Incoming>,
-            Value,
-        ),
-        HarnessError,
-    > {
+    async fn start_registry(&self) -> Result<Started, HarnessError> {
+        self.start_registry_with(Stdio::null()).await
+    }
+
+    /// [`Self::start_registry`] with the agent's stderr going to `stderr`
+    /// (the registry audit keeps it to explain a failed start).
+    pub(super) async fn start_registry_with(&self, stderr: Stdio) -> Result<Started, HarnessError> {
         let display_name = self.spec.display_name;
         let (exe, args) = self.launcher().resolve_program()?;
         let mut cmd = Command::new(&exe);
@@ -793,7 +798,7 @@ impl AcpExecutor {
         self.launcher().registry_environment(&mut cmd);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .kill_on_drop(true);
         let mut child = crate::process::owned::spawn_grouped(&mut cmd).map_err(|e| {
             crate::executable::spawn_error(e, None, || crate::executable::binary_hint(&exe))
