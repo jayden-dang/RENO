@@ -41,6 +41,7 @@ use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskRunParams};
 
 use super::icon::{Icon, icon};
 use super::kit;
+use super::overlay;
 use super::text_area::{TextArea, TextLayout};
 use super::text_model::{EnterOutcome, TextModel};
 use super::theme::{self, Theme};
@@ -297,7 +298,7 @@ impl Composer {
         let mut composer = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 if this.picker_open && this.live_run(cx).is_some() != this.picker_for_live {
-                    this.picker_open = false;
+                    this.set_menus(false, this.class_open, cx);
                 }
                 this.refresh_preview(cx);
                 cx.notify();
@@ -336,6 +337,10 @@ impl Composer {
             class_bounds: Rc::default(),
             picker_for_live: false,
         };
+        // A composer that goes away with a menu open takes its signal with it.
+        let owner = cx.entity_id();
+        cx.on_release(move |_, cx| overlay::release(cx, owner))
+            .detach();
         composer.refresh_preview(cx);
         composer
     }
@@ -795,20 +800,28 @@ impl Composer {
                 theme.faint,
             ))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.picker_open = !this.picker_open;
                 this.picker_for_live = this.live_run(cx).is_some();
                 this.picker_drill = None;
-                this.class_open = false;
+                this.set_menus(!this.picker_open, false, cx);
                 cx.notify();
             }))
     }
 
     fn close_picker(&mut self, cx: &mut Context<Self>) {
         if self.picker_open {
-            self.picker_open = false;
+            self.set_menus(false, self.class_open, cx);
             self.picker_drill = None;
             cx.notify();
         }
+    }
+
+    /// The one place the picker and the class menu open or close, so the app-wide overlay
+    /// signal always agrees with them.
+    fn set_menus(&mut self, picker: bool, class: bool, cx: &mut Context<Self>) {
+        self.picker_open = picker;
+        self.class_open = class;
+        let owner = cx.entity_id();
+        overlay::set(cx, owner, picker || class);
     }
 
     /// Choose a model: on a live run the daemon switches it; otherwise it is the next task's,
@@ -958,8 +971,7 @@ impl Composer {
                     .size_full(),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.class_open = !this.class_open;
-                this.picker_open = false;
+                this.set_menus(false, !this.class_open, cx);
                 cx.notify();
             }))
     }
@@ -970,7 +982,7 @@ impl Composer {
                 .child(class.label())
                 .when(class == self.class, |r| r.child(check(theme)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.class_open = false;
+                    this.set_menus(this.picker_open, false, cx);
                     this.set_class(class, cx);
                 }))
         });
@@ -1471,8 +1483,8 @@ impl Composer {
 
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         if self.picker_open || self.class_open {
-            self.class_open = false;
-            self.close_picker(cx);
+            self.set_menus(false, false, cx);
+            self.picker_drill = None;
             cx.notify();
         } else if self.mode == Mode::Reason {
             self.model.set_text("");
@@ -2289,7 +2301,7 @@ impl Render for Composer {
                     &at,
                     content,
                     |this, cx| {
-                        this.class_open = false;
+                        this.set_menus(this.picker_open, false, cx);
                         cx.notify();
                     },
                     cx,

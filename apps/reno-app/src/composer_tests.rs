@@ -789,3 +789,51 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
         Some(reno_proto::Effort::High)
     );
 }
+
+// --- the app-wide overlay signal ---------------------------------------------------------------
+
+fn overlay_open(vcx: &mut gpui::VisualTestContext) -> bool {
+    vcx.update(|_, cx| crate::ui::overlay::is_open(cx))
+}
+
+#[gpui::test]
+fn the_overlay_signal_follows_the_palette_and_the_menus(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    assert!(!overlay_open(vcx), "nothing is open at the start");
+
+    root.update_in(vcx, |r, window, cx| r.open_palette(window, cx));
+    assert!(overlay_open(vcx), "the palette raises it");
+    root.update_in(vcx, |r, window, cx| r.close_palette(window, cx));
+    assert!(!overlay_open(vcx), "and clears it");
+
+    click(vcx, "class-menu");
+    assert!(overlay_open(vcx), "a composer menu raises it");
+    // Two owners: the palette closing leaves the menu's signal alone.
+    root.update_in(vcx, |r, window, cx| r.open_palette(window, cx));
+    root.update_in(vcx, |r, window, cx| r.close_palette(window, cx));
+    assert!(overlay_open(vcx));
+    click(vcx, "class-menu");
+    assert!(!overlay_open(vcx), "the toggle closes the menu and the signal");
+}
+
+#[gpui::test]
+fn a_composer_dropped_with_its_menu_open_clears_the_signal(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(crate::tests::run_id("keeper1"), window, cx);
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    click(vcx, "model-chip");
+    assert!(overlay_open(vcx));
+    root.update_in(vcx, |r, window, cx| {
+        r.navigate(crate::nav::Nav::Runs, window, cx);
+    });
+    draw(vcx);
+    assert!(!overlay_open(vcx), "the run's composer went with its menu");
+}

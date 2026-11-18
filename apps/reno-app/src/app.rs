@@ -32,6 +32,7 @@ use crate::ui::composer;
 use crate::ui::icon::{Assets, Icon};
 use crate::ui::kit::{self, SANS};
 use crate::ui::motion::{self, ReduceMotion};
+use crate::ui::overlay;
 use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
@@ -597,12 +598,14 @@ impl RootView {
         .detach();
         let handle = palette.focus_handle(cx);
         window.focus(&handle, cx);
+        overlay::set(cx, palette.entity_id(), true);
         self.palette = Some(palette);
         cx.notify();
     }
 
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
+        if let Some(palette) = self.palette.take() {
+            overlay::set(cx, palette.entity_id(), false);
             self.focus_composer(window, cx);
             cx.notify();
         }
