@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString,
-    Stateful, Transformation, div, hsla, percentage, prelude::*, px,
+    Stateful, Transformation, div, percentage, prelude::*, px,
 };
 use reno_proto::RunStatus;
 
@@ -89,26 +89,10 @@ pub(crate) fn run_color(theme: &Theme, status: RunStatus, problem: Option<Proble
     }
 }
 
-/// The mark for an executor, in its own colour: Claude's burst is orange.
-pub(crate) fn exec_icon(theme: &Theme, executor_id: &str) -> (Icon, Hsla) {
-    match executor_id {
-        "claude-code" => (Icon::XClaude, hsla(0.04, 0.62, 0.62, 1.0)),
-        "codex" => (Icon::XCodex, theme.text),
-        "grok" | "acp.grok" => (Icon::XGrok, theme.text),
-        "opencode" => (Icon::XOpencode, theme.muted),
-        _ => (Icon::Cpu, theme.muted),
-    }
-}
-
-/// An executor mark of `size` px.
+/// An executor's mark of `size` px, everywhere in the app: its coloured logo (a light twin on
+/// dark themes), or a Phosphor glyph for an executor with no logo.
 pub(crate) fn exec_glyph(theme: &Theme, executor_id: &str, size: f32) -> Div {
-    let (glyph, color) = exec_icon(theme, executor_id);
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icon(glyph, size, color))
+    div().flex_none().child(logo(theme, executor_id, size))
 }
 
 /// A square icon button with an accessible label (the element id).

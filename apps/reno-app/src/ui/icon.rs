@@ -87,10 +87,6 @@ icons! {
     Up => "up",
     Wand => "wand",
     X => "x",
-    XClaude => "x-claude",
-    XCodex => "x-codex",
-    XGrok => "x-grok",
-    XOpencode => "x-opencode",
     PhCaretRight => "ph-caret-right",
     PhCaretDown => "ph-caret-down",
     PhDownload => "ph-download-simple",
@@ -158,6 +154,14 @@ const LOGOS: &[(&str, &[u8])] = &[
         "logos/hermes-light.svg",
         include_bytes!("../../assets/logos/hermes-light.svg"),
     ),
+    (
+        "logos/opencode.svg",
+        include_bytes!("../../assets/logos/opencode.svg"),
+    ),
+    (
+        "logos/opencode-light.svg",
+        include_bytes!("../../assets/logos/opencode-light.svg"),
+    ),
 ];
 
 /// The asset path of the coloured logo of `executor_id`, for `dark` or light themes; `None` for
@@ -170,6 +174,7 @@ pub(crate) fn logo_path(executor_id: &str, dark: bool) -> Option<&'static str> {
         "acp.hermes" => ("logos/hermes.svg", Some("logos/hermes-light.svg")),
         "acp.devin" => ("logos/devin.svg", Some("logos/devin-light.svg")),
         "acp.antigravity" => ("logos/antigravity.svg", None),
+        "opencode" | "acp.opencode" => ("logos/opencode.svg", Some("logos/opencode-light.svg")),
         _ => return None,
     };
     Some(if dark { light.unwrap_or(plain) } else { plain })
