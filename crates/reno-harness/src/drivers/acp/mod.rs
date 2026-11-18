@@ -489,6 +489,19 @@ impl AcpExecutor {
         }
     }
 
+    /// The CLI's own model list, where its spec says how to ask for one without a session;
+    /// `None` when it has no such command, it failed or timed out, or it listed nothing.
+    async fn live_models(&self, path: &std::path::Path) -> Option<ModelCatalog> {
+        let live = self.spec.live_models?;
+        let (success, stdout) =
+            probe::status_and_stdout(path, live.args, LIVE_MODELS_BUDGET).await?;
+        if !success {
+            return None;
+        }
+        let models = (live.parse)(&String::from_utf8_lossy(&stdout));
+        (!models.is_empty()).then(|| ModelCatalog::live(models))
+    }
+
     fn known_models(&self) -> Vec<ModelInfo> {
         self.spec
             .models
@@ -503,6 +516,9 @@ impl AcpExecutor {
             .collect()
     }
 }
+
+/// How long the probe waits for a CLI's model list (`grok models` answers in about a second).
+const LIVE_MODELS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One launched agent process and what watches it.
 struct Spawned {
@@ -594,7 +610,8 @@ impl Executor for AcpExecutor {
     /// `initialize` and a `session/new` (never a prompt, so no model runs); a session refused as
     /// `auth_required` is signed out. The built-in agents (Grok, Devin, Hermes, fx, Antigravity)
     /// have no status the driver can read without starting a run, so they are `Unknown`.
-    /// The models are the curated list: ACP agents advertise theirs only inside a session.
+    /// The models are the CLI's own list where its spec names a command for it (Grok's `grok
+    /// models`), else the curated list: ACP agents advertise theirs only inside a session.
     async fn probe(&self) -> HealthProbe {
         let curated = || ModelCatalog::curated(self.known_models());
         let spec = Arc::clone(&self.spec);
@@ -643,11 +660,16 @@ impl Executor for AcpExecutor {
         } else {
             self.sign_in_state().await
         };
+        let models = if matches!(version_gate, VersionGate::TooOld { .. }) {
+            curated()
+        } else {
+            self.live_models(&path).await.unwrap_or_else(curated)
+        };
         HealthProbe {
             installed: probe::installed(path, version),
             version_gate,
             signed_in,
-            models: curated(),
+            models,
         }
     }
 

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use reno_proto::{AccessMode, Effort, Steering};
+use reno_proto::{AccessMode, Effort, ModelInfo, Steering};
 
 use crate::agent_id::HarnessId;
 
@@ -68,6 +68,18 @@ pub(super) struct AcpAgentSpec {
     /// The oldest CLI version and the newest one the driver was verified against, when the
     /// driver pins any. `None`: nothing is pinned, and the descriptor says so.
     pub cli_verified: Option<(&'static str, &'static str)>,
+    /// How the probe asks the CLI itself for its models, where it can without a session. `None`:
+    /// the probe offers [`Self::models`] (ACP agents advertise theirs only inside a session).
+    pub live_models: Option<LiveModels>,
+}
+
+/// A command that lists the CLI's models, and how to read its standard output.
+#[derive(Clone, Copy)]
+pub(super) struct LiveModels {
+    /// Arguments after the executable.
+    pub args: &'static [&'static str],
+    /// The models in what it printed, the CLI's default first; empty when nothing was readable.
+    pub parse: fn(&str) -> Vec<ModelInfo>,
 }
 
 /// Only full access: the agent decides its own approvals.
@@ -152,6 +164,13 @@ pub(super) fn grok() -> AcpAgentSpec {
         // 1.0.46 is the newest version a pinned behavior (the `Path not found.` answer to an
         // unknown session) was observed on.
         cli_verified: Some(("1.0.4", "1.0.46")),
+        // `grok models` answers from the CLI's own catalogue (~1 s, verified 1.0.88), including
+        // the models of providers the person added (`zroute/grok-4.7`). `--no-auto-update` keeps
+        // the launch-time update check out of the probe.
+        live_models: Some(LiveModels {
+            args: &["--no-auto-update", "models"],
+            parse: grok_models,
+        }),
     }
 }
 
@@ -199,6 +218,7 @@ pub(super) fn devin() -> AcpAgentSpec {
         // command and edit is not.
         access_modes: FULL_ACCESS_ONLY,
         cli_verified: None,
+        live_models: None,
     }
 }
 
@@ -230,6 +250,7 @@ pub(super) fn registry(agent: crate::agent_id::RegistryAgent, name: &str) -> Acp
         drops_unstarted_cancelled_prompt: false,
         access_modes: SUPERVISED_OR_FULL,
         cli_verified: None,
+        live_models: None,
     }
 }
 
@@ -261,6 +282,7 @@ pub(super) fn fx() -> AcpAgentSpec {
         drops_unstarted_cancelled_prompt: false,
         access_modes: SUPERVISED_OR_FULL,
         cli_verified: None,
+        live_models: None,
     }
 }
 
@@ -309,6 +331,7 @@ pub(super) fn hermes() -> AcpAgentSpec {
         // and edit.
         access_modes: FULL_ACCESS_ONLY,
         cli_verified: None,
+        live_models: None,
     }
 }
 
@@ -352,5 +375,132 @@ pub(super) fn antigravity() -> AcpAgentSpec {
         // 1.1.1 is the oldest build whose wire behavior is pinned in the driver; 1.2.1 is the
         // pinned release archive.
         cli_verified: Some(("1.1.1", "1.2.1")),
+        live_models: None,
+    }
+}
+
+/// Reads `grok models`:
+///
+/// ```text
+/// Default model: grok-4.7
+///
+/// Available models:
+///   * grok-4.7 (default)
+///   - grok-4.6
+///   - zroute/grok-4.7
+/// ```
+///
+/// One model per `*` or `-` line under "Available models:", the default first. A model routed
+/// through a provider the person added (`provider/id`) says so in its description.
+pub(super) fn grok_models(text: &str) -> Vec<ModelInfo> {
+    let mut listed = false;
+    let mut models: Vec<ModelInfo> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.eq_ignore_ascii_case("available models:") {
+            listed = true;
+            continue;
+        }
+        if !listed {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("* ").or_else(|| line.strip_prefix("- ")) else {
+            if line.is_empty() {
+                continue;
+            }
+            break;
+        };
+        let (id, default) = match rest.strip_suffix("(default)") {
+            Some(id) => (id.trim(), true),
+            None => (rest.trim(), line.starts_with('*')),
+        };
+        if id.is_empty() || id.contains(char::is_whitespace) || models.iter().any(|m| m.id == id) {
+            continue;
+        }
+        let (provider, bare) = match id.split_once('/') {
+            Some((provider, bare)) => (Some(provider), bare),
+            None => (None, id),
+        };
+        let model = ModelInfo {
+            default_effort: None,
+            efforts: vec![],
+            id: id.to_owned(),
+            display_name: Some(grok_name(bare)),
+            description: match (default, provider) {
+                (_, Some(provider)) => Some(format!("Through {provider}")),
+                (true, None) => Some("Grok's default".to_owned()),
+                (false, None) => None,
+            },
+        };
+        if default {
+            models.insert(0, model);
+        } else {
+            models.push(model);
+        }
+    }
+    models
+}
+
+/// `grok-4.7-build-fast` → "Grok 4.7 Build Fast".
+fn grok_name(id: &str) -> String {
+    id.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod grok_models_tests {
+    use super::grok_models;
+
+    /// What grok 1.0.88 printed on the owner's Mac, 2026-11-18.
+    const REAL: &str = "You are logged in with grok.com.\n\nDefault model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.7-build-fast\n  - grok-4.6\n  - grok-4.5\n  - zroute/grok-4.5\n  - zroute/grok-4.6\n  - zroute/grok-4.7\n  - zroute/grok-4.7-build-fast\n";
+
+    #[test]
+    fn every_listed_model_is_read_the_default_first() {
+        let models = grok_models(REAL);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "grok-4.7",
+                "grok-4.7-build-fast",
+                "grok-4.6",
+                "grok-4.5",
+                "zroute/grok-4.5",
+                "zroute/grok-4.6",
+                "zroute/grok-4.7",
+                "zroute/grok-4.7-build-fast",
+            ]
+        );
+        assert_eq!(models[0].display_name.as_deref(), Some("Grok 4.7"));
+        assert_eq!(models[0].description.as_deref(), Some("Grok's default"));
+        assert_eq!(
+            models[1].display_name.as_deref(),
+            Some("Grok 4.7 Build Fast")
+        );
+        assert_eq!(models[1].description, None);
+        assert_eq!(models[6].display_name.as_deref(), Some("Grok 4.7"));
+        assert_eq!(models[6].description.as_deref(), Some("Through zroute"));
+    }
+
+    #[test]
+    fn a_default_listed_later_still_comes_first_and_noise_is_ignored() {
+        let text = "Available models:\n  - grok-4.6\n  * grok-4.7 (default)\n  - grok-4.6\n\nTip: use --model\n  - not-a-model\n";
+        let ids: Vec<String> = grok_models(text).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["grok-4.7", "grok-4.6"]);
+    }
+
+    #[test]
+    fn nothing_readable_is_no_models() {
+        assert!(grok_models("").is_empty());
+        assert!(grok_models("Error: not logged in\n").is_empty());
+        assert!(grok_models("Available models:\n").is_empty());
     }
 }
