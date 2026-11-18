@@ -33,6 +33,7 @@
 //! | `workspace.diff` | `workspace_diff` |
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `thread.list`, `thread.get`, `thread.close` | `threads`, `thread`, `close_thread` |
+//! | `fs.list`, `fs.read`, `fs.read_image`, `fs.search_files`, `fs.search_content`, `git.status`, `fs.watch` | `workspace`, `run_thread`, `thread` (which tree), then the `files` service |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.frames` | `executor_frames` |
@@ -116,6 +117,12 @@ use reno_proto::{
     WorkspaceCleanResult, WorkspaceDiff, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceGet,
     WorkspaceGetParams, WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
 };
+use reno_proto::{
+    FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
+    FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
+    FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
+    GitStatusParams, GitStatusResult, RunId, Seq,
+};
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -157,6 +164,8 @@ pub(crate) struct Ctx {
     /// The kernel was given the means to install and update executors, so the daemon offers
     /// feature `executor.maintain`.
     pub(crate) maintenance: bool,
+    /// The Files tab's service: `fs.*` and `git.status`.
+    pub(crate) files: crate::files::Files,
 }
 
 /// Adapts `handler(ctx, params)` to the closure shape `Router` takes.
@@ -235,6 +244,13 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ThreadList, _, _>(bind(ctx, thread_list))
         .method::<ThreadGet, _, _>(bind(ctx, thread_get))
         .method::<ThreadClose, _, _>(bind(ctx, thread_close))
+        .method::<FsList, _, _>(bind(ctx, fs_list))
+        .method::<FsRead, _, _>(bind(ctx, fs_read))
+        .method::<FsReadImage, _, _>(bind(ctx, fs_read_image))
+        .method::<FsSearchFiles, _, _>(bind(ctx, fs_search_files))
+        .method::<FsSearchContent, _, _>(bind(ctx, fs_search_content))
+        .method::<GitStatus, _, _>(bind(ctx, git_status))
+        .subscription::<FsWatch, _, _, _>(bind(ctx, fs_watch))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
@@ -894,6 +910,102 @@ async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceI
         .workspace(&p.run_id)
         .await
         .map_err(|e| kernel_error(&e))
+}
+
+// ----- The Files tab (RP1). Person-only: the guard above refuses these to a run's connection.
+
+/// The tree `run` is served from: its thread's worktree while that exists (live, or kept after
+/// the run ended); for a run with no worktree its own working directory, flagged `in_place`; and
+/// for a worktree that was removed, nothing (`WorkspaceUnavailable`).
+async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
+    use crate::files::{FsError, Served};
+    use reno_proto::WorkspaceStatus;
+    match ctx.kernel.workspace(run).await {
+        Ok(info) => match info.status {
+            WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept => {
+                Ok(Served {
+                    dir: info.path,
+                    in_place: false,
+                })
+            }
+            WorkspaceStatus::Removed | WorkspaceStatus::Lost => Err(FsError::Unavailable(
+                "its worktree was removed".to_owned(),
+            )
+            .object()),
+        },
+        Err(KernelError::WorkspaceNotFound(_)) => {
+            let thread = ctx
+                .kernel
+                .run_thread(run)
+                .await
+                .map_err(|e| kernel_error(&e))?;
+            let info = ctx.kernel.thread(&thread).await.map_err(|e| kernel_error(&e))?;
+            match info.cwd {
+                Some(dir) => Ok(Served { dir, in_place: true }),
+                None => Err(FsError::Unavailable("the run has no folder".to_owned()).object()),
+            }
+        }
+        Err(e) => Err(kernel_error(&e)),
+    }
+}
+
+async fn fs_list(ctx: Arc<Ctx>, p: FsListParams) -> Reply<FsListResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files
+        .list(&tree, p.dir, p.cursor, p.limit)
+        .await
+        .map_err(|e| e.object())
+}
+
+async fn fs_read(ctx: Arc<Ctx>, p: FsReadParams) -> Reply<FsReadResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files.read(&tree, p.path).await.map_err(|e| e.object())
+}
+
+async fn fs_read_image(ctx: Arc<Ctx>, p: FsReadImageParams) -> Reply<reno_proto::FsImageChunk> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files
+        .read_image(&tree, p.path, p.offset)
+        .await
+        .map_err(|e| e.object())
+}
+
+async fn fs_search_files(ctx: Arc<Ctx>, p: FsSearchFilesParams) -> Reply<FsSearchFilesResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files
+        .search_files(&tree, p.query, p.limit)
+        .await
+        .map_err(|e| e.object())
+}
+
+async fn fs_search_content(
+    ctx: Arc<Ctx>,
+    p: FsSearchContentParams,
+) -> Reply<FsSearchContentResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files
+        .search_content(&tree, &p.query, p.regex, p.ignore_case, p.limit)
+        .await
+        .map_err(|e| e.object())
+}
+
+async fn git_status(ctx: Arc<Ctx>, p: GitStatusParams) -> Reply<GitStatusResult> {
+    let tree = served(&ctx, &p.run_id).await?;
+    ctx.files.git_status(&tree).await.map_err(|e| e.object())
+}
+
+/// `fs.watch`: the watcher is armed here, for this subscription alone, and dropped with the
+/// stream. Items carry a sequence number so a reader that falls behind is cut off with
+/// `sub.gap` (ARCH-12) and subscribes again.
+async fn fs_watch(
+    ctx: Arc<Ctx>,
+    p: FsWatchParams,
+) -> Reply<impl Stream<Item = SubItem<FsChange>> + Send + use<>> {
+    let tree = served(&ctx, &p.run_id).await?;
+    let changes = ctx.files.watch(&tree).await.map_err(|e| e.object())?;
+    Ok(changes
+        .enumerate()
+        .map(|(n, change)| SubItem::seq(Seq(n as u64 + 1), change)))
 }
 
 async fn workspace_diff(ctx: Arc<Ctx>, p: WorkspaceDiffParams) -> Reply<WorkspaceDiffResult> {
