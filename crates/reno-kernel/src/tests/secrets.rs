@@ -373,3 +373,41 @@ async fn a_resumed_run_gets_its_secrets_again_and_stays_redacted() {
     let shown = serde_json::to_string(&fx.journal_with_done(&run).await).unwrap();
     assert!(!shown.contains(TOKEN), "{shown}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_secret_in_a_tools_output_is_redacted_before_it_is_journaled() {
+    let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
+    let m = mock([
+        MockStep::Emit(ExecEvent::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            summary: Some(format!("last line {TOKEN}")),
+            output: Some(reno_proto::ToolOutput::from_text(&format!(
+                "GITHUB_TOKEN={TOKEN}\nmore"
+            ))),
+        }),
+        MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }),
+    ]);
+    let fx = fx_with(
+        bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]"),
+        Some(secrets),
+        &m,
+    )
+    .await;
+
+    let run = go(&fx).await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+
+    let journal = fx.journal_with_done(&run).await;
+    let shown = serde_json::to_string(&journal).unwrap();
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(
+        shown.contains("GITHUB_TOKEN=[secret:GITHUB_TOKEN]\\nmore"),
+        "{shown}"
+    );
+}

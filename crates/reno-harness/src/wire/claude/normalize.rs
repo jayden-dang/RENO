@@ -2,7 +2,7 @@
 //!
 //! Sans-IO (ARCH-6): frames in, events out.
 
-use reno_proto::{ExecEvent, SessionRef, StopReason, ToolCall};
+use reno_proto::{ExecEvent, SessionRef, StopReason, ToolCall, ToolOutput};
 use serde_json::Value;
 
 use super::wire::{ContentBlock, Frame, MessageFrame, ResultFrame};
@@ -192,7 +192,7 @@ fn note_commands(f: &MessageFrame, commands: &mut std::collections::HashMap<Stri
 /// A `tool_result` block as its event. A Bash call's result carries its exit code and the last
 /// line of its output: Claude Code leads a failed command's text with `Exit code N`; one that
 /// succeeded says nothing, so it exited 0, unless it went to the background, which says only
-/// that it started. Every other tool's output stays off the event.
+/// that it started. Every tool's output text rides along, cut to what a journal row keeps.
 fn tool_result(
     b: &ContentBlock,
     commands: &mut std::collections::HashMap<String, bool>,
@@ -216,11 +216,12 @@ fn tool_result(
         id: b.tool_use_id.clone(),
         ok: !is_error,
         summary,
-        output: None,
+        output: ToolOutput::from_text_opt(&result_text(&b.content)),
     }
 }
 
-/// A `tool_result`'s text: its string, or its text blocks joined.
+/// A `tool_result`'s text: its string, or its text blocks joined; any other structured content
+/// as compact JSON.
 fn result_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
@@ -230,7 +231,8 @@ fn result_text(content: &Value) -> String {
             .filter_map(|b| b.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
-        _ => String::new(),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
@@ -523,7 +525,7 @@ fn done(stop: StopReason, result: Option<String>, diagnostic: Option<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reno_proto::{ActionClass, SessionRef, StopReason, ToolCall};
+    use reno_proto::{ActionClass, SessionRef, StopReason, ToolCall, ToolOutput};
     use serde_json::json;
 
     fn parse(raw: &str) -> Frame {
@@ -684,28 +686,61 @@ mod tests {
                     id: "ok".into(),
                     ok: true,
                     summary: Some("exit code 0: all 3 tests passed".into()),
-                    output: None
+                    output: Some(ToolOutput::from_text("compiling\nall 3 tests passed\n"))
                 },
                 ExecEvent::ToolResult {
                     id: "bad".into(),
                     ok: false,
                     summary: Some("exit code 2: make: *** [all] Error 1".into()),
-                    output: None
+                    output: Some(ToolOutput::from_text(
+                        "Exit code 2\nmake: *** [all] Error 1"
+                    ))
                 },
                 ExecEvent::ToolResult {
                     id: "bg".into(),
                     ok: true,
                     summary: Some("Command running in background with ID: b1.".into()),
-                    output: None
+                    output: Some(ToolOutput::from_text(
+                        "Command running in background with ID: b1."
+                    ))
                 },
                 ExecEvent::ToolResult {
                     id: "rd".into(),
                     ok: true,
                     summary: None,
-                    output: None
+                    output: Some(ToolOutput::from_text("file text"))
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_tool_result_keeps_its_output_cut_in_the_middle_when_huge() {
+        let mut norm = Normalizer::new();
+        let big = format!("START\n{}\nEND", "line of output\n".repeat(5000));
+        let frame = json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"r1","content":big},
+            {"type":"tool_result","tool_use_id":"r2","content":[
+                {"type":"text","text":"a"},{"type":"image","source":{}},{"type":"text","text":"b"}]},
+            {"type":"tool_result","tool_use_id":"r3","content":{"k":1}},
+            {"type":"tool_result","tool_use_id":"r4","content":""}]}})
+        .to_string();
+        let events = norm.normalize(parse(&frame), false);
+        let outputs: Vec<Option<ToolOutput>> = events
+            .into_iter()
+            .map(|e| match e {
+                ExecEvent::ToolResult { output, .. } => output,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let huge = outputs[0].as_ref().expect("output");
+        assert!(huge.truncated);
+        assert_eq!(huge.bytes, big.len() as u64);
+        assert!(huge.text.starts_with("START\n") && huge.text.ends_with("END"));
+        assert!(huge.text.contains("bytes cut"));
+        assert_eq!(outputs[1].as_ref().expect("blocks").text, "a\nb");
+        assert_eq!(outputs[2].as_ref().expect("structured").text, r#"{"k":1}"#);
+        assert_eq!(outputs[3], None);
     }
 
     #[test]

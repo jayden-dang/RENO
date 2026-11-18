@@ -318,7 +318,9 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
         id: "t1".into(),
         ok: true,
         summary: Some("test result: ok. 13 passed; 0 failed; 0 ignored".into()),
-        output: None
+        output: Some(reno_proto::ToolOutput::from_text(
+            "   Compiling reno-harness v0.1.21\n    Finished `dev` profile [unoptimized] in 2.41s\n     Running tests/acp.rs\n\nrunning 13 tests\ntest result: ok. 13 passed; 0 failed; 0 ignored"
+        ))
     }));
     // An edit resolved in one shot.
     assert!(events.contains(&ExecEvent::Tool {
@@ -329,7 +331,9 @@ async fn happy_path_maps_updates_to_exec_events_with_classified_tools() {
         id: "t2".into(),
         ok: true,
         summary: None,
-        output: None
+        output: Some(reno_proto::ToolOutput::from_text(
+            "edited /w/src/resolve.rs"
+        ))
     }));
 
     // Plans, command lists, context gauges and unknown updates have no place in the contract.

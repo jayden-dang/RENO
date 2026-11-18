@@ -264,7 +264,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "c1".into(),
                 ok: false,
                 summary: Some("exit code 1: no such file".into()),
-                output: None
+                output: Some(reno_proto::ToolOutput::from_text("first\nno such file\n"))
             },
             ExecEvent::Tool {
                 id: "f1".into(),
@@ -278,7 +278,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "f1".into(),
                 ok: true,
                 summary: None,
-                output: None
+                output: Some(reno_proto::ToolOutput::from_text("add /tmp/new.rs"))
             },
             ExecEvent::Tool {
                 id: "mcp1".into(),

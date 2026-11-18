@@ -668,3 +668,100 @@ pub struct ExecutorDescriptor {
     /// Declared capabilities.
     pub caps: ExecutorCaps,
 }
+
+impl ToolOutput {
+    /// Keeps `text` whole when it fits in [`Self::MAX_BYTES`]; otherwise keeps the first and the
+    /// last half of the budget (cut on character boundaries) joined by a `… N bytes cut …` line.
+    /// `bytes` is always the original size.
+    pub fn from_text(text: &str) -> Self {
+        let bytes = text.len() as u64;
+        if text.len() <= Self::MAX_BYTES {
+            return Self {
+                text: text.to_owned(),
+                bytes,
+                truncated: false,
+            };
+        }
+        let half = Self::MAX_BYTES / 2;
+        let mut head_end = half;
+        while !text.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let mut tail_start = text.len() - half;
+        while !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let cut = tail_start - head_end;
+        let mut out = String::with_capacity(Self::MAX_BYTES + 40);
+        out.push_str(&text[..head_end]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("… {cut} bytes cut …\n"));
+        out.push_str(&text[tail_start..]);
+        Self {
+            text: out,
+            bytes,
+            truncated: true,
+        }
+    }
+
+    /// [`Self::from_text`], or none for an empty text (nothing to show).
+    pub fn from_text_opt(text: &str) -> Option<Self> {
+        (!text.is_empty()).then(|| Self::from_text(text))
+    }
+}
+
+#[cfg(test)]
+mod tool_output_tests {
+    use super::ToolOutput;
+
+    #[test]
+    fn empty_is_kept_whole() {
+        let o = ToolOutput::from_text("");
+        assert_eq!((o.text.as_str(), o.bytes, o.truncated), ("", 0, false));
+        assert!(ToolOutput::from_text_opt("").is_none());
+    }
+
+    #[test]
+    fn exact_limit_is_not_cut() {
+        let s = "a".repeat(ToolOutput::MAX_BYTES);
+        let o = ToolOutput::from_text(&s);
+        assert!(!o.truncated);
+        assert_eq!(o.text, s);
+        let o = ToolOutput::from_text(&format!("{s}b"));
+        assert!(o.truncated);
+        assert_eq!(o.bytes, ToolOutput::MAX_BYTES as u64 + 1);
+    }
+
+    #[test]
+    fn multibyte_at_the_cut_stays_valid() {
+        for pad in 0..4 {
+            let s = format!("{}{}", "x".repeat(pad), "é€😀".repeat(8000));
+            let o = ToolOutput::from_text(&s);
+            assert!(o.truncated);
+            assert_eq!(o.bytes, s.len() as u64);
+            assert!(o.text.contains("bytes cut"));
+            assert!(o.text.len() <= ToolOutput::MAX_BYTES + 40);
+        }
+    }
+
+    #[test]
+    fn huge_keeps_head_and_tail() {
+        let s = format!("HEAD{}TAIL", "z".repeat(10_000_000));
+        let o = ToolOutput::from_text(&s);
+        assert!(o.truncated);
+        assert_eq!(o.bytes, s.len() as u64);
+        assert!(o.text.starts_with("HEAD"));
+        assert!(o.text.ends_with("TAIL"));
+        assert!(o.text.len() <= ToolOutput::MAX_BYTES + 40);
+        let cut: usize = o
+            .text
+            .lines()
+            .find_map(|l| l.strip_prefix("… ")?.strip_suffix(" bytes cut …"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(cut > 9_900_000);
+    }
+}

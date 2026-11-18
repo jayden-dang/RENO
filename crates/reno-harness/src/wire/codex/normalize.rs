@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use reno_proto::{ActionClass, ExecEvent, StopReason, ToolCall};
+use reno_proto::{ActionClass, ExecEvent, StopReason, ToolCall, ToolOutput};
 use serde_json::{Value, json};
 
 use super::permission::{COMMAND_TOOL, FILE_CHANGE_TOOL};
@@ -558,6 +558,57 @@ fn call(item: &Value) -> Option<ToolCall> {
     })
 }
 
+/// What a completed item printed or returned, whole (the caller cuts it): a command's aggregated
+/// output, an MCP or dynamic tool's text content (or its error), a patch's list of files.
+/// Never an image generation's `result`, which can be megabytes of media.
+fn output_text(item: &Value) -> String {
+    let texts = |blocks: Option<&Value>, kind: &[&str]| -> Vec<String> {
+        blocks
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter(|b| {
+                b.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| kind.contains(&t))
+            })
+            .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    };
+    match item_type(item) {
+        "commandExecution" | "command_execution" => {
+            str_field(item, &["aggregatedOutput", "aggregated_output"])
+        }
+        "mcpToolCall" | "mcp_tool_call" => {
+            let result = item.get("result").filter(|v| !v.is_null());
+            let mut parts = texts(result.and_then(|r| r.get("content")), &["text"]);
+            if parts.is_empty()
+                && let Some(structured) = result
+                    .and_then(|r| field(r, &["structuredContent", "structured_content"]))
+                    .filter(|v| !v.is_null())
+            {
+                parts.push(structured.to_string());
+            }
+            if let Some(message) = item.pointer("/error/message").and_then(Value::as_str) {
+                parts.push(message.to_owned());
+            }
+            parts.join("\n")
+        }
+        "dynamicToolCall" | "dynamic_tool_call" => texts(
+            field(item, &["contentItems", "content_items"]),
+            &["inputText", "input_text"],
+        )
+        .join("\n"),
+        "fileChange" | "file_change" => changes(item)
+            .into_iter()
+            .map(|(path, kind)| format!("{kind} {path}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 /// How a completed item went: whether it succeeded, and a one-line outcome.
 fn outcome(item: &Value) -> (bool, Option<String>) {
     let status = str_field(item, &["status"]);
@@ -801,7 +852,7 @@ impl Normalizer {
                     id,
                     ok,
                     summary,
-                    output: None,
+                    output: ToolOutput::from_text_opt(&output_text(item)),
                 });
             }
         }
@@ -1083,7 +1134,7 @@ mod tests {
                 id: "c1".into(),
                 ok: false,
                 summary: Some("exit code 1: two".into()),
-                output: None
+                output: Some(ToolOutput::from_text("one\ntwo\n"))
             }]
         );
         // A repeated completion closes nothing, and neither reopens it.
@@ -1107,6 +1158,57 @@ mod tests {
                 ExecEvent::ToolResult { ok: true, .. }
             ]
         ));
+    }
+
+    #[test]
+    fn a_completed_call_keeps_what_it_returned() {
+        let out = |item: Value| match Normalizer::new().item(Phase::Completed, &item).pop() {
+            Some(ExecEvent::ToolResult { output, .. }) => output.map(|o| (o.text, o.truncated)),
+            other => panic!("{other:?}"),
+        };
+        let big = format!("TOP\n{}\nBOTTOM", "x".repeat(40_000));
+        let (text, truncated) = out(
+            json!({"id": "c", "type": "commandExecution", "command": "ls",
+            "status": "completed", "exitCode": 0, "aggregatedOutput": big}),
+        )
+        .expect("command output");
+        assert!(truncated && text.starts_with("TOP") && text.ends_with("BOTTOM"));
+        assert_eq!(
+            out(
+                json!({"id": "p", "type": "fileChange", "status": "completed",
+                "changes": [{"path": "a.rs", "kind": "add"}, {"path": "b.rs", "kind": "delete"}]})
+            ),
+            Some(("add a.rs\ndelete b.rs".into(), false))
+        );
+        assert_eq!(
+            out(
+                json!({"id": "m", "type": "mcpToolCall", "server": "s", "tool": "t",
+                "status": "completed", "arguments": {},
+                "result": {"content": [{"type": "text", "text": "hello"}, {"type": "image"}]}})
+            ),
+            Some(("hello".into(), false))
+        );
+        assert_eq!(
+            out(
+                json!({"id": "m2", "type": "mcpToolCall", "server": "s", "tool": "t",
+                "status": "failed", "arguments": {}, "error": {"message": "boom"}})
+            ),
+            Some(("boom".into(), false))
+        );
+        assert_eq!(
+            out(
+                json!({"id": "d", "type": "dynamicToolCall", "tool": "t", "status": "completed",
+                "contentItems": [{"type": "inputText", "text": "dyn"}]})
+            ),
+            Some(("dyn".into(), false))
+        );
+        assert_eq!(
+            out(
+                json!({"id": "c2", "type": "commandExecution", "command": "true",
+                "status": "completed", "exitCode": 0, "aggregatedOutput": ""})
+            ),
+            None
+        );
     }
 
     #[test]
