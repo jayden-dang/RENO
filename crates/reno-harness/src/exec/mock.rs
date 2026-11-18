@@ -123,6 +123,8 @@ impl MockExecutor {
                 verified: "0".into(),
             },
             caps: ExecutorCaps {
+                live_effort: None,
+                live_model_options: None,
                 steering: Steering::StepBoundary,
                 resume: true,
                 access_modes: vec![

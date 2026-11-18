@@ -558,6 +558,8 @@ impl Executor for CodexExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
             caps: ExecutorCaps {
+                live_effort: None,
+                live_model_options: None,
                 // `turn/steer` lands in the running turn; a steer that misses it starts the next
                 // turn.
                 steering: Steering::StepBoundary,

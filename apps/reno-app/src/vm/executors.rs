@@ -965,6 +965,8 @@ mod tests {
                     verified: "2".into(),
                 },
                 caps: ExecutorCaps {
+                    live_effort: None,
+                    live_model_options: None,
                     steering: Steering::None,
                     resume: false,
                     access_modes: vec![AccessMode::Supervised, AccessMode::AutoAcceptEdits],
@@ -1447,6 +1449,8 @@ mod roster_tests {
                     verified: "9".into(),
                 },
                 caps: ExecutorCaps {
+                    live_effort: None,
+                    live_model_options: None,
                     steering: Steering::None,
                     resume: false,
                     access_modes: vec![AccessMode::Supervised],

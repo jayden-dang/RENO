@@ -341,6 +341,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                     verified: range.1.to_owned(),
                 },
                 caps: ExecutorCaps {
+                    live_effort: None,
+                    live_model_options: None,
                     steering: Steering::StepBoundary,
                     resume: true,
                     access_modes: access.to_vec(),

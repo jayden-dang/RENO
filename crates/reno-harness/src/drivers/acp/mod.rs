@@ -579,6 +579,8 @@ impl Executor for AcpExecutor {
                 verified: verified.into(),
             },
             caps: ExecutorCaps {
+                live_effort: None,
+                live_model_options: None,
                 steering: self.spec.steering,
                 resume: true,
                 access_modes: self.access_modes.clone(),

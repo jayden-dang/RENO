@@ -638,6 +638,8 @@ impl Executor for ClaudeExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
             caps: ExecutorCaps {
+                live_effort: None,
+                live_model_options: None,
                 // Prompts land in the running turn at the CLI's next step.
                 steering: Steering::StepBoundary,
                 resume: true,

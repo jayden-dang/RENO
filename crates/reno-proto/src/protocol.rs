@@ -104,6 +104,9 @@ pub const FEATURE_RUN_EFFORT: &str = "run.effort";
 /// what each model offers, `RunSummary::model_options` says what the run launched with, and
 /// journals may carry `ExecEvent::ContextUsage`.
 pub const FEATURE_RUN_CONTEXT: &str = "run.context";
+/// Feature: `run.configure` exists, journals may carry `ExecEvent::ConfigChanged`, and
+/// `ExecutorCaps::live_effort` and `live_model_options` say what each executor applies live.
+pub const FEATURE_RUN_CONFIGURE: &str = "run.configure";
 /// Feature: `executor.list`, `executor.refresh` and the `executors.watch` subscription exist.
 pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `executor.install` exists.
@@ -168,6 +171,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_MODEL,
     FEATURE_RUN_EFFORT,
     FEATURE_RUN_CONTEXT,
+    FEATURE_RUN_CONFIGURE,
     FEATURE_EXECUTOR_MAINTAIN,
     FEATURE_RUN_CHANGES,
 ];
@@ -551,6 +555,41 @@ pub struct RunSetModelResult {
     pub model: String,
 }
 
+/// Params of `run.configure`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConfigureParams {
+    /// The run to change; live, or one that ended and may be resumed (the change then holds for
+    /// its next launch).
+    pub run_id: RunId,
+    /// Set or clear the reasoning effort. Absent: unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::EffortChange>,
+    /// Option choices to set (option id to choice id), each one the run's model lists
+    /// (`ModelInfo::options`). Options not named keep their choice.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_options: std::collections::BTreeMap<String, String>,
+}
+
+/// Result of `run.configure`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConfigureResult {
+    /// The effort the run now asks for; absent: the model's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::Effort>,
+    /// Every option choice the run now asks for.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_options: std::collections::BTreeMap<String, String>,
+    /// When the effort change takes hold. Absent when the request did not change the effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_applies: Option<crate::ConfigTiming>,
+    /// When the option changes take hold: the latest of them. Absent when the request changed
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_apply: Option<crate::ConfigTiming>,
+}
+
 /// Params of the `run.events` subscription.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -845,6 +884,14 @@ method!(
     RunSetModel, "run.set_model", RunSetModelParams => RunSetModelResult
 );
 method!(
+    /// `run.configure`: changes a run's effort or model options. On a live run the executor's
+    /// caps (`live_effort`, `live_model_options`) say what takes hold now; the rest is stored
+    /// and used when the run is next launched (a resume). Journals `ConfigChanged`. Refused
+    /// (`InvalidParams`) for an effort, option or choice the run's model does not list, and
+    /// (`Conflict`) for a run that has ended for good. Needs feature `run.configure`.
+    RunConfigure, "run.configure", RunConfigureParams => RunConfigureResult
+);
+method!(
     /// `def.list`: the current definitions and any load errors. Needs feature `defs`.
     DefList, "def.list", DefListParams => DefsSnapshot
 );
@@ -1065,6 +1112,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<RunCancel>(),
             method_entry::<RunResume>(),
             method_entry::<RunSteer>(),
+            method_entry::<RunConfigure>(),
             method_entry::<ApprovalList>(),
             method_entry::<ApprovalDecide>(),
             method_entry::<ApprovalHistory>(),

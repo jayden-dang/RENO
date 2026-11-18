@@ -291,9 +291,9 @@ pub(crate) fn build_rows(
                     output: *output_tokens,
                 });
             }
-            // Context occupancy is a gauge, not a transcript row (the app reads it with
-            // `ContextUsage::latest`).
-            ExecEvent::ContextUsage { .. } => {}
+            // Context occupancy is a gauge (read with `ContextUsage::latest`) and a changed
+            // configuration shows in the run's summary, not as a transcript row.
+            ExecEvent::ContextUsage { .. } | ExecEvent::ConfigChanged { .. } => {}
             ExecEvent::Text { text } => match built.rows.last_mut() {
                 Some(Row::Prose { text: open, .. }) => open.push_str(text),
                 _ => built.rows.push(Row::Prose {

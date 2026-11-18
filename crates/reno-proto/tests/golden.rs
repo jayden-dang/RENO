@@ -313,7 +313,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "executor.maintain", "run.changes"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes"],
                "pid": 4242}),
     );
 }
@@ -1716,4 +1716,63 @@ fn run_context() {
     );
     assert_eq!(FEATURE_RUN_CONTEXT, "run.context");
     assert!(FEATURES.contains(&FEATURE_RUN_CONTEXT));
+}
+
+#[test]
+fn run_configure() {
+    golden(
+        &RunConfigureParams {
+            run_id: run_id(),
+            effort: Some(EffortChange::Set {
+                effort: Effort::High,
+            }),
+            model_options: [("contextWindow".to_owned(), "1m".to_owned())].into(),
+        },
+        json!({"runId": "run_01HZX9", "effort": {"type": "set", "effort": "high"},
+               "modelOptions": {"contextWindow": "1m"}}),
+    );
+    golden(
+        &RunConfigureParams {
+            run_id: run_id(),
+            effort: Some(EffortChange::Clear),
+            model_options: Default::default(),
+        },
+        json!({"runId": "run_01HZX9", "effort": {"type": "clear"}}),
+    );
+    // Absent means unchanged, which is not the same as clear.
+    golden(
+        &RunConfigureParams {
+            run_id: run_id(),
+            effort: None,
+            model_options: Default::default(),
+        },
+        json!({"runId": "run_01HZX9"}),
+    );
+    golden(
+        &RunConfigureResult {
+            effort: None,
+            model_options: Default::default(),
+            effort_applies: Some(ConfigTiming::NextTurn),
+            options_apply: Some(ConfigTiming::AfterRestart),
+        },
+        json!({"effortApplies": "next_turn", "optionsApply": "after_restart"}),
+    );
+    golden(
+        &ExecEvent::ConfigChanged {
+            effort: Some(Effort::Low),
+            model_options: [("contextWindow".to_owned(), "200k".to_owned())].into(),
+        },
+        json!({"type": "config_changed", "effort": "low",
+               "modelOptions": {"contextWindow": "200k"}}),
+    );
+    golden(
+        &ExecEvent::ConfigChanged {
+            effort: None,
+            model_options: Default::default(),
+        },
+        json!({"type": "config_changed"}),
+    );
+    assert_eq!(<RunConfigure as Method>::NAME, "run.configure");
+    assert_eq!(FEATURE_RUN_CONFIGURE, "run.configure");
+    assert!(FEATURES.contains(&FEATURE_RUN_CONFIGURE));
 }

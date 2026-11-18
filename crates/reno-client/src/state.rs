@@ -875,6 +875,8 @@ mod tests {
                     verified: "0".into(),
                 },
                 caps: ExecutorCaps {
+                    live_effort: None,
+                    live_model_options: None,
                     steering: Steering::None,
                     resume: false,
                     access_modes: vec![],
