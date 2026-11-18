@@ -41,6 +41,7 @@ mod header;
 mod output;
 mod panel;
 mod session;
+mod terminal;
 mod transcript;
 
 pub(crate) use panel::PanelAction;
@@ -102,6 +103,8 @@ pub(crate) struct RunScreen {
     panel_shown: bool,
     /// The Files tab's tree, viewer and watch, made when it first shows.
     files: Option<files::FilesTab>,
+    /// The Terminal tabs: a slot each, with its view made when it first shows.
+    terms: terminal::Terms,
     /// Review's files the person folded, and whether the many-files default was applied.
     review_folded: HashSet<String>,
     review_default_applied: bool,
@@ -135,6 +138,14 @@ impl RunScreen {
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
         let key = panel_key_for(store.read(cx), &run);
         let saved = Saved::get(&key, cx).or_else(|| migrated(store.read(cx), &key, cx));
+        // What was saved names terminals by id; the panel names them by slot.
+        let (terms, saved) = match saved {
+            Some(saved) => {
+                let (terms, saved) = terminal::Terms::restore(saved);
+                (terms, Some(saved))
+            }
+            None => (terminal::Terms::default(), None),
+        };
         let (panel, panel_seeded) = match saved {
             // What the person left: the first-tabs choice must not undo it.
             Some(saved) => (PanelState::restore(&saved), true),
@@ -170,6 +181,7 @@ impl RunScreen {
             panel_focus: cx.focus_handle(),
             panel_shown: false,
             files: None,
+            terms,
             review_folded: HashSet::new(),
             review_default_applied: false,
             review: changes::Flat::new(),
@@ -686,3 +698,5 @@ mod files_tests;
 mod panel_tests;
 #[cfg(test)]
 mod persist_tests;
+#[cfg(test)]
+mod terminal_tests;

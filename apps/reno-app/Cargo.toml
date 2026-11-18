@@ -15,6 +15,7 @@ reno-proto.workspace = true
 reno-markdown.workspace = true
 reno-syntax.workspace = true
 reno-notify.workspace = true
+reno-term.workspace = true
 reno-client = { workspace = true, features = ["fake"] }
 chrono.workspace = true
 futures.workspace = true

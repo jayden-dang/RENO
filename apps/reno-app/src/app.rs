@@ -68,6 +68,9 @@ pub(crate) struct Options {
     pub(crate) files_open: Option<String>,
     /// `RENO_FILES_SEARCH=<text>`: with `RENO_PANEL=files`, type that in the Files tab's search.
     pub(crate) files_search: Option<String>,
+    /// `RENO_TERMINAL_INPUT=<text>`: with `RENO_PANEL=terminal`, type that into the new terminal
+    /// (`\e` is Escape, `\n` is Enter; the fake daemon echoes it, so colours show).
+    pub(crate) terminal_input: Option<String>,
     /// `RENO_FOLLOW_UP=<text>`: with `RENO_OPEN=run_<id>`, send `text` from that run's box once it
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
@@ -134,6 +137,7 @@ impl Options {
             Some("session") => Some(Surface::Session),
             Some("review") => Some(Surface::Review),
             Some("files") => Some(Surface::Files),
+            Some("terminal") => Some(Surface::Terminal(0)),
             Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
                 Some(Surface::File(other["file:".len()..].to_owned()))
             }
@@ -142,6 +146,7 @@ impl Options {
         };
         options.files_open = env("RENO_FILES_OPEN").filter(|v| !v.is_empty());
         options.files_search = env("RENO_FILES_SEARCH").filter(|v| !v.is_empty());
+        options.terminal_input = env("RENO_TERMINAL_INPUT").filter(|v| !v.is_empty());
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
@@ -179,6 +184,9 @@ pub(crate) struct Start {
     /// A file to open in the Files tab, as `path` or `path:line`, and a search to type there.
     pub(crate) files_open: Option<String>,
     pub(crate) files_search: Option<String>,
+    /// `RENO_TERMINAL_INPUT=<text>`: with `RENO_PANEL=terminal`, type that into the new terminal
+    /// (`\e` is Escape, `\n` is Enter; the fake daemon echoes it, so colours show).
+    pub(crate) terminal_input: Option<String>,
     /// A message to send from that run's box once it is open.
     pub(crate) follow_up: Option<String>,
 }
@@ -223,6 +231,7 @@ pub(crate) fn run(options: Options) {
             panel: options.panel.clone(),
             files_open: options.files_open.clone(),
             files_search: options.files_search.clone(),
+            terminal_input: options.terminal_input.clone(),
             follow_up: options.follow_up.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
@@ -266,6 +275,7 @@ pub(crate) fn open_window(
         panel,
         files_open,
         files_search,
+        terminal_input,
         follow_up,
     } = start;
     cx.open_window(
@@ -311,8 +321,17 @@ pub(crate) fn open_window(
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.open_run(run, window, cx);
-                            if let Some(tab) = panel {
-                                root.show_panel_tab(tab, window, cx);
+                            match panel {
+                                Some(Surface::Terminal(_)) => {
+                                    if let Some(screen) = root.run_screen().cloned() {
+                                        let input = terminal_input.clone();
+                                        screen.update(cx, |screen, cx| {
+                                            screen.open_demo_terminal(input, window, cx);
+                                        });
+                                    }
+                                }
+                                Some(tab) => root.show_panel_tab(tab, window, cx),
+                                None => {}
                             }
                         })
                         .ok();
@@ -1049,6 +1068,7 @@ mod tests {
                 panel: None,
                 files_open: None,
                 files_search: None,
+                terminal_input: None,
                 follow_up: None,
                 data_dir: None,
             })

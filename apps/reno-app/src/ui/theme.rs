@@ -65,6 +65,10 @@ pub(crate) struct Palette {
     pub(crate) danger: u32,
     pub(crate) warning: u32,
     pub(crate) success: u32,
+    /// The terminal's 16 ANSI colours: black, red, green, yellow, blue, magenta, cyan, white,
+    /// then their bright forms. Red, green and yellow are the danger, success and warning
+    /// tokens, so a terminal and the rest of the app say the same colours.
+    pub(crate) ansi: [u32; 16],
 }
 
 /// The dark palette.
@@ -82,6 +86,10 @@ pub(crate) const fn reno_dark() -> Palette {
         danger: 0xf87171,
         warning: 0xfacc15,
         success: 0x34d399,
+        ansi: [
+            0x3b3b41, 0xf87171, 0x34d399, 0xfacc15, 0x7aa2f7, 0xc084fc, 0x22d3ee, 0xd4d4d8,
+            0x71717a, 0xfca5a5, 0x6ee7b7, 0xfde047, 0x93c5fd, 0xd8b4fe, 0x67e8f9, 0xfafafa,
+        ],
     }
 }
 
@@ -101,6 +109,10 @@ pub(crate) const fn reno_light() -> Palette {
         danger: 0xdc2626,
         warning: 0xa16207,
         success: 0x15803d,
+        ansi: [
+            0x303035, 0xdc2626, 0x15803d, 0xa16207, 0x1d4ed8, 0x7e22ce, 0x0e7490, 0x62626a,
+            0x52525b, 0xb91c1c, 0x166534, 0x854d0e, 0x1e40af, 0x6b21a8, 0x155e75, 0x3f3f46,
+        ],
     }
 }
 
@@ -130,6 +142,8 @@ pub(crate) struct Theme {
     pub(crate) success: Hsla,
     /// Hairline: text at [`HAIRLINE_ALPHA`].
     pub(crate) hairline: Hsla,
+    /// The terminal's ANSI-16 colours, from [`Palette::ansi`].
+    pub(crate) ansi: [Hsla; 16],
 }
 
 impl Theme {
@@ -154,6 +168,7 @@ impl Theme {
             warning: rgb(palette.warning).into(),
             success: rgb(palette.success).into(),
             hairline: text.opacity(HAIRLINE_ALPHA),
+            ansi: palette.ansi.map(|c| rgb(c).into()),
         }
     }
 
@@ -232,6 +247,35 @@ mod tests {
             assert_eq!(hex(theme.danger), palette.danger);
             assert_eq!(theme.canvas.a, 1.0, "tokens are opaque");
             assert_eq!(theme.card.a, 1.0, "tokens are opaque");
+        }
+    }
+
+    #[test]
+    fn the_ansi_palette_shares_the_semantic_colours_in_both_appearances() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let p = Palette::for_appearance(appearance);
+            assert_eq!(p.ansi[1], p.danger, "red is danger ({appearance:?})");
+            assert_eq!(p.ansi[2], p.success, "green is success ({appearance:?})");
+            assert_eq!(p.ansi[3], p.warning, "yellow is warning ({appearance:?})");
+            let theme = Theme::for_appearance(appearance);
+            for (i, c) in theme.ansi.iter().enumerate() {
+                assert_eq!(hex(*c), p.ansi[i]);
+                assert_eq!(c.a, 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_hues_read_on_the_canvas_in_both_appearances() {
+        // Red, green, yellow, blue, magenta, cyan, and their bright forms, against the canvas
+        // the terminal sits on: what a program colours must stay legible without the
+        // contrast floor doing the work.
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::for_appearance(appearance);
+            for i in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14] {
+                let ratio = crate::vm::terminal::contrast_ratio(theme.ansi[i], theme.canvas);
+                assert!(ratio >= 4.0, "{appearance:?} ansi {i}: {ratio}");
+            }
         }
     }
 

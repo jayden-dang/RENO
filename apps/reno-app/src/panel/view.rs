@@ -2,6 +2,7 @@
 //! functions over the model (`PanelState`, `vm::panel_home::Home`); a click goes out as a [`Cmd`]
 //! through one handler, like `ui/sidebar.rs`, so the run screen decides what each one does.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -125,13 +126,13 @@ pub(crate) fn tab_strip(
     theme: &Theme,
     state: &PanelState,
     counts: &Counts,
+    labels: &HashMap<u64, String>,
     emit: &Emit,
 ) -> impl IntoElement {
-    let tabs = state
-        .tabs()
-        .iter()
-        .enumerate()
-        .map(|(ix, surface)| tab(theme, ix, surface, surface == state.active(), counts, emit));
+    let tabs = state.tabs().iter().enumerate().map(|(ix, surface)| {
+        let active = surface == state.active();
+        tab(theme, ix, surface, active, counts, labels, emit)
+    });
     let new_tab = {
         let emit = emit.clone();
         kit::icon_button(theme, "panel-new-tab", Icon::Plus, 28.0)
@@ -173,13 +174,19 @@ fn tab(
     surface: &Surface,
     active: bool,
     counts: &Counts,
+    labels: &HashMap<u64, String>,
     emit: &Emit,
 ) -> Stateful<gpui::Div> {
     let slug = surface.slug();
     let selector = format!("panel-tab-{slug}");
     let ink = if active { theme.text } else { theme.muted };
     let hover = hover_fill(theme);
-    let title: SharedString = surface.title().into();
+    // A terminal says what a program titled it; every other tab has one fixed label.
+    let title: SharedString = match surface {
+        Surface::Terminal(slot) => labels.get(slot).cloned().unwrap_or_else(|| surface.title()),
+        _ => surface.title(),
+    }
+    .into();
     let closable = surface.closable();
     let pinned = !closable;
     let target = surface.clone();

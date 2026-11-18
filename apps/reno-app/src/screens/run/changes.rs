@@ -180,6 +180,7 @@ impl RunScreen {
     pub(super) fn ensure_patches(&mut self, cx: &mut Context<Self>) {
         // The Files tab starts or stops its watch with the same events.
         self.sync_files(cx);
+        self.sync_terminals(cx);
         let review = self.review_is_showing(cx);
         let file_tab = self.file_tab_showing(cx);
         if !review && file_tab.is_none() {

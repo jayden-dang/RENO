@@ -748,6 +748,17 @@ impl Store {
         self.client()
     }
 
+    /// Whether the daemon serves the Terminal tab (feature `terminals`).
+    pub(crate) fn supports_terminals(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_TERMINALS)
+    }
+
+    /// The connected client, for the Terminal tab's own requests: a terminal's output is a
+    /// stream the view folds itself, so its calls go through the client directly.
+    pub(crate) fn term_client(&self) -> Option<Client> {
+        self.client()
+    }
+
     /// Whether the daemon has threads (feature `threads`).
     pub(crate) fn supports_threads(&self) -> bool {
         self.state.supports(reno_proto::FEATURE_THREADS)
