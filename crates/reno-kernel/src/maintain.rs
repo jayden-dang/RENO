@@ -101,6 +101,9 @@ struct JobState {
     work: Work,
     /// When the last line was printed, for `quiet_since_ms`.
     last_output_ms: u64,
+    /// A person started it (an RPC), not the daily auto-update: its closing probe is the full
+    /// one, so a person's install or update ends with the sign-in answer they would ask for next.
+    by_person: bool,
 }
 
 impl JobState {
@@ -624,6 +627,8 @@ fn begin(
             cancel: cancel.clone(),
             work: plan.work,
             last_output_ms: now,
+            // Only the auto-update asks for `idle_only`.
+            by_person: !idle_only,
         },
     );
     Ok(if waiting > 0 {
@@ -653,10 +658,14 @@ async fn start(
         .ok_or_else(|| KernelError::ExecutorNotFound(id.clone()))?;
     let mut health = shared.any_health(id);
     if health.is_none() {
-        // Jobs also start from the daily auto-update, which no person asked for: quiet.
-        shared
-            .probe_executor(id, Probing::Shared, ProbeDepth::Quiet)
-            .await?;
+        // The auto-update (`idle_only`) is not a person's request: quiet. A job a person started
+        // is full.
+        let depth = if idle_only {
+            ProbeDepth::Quiet
+        } else {
+            ProbeDepth::Full
+        };
+        shared.probe_executor(id, Probing::Shared, depth).await?;
         health = shared.any_health(id);
     }
     let health = health.ok_or_else(|| KernelError::NothingToDo {
@@ -758,10 +767,10 @@ async fn run_job(
     job: String,
     cancel: CancellationToken,
 ) {
-    let (work, kind) = {
+    let (work, kind, by_person) = {
         let state = maintainer.state();
         match state.jobs.get(&id) {
-            Some(j) if j.id == job => (j.work.clone(), j.kind),
+            Some(j) if j.id == job => (j.work.clone(), j.kind, j.by_person),
             _ => return,
         }
     };
@@ -781,7 +790,7 @@ async fn run_job(
         }
         Work::Managed => managed(&shared, &maintainer, &id, &job, &cancel, limits).await,
     };
-    finish(&shared, &maintainer, &id, &job, kind, outcome).await;
+    finish(&shared, &maintainer, &id, &job, kind, by_person, outcome).await;
 }
 
 async fn managed(
@@ -906,6 +915,7 @@ async fn finish(
     id: &ExecutorId,
     job: &str,
     kind: JobKind,
+    by_person: bool,
     outcome: Outcome,
 ) {
     let now = now_ms(shared);
@@ -925,11 +935,13 @@ async fn finish(
     }
     shared.publish_executors();
     // Whatever happened, the health shown is what the executor is now.
-    // Auto-update ends here too, so the probe is quiet; a person's Check again is the full one.
-    if let Err(error) = shared
-        .probe_executor(id, Probing::Fresh, ProbeDepth::Quiet)
-        .await
-    {
+    // A job a person started ends with the full probe; the auto-update's stays quiet.
+    let depth = if by_person {
+        ProbeDepth::Full
+    } else {
+        ProbeDepth::Quiet
+    };
+    if let Err(error) = shared.probe_executor(id, Probing::Fresh, depth).await {
         tracing::debug!(executor = %id, %error, "the probe after a job ended early");
     }
     {
