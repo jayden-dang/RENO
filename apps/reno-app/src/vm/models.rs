@@ -54,6 +54,11 @@ pub(crate) struct HarnessChoice {
     pub(crate) usable: bool,
     /// A running run's model can be changed (`ExecutorCaps::model_switch`).
     pub(crate) switches: bool,
+    /// When a live run's effort change takes hold (`ExecutorCaps::live_effort`); `None`: it is
+    /// stored for the next launch.
+    pub(crate) live_effort: Option<reno_proto::ConfigTiming>,
+    /// Likewise for its model options (`live_model_options`).
+    pub(crate) live_options: Option<reno_proto::ConfigTiming>,
     /// Who is signed in, as the harness reported it.
     pub(crate) account: Account,
     /// The account's plan meters, when the daemon has them.
@@ -109,6 +114,8 @@ fn choice(info: &ExecutorInfo) -> Option<HarnessChoice> {
         live,
         usable: !signed_out,
         switches: info.descriptor.caps.model_switch,
+        live_effort: info.descriptor.caps.live_effort,
+        live_options: info.descriptor.caps.live_model_options,
         account,
         usage: health.and_then(|h| h.plan_usage.clone()),
     })

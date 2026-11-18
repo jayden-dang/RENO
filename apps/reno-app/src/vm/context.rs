@@ -5,7 +5,9 @@
 //! `crates/ui/src/context_usage.rs`; plan usage thresholds (0.80 / 0.95) come from
 //! `reno_proto::usage_level`.
 
-use reno_proto::{ContextUsage, MODEL_OPTION_CONTEXT_WINDOW, ModelOption, UsageLevel, UsageWindow};
+use reno_proto::{
+    ConfigTiming, ContextUsage, MODEL_OPTION_CONTEXT_WINDOW, ModelOption, UsageLevel, UsageWindow,
+};
 
 use super::models::ModelChoice;
 
@@ -161,6 +163,24 @@ pub(crate) fn options_for_model(
         .collect()
 }
 
+/// When a change of a run's effort or options takes hold, as the picker says it under the control.
+pub(crate) const fn timing_words(timing: ConfigTiming) -> &'static str {
+    match timing {
+        ConfigTiming::Now => "applies now",
+        ConfigTiming::NextTurn => "from the next turn",
+        ConfigTiming::AfterRestart => "next time the run starts",
+    }
+}
+
+/// When a change to `choice` of a window option takes hold on a live run: the executor's own
+/// timing, except that a 200K cap is a launch setting (`after_restart`) whatever it says.
+pub(crate) fn window_timing(live: Option<ConfigTiming>, choice: &str) -> ConfigTiming {
+    if choice == reno_proto::CONTEXT_WINDOW_200K {
+        return ConfigTiming::AfterRestart;
+    }
+    live.unwrap_or(ConfigTiming::AfterRestart)
+}
+
 // ---- plan usage ---------------------------------------------------------------------------------
 
 /// When a window resets, in `zone`: "16:00" on the day of `now_ms`, "Thu 10:00" on another.
@@ -290,6 +310,7 @@ mod tests {
             label: label.into(),
         };
         ModelOption {
+            settable: true,
             id: MODEL_OPTION_CONTEXT_WINDOW.into(),
             label: "Context window".into(),
             choices: vec![choice("200k", "200K"), choice("1m", "1M")],
@@ -350,5 +371,25 @@ mod tests {
             window_line(&UsageWindow::new("Week", 0.21, None), now, &zone),
             "Week 21%"
         );
+    }
+
+    #[test]
+    fn timings_read_as_when_the_change_takes_hold() {
+        assert_eq!(timing_words(ConfigTiming::Now), "applies now");
+        assert_eq!(timing_words(ConfigTiming::NextTurn), "from the next turn");
+        assert_eq!(
+            timing_words(ConfigTiming::AfterRestart),
+            "next time the run starts"
+        );
+        assert_eq!(
+            window_timing(Some(ConfigTiming::Now), "1m"),
+            ConfigTiming::Now
+        );
+        assert_eq!(
+            window_timing(Some(ConfigTiming::Now), "200k"),
+            ConfigTiming::AfterRestart,
+            "a 200K cap is a launch setting"
+        );
+        assert_eq!(window_timing(None, "1m"), ConfigTiming::AfterRestart);
     }
 }

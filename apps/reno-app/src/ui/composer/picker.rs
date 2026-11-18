@@ -328,15 +328,25 @@ impl Composer {
     }
 
     /// A click on an effort cell: that level, or the model's default when it was the chosen one.
-    /// What is chosen is remembered for the model.
+    /// What is chosen is remembered for the model; on a live run the daemon changes it.
     fn click_effort(&mut self, clicked: Effort, cx: &mut Context<Self>) {
-        if self.live_run(cx).is_some() {
-            return;
-        }
         let Some(mut pick) = self.shown_pick(cx) else {
             return;
         };
         pick.effort = picker::next_effort(pick.effort, clicked);
+        if let Some(run) = self.live_run(cx).map(|r| r.run_id.clone()) {
+            // A live run: the daemon changes it (or stores the change for its next launch) and
+            // says when it applies.
+            let change = pick
+                .effort
+                .map_or(reno_proto::EffortChange::Clear, |effort| {
+                    reno_proto::EffortChange::Set { effort }
+                });
+            self.store.update(cx, |store, cx| {
+                store.configure_run(run, Some(change), Default::default(), cx);
+            });
+            return;
+        }
         if let Some(model) = pick.model.clone() {
             let (executor, effort) = (pick.executor.clone(), pick.effort);
             self.store.update(cx, |store, cx| {
@@ -348,9 +358,15 @@ impl Composer {
         cx.notify();
     }
 
-    /// A click on a size of the context window: the next task's, remembered for the model.
+    /// A click on a size of the context window: the next task's, remembered for the model; on a
+    /// live run the daemon changes it.
     fn choose_option(&mut self, option: &str, choice: &str, cx: &mut Context<Self>) {
-        if self.live_run(cx).is_some() {
+        if let Some(run) = self.live_run(cx).map(|r| r.run_id.clone()) {
+            let options = [(option.to_owned(), choice.to_owned())].into();
+            self.store
+                .update(cx, |store, cx| store.configure_run(run, None, options, cx));
+            self.picker_window_open = false;
+            cx.notify();
             return;
         }
         let Some(mut pick) = self.shown_pick(cx) else {
@@ -944,9 +960,19 @@ impl Composer {
         div().flex().flex_col().child(row).children(meters)
     }
 
+    /// Whether a live run's effort and options can be changed: the daemon has `run.configure`.
+    /// Where the executor does not apply a change live, the daemon stores it for the next launch.
+    fn live_configurable(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .state()
+            .supports(reno_proto::FEATURE_RUN_CONFIGURE)
+    }
+
     /// The Context window row, when the shown model offers a choice of sizes: the size chosen
-    /// for the next task (a click lists the sizes), or on a live run the live fill with the
-    /// choice locked until the next run.
+    /// (a click lists the sizes), or on a live run the live fill, with when a change applies
+    /// under it. An option the harness does not let Reno set shows its size and nothing to
+    /// click.
     fn context_row(&self, theme: &Theme, view: &View, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let shown = view.shown.as_ref()?;
         let state = self.store.read(cx).state();
@@ -955,11 +981,15 @@ impl Composer {
         let chosen = shown.options.get(&option.id).map(String::as_str);
         let label = context::chosen_label(option, chosen);
         let live = self.live_run(cx);
+        let configurable = live.is_none() || self.live_configurable(cx);
+        let interactive = option.settable && configurable;
+        let harness = view.harnesses.iter().find(|h| h.id == shown.executor);
         let value = live
             .and_then(|run| context::live_words(models::context_usage(state, &run.run_id)))
             .unwrap_or_else(|| label.clone());
-        let open = self.picker_window_open && live.is_none();
-        let row = menu_row(theme, "picker-context".to_owned(), live.is_none())
+        let open = self.picker_window_open && interactive;
+        let name = harness.map_or_else(String::new, |h| h.name.clone());
+        let row = menu_row(theme, "picker-context".to_owned(), interactive)
             .child(
                 div()
                     .flex_none()
@@ -978,7 +1008,18 @@ impl Composer {
                     .text_color(theme.text)
                     .child(SharedString::from(value)),
             )
-            .when(live.is_none(), |r| {
+            .when(!option.settable, |r| {
+                let words = if shown.executor.as_str() == "acp.grok" {
+                    "Set in Grok's own settings (/context-window)".to_owned()
+                } else {
+                    format!("Set in {name}'s own settings")
+                };
+                r.tooltip(move |_, cx| {
+                    let words = SharedString::from(words.clone());
+                    cx.new(|_| Tip(words)).into()
+                })
+            })
+            .when(interactive, |r| {
                 r.child(icon(
                     if open { Icon::ChevDown } else { Icon::Fwd },
                     12.0,
@@ -990,14 +1031,32 @@ impl Composer {
                 }))
             });
         let mut section = div().flex().flex_col().child(row);
-        if live.is_some() {
+        if let Some(run) = live
+            && option.settable
+        {
+            let current = context::chosen_choice(option, chosen);
+            let when = if configurable {
+                let timing = self
+                    .store
+                    .read(cx)
+                    .config_applied(&run.run_id)
+                    .options
+                    .unwrap_or_else(|| {
+                        context::window_timing(harness.and_then(|h| h.live_options), current)
+                    });
+                context::timing_words(timing)
+            } else {
+                "next run"
+            };
             section = section.child(
                 div()
+                    .id("context-applies")
+                    .debug_selector(|| "context-applies".to_owned())
                     .px(px(10.0))
                     .pb(px(4.0))
                     .text_size(px(11.5))
                     .text_color(theme.faint)
-                    .child(SharedString::from(format!("{label} \u{b7} next run"))),
+                    .child(SharedString::from(format!("{label} \u{b7} {when}"))),
             );
         }
         if open {
@@ -1025,6 +1084,8 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let live = view.live.is_some();
+        // Changeable unless it is a live run whose daemon cannot take a change (`run.configure`).
+        let editable = !live || self.live_configurable(cx);
         let state = self.store.read(cx).state();
         let shown = view.shown.as_ref();
         let model = shown.and_then(|p| {
@@ -1042,7 +1103,7 @@ impl Composer {
             String::new()
         } else {
             let mut w = picker::effort_words(chosen, default);
-            if live {
+            if live && !editable {
                 w.push_str(" \u{b7} next run");
             }
             w
@@ -1075,7 +1136,7 @@ impl Composer {
                     div()
                         .flex()
                         .gap(px(3.0))
-                        .when(live, |d| d.opacity(0.5))
+                        .when(!editable, |d| d.opacity(0.5))
                         .children(cells.into_iter().map(|cell| {
                             let effort = cell.effort;
                             let id = format!("effort-cell-{}", effort.as_str());
@@ -1107,7 +1168,7 @@ impl Composer {
                                             faint.opacity(0.0)
                                         })
                                 })
-                                .when(!live, |c| {
+                                .when(editable, |c| {
                                     c.cursor_pointer().on_click(cx.listener(
                                         move |this, _, _, cx| this.click_effort(effort, cx),
                                     ))
@@ -1117,6 +1178,33 @@ impl Composer {
                         .into_any_element()
                 }
             };
+        // Under the track on a live run: when a change takes hold, as the daemon last answered,
+        // else as the executor says it applies one.
+        let applies = (live && editable && !levels.is_empty())
+            .then(|| {
+                let run = self.live_run(cx)?;
+                let timing = self
+                    .store
+                    .read(cx)
+                    .config_applied(&run.run_id)
+                    .effort
+                    .or_else(|| {
+                        view.harnesses
+                            .iter()
+                            .find(|h| h.id == run.executor)
+                            .and_then(|h| h.live_effort)
+                    })
+                    .unwrap_or(reno_proto::ConfigTiming::AfterRestart);
+                Some(
+                    div()
+                        .id("effort-applies")
+                        .debug_selector(|| "effort-applies".to_owned())
+                        .text_size(px(11.5))
+                        .text_color(theme.faint)
+                        .child(SharedString::from(context::timing_words(timing))),
+                )
+            })
+            .flatten();
         div()
             .id("picker-effort")
             .debug_selector(|| "picker-effort".to_owned())
@@ -1148,6 +1236,7 @@ impl Composer {
                     ),
             )
             .child(body)
+            .children(applies)
     }
 
     /// The picker's popover content: rail, search, list and the footer.

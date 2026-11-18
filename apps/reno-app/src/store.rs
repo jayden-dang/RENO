@@ -228,6 +228,8 @@ pub(crate) struct Store {
     /// daemon, in memory only for the fake one.
     composer: crate::vm::composer_prefs::ComposerPrefs,
     composer_file: Option<PathBuf>,
+    /// When the last `run.configure` of each run takes hold, as the daemon answered.
+    configured: BTreeMap<RunId, ConfigApplied>,
     /// The run on screen: it is seen as it changes.
     looking: Option<RunId>,
     /// The boot task and then the update consumer. Owned here so it dies with the store.
@@ -235,6 +237,13 @@ pub(crate) struct Store {
 }
 
 impl EventEmitter<StoreEvent> for Store {}
+
+/// When a run's last changes of effort and of model options take hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConfigApplied {
+    pub(crate) effort: Option<reno_proto::ConfigTiming>,
+    pub(crate) options: Option<reno_proto::ConfigTiming>,
+}
 
 impl Store {
     /// A store that has not connected yet.
@@ -272,6 +281,7 @@ impl Store {
             seen_file: None,
             composer: crate::vm::composer_prefs::ComposerPrefs::default(),
             composer_file: None,
+            configured: BTreeMap::new(),
             looking: None,
             bridge: None,
         }
@@ -1543,6 +1553,41 @@ impl Store {
             D {
                 ok: Box::new(|store, _rule, cx| {
                     store.load_rules(cx);
+                    cx.notify();
+                }),
+                err: Box::new(|_, cx| cx.notify()),
+                quiet: false,
+            },
+        );
+    }
+
+    /// When the last effort and option changes of `run` take hold, from the daemon's answers.
+    pub(crate) fn config_applied(&self, run: &RunId) -> ConfigApplied {
+        self.configured.get(run).copied().unwrap_or_default()
+    }
+
+    /// `run.configure`: changes a run's effort and options. The daemon says when each takes
+    /// hold; the run's summary brings the new values. A refusal is a toast.
+    pub(crate) fn configure_run(
+        &mut self,
+        run: RunId,
+        effort: Option<reno_proto::EffortChange>,
+        options: BTreeMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.supports(reno_proto::FEATURE_RUN_CONFIGURE) {
+            return;
+        }
+        let key = run.clone();
+        self.call(
+            "Could not change the run",
+            move |client| async move { client.configure_run(&run, effort, options).await },
+            cx,
+            D {
+                ok: Box::new(move |store, result: reno_proto::RunConfigureResult, cx| {
+                    let applied = store.configured.entry(key.clone()).or_default();
+                    applied.effort = result.effort_applies.or(applied.effort);
+                    applied.options = result.options_apply.or(applied.options);
                     cx.notify();
                 }),
                 err: Box::new(|_, cx| cx.notify()),

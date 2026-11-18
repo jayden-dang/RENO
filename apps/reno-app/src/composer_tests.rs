@@ -778,7 +778,7 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_next(
+fn a_live_runs_effort_is_changed_through_the_daemon_and_an_ended_runs_goes_with_the_next(
     cx: &mut TestAppContext,
 ) {
     let store = fake_store(cx);
@@ -803,10 +803,20 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
     // A live run: the cells show its model's levels, and a click changes nothing.
     wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
     assert!(painted(vcx, "effort-word"));
-    let before = composer.read_with(vcx, |c, _| c.pick().cloned());
+    // A click asks the daemon (`run.configure`), which says when it applies; the composer's own
+    // pick stays unset on a live run.
     click(vcx, "effort-cell-high");
-    draw(vcx);
-    assert_eq!(composer.read_with(vcx, |c, _| c.pick().cloned()), before);
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state().run(&keeper).and_then(|r| r.effort) == Some(reno_proto::Effort::High)
+        })
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-applies"));
+    assert_eq!(composer.read_with(vcx, |c, _| c.pick().cloned()), None);
+    assert!(
+        store.read_with(vcx, |s, _| s.config_applied(&keeper).effort.is_some()),
+        "the answer says when"
+    );
     // Ended: a cell picks the effort the next run starts with.
     store.update(vcx, |s, cx| s.cancel_run(keeper.clone(), cx));
     wait_until(vcx, |cx| {
@@ -820,11 +830,12 @@ fn a_live_runs_effort_shows_but_does_not_change_and_an_ended_runs_goes_with_the_
     assert!(!painted(vcx, "model-picker"), "the run ending closes it");
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
-    click(vcx, "effort-cell-high");
+    click(vcx, "effort-cell-low");
     draw(vcx);
     assert_eq!(
         composer.read_with(vcx, |c, _| c.pick().and_then(|p| p.effort)),
-        Some(reno_proto::Effort::High)
+        Some(reno_proto::Effort::Low),
+        "the run asked for high; the next run starts from what is clicked"
     );
 }
 
@@ -1097,4 +1108,70 @@ fn a_live_run_with_a_reported_window_shows_the_context_ring(cx: &mut TestAppCont
     wait_drawn(vcx, |vcx| painted(vcx, "context-ring"));
     click(vcx, "context-ring");
     wait_drawn(vcx, |vcx| painted(vcx, "context-card"));
+}
+
+#[gpui::test]
+fn a_live_runs_window_is_changed_through_the_daemon_and_says_when(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
+    // The demo run's own model is an alias the fake daemon cannot configure; switch to a listed
+    // one first, as a person would.
+    let keeper = crate::tests::run_id("keeper1");
+    store.update(vcx, |s, cx| {
+        s.set_run_model(keeper.clone(), "claude-opus-5-5".into(), cx);
+    });
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .and_then(|r| r.model.clone())
+                .as_deref()
+                == Some("claude-opus-5-5")
+        })
+    });
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-context"));
+    assert!(painted(vcx, "context-applies"));
+    click(vcx, "picker-context");
+    wait_drawn(vcx, |vcx| painted(vcx, "context-choice-200k"));
+    click(vcx, "context-choice-200k");
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state()
+                .run(&keeper)
+                .and_then(|r| r.model_options.get("contextWindow").cloned())
+                .as_deref()
+                == Some("200k")
+        })
+    });
+    assert!(store.read_with(vcx, |s, _| s.config_applied(&keeper).options.is_some()));
+}
+
+#[gpui::test]
+fn grok_lists_its_levels_on_home_and_its_window_is_read_only(cx: &mut TestAppContext) {
+    let (_store, _root, vcx) = open_picker_on(cx, "acp.grok");
+    wait_drawn(vcx, |vcx| painted(vcx, "pick-model-grok-4"));
+    click(vcx, "pick-model-grok-4");
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-xhigh"));
+    assert!(
+        painted(vcx, "effort-cell-low")
+            && painted(vcx, "effort-cell-medium")
+            && painted(vcx, "effort-cell-high"),
+        "Grok's four levels"
+    );
+    assert!(!painted(vcx, "effort-cell-max"));
+    assert!(painted(vcx, "picker-context"), "the window shows its size");
+    click(vcx, "picker-context");
+    draw(vcx);
+    assert!(
+        !painted(vcx, "context-choice-256k"),
+        "a read-only window has no sizes to pick"
+    );
 }

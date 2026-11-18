@@ -311,6 +311,8 @@ mod tests {
     fn harness(id: &str, usable: bool, models: Vec<ModelChoice>) -> HarnessChoice {
         HarnessChoice {
             usage: None,
+            live_effort: None,
+            live_options: None,
             id: id.parse().unwrap(),
             name: id.to_owned(),
             models,

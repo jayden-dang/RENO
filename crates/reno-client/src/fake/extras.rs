@@ -378,6 +378,8 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
                 (vec![Low, Medium, High, XHigh, Max], Some(High))
             }
             "claude-haiku-5-5" => (vec![Low, Medium, High], Some(Medium)),
+            // Grok reports four levels; its default is its own.
+            "grok-4" => (vec![Low, Medium, High, XHigh], Some(High)),
             id if id.starts_with("gpt-") => (vec![Minimal, Low, Medium, High, XHigh], Some(Medium)),
             _ => (vec![], None),
         }
@@ -385,16 +387,18 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
     // The context-window choice, as the Claude catalog offers it: Opus 5.5 runs 1M by itself
     // (default 1m); the fake's Sonnet 5.5 defaults to 200k so both defaults can be shown.
     let options = |id: &str| -> Vec<reno_proto::ModelOption> {
-        let default_choice = match id {
-            "claude-opus-5-5" => "1m",
-            "claude-sonnet-5-5" => "200k",
+        // Grok's window (256k or 500k) is read-only: only its own settings change it.
+        let (default_choice, settable, sizes) = match id {
+            "claude-opus-5-5" => ("1m", true, [("200k", "200K"), ("1m", "1M")]),
+            "claude-sonnet-5-5" => ("200k", true, [("200k", "200K"), ("1m", "1M")]),
+            "grok-4" => ("256k", false, [("256k", "256K"), ("500k", "500K")]),
             _ => return Vec::new(),
         };
         vec![reno_proto::ModelOption {
-            settable: true,
+            settable,
             id: reno_proto::MODEL_OPTION_CONTEXT_WINDOW.to_owned(),
             label: "Context window".to_owned(),
-            choices: [("200k", "200K"), ("1m", "1M")]
+            choices: sizes
                 .map(|(id, label)| reno_proto::ModelOptionChoice {
                     id: id.to_owned(),
                     label: label.to_owned(),
