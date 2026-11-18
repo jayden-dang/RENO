@@ -138,9 +138,9 @@ pub(crate) fn session_config(servers: &[McpServerSpec]) -> Option<Value> {
 /// text in the prompt cannot be silently dropped.
 pub(crate) fn opening_prompt(instructions: Option<&str>, prompt: &str) -> String {
     match instructions.map(str::trim).filter(|i| !i.is_empty()) {
-        Some(instructions) => format!(
-            "<instructions>\n{instructions}\n</instructions>\n\n{prompt}"
-        ),
+        Some(instructions) => {
+            format!("<instructions>\n{instructions}\n</instructions>\n\n{prompt}")
+        }
         None => prompt.to_owned(),
     }
 }
@@ -148,9 +148,7 @@ pub(crate) fn opening_prompt(instructions: Option<&str>, prompt: &str) -> String
 /// Whether `id` is a session id Muse accepts (a UUID).
 pub(crate) fn valid_session_id(id: &str) -> bool {
     id.len() == 36
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+        && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
         && id.matches('-').count() == 4
 }
 
@@ -181,7 +179,12 @@ mod tests {
     #[test]
     fn no_run_trusts_a_workspace_or_leaves_the_sandbox() {
         for mode in [Mode::Run, Mode::Probe] {
-            for refused in ["--trust-workspace", "--disable-sandbox", "--listen", "--join"] {
+            for refused in [
+                "--trust-workspace",
+                "--disable-sandbox",
+                "--listen",
+                "--join",
+            ] {
                 assert!(
                     !serve_args(mode, "meta").iter().any(|a| a == refused),
                     "{refused}"
@@ -199,13 +202,21 @@ mod tests {
         });
         assert!(ask.confirmed_by(&started).is_ok());
         let wrong_profile = json!({"permissionState": {"profileId": ":unrestricted"}});
-        assert!(ask.confirmed_by(&wrong_profile).unwrap_err().contains(":unrestricted"));
+        assert!(
+            ask.confirmed_by(&wrong_profile)
+                .unwrap_err()
+                .contains(":unrestricted")
+        );
         assert!(ask.confirmed_by(&json!({})).is_err());
         let wrong_mode = json!({
             "approvalMode": {"mode": "allowAll", "source": "startup"},
             "permissionState": {"profileId": ":ask-me"}
         });
-        assert!(ask.confirmed_by(&wrong_mode).unwrap_err().contains("allowAll"));
+        assert!(
+            ask.confirmed_by(&wrong_mode)
+                .unwrap_err()
+                .contains("allowAll")
+        );
         // A resumed session shows the mode it last had; setApprovalMode is what decides.
         let resumed = json!({
             "approvalMode": {"mode": "allowAll", "source": "replay"},
@@ -267,7 +278,13 @@ mod tests {
     #[test]
     fn session_ids_are_uuids() {
         assert!(valid_session_id("01a1ee73-5121-74d0-b05d-e674c72aeaf4"));
-        for bad in ["", "abc", "--help", "01a1ee73-5121-74d0-b05d-e674c72aeaf4x", "../x"] {
+        for bad in [
+            "",
+            "abc",
+            "--help",
+            "01a1ee73-5121-74d0-b05d-e674c72aeaf4x",
+            "../x",
+        ] {
             assert!(!valid_session_id(bad), "{bad}");
         }
     }

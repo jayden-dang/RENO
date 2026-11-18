@@ -97,7 +97,9 @@ impl Requirement {
 /// resolved (the update that reports a decision).
 pub(crate) fn requirement(params: &Value) -> Option<Requirement> {
     let approval = string(params, "approvalId");
-    let current = params.get("currentRequirementId").filter(|r| !r.is_null())?;
+    let current = params
+        .get("currentRequirementId")
+        .filter(|r| !r.is_null())?;
     if approval.is_empty() {
         return None;
     }
@@ -294,7 +296,11 @@ fn answer(question: &Question, labels: &[String]) -> Value {
         (true, all) => answer["selectedLabels"] = json!(all),
     }
     if !free_text.is_empty() {
-        answer[if selected.is_empty() { "freeText" } else { "note" }] = json!(free_text);
+        answer[if selected.is_empty() {
+            "freeText"
+        } else {
+            "note"
+        }] = json!(free_text);
     } else if selected.is_empty() {
         answer["freeText"] = json!("(no answer)");
     }
@@ -302,7 +308,12 @@ fn answer(question: &Question, labels: &[String]) -> Value {
 }
 
 /// `userInput/answer` params.
-pub(crate) fn answer_params(session: &str, command: &str, input: &str, answers: Vec<Value>) -> Value {
+pub(crate) fn answer_params(
+    session: &str,
+    command: &str,
+    input: &str,
+    answers: Vec<Value>,
+) -> Value {
     json!({"commandId": command, "sessionId": session, "userInputId": input, "answers": answers})
 }
 
@@ -414,7 +425,10 @@ mod tests {
         ))
         .unwrap();
         assert!(asked.allow().is_none());
-        assert!(asked.deny().is_none(), "a persistent denial is a rule written to Muse");
+        assert!(
+            asked.deny().is_none(),
+            "a persistent denial is a rule written to Muse"
+        );
     }
 
     #[test]
@@ -431,7 +445,10 @@ mod tests {
         assert_eq!(deny["feedback"], "not here");
         let allow = decide("s1", "c2", &asked, asked.allow().unwrap(), Some("ignored"));
         assert_eq!(allow["choiceId"], "allow_once");
-        assert!(allow.get("feedback").is_none(), "the allow takes no feedback");
+        assert!(
+            allow.get("feedback").is_none(),
+            "the allow takes no feedback"
+        );
     }
 
     #[test]
@@ -506,7 +523,10 @@ mod tests {
             },
         ];
         let out = answers(&asked(), &given);
-        assert_eq!(out[0], json!({"questionId": "q1", "selectedLabel": "Changed"}));
+        assert_eq!(
+            out[0],
+            json!({"questionId": "q1", "selectedLabel": "Changed"})
+        );
         assert_eq!(
             out[1],
             json!({"questionId": "q2", "selectedLabels": ["A", "B"], "note": "and a note"})
@@ -517,15 +537,24 @@ mod tests {
             labels: free,
         }];
         let out = answers(&asked(), &given);
-        assert_eq!(out[0], json!({"questionId": "q1", "freeText": "something else"}));
-        assert_eq!(out[1], json!({"questionId": "q2", "freeText": "(no answer)"}));
+        assert_eq!(
+            out[0],
+            json!({"questionId": "q1", "freeText": "something else"})
+        );
+        assert_eq!(
+            out[1],
+            json!({"questionId": "q2", "freeText": "(no answer)"})
+        );
         let long = vec!["x".repeat(900)];
         let given = [InputAnswer {
             question_id: "q1".into(),
             labels: long,
         }];
         assert_eq!(
-            answers(&asked(), &given)[0]["freeText"].as_str().unwrap().len(),
+            answers(&asked(), &given)[0]["freeText"]
+                .as_str()
+                .unwrap()
+                .len(),
             500
         );
     }

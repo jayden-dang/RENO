@@ -154,6 +154,7 @@ impl Normalizer {
     pub(crate) fn next_turn(&mut self) {
         let running = std::mem::take(&mut self.running);
         let unknown = std::mem::take(&mut self.unknown);
+        let final_text = std::mem::take(&mut self.final_text);
         // A subagent shown in an earlier turn is not shown again when it ends in a later one.
         let announced: HashSet<String> = self
             .announced
@@ -165,6 +166,8 @@ impl Normalizer {
         self.running = running;
         self.announced = announced;
         self.unknown = unknown;
+        // The run's result is the last message of the last turn, whichever turn that was.
+        self.final_text = final_text;
     }
 
     /// How many subagents and workflows are running.
@@ -278,7 +281,11 @@ impl Normalizer {
 
     fn tool(&mut self, id: &str, item: &Value) -> Vec<ExecEvent> {
         let user_shell = string(item, "kind") == "userShell";
-        let tool = if user_shell { "bash" } else { string(item, "tool") };
+        let tool = if user_shell {
+            "bash"
+        } else {
+            string(item, "tool")
+        };
         let status = string(item, "status");
         let failed = status == "failed";
         if SHADOWED_TOOLS.contains(&tool) && !failed {
@@ -418,19 +425,37 @@ mod tests {
     fn message_text_streams_once_across_deltas_and_full_resends() {
         let mut n = Normalizer::new();
         assert!(
-            n.item(&item("m", "agentMessage", 1, "inProgress", json!({"text": ""})))
-                .is_empty()
+            n.item(&item(
+                "m",
+                "agentMessage",
+                1,
+                "inProgress",
+                json!({"text": ""})
+            ))
+            .is_empty()
         );
         let events = n.delta(&json!({"itemId": "m", "field": "text", "delta": "Hel"}));
         assert_eq!(texts(&events), ["Hel"]);
         n.delta(&json!({"itemId": "m", "field": "text", "delta": "lo"}));
         // The completed re-send adds only what the deltas did not carry.
-        let events = n.item(&item("m", "agentMessage", 2, "completed", json!({"text": "Hello!"})));
+        let events = n.item(&item(
+            "m",
+            "agentMessage",
+            2,
+            "completed",
+            json!({"text": "Hello!"}),
+        ));
         assert_eq!(texts(&events), ["!"]);
         // A stale revision is ignored.
         assert!(
-            n.item(&item("m", "agentMessage", 2, "completed", json!({"text": "Hello!!"})))
-                .is_empty()
+            n.item(&item(
+                "m",
+                "agentMessage",
+                2,
+                "completed",
+                json!({"text": "Hello!!"})
+            ))
+            .is_empty()
         );
         assert_eq!(n.final_text().as_deref(), Some("Hello!"));
     }
@@ -438,8 +463,20 @@ mod tests {
     #[test]
     fn a_later_message_of_the_turn_is_a_new_paragraph() {
         let mut n = Normalizer::new();
-        let first = n.item(&item("a", "agentMessage", 1, "completed", json!({"text": "one"})));
-        let second = n.item(&item("b", "agentMessage", 1, "completed", json!({"text": "two"})));
+        let first = n.item(&item(
+            "a",
+            "agentMessage",
+            1,
+            "completed",
+            json!({"text": "one"}),
+        ));
+        let second = n.item(&item(
+            "b",
+            "agentMessage",
+            1,
+            "completed",
+            json!({"text": "two"}),
+        ));
         assert_eq!(texts(&first), ["one"]);
         assert_eq!(texts(&second), ["\n\ntwo"]);
         assert_eq!(n.final_text().as_deref(), Some("two"));
@@ -459,11 +496,27 @@ mod tests {
     #[test]
     fn reasoning_streams_by_summary_part_and_is_never_text() {
         let mut n = Normalizer::new();
-        n.item(&item("r", "reasoning", 1, "inProgress", json!({"summary": []})));
+        n.item(&item(
+            "r",
+            "reasoning",
+            1,
+            "inProgress",
+            json!({"summary": []}),
+        ));
         let one = n.delta(&json!({"itemId": "r", "field": "summary.0", "delta": "think"}));
         let two = n.delta(&json!({"itemId": "r", "field": "summary.1", "delta": "more"}));
-        assert_eq!(one, [ExecEvent::Reasoning { text: "think".into() }]);
-        assert_eq!(two, [ExecEvent::Reasoning { text: "\n\nmore".into() }]);
+        assert_eq!(
+            one,
+            [ExecEvent::Reasoning {
+                text: "think".into()
+            }]
+        );
+        assert_eq!(
+            two,
+            [ExecEvent::Reasoning {
+                text: "\n\nmore".into()
+            }]
+        );
         assert!(texts(&one).is_empty() && n.final_text().is_none());
     }
 
@@ -592,10 +645,25 @@ mod tests {
     #[test]
     fn housekeeping_items_are_known_and_a_new_kind_is_counted() {
         let mut n = Normalizer::new();
-        assert!(n.item(&item("u", "userMessage", 1, "completed", json!({"text": "hi"}))).is_empty());
-        assert!(n.item(&item("r", "reminderChild", 1, "inProgress", json!({}))).is_empty());
+        assert!(
+            n.item(&item(
+                "u",
+                "userMessage",
+                1,
+                "completed",
+                json!({"text": "hi"})
+            ))
+            .is_empty()
+        );
+        assert!(
+            n.item(&item("r", "reminderChild", 1, "inProgress", json!({})))
+                .is_empty()
+        );
         assert!(n.take_unknown().is_empty());
-        assert!(n.item(&item("h", "hologram", 1, "completed", json!({}))).is_empty());
+        assert!(
+            n.item(&item("h", "hologram", 1, "completed", json!({})))
+                .is_empty()
+        );
         assert_eq!(n.take_unknown(), ["item:hologram"]);
     }
 
@@ -611,7 +679,8 @@ mod tests {
             terminal(&failed, false),
             (StopReason::Error, Some("quota".into()))
         );
-        let denied = json!({"terminal": "failed", "error": {"message": "no", "requestDenied": true}});
+        let denied =
+            json!({"terminal": "failed", "error": {"message": "no", "requestDenied": true}});
         assert_eq!(terminal(&denied, false).0, StopReason::Refusal);
         assert_eq!(
             terminal(&json!({"terminal": "exploded"}), false),
@@ -645,7 +714,10 @@ mod tests {
                 cache_write_tokens: 0
             })
         );
-        assert_eq!(usage(&json!({"promptTokens": 0, "usage": {"outputTokens": 0}})), None);
+        assert_eq!(
+            usage(&json!({"promptTokens": 0, "usage": {"outputTokens": 0}})),
+            None
+        );
         assert_eq!(
             context_usage(&json!({"usedTokens": 33029, "windowTokens": 1007997})),
             ExecEvent::ContextUsage {

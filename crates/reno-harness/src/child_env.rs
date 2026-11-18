@@ -192,6 +192,18 @@ pub const PI: DriverEnv = DriverEnv {
     prefixes: &[],
 };
 
+/// Muse Code: nothing beyond the base set, on purpose. Its sign-in is the owner's own login (a
+/// file under `XDG_CONFIG_HOME`, which the base set carries, or the Keychain, which Muse reads
+/// itself). `META_API_KEY` is NOT here: it takes priority over the login, so one exported to the
+/// daemon would silently replace the owner's account for every run. A bot that is meant to run on
+/// a key lists it as a secret, which reaches only its runs. Exact names only: a `MUSE_` prefix
+/// would pass `MUSE_PERMISSION_PROFILE_FAIL_OPEN`, `MUSE_LAUNCHER_INSTALL`, `MUSE_SYNC_UPDATE` and
+/// the like, each of which changes what the launcher or the permission system does.
+pub const MUSE: DriverEnv = DriverEnv {
+    names: &[],
+    prefixes: &[],
+};
+
 const DEVIN: DriverEnv = DriverEnv {
     names: &["DEVIN_API_KEY", "WINDSURF_API_KEY"],
     prefixes: &[],
@@ -259,6 +271,7 @@ pub fn for_harness(harness: HarnessId) -> DriverEnv {
         HarnessId::Fx => FX,
         HarnessId::Antigravity => ANTIGRAVITY,
         HarnessId::Pi => PI,
+        HarnessId::Muse => MUSE,
         HarnessId::Registry(agent) if agent.registry_id() == "gemini" => GEMINI_REGISTRY,
         HarnessId::Registry(_) => NONE,
     }
@@ -389,6 +402,22 @@ mod tests {
             ("GITHUB_TOKEN", "g"),
         ];
         assert_eq!(kept(PI, &daemon), ["PI_CODING_AGENT_DIR"]);
+    }
+
+    #[test]
+    fn a_muse_child_gets_the_base_set_and_never_a_key_that_outranks_the_owners_login() {
+        let daemon = [
+            ("META_API_KEY", "k"),
+            ("MUSE_NO_AUTO_UPDATE", "0"),
+            ("MUSE_LAUNCHER_INSTALL", "1"),
+            ("MUSE_SYNC_UPDATE", "1"),
+            ("MUSE_PERMISSION_PROFILE_FAIL_OPEN", "1"),
+            ("TBH_CREDENTIAL_BACKEND", "x"),
+            ("XDG_CONFIG_HOME", "/c"),
+            ("GITHUB_TOKEN", "g"),
+        ];
+        assert_eq!(kept(MUSE, &daemon), ["XDG_CONFIG_HOME"]);
+        assert_eq!(for_harness(HarnessId::Muse), MUSE);
     }
 
     #[test]

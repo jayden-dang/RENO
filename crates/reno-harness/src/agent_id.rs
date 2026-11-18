@@ -87,6 +87,8 @@ pub enum HarnessId {
     /// Pi (the earendil-works coding agent), driven natively over its JSONL RPC
     /// (`pi --mode rpc`).
     Pi,
+    /// Meta's Muse Code, driven natively over its Muse Session Protocol (`muse serve`).
+    Muse,
     /// An agent added from the ACP registry (`acp.<registry id>`), driven by
     /// the generic ACP harness from its registry entry: every registry
     /// agent goes through this one path.
@@ -96,7 +98,7 @@ pub enum HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 8] = [
+    pub const ALL: [HarnessId; 9] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Devin,
@@ -105,6 +107,7 @@ impl HarnessId {
         HarnessId::Fx,
         HarnessId::Antigravity,
         HarnessId::Pi,
+        HarnessId::Muse,
     ];
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
@@ -118,6 +121,7 @@ impl HarnessId {
             HarnessId::Fx => "fx",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Pi => "pi",
+            HarnessId::Muse => "muse",
             HarnessId::Registry(agent) => agent.slug(),
         }
     }
@@ -159,6 +163,7 @@ mod registry_slug_tests {
         // A built-in's slug stays the built-in, never a registry agent.
         assert_eq!(HarnessId::from_slug("codex"), Some(HarnessId::Codex));
         assert_eq!(HarnessId::from_slug("pi"), Some(HarnessId::Pi));
+        assert_eq!(HarnessId::from_slug("muse"), Some(HarnessId::Muse));
         assert_eq!(
             HarnessId::from_slug("claude-code"),
             Some(HarnessId::ClaudeCode)

@@ -211,9 +211,7 @@ pub(crate) fn hello(result: &Value) -> Result<Hello, String> {
         );
     }
     Ok(Hello {
-        version: result["serverInfo"]["version"]
-            .as_str()
-            .map(str::to_owned),
+        version: result["serverInfo"]["version"].as_str().map(str::to_owned),
         session_mcp: result["grantedCapabilities"]
             .as_array()
             .is_some_and(|granted| granted.iter().any(|c| c == "sessionMcp")),
@@ -307,7 +305,11 @@ pub(crate) fn turn_start(
     if_busy: IfBusy,
     root: &str,
 ) -> Value {
-    let text = if prompt.is_empty() { "(no message)" } else { prompt };
+    let text = if prompt.is_empty() {
+        "(no message)"
+    } else {
+        prompt
+    };
     let mut params = json!({
         "commandId": turn,
         "sessionId": session,
@@ -364,7 +366,13 @@ mod tests {
     #[test]
     fn frames_decode_as_what_they_are() {
         let response = decode(&json!({"jsonrpc":"2.0","id":3,"result":{"a":1}})).unwrap();
-        assert!(matches!(response, Inbound::Response { id: 3, result: Ok(_) }));
+        assert!(matches!(
+            response,
+            Inbound::Response {
+                id: 3,
+                result: Ok(_)
+            }
+        ));
         let refused = decode(&json!({"jsonrpc":"2.0","id":4,"error":{"code":-32020,
             "message":"gone","data":{"kind":"sessionNotFound"}}}))
         .unwrap();

@@ -66,12 +66,13 @@ pub(crate) fn model_infos(result: &Value) -> Vec<ModelInfo> {
                 row["isDefault"] == true,
                 ModelInfo {
                     id: id.to_owned(),
-                    display_name: Some(if label.is_empty() || (label == id && id.starts_with("muse-"))
-                    {
-                        pretty(id)
-                    } else {
-                        label.to_owned()
-                    }),
+                    display_name: Some(
+                        if label.is_empty() || (label == id && id.starts_with("muse-")) {
+                            pretty(id)
+                        } else {
+                            label.to_owned()
+                        },
+                    ),
                     description: row["description"]
                         .as_str()
                         .map(str::trim)
