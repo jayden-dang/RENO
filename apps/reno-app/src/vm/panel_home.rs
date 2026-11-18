@@ -246,7 +246,7 @@ pub(crate) fn now_tone(status: RunStatus, problem: Option<Problem>) -> NowTone {
 }
 
 /// Whether the run still holds its workspace: not finished, stopped or interrupted.
-fn holds_workspace(status: RunStatus) -> bool {
+pub(crate) fn holds_workspace(status: RunStatus) -> bool {
     matches!(
         status,
         RunStatus::Queued
