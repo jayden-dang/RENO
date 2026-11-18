@@ -342,6 +342,13 @@ pub(crate) fn click(vcx: &mut VisualTestContext, selector: &str) {
     vcx.run_until_parked();
 }
 
+/// Brings the panel's Session tab in front. A run that changed something opens on Review.
+pub(crate) fn show_session(vcx: &mut VisualTestContext) {
+    wait_drawn(vcx, |vcx| painted(vcx, "panel-tab-session"));
+    click(vcx, "panel-tab-session");
+    draw(vcx);
+}
+
 pub(crate) fn painted(vcx: &mut VisualTestContext, selector: &str) -> bool {
     let key: &'static str = Box::leak(selector.to_owned().into_boxed_str());
     vcx.debug_bounds(key).is_some()
@@ -828,6 +835,7 @@ fn a_real_run_shows_its_repository_in_the_details_pane(cx: &mut TestAppContext) 
     let (_root, vcx) = window(cx, &store, Appearance::Light);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
+    show_session(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "details-repository"));
 }
 
@@ -850,6 +858,7 @@ fn the_details_pane_shows_what_the_agent_reported_when_it_did_not_go_well(cx: &m
     let (_root, vcx) = window(cx, &store, Appearance::Light);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
+    show_session(vcx);
     // The fake daemon's own copy of the run can arrive after the local upsert under load and
     // replace it without the report; put it back until the screen shows it.
     wait_drawn(vcx, |vcx| {

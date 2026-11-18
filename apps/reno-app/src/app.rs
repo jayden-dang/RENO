@@ -18,12 +18,16 @@ use gpui::{
 use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
-use crate::actions::{self, GoRuns, OpenPalette, Quit, ToggleSidebar, ToggleTheme};
+use crate::actions::{
+    self, ClosePanelTab, GoRuns, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab, Quit,
+    ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
+};
 use crate::nav::Nav;
+use crate::panel::surface::Surface;
 use crate::screens::ScreenEvent;
 use crate::screens::executors::ExecutorsScreen;
 use crate::screens::home::HomeScreen;
-use crate::screens::run::RunScreen;
+use crate::screens::run::{PanelAction, RunScreen};
 use crate::screens::runs::RunsScreen;
 use crate::screens::settings::SettingsScreen;
 use crate::screens::triggers::TriggersScreen;
@@ -32,6 +36,7 @@ use crate::ui::composer;
 use crate::ui::icon::{Assets, Icon};
 use crate::ui::kit::{self, SANS};
 use crate::ui::motion::{self, ReduceMotion};
+use crate::ui::overlay;
 use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
@@ -54,6 +59,9 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
+    /// `RENO_PANEL=home|session|review`: with `RENO_OPEN=run_<id>`, put that tab of the side
+    /// panel in front (screenshots, reviews).
+    pub(crate) panel: Option<Surface>,
 }
 
 impl Options {
@@ -96,6 +104,13 @@ impl Options {
                 None
             }
             Some(other) => return Err(format!("unknown RENO_OPEN screen: {other}")),
+        };
+        options.panel = match env("RENO_PANEL").as_deref() {
+            Some("home") => Some(Surface::Home),
+            Some("session") => Some(Surface::Session),
+            Some("review") => Some(Surface::Review),
+            None | Some("") => None,
+            Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
         Ok(options)
     }
@@ -149,6 +164,7 @@ pub(crate) fn run(options: Options) {
         let open = options.open;
         let open_run = options.open_run;
         let open_project = options.open_project;
+        let open_panel = options.panel.clone();
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -192,6 +208,9 @@ pub(crate) fn run(options: Options) {
                                 .await;
                             root.update_in(cx, |root, window, cx| {
                                 root.open_run(run, window, cx);
+                                if let Some(tab) = open_panel {
+                                    root.show_panel_tab(tab, window, cx);
+                                }
                             })
                             .ok();
                         })
@@ -534,6 +553,25 @@ impl RootView {
         cx.notify();
     }
 
+    /// A panel key command, for the run screen when one is showing.
+    fn panel_action(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Run(run) = &self.screen {
+            run.update(cx, |run, cx| run.panel_action(action, window, cx));
+        }
+    }
+
+    /// Puts `tab` in front in the open run's side panel.
+    pub(crate) fn show_panel_tab(
+        &mut self,
+        tab: Surface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Screen::Run(run) = &self.screen {
+            run.update(cx, |run, cx| run.open_surface(tab, window, cx));
+        }
+    }
+
     /// Shows a project's Allowlist and History.
     pub(crate) fn open_project(
         &mut self,
@@ -597,12 +635,14 @@ impl RootView {
         .detach();
         let handle = palette.focus_handle(cx);
         window.focus(&handle, cx);
+        overlay::set(cx, palette.entity_id(), true);
         self.palette = Some(palette);
         cx.notify();
     }
 
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
+        if let Some(palette) = self.palette.take() {
+            overlay::set(cx, palette.entity_id(), false);
             self.focus_composer(window, cx);
             cx.notify();
         }
@@ -696,6 +736,14 @@ impl Render for RootView {
         let theme = Theme::for_appearance(self.appearance(window));
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
+        // What the run screen's panel needs to fit itself on its first frame: the sidebar and
+        // the insets around the canvas.
+        cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
+            16.0
+        } else {
+            sidebar::WIDTH + 8.0
+        }));
+        let on_run = matches!(self.screen, Screen::Run(_));
 
         let panel = div()
             .id("canvas-panel")
@@ -705,11 +753,14 @@ impl Render for RootView {
             .mr(px(8.0))
             .when(self.sidebar_hidden, |p| p.ml(px(8.0)))
             .when(!self.sidebar_hidden, |p| p.mt(px(8.0)))
-            .rounded(px(14.0))
-            .bg(theme.canvas)
-            .border_1()
-            .border_color(theme.hairline)
-            .overflow_hidden()
+            // A run draws its own two canvases; every other screen sits on this one.
+            .when(!on_run, |p| {
+                p.rounded(px(14.0))
+                    .bg(theme.canvas)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .overflow_hidden()
+            })
             .child(match &self.screen {
                 Screen::Home => self.home.clone().into_any_element(),
                 Screen::Runs => self.runs.clone().into_any_element(),
@@ -739,6 +790,24 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
+                this.panel_action(PanelAction::Toggle, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewPanelTab, w, cx| {
+                this.panel_action(PanelAction::NewTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePanelTab, w, cx| {
+                this.panel_action(PanelAction::CloseTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ReopenPanelTab, w, cx| {
+                this.panel_action(PanelAction::ReopenTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextPanelTab, w, cx| {
+                this.panel_action(PanelAction::NextTab, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevPanelTab, w, cx| {
+                this.panel_action(PanelAction::PrevTab, w, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &GoRuns, window, cx| this.navigate(Nav::Runs, window, cx)),
             )
@@ -807,6 +876,7 @@ mod tests {
                 open: Some(Nav::Executors),
                 open_run: None,
                 open_project: None,
+                panel: None,
             })
         );
         let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();
@@ -815,6 +885,16 @@ mod tests {
             run.open_run.map(|r| r.to_string()).as_deref(),
             Some("run_keeper1")
         );
+    }
+
+    #[test]
+    fn the_panel_tab_to_show_comes_from_the_environment() {
+        let tab = |name| parse(&[], &[("RENO_PANEL", name)]).map(|o| o.panel);
+        assert_eq!(tab("home"), Ok(Some(Surface::Home)));
+        assert_eq!(tab("session"), Ok(Some(Surface::Session)));
+        assert_eq!(tab("review"), Ok(Some(Surface::Review)));
+        assert_eq!(tab(""), Ok(None));
+        assert!(tab("files").is_err());
     }
 
     #[test]
