@@ -63,6 +63,11 @@ pub(crate) struct Options {
     /// `RENO_PANEL=home|session|review|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
+    /// `RENO_FILES_OPEN=<path>` or `<path>:<line>`: with `RENO_PANEL=files`, open that file in
+    /// the Files tab (screenshots, reviews).
+    pub(crate) files_open: Option<String>,
+    /// `RENO_FILES_SEARCH=<text>`: with `RENO_PANEL=files`, type that in the Files tab's search.
+    pub(crate) files_search: Option<String>,
     /// `RENO_FOLLOW_UP=<text>`: with `RENO_OPEN=run_<id>`, send `text` from that run's box once it
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
@@ -128,12 +133,15 @@ impl Options {
             Some("home") => Some(Surface::Home),
             Some("session") => Some(Surface::Session),
             Some("review") => Some(Surface::Review),
+            Some("files") => Some(Surface::Files),
             Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
                 Some(Surface::File(other["file:".len()..].to_owned()))
             }
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
+        options.files_open = env("RENO_FILES_OPEN").filter(|v| !v.is_empty());
+        options.files_search = env("RENO_FILES_SEARCH").filter(|v| !v.is_empty());
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
@@ -168,6 +176,9 @@ pub(crate) struct Start {
     pub(crate) open_project: Option<PathBuf>,
     /// A panel tab to put in front once `open_run` is open.
     pub(crate) panel: Option<Surface>,
+    /// A file to open in the Files tab, as `path` or `path:line`, and a search to type there.
+    pub(crate) files_open: Option<String>,
+    pub(crate) files_search: Option<String>,
     /// A message to send from that run's box once it is open.
     pub(crate) follow_up: Option<String>,
 }
@@ -210,6 +221,8 @@ pub(crate) fn run(options: Options) {
             open_run: options.open_run.clone(),
             open_project: options.open_project.clone(),
             panel: options.panel.clone(),
+            files_open: options.files_open.clone(),
+            files_search: options.files_search.clone(),
             follow_up: options.follow_up.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
@@ -251,6 +264,8 @@ pub(crate) fn open_window(
         open_run,
         open_project,
         panel,
+        files_open,
+        files_search,
         follow_up,
     } = start;
     cx.open_window(
@@ -301,6 +316,31 @@ pub(crate) fn open_window(
                             }
                         })
                         .ok();
+                        if files_open.is_some() || files_search.is_some() {
+                            // The Files tab reads its root first.
+                            cx.background_executor()
+                                .timer(Duration::from_millis(800))
+                                .await;
+                            root.update_in(cx, |root, window, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |screen, cx| {
+                                        if let Some(target) = &files_open {
+                                            let (path, line) = match target.rsplit_once(':') {
+                                                Some((p, l)) if l.parse::<u32>().is_ok() => {
+                                                    (p, l.parse().ok())
+                                                }
+                                                _ => (target.as_str(), None),
+                                            };
+                                            screen.open_file_at(path, line, window, cx);
+                                        }
+                                        if let Some(text) = &files_search {
+                                            screen.type_files_search(text, window, cx);
+                                        }
+                                    });
+                                }
+                            })
+                            .ok();
+                        }
                         if let Some(text) = follow_up {
                             // Once the threads are read, so the message continues the thread.
                             cx.background_executor()
@@ -1007,6 +1047,8 @@ mod tests {
                 open_run: None,
                 open_project: None,
                 panel: None,
+                files_open: None,
+                files_search: None,
                 follow_up: None,
                 data_dir: None,
             })
@@ -1041,7 +1083,8 @@ mod tests {
             Ok(Some(Surface::File("src/a.rs".into())))
         );
         assert_eq!(tab(""), Ok(None));
-        assert!(tab("files").is_err());
+        assert_eq!(tab("files"), Ok(Some(Surface::Files)));
+        assert!(tab("filez").is_err());
         assert!(tab("file:").is_err());
     }
 

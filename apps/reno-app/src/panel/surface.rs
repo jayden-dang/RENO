@@ -16,8 +16,10 @@ pub(crate) enum Surface {
     Session,
     /// The changes the run made.
     Review,
-    /// A file in the worktree, by path.
+    /// A file's diff, by path. Not the file browser: that is [`Surface::Files`].
     File(String),
+    /// The read-only file browser: a tree and a viewer over the worktree.
+    Files,
     /// A shell, by terminal id.
     Terminal(u64),
     /// Commits on the branch.
@@ -50,6 +52,7 @@ impl Surface {
                 .find(|s| !s.is_empty())
                 .unwrap_or(path)
                 .to_owned(),
+            Self::Files => "Files".into(),
             Self::Terminal(_) => "Terminal".into(),
             Self::History => "History".into(),
             Self::Commit(sha) => sha.chars().take(7).collect(),
@@ -58,10 +61,12 @@ impl Surface {
         }
     }
 
-    /// The tab a home row opens: Changes is Review; the others are placeholders for now.
+    /// The tab a home row opens: Changes is Review, Files is the browser; the others are
+    /// placeholders for now.
     pub(crate) fn for_row(kind: HomeKind) -> Self {
         match kind {
             HomeKind::Changes => Self::Review,
+            HomeKind::Files => Self::Files,
             other => Self::Planned(other),
         }
     }
@@ -73,6 +78,7 @@ impl Surface {
             Self::Session => "session".into(),
             Self::Review => "review".into(),
             Self::File(path) => format!("file-{path}"),
+            Self::Files => "files".into(),
             Self::Terminal(id) => format!("terminal-{id}"),
             Self::History => "history".into(),
             Self::Commit(sha) => format!("commit-{sha}"),
@@ -90,6 +96,7 @@ impl Surface {
             Self::Session => Icon::Sliders,
             Self::Review => Icon::Branch,
             Self::File(_) => Icon::File,
+            Self::Files => Icon::Folder,
             Self::Terminal(_) => Icon::Terminal,
             Self::History => Icon::History,
             Self::Commit(_) => Icon::Merge,
@@ -118,6 +125,7 @@ impl Surface {
             Self::Session => (Kind::Session, String::new()),
             Self::Review => (Kind::Review, String::new()),
             Self::File(path) => (Kind::File, path.clone()),
+            Self::Files => (Kind::Files, String::new()),
             Self::Terminal(id) => (Kind::Terminal, id.to_string()),
             Self::History => (Kind::History, String::new()),
             Self::Commit(sha) => (Kind::Commit, sha.clone()),
@@ -137,6 +145,8 @@ pub(crate) enum Kind {
     Session,
     Review,
     File,
+    /// The file browser. A build that predates it reads this as `Unknown` and drops the tab.
+    Files,
     Terminal,
     History,
     Commit,
@@ -163,6 +173,7 @@ impl Descriptor {
             Kind::Session => Some(Surface::Session),
             Kind::Review => Some(Surface::Review),
             Kind::History => Some(Surface::History),
+            Kind::Files => Some(Surface::Files),
             Kind::File => (!key.is_empty()).then(|| Surface::File(key.to_owned())),
             Kind::Commit => (!key.is_empty()).then(|| Surface::Commit(key.to_owned())),
             Kind::Terminal => key.parse().ok().map(Surface::Terminal),
@@ -187,6 +198,7 @@ mod tests {
             Surface::Session,
             Surface::Review,
             Surface::File("src/a.rs".into()),
+            Surface::Files,
             Surface::Terminal(7),
             Surface::History,
             Surface::Commit("abcdef0123".into()),
@@ -204,6 +216,23 @@ mod tests {
         let d: Descriptor = serde_json::from_str(r#"{"kind":"browser","key":"x"}"#).expect("parse");
         assert_eq!(d.kind, Kind::Unknown);
         assert_eq!(d.surface(), None);
+    }
+
+    #[test]
+    fn files_is_its_own_kind_beside_the_diff_tab_and_a_home_row_opens_it() {
+        let d = Surface::Files.descriptor();
+        assert_eq!(d.kind, Kind::Files);
+        assert_eq!(
+            serde_json::to_string(&d).expect("json"),
+            r#"{"kind":"files","key":""}"#
+        );
+        // The diff tab of a path called "files" is still a File.
+        assert_eq!(Surface::File("files".into()).descriptor().kind, Kind::File);
+        assert_eq!(Surface::for_row(HomeKind::Files), Surface::Files);
+        assert_eq!(
+            Surface::for_row(HomeKind::History),
+            Surface::Planned(HomeKind::History)
+        );
     }
 
     #[test]
@@ -231,6 +260,8 @@ mod tests {
         assert_eq!(Surface::File("a.rs".into()).title(), "a.rs");
         assert_eq!(Surface::Commit("abcdef0123".into()).title(), "abcdef0");
         assert_eq!(Surface::Terminal(3).title(), "Terminal");
+        assert_eq!(Surface::Files.title(), "Files");
+        assert_eq!(Surface::Files.slug(), "files");
     }
 
     #[test]
@@ -240,6 +271,7 @@ mod tests {
             Surface::Session,
             Surface::Review,
             Surface::File("a".into()),
+            Surface::Files,
             Surface::Terminal(1),
             Surface::History,
             Surface::Commit("a".into()),

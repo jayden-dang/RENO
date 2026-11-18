@@ -36,6 +36,7 @@ use crate::vm::rules;
 
 mod changes;
 mod dock;
+mod files;
 mod header;
 mod output;
 mod panel;
@@ -97,6 +98,10 @@ pub(crate) struct RunScreen {
     panel_touched: bool,
     /// Focus for the panel, so its letters and its keys do not reach the steer input.
     panel_focus: FocusHandle,
+    /// The panel was drawn on the last frame (it is not hidden or closed).
+    panel_shown: bool,
+    /// The Files tab's tree, viewer and watch, made when it first shows.
+    files: Option<files::FilesTab>,
     /// Review's files the person folded, and whether the many-files default was applied.
     review_folded: HashSet<String>,
     review_default_applied: bool,
@@ -163,6 +168,8 @@ impl RunScreen {
             panel_seeded,
             panel_touched: false,
             panel_focus: cx.focus_handle(),
+            panel_shown: false,
+            files: None,
             review_folded: HashSet::new(),
             review_default_applied: false,
             review: changes::Flat::new(),
@@ -673,6 +680,8 @@ mod question_card_tests;
 #[cfg(test)]
 mod changes_tests;
 
+#[cfg(test)]
+mod files_tests;
 #[cfg(test)]
 mod panel_tests;
 #[cfg(test)]

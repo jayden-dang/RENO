@@ -93,10 +93,10 @@ impl HomeKind {
         }
     }
 
-    /// Whether the tab behind the row exists yet. Only Changes does; the UI opens a placeholder
-    /// tab for the rest.
+    /// Whether the tab behind the row exists yet. Changes and Files do; the UI opens a
+    /// placeholder tab for the rest.
     pub(crate) const fn built(self) -> bool {
-        matches!(self, Self::Changes)
+        matches!(self, Self::Changes | Self::Files)
     }
 }
 
@@ -1042,18 +1042,24 @@ mod tests {
     }
 
     #[test]
-    fn only_changes_has_a_tab_built() {
+    fn only_changes_and_files_have_a_tab_built() {
         let h = home(&facts(RunStatus::Running), &Pane::Loading);
         for r in h.rows() {
-            assert_eq!(r.built, r.kind == HomeKind::Changes, "{:?}", r.kind);
+            assert_eq!(
+                r.built,
+                matches!(r.kind, HomeKind::Changes | HomeKind::Files),
+                "{:?}",
+                r.kind
+            );
         }
         // A disabled row says the same.
         let pane = Pane::Removed {
             branch: BRANCH.into(),
         };
         let h = home(&facts(RunStatus::Succeeded), &pane);
-        assert!(!row(&h, HomeKind::Files).built);
-        assert_eq!(h.rows().filter(|r| r.built).count(), 1);
+        assert!(row(&h, HomeKind::Files).built);
+        assert!(!row(&h, HomeKind::History).built);
+        assert_eq!(h.rows().filter(|r| r.built).count(), 2);
     }
 
     #[test]

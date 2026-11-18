@@ -261,6 +261,32 @@ pub(crate) fn highlighted(code: &str, language: Option<&str>) -> Option<Rc<Highl
     })
 }
 
+/// The text runs of one highlighted code line, in the mono face; they cover all of `line`.
+pub(crate) fn line_runs(
+    line: &str,
+    spans: &[HighlightSpan],
+    theme: &Theme,
+    base: &gpui::TextStyle,
+) -> Vec<TextRun> {
+    line_pieces(line, spans)
+        .into_iter()
+        .map(|(range, token)| {
+            let (color, weight) = token_look(theme, token);
+            let mut font = base.font();
+            font.family = MONO.into();
+            font.weight = weight;
+            TextRun {
+                len: range.len(),
+                font,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }
+        })
+        .collect()
+}
+
 fn code_block(code: &str, language: Option<&str>, theme: &Theme, window: &Window) -> AnyElement {
     let frame = div()
         .w_full()
@@ -289,25 +315,8 @@ fn code_block(code: &str, language: Option<&str>, theme: &Theme, window: &Window
                 // An empty line still takes its height.
                 return div().h(px(19.0)).into_any_element();
             }
-            let runs: Vec<TextRun> = line_pieces(line, spans)
-                .into_iter()
-                .map(|(range, token)| {
-                    let (color, weight) = token_look(theme, token);
-                    let mut font = base.font();
-                    font.family = MONO.into();
-                    font.weight = weight;
-                    TextRun {
-                        len: range.len(),
-                        font,
-                        color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }
-                })
-                .collect();
             StyledText::new(SharedString::from((*line).to_owned()))
-                .with_runs(runs)
+                .with_runs(line_runs(line, spans, theme, &base))
                 .into_any_element()
         }))
         .into_any_element()

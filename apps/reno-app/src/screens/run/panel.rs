@@ -311,6 +311,12 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let layout = self.layout(window, cx);
+        // A watch lives only while the panel is drawn: tell the Files tab when that changes.
+        let shown = layout != Layout::Hidden;
+        if self.panel_shown != shown {
+            self.panel_shown = shown;
+            cx.defer_in(window, |this, _, cx| this.sync_files(cx));
+        }
         match layout {
             Layout::Hidden => stage.into_any_element(),
             Layout::Split { panel_w, .. } => {
@@ -376,7 +382,7 @@ impl RunScreen {
         &mut self,
         theme: &Theme,
         width: f32,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let emit = self.emitter(cx);
@@ -397,6 +403,7 @@ impl RunScreen {
             Surface::Terminal(_) => view::planned_page(theme, HomeKind::Terminal),
             Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
             Surface::File(path) => self.file_body(theme, &path, cx),
+            Surface::Files => self.files_body(theme, width, window, cx),
             Surface::Commit(_) => view::planned_page(theme, HomeKind::History),
         };
         div()
