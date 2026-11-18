@@ -47,9 +47,15 @@
 //! - Isolation (ARCH-15): unless `inherit_user_config`, the SDK is told to load no ambient
 //!   settings (`settingSources: []`), so the owner's `~/.cursor/mcp.json`, plugins, team and MDM
 //!   layers are invisible. The project layer is never loaded.
+//! - Effort: `ExecSpec::effort` is not applied. Cursor has no effort levels of its own; a model's
+//!   own parameters (thinking, context, optimize-for) are `model_options`, the picks the catalog lists,
+//!   and a pick the run leaves out is filled from the catalog the last probe listed.
 //! - Install: `start` and `probe` never install. [`Executor::install`] runs
 //!   `npm install --ignore-scripts @cursor/sdk@1.0.32` into Reno's managed adapter directory and
-//!   materializes the shim beside the SDK there. Conversation stores live in `cursor-state`
+//!   materializes the shim beside the SDK there. Once the SDK is installed, `probe` and `start` also
+//!   publish the shim of THIS Reno build if it is not there yet (one atomic, content-addressed file in
+//!   Reno's own directory, no npm, no network), so a Reno update that changes the shim does not strand a
+//!   working install until someone presses Install. Conversation stores live in `cursor-state`
 //!   beside it, never under `~/.cursor`.
 //! - Process records: the shim is reported through `ExecControls::processes` at once and its
 //!   descendants are traced at teardown. The short-lived `models` probe is bounded and reaped.

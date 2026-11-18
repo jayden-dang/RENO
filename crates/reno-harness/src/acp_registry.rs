@@ -1385,6 +1385,8 @@ mod tests {
         assert_eq!(built_in("grok-build"), Some("grok"));
         // Pi has a native driver: the registry's adapter copy is not offered beside it.
         assert_eq!(built_in("pi-acp"), Some("pi"));
+        // Likewise Cursor: its ACP surface is lossy, and Reno drives its SDK.
+        assert_eq!(built_in("cursor"), Some("cursor"));
         assert_eq!(built_in("gemini"), None);
     }
 
