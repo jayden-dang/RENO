@@ -40,6 +40,7 @@
 mod changes;
 pub mod data;
 mod extras;
+pub mod files;
 mod jobs;
 mod script;
 mod world;
@@ -110,6 +111,10 @@ pub(crate) struct Shared {
     triggers_tx: watch::Sender<Vec<reno_proto::TriggerInfo>>,
     executors_tx: watch::Sender<Vec<reno_proto::ExecutorInfo>>,
     defs_tx: watch::Sender<DefsSnapshot>,
+    /// `fs.watch` changes pushed by a test, with the run each is for.
+    fs_tx: tokio::sync::broadcast::Sender<(RunId, reno_proto::FsChange)>,
+    /// Open `fs.watch` subscriptions.
+    fs_watches: AtomicUsize,
     /// Errors a method answers with, until cleared.
     injected: Mutex<HashMap<String, ErrorObject>>,
     /// One token per open connection, so a test can cut them all.
@@ -229,6 +234,8 @@ impl FakeDaemon {
             triggers_tx,
             executors_tx,
             defs_tx,
+            fs_tx: tokio::sync::broadcast::channel(64).0,
+            fs_watches: AtomicUsize::new(0),
             injected: Mutex::new(HashMap::new()),
             connections: Mutex::new(Vec::new()),
             previews: Mutex::new(Vec::new()),
@@ -1167,7 +1174,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         }
     };
 
-    Router::new()
+    let router = Router::new()
         .method::<DaemonHello, _, _>(hello)
         .method::<DaemonStatus, _, _>(status)
         // The fake has no process to stop: it accepts the request and carries on.
@@ -1219,7 +1226,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::DefGet, _, _>(def_get)
         .method::<reno_proto::DefValidate, _, _>(def_validate)
         .subscription::<reno_proto::DefsWatch, _, _, _>(defs_watch)
-        .notification::<SubGap, _, _>(|_: SubGapParams, _| async {})
+        .notification::<SubGap, _, _>(|_: SubGapParams, _| async {});
+    files::add(router, shared)
 }
 
 /// A simplified `def.validate`: the body must be an object named like the file, and a bot needs

@@ -22,13 +22,13 @@ async fn daemon(server_end: tokio::io::DuplexStream, gaps: u32) {
         let out = match frame["method"].as_str() {
             Some("daemon.hello") => vec![json!({"jsonrpc": "2.0", "id": id, "result": {
                 "serverVersion": "t", "protocolVersion": PROTOCOL_VERSION,
-                "features": ["executors"], "pid": 1}})],
-            Some(method @ ("runs.watch" | "executors.watch")) => {
+                "features": ["executors", "files"], "pid": 1}})],
+            Some(method @ ("runs.watch" | "executors.watch" | "fs.watch")) => {
                 watches += 1;
-                let items = if method == "runs.watch" {
-                    json!({"runs": []})
-                } else {
-                    json!({"executors": []})
+                let items = match method {
+                    "runs.watch" => json!({"runs": []}),
+                    "fs.watch" => json!({"dirs": ["a"]}),
+                    _ => json!({"executors": []}),
                 };
                 let sub = format!("sub_w{watches}");
                 let ack = json!({"jsonrpc": "2.0", "id": id, "result": {"subscription": sub}});
@@ -87,6 +87,35 @@ async fn a_watch_that_only_gaps_ends_with_a_protocol_error() {
     let first = watch.next().await.unwrap();
     assert!(matches!(first, Err(reno_client::ClientError::Protocol(_))));
     assert!(watch.next().await.is_none());
+    cancel.cancel();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_gap_on_a_file_watch_resubscribes_and_says_to_rescan_before_going_on() {
+    let (client, cancel, server) = connect(1).await;
+    let run = reno_proto::RunId::from_suffix("r1").unwrap();
+    let mut watch = client.watch_fs(run).await.unwrap();
+    // What changed while the daemon had cut it off is unknown.
+    let rescan = watch.next().await.unwrap().unwrap();
+    assert!(rescan.overflow && rescan.git && rescan.dirs.is_empty());
+    let next = watch.next().await.unwrap().unwrap();
+    assert_eq!(next.dirs, ["a"]);
+    assert!(!next.overflow);
+    cancel.cancel();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_file_watch_that_only_gaps_ends_with_a_protocol_error() {
+    let (client, cancel, server) = connect(u32::MAX).await;
+    let run = reno_proto::RunId::from_suffix("r1").unwrap();
+    let mut watch = client.watch_fs(run).await.unwrap();
+    let mut last = None;
+    while let Some(item) = watch.next().await {
+        last = Some(item);
+    }
+    assert!(matches!(last, Some(Err(reno_client::ClientError::Protocol(_)))));
     cancel.cancel();
     server.abort();
 }
