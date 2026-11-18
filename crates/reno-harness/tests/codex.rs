@@ -264,6 +264,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "c1".into(),
                 ok: false,
                 summary: Some("exit code 1: no such file".into()),
+                output: Some(reno_proto::ToolOutput::from_text("first\nno such file\n"))
             },
             ExecEvent::Tool {
                 id: "f1".into(),
@@ -277,6 +278,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "f1".into(),
                 ok: true,
                 summary: None,
+                output: Some(reno_proto::ToolOutput::from_text("add /tmp/new.rs"))
             },
             ExecEvent::Tool {
                 id: "mcp1".into(),
@@ -290,6 +292,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "mcp1".into(),
                 ok: false,
                 summary: None,
+                output: None
             },
             ExecEvent::Tool {
                 id: "w1".into(),
@@ -303,6 +306,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "w1".into(),
                 ok: true,
                 summary: None,
+                output: None
             },
             // Completion-only: opened and closed together.
             ExecEvent::Tool {
@@ -320,6 +324,7 @@ async fn happy_path_maps_notifications_to_exec_events() {
                 id: "td1".into(),
                 ok: true,
                 summary: None,
+                output: None
             },
             // The streamed message is not repeated by its completion; each message closes as
             // a paragraph; a message that never streamed arrives whole.
@@ -416,6 +421,7 @@ async fn view_image_reads_as_a_file_read() {
         id: "exec-view-1".into(),
         ok: true,
         summary: None,
+        output: None
     }));
 }
 

@@ -7,18 +7,44 @@
 use std::collections::HashSet;
 use std::io::{self, Write};
 
+use reno_proto::ChangeKind;
 use reno_proto::defs::format_instant;
 use reno_proto::{
     Approval, ApprovalId, ApprovalOutcome, ApprovalRecord, ApprovalStatus, ApprovalSubject,
     CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
     InstallStatus, ModelSource, NotInstalledReason, ReportStatus, ResolvedBy, RoutingDecision,
     RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo,
-    TriggerStatus, VersionGate, WorkspaceInfo, WorkspaceStatus,
+    TriggerStatus, VersionGate, WorkspaceDiffResult, WorkspaceInfo, WorkspaceStatus,
 };
 use serde::Serialize;
 
 /// How long a tool call's input may be before it is cut.
 const INPUT_WIDTH: usize = 100;
+
+/// How many lines of a tool's output the plain transcript shows.
+const OUTPUT_LINES: usize = 20;
+
+/// A tool's output under its result line: indented, the first [`OUTPUT_LINES`] lines, then how
+/// many were left out. Control characters (a terminal escape in what a tool printed) are
+/// dropped. One line that says just what the summary did adds nothing.
+fn write_output(out: &mut impl Write, text: &str, summary: Option<&str>) -> io::Result<()> {
+    let clean: String = text
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+        .collect();
+    let lines: Vec<&str> = clean.lines().collect();
+    if lines.is_empty() || (lines.len() == 1 && Some(lines[0].trim()) == summary) {
+        return Ok(());
+    }
+    for line in lines.iter().take(OUTPUT_LINES) {
+        writeln!(out, "    {line}")?;
+    }
+    match lines.len().saturating_sub(OUTPUT_LINES) {
+        0 => Ok(()),
+        1 => writeln!(out, "    … 1 more line"),
+        more => writeln!(out, "    … {more} more lines"),
+    }
+}
 
 /// The wire name of an enum that serialises as a plain string (`succeeded`, `completed`).
 pub(crate) fn wire_name<T: Serialize>(value: &T) -> String {
@@ -97,11 +123,20 @@ impl<W: Write> Transcript<W> {
                     writeln!(self.out, "> {} {}", call.name, shorten(&input, INPUT_WIDTH))
                 }
             }
-            ExecEvent::ToolResult { ok, summary, .. } => {
+            ExecEvent::ToolResult {
+                ok,
+                summary,
+                output,
+                ..
+            } => {
                 let outcome = if *ok { "ok" } else { "failed" };
                 match summary {
-                    Some(summary) => writeln!(self.out, "  {outcome}: {summary}"),
-                    None => writeln!(self.out, "  {outcome}"),
+                    Some(summary) => writeln!(self.out, "  {outcome}: {summary}")?,
+                    None => writeln!(self.out, "  {outcome}")?,
+                }
+                match output {
+                    Some(output) => write_output(&mut self.out, &output.text, summary.as_deref()),
+                    None => Ok(()),
                 }
             }
             ExecEvent::NeedsApproval { subject, .. } => {
@@ -461,6 +496,47 @@ pub(crate) fn approval_line(approval: &Approval) -> String {
         "{}  run {}  {:<8}  by nobody yet  {} {what}",
         approval.id, approval.run_id, "pending", subject.tool
     )
+}
+
+/// What `reno workspace diff` prints without `--path`: the run's branch and base, then one line
+/// per changed file (status letter, `+added -removed`, path), then a total.
+pub(crate) fn diff_lines(diff: &WorkspaceDiffResult) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{} on {} since {} ({} commit(s))",
+        diff.run_id,
+        diff.branch,
+        diff.base_sha.chars().take(12).collect::<String>(),
+        diff.commits
+    )];
+    if diff.files.is_empty() {
+        lines.push("no changes".to_owned());
+        return lines;
+    }
+    for file in &diff.files {
+        let letter = match file.kind {
+            ChangeKind::Added => 'A',
+            ChangeKind::Modified => 'M',
+            ChangeKind::Deleted => 'D',
+            ChangeKind::Renamed => 'R',
+        };
+        let counts = if file.binary {
+            "binary".to_owned()
+        } else {
+            format!("+{} -{}", file.additions, file.deletions)
+        };
+        let name = match &file.from {
+            Some(from) => format!("{from} -> {}", file.path),
+            None => file.path.clone(),
+        };
+        lines.push(format!("{letter}  {counts:>12}  {name}"));
+    }
+    let additions: u64 = diff.files.iter().map(|f| u64::from(f.additions)).sum();
+    let deletions: u64 = diff.files.iter().map(|f| u64::from(f.deletions)).sum();
+    lines.push(format!(
+        "{} file(s), +{additions} -{deletions}",
+        diff.files.len()
+    ));
+    lines
 }
 
 /// One workspace on one line: run, status, branch, what it holds and where it is.
@@ -988,6 +1064,7 @@ mod tests {
                     id: "1".into(),
                     ok: false,
                     summary: Some("no match".into()),
+                    output: None,
                 },
                 text("bye\n"),
                 done(StopReason::Completed),
@@ -1004,6 +1081,84 @@ mod tests {
                 diagnostic: Some("boom".into())
             })
         );
+    }
+
+    #[test]
+    fn a_tool_result_prints_its_output_indented_and_cut_after_twenty_lines() {
+        let output = |text: &str| {
+            Some(reno_proto::ToolOutput {
+                text: text.into(),
+                bytes: text.len() as u64,
+                truncated: false,
+            })
+        };
+        let result = |summary: Option<&str>, text: &str| ExecEvent::ToolResult {
+            id: "1".into(),
+            ok: true,
+            summary: summary.map(str::to_owned),
+            output: output(text),
+        };
+        // Short output follows the result line, indented.
+        let (out, _) = render(false, vec![result(Some("exit code 0: b"), "a\nb\n")]);
+        assert_eq!(out, "  ok: exit code 0: b\n    a\n    b\n");
+        // The same single line as the summary adds nothing.
+        let (out, _) = render(false, vec![result(Some("only"), "only\n")]);
+        assert_eq!(out, "  ok: only\n");
+        // Long output shows twenty lines and says how many it left out.
+        let long: String = (1..=25).map(|n| format!("l{n}\n")).collect();
+        let (out, _) = render(false, vec![result(None, &long)]);
+        assert_eq!(out.lines().count(), 1 + 20 + 1);
+        assert!(out.contains("    l20\n"));
+        assert!(!out.contains("l21"));
+        assert!(out.ends_with("    … 5 more lines\n"), "{out}");
+        // A terminal escape in a tool's output never reaches the terminal.
+        let (out, _) = render(false, vec![result(None, "\u{1b}[2Jhello\tworld\r\n")]);
+        assert!(!out.contains('\u{1b}') && !out.contains('\r'), "{out:?}");
+        assert!(out.contains("hello\tworld"), "{out:?}");
+        // JSON output is the event as it is.
+        let (out, _) = render(true, vec![result(None, "x")]);
+        assert!(out.contains(r#""output":{"text":"x","bytes":1}"#), "{out}");
+    }
+
+    #[test]
+    fn the_diff_lists_each_file_with_its_status_counts_and_a_total() {
+        use reno_proto::{ChangeKind, ChangedFile, WorkspaceDiffResult};
+        let file =
+            |path: &str, from: Option<&str>, kind, additions, deletions, binary| ChangedFile {
+                path: path.into(),
+                from: from.map(str::to_owned),
+                kind,
+                additions,
+                deletions,
+                binary,
+            };
+        let diff = WorkspaceDiffResult {
+            run_id: reno_proto::RunId::from_suffix("r1").unwrap(),
+            branch: "reno/run_r1".into(),
+            base_sha: "0123456789abcdef0123".into(),
+            commits: 2,
+            files: vec![
+                file("a.rs", None, ChangeKind::Modified, 3, 1, false),
+                file("b.rs", Some("old b.rs"), ChangeKind::Renamed, 0, 0, false),
+                file("logo.png", None, ChangeKind::Added, 0, 0, true),
+            ],
+            patch: None,
+            patch_truncated: false,
+        };
+        let lines = diff_lines(&diff);
+        assert!(
+            lines[0].ends_with("since 0123456789ab (2 commit(s))"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[1], "M         +3 -1  a.rs");
+        assert_eq!(lines[2], "R         +0 -0  old b.rs -> b.rs");
+        assert_eq!(lines[3], "A        binary  logo.png");
+        assert_eq!(lines[4], "3 file(s), +3 -1");
+        let empty = WorkspaceDiffResult {
+            files: vec![],
+            ..diff
+        };
+        assert_eq!(diff_lines(&empty)[1], "no changes");
     }
 
     #[test]

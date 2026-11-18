@@ -48,8 +48,8 @@ use crate::triggers::{
     TriggerFireParams, TriggerFireResult, TriggerListResult, TriggersSnapshot, TriggersWatchParams,
 };
 use crate::workspace::{
-    WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGetParams, WorkspaceInfo,
-    WorkspaceListParams, WorkspaceListResult,
+    WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceDiffParams, WorkspaceDiffResult,
+    WorkspaceGetParams, WorkspaceInfo, WorkspaceListParams, WorkspaceListResult,
 };
 
 /// The wire protocol version. Bumped only for a breaking change.
@@ -85,6 +85,9 @@ pub const FEATURE_TRIGGERS: &str = "triggers";
 
 /// Feature: `workspace.list`, `workspace.get` and `workspace.clean` exist.
 pub const FEATURE_WORKSPACES: &str = "workspaces";
+
+/// Feature: `workspace.diff` exists, and `ExecEvent::ToolResult` may carry `output`.
+pub const FEATURE_RUN_CHANGES: &str = "run.changes";
 
 /// Feature: `approval.history` exists, and journals may carry `ExecEvent::ApprovalResolved`.
 pub const FEATURE_APPROVAL_HISTORY: &str = "approval.history";
@@ -161,6 +164,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_MODEL,
     FEATURE_RUN_EFFORT,
     FEATURE_EXECUTOR_MAINTAIN,
+    FEATURE_RUN_CHANGES,
 ];
 
 /// A request with a single reply.
@@ -854,6 +858,11 @@ method!(
 method!(
     /// `workspace.get`: one run's workspace. Needs feature `workspaces`.
     WorkspaceGet, "workspace.get", WorkspaceGetParams => WorkspaceInfo
+);
+method!(
+    /// `workspace.diff`: what a run changed in its workspace: the files, and the patch of one.
+    /// Needs feature `run.changes`.
+    WorkspaceDiff, "workspace.diff", WorkspaceDiffParams => WorkspaceDiffResult
 );
 method!(
     /// `workspace.clean`: removes workspaces that hold nothing to lose (or, with `force`, any).

@@ -10,7 +10,7 @@ use reno_harness::proc::git_workspace::{
     Changes, GitError, GitWorktrees, Inspection as GitInspection, Location, Release,
     Released as GitReleased,
 };
-use reno_kernel::{Inspection, ReleasePolicy, Released, Workspace, WorkspaceError};
+use reno_kernel::{Inspection, ReleasePolicy, Released, RunChanges, Workspace, WorkspaceError};
 use reno_proto::{RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 
 /// Git worktrees under `<data dir>/worktrees/<repo key>/<run id>`.
@@ -150,6 +150,24 @@ impl Workspace for GitWorkspace {
             .protected_changes(&location(workspace))
             .await
             .map_err(error)
+    }
+
+    async fn changes_since_base(
+        &self,
+        workspace: &WorkspaceInfo,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError> {
+        let found = self
+            .git
+            .changes_since_base(&location(workspace), path)
+            .await
+            .map_err(error)?;
+        Ok(RunChanges {
+            commits: found.commits,
+            files: found.files,
+            patch: found.patch,
+            patch_truncated: found.patch_truncated,
+        })
     }
 
     async fn revert_protected(

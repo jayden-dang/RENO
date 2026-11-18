@@ -254,11 +254,13 @@ async fn happy_path_maps_frames_to_exec_events_and_drops_subagent_traffic() {
         id: "tool-1".into(),
         ok: true,
         summary: Some("exit code 0".into()),
+        output: None
     }));
     assert!(events.contains(&ExecEvent::ToolResult {
         id: "tool-2".into(),
         ok: false,
         summary: None,
+        output: None
     }));
     assert!(events.contains(&ExecEvent::Usage {
         input_tokens: 10,

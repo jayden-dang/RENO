@@ -29,6 +29,7 @@
 //! | `trigger.fire` | `fire_trigger` |
 //! | `triggers.watch` | `watch_triggers` |
 //! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
+//! | `workspace.diff` | `workspace_diff` |
 //! | `workspace.clean` | `clean_workspaces` |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
@@ -107,8 +108,9 @@ use reno_proto::{
     SecretInfo, SecretList, SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
 };
 use reno_proto::{
-    WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceGet, WorkspaceGetParams,
-    WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
+    WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceDiff, WorkspaceDiffParams,
+    WorkspaceDiffResult, WorkspaceGet, WorkspaceGetParams, WorkspaceInfo, WorkspaceList,
+    WorkspaceListParams, WorkspaceListResult,
 };
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
@@ -223,6 +225,7 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<SecretDelete, _, _>(bind(ctx, secret_delete))
         .method::<WorkspaceList, _, _>(bind(ctx, workspace_list))
         .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
+        .method::<WorkspaceDiff, _, _>(bind(ctx, workspace_diff))
         .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
@@ -868,6 +871,13 @@ async fn workspace_list(ctx: Arc<Ctx>, p: WorkspaceListParams) -> Reply<Workspac
 async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceInfo> {
     ctx.kernel
         .workspace(&p.run_id)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+async fn workspace_diff(ctx: Arc<Ctx>, p: WorkspaceDiffParams) -> Reply<WorkspaceDiffResult> {
+    ctx.kernel
+        .workspace_diff(&p.run_id, p.path.as_deref())
         .await
         .map_err(|e| kernel_error(&e))
 }

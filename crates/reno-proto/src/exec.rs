@@ -232,6 +232,31 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// What a tool call returned, kept in the journal so the transcript can show it and a later
+/// reader (the app, a verifier, a teammate) does not have to run the call again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutput {
+    /// The text, with the middle cut out when it was longer than [`Self::MAX_BYTES`]: the head and
+    /// the tail are kept, joined by a line saying how much is missing. Always valid UTF-8 cut on a
+    /// character boundary, with secrets redacted like the rest of the journal.
+    pub text: String,
+    /// The size of the whole output in bytes before it was cut.
+    pub bytes: u64,
+    /// Whether `text` is shorter than the whole output.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl ToolOutput {
+    /// The most text a journal row keeps for one call.
+    pub const MAX_BYTES: usize = 16 * 1024;
+}
+
 /// A tool invocation as far as Reno needs to know it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -419,6 +444,10 @@ pub enum ExecEvent {
         /// Short human-readable outcome.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        /// What the tool printed or returned, cut to [`ToolOutput::MAX_BYTES`]. The journal is the
+        /// only record of it: an event written without it cannot be given one later.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<ToolOutput>,
     },
     /// Tokens used since the previous `Usage` of the run (executors report per turn, or once at
     /// the end). The daemon adds them up: a bot's daily token budget is the sum of its runs'.
@@ -638,4 +667,101 @@ pub struct ExecutorDescriptor {
     pub cli_verified: VersionRange,
     /// Declared capabilities.
     pub caps: ExecutorCaps,
+}
+
+impl ToolOutput {
+    /// Keeps `text` whole when it fits in [`Self::MAX_BYTES`]; otherwise keeps the first and the
+    /// last half of the budget (cut on character boundaries) joined by a `… N bytes cut …` line.
+    /// `bytes` is always the original size.
+    pub fn from_text(text: &str) -> Self {
+        let bytes = text.len() as u64;
+        if text.len() <= Self::MAX_BYTES {
+            return Self {
+                text: text.to_owned(),
+                bytes,
+                truncated: false,
+            };
+        }
+        let half = Self::MAX_BYTES / 2;
+        let mut head_end = half;
+        while !text.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        let mut tail_start = text.len() - half;
+        while !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        let cut = tail_start - head_end;
+        let mut out = String::with_capacity(Self::MAX_BYTES + 40);
+        out.push_str(&text[..head_end]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("… {cut} bytes cut …\n"));
+        out.push_str(&text[tail_start..]);
+        Self {
+            text: out,
+            bytes,
+            truncated: true,
+        }
+    }
+
+    /// [`Self::from_text`], or none for an empty text (nothing to show).
+    pub fn from_text_opt(text: &str) -> Option<Self> {
+        (!text.is_empty()).then(|| Self::from_text(text))
+    }
+}
+
+#[cfg(test)]
+mod tool_output_tests {
+    use super::ToolOutput;
+
+    #[test]
+    fn empty_is_kept_whole() {
+        let o = ToolOutput::from_text("");
+        assert_eq!((o.text.as_str(), o.bytes, o.truncated), ("", 0, false));
+        assert!(ToolOutput::from_text_opt("").is_none());
+    }
+
+    #[test]
+    fn exact_limit_is_not_cut() {
+        let s = "a".repeat(ToolOutput::MAX_BYTES);
+        let o = ToolOutput::from_text(&s);
+        assert!(!o.truncated);
+        assert_eq!(o.text, s);
+        let o = ToolOutput::from_text(&format!("{s}b"));
+        assert!(o.truncated);
+        assert_eq!(o.bytes, ToolOutput::MAX_BYTES as u64 + 1);
+    }
+
+    #[test]
+    fn multibyte_at_the_cut_stays_valid() {
+        for pad in 0..4 {
+            let s = format!("{}{}", "x".repeat(pad), "é€😀".repeat(8000));
+            let o = ToolOutput::from_text(&s);
+            assert!(o.truncated);
+            assert_eq!(o.bytes, s.len() as u64);
+            assert!(o.text.contains("bytes cut"));
+            assert!(o.text.len() <= ToolOutput::MAX_BYTES + 40);
+        }
+    }
+
+    #[test]
+    fn huge_keeps_head_and_tail() {
+        let s = format!("HEAD{}TAIL", "z".repeat(10_000_000));
+        let o = ToolOutput::from_text(&s);
+        assert!(o.truncated);
+        assert_eq!(o.bytes, s.len() as u64);
+        assert!(o.text.starts_with("HEAD"));
+        assert!(o.text.ends_with("TAIL"));
+        assert!(o.text.len() <= ToolOutput::MAX_BYTES + 40);
+        let cut: usize = o
+            .text
+            .lines()
+            .find_map(|l| l.strip_prefix("… ")?.strip_suffix(" bytes cut …"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(cut > 9_900_000);
+    }
 }

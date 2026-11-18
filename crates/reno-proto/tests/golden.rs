@@ -52,6 +52,7 @@ fn exec_event_every_variant() {
                 id: "t1".into(),
                 ok: true,
                 summary: Some("2 files".into()),
+                output: None,
             },
             json!({"type": "tool_result", "id": "t1", "ok": true, "summary": "2 files"}),
         ),
@@ -60,6 +61,7 @@ fn exec_event_every_variant() {
                 id: "t2".into(),
                 ok: false,
                 summary: None,
+                output: None,
             },
             json!({"type": "tool_result", "id": "t2", "ok": false}),
         ),
@@ -309,7 +311,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "executor.maintain"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "executor.maintain", "run.changes"],
                "pid": 4242}),
     );
 }

@@ -22,7 +22,7 @@
 
 use std::collections::HashSet;
 
-use reno_proto::{ExecEvent, StopReason, ToolCall};
+use reno_proto::{ExecEvent, StopReason, ToolCall, ToolOutput};
 use serde_json::Value;
 
 use super::permission;
@@ -60,6 +60,53 @@ fn output_summary(update: &Value) -> Option<String> {
         .map(str::trim)
         .rfind(|line| !line.is_empty())?;
     Some(line.chars().take(SUMMARY_CHARS).collect())
+}
+
+/// What a call returned, whole (the caller cuts it): its text `content`, one block per line group;
+/// a `diff` entry as `edited <path>`; with neither, the agent's `rawOutput` (a string as is, an
+/// object's `output`/`stdout`/`stderr` text, or its JSON).
+fn output_text(update: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for entry in update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match entry.get("type").and_then(Value::as_str) {
+            Some("content") => {
+                if let Some(text) = entry.get("content").and_then(block_text) {
+                    parts.push(text.to_owned());
+                }
+            }
+            Some("diff") => {
+                if let Some(path) = entry.get("path").and_then(Value::as_str) {
+                    parts.push(format!("edited {path}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !parts.is_empty() {
+        return parts.join("\n");
+    }
+    match update.get("rawOutput") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(raw @ Value::Object(map)) => {
+            let streams: Vec<&str> = ["output", "stdout", "stderr"]
+                .iter()
+                .filter_map(|key| map.get(*key).and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .collect();
+            if streams.is_empty() {
+                raw.to_string()
+            } else {
+                streams.join("\n")
+            }
+        }
+        Some(other) => other.to_string(),
+    }
 }
 
 /// The input of a call: the agent's `rawInput`, plus the call's `locations` (the files it names)
@@ -139,6 +186,7 @@ impl Normalizer {
                 id,
                 ok,
                 summary: output_summary(update),
+                output: ToolOutput::from_text_opt(&output_text(update)),
             });
         }
         events
@@ -341,6 +389,9 @@ mod tests {
                     id: "t1".into(),
                     ok: true,
                     summary: Some("test result: ok".into()),
+                    output: Some(ToolOutput::from_text(
+                        "compiling\nrunning 3 tests\n\ntest result: ok\n"
+                    ))
                 },
             ]
         );
@@ -391,7 +442,8 @@ mod tests {
             ExecEvent::ToolResult {
                 id: "t".into(),
                 ok: false,
-                summary: None
+                summary: None,
+                output: None
             }
         );
     }
@@ -411,9 +463,50 @@ mod tests {
             ExecEvent::ToolResult {
                 id: "r1".into(),
                 ok: true,
-                summary: Some("contents".into())
+                summary: Some("contents".into()),
+                output: Some(ToolOutput::from_text("contents"))
             }
         );
+    }
+
+    #[test]
+    fn a_calls_raw_output_is_kept_when_it_sends_no_content() {
+        let out = |update: Value| match events(&[update]).pop() {
+            Some(ExecEvent::ToolResult { output, .. }) => output,
+            other => panic!("{other:?}"),
+        };
+        let done = |extra: Value| {
+            let mut u = json!({ "sessionUpdate": "tool_call", "toolCallId": "x",
+                                "kind": "execute", "status": "completed" });
+            u.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            u
+        };
+        assert_eq!(
+            out(done(json!({ "rawOutput": "plain" }))),
+            Some(ToolOutput::from_text("plain"))
+        );
+        assert_eq!(
+            out(done(
+                json!({ "rawOutput": { "stdout": "o", "stderr": "e", "exit": 1 } })
+            )),
+            Some(ToolOutput::from_text("o\ne"))
+        );
+        assert_eq!(
+            out(done(json!({ "rawOutput": { "n": 1 } }))),
+            Some(ToolOutput::from_text(r#"{"n":1}"#))
+        );
+        assert_eq!(
+            out(done(json!({ "content": [{ "type": "diff", "path": "a.rs",
+                                           "oldText": "x", "newText": "y" }] }))),
+            Some(ToolOutput::from_text("edited a.rs"))
+        );
+        assert_eq!(out(done(json!({}))), None);
+        let big = "y".repeat(50_000);
+        let cut = out(done(json!({ "rawOutput": big }))).expect("output");
+        assert!(cut.truncated);
+        assert_eq!(cut.bytes, 50_000);
     }
 
     #[test]

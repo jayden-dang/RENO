@@ -111,7 +111,7 @@ pub use wake::WakeSignal;
 pub use watch::{Watch, WatchBackoff, WatchSpec, WatchStream};
 pub use workspace::{
     FAKE_WORKTREES, FakeWorkspace, InPlace, Inspection, Placement, ReleasePolicy, Released,
-    Workspace, WorkspaceError,
+    RunChanges, Workspace, WorkspaceError,
 };
 
 #[cfg(test)]

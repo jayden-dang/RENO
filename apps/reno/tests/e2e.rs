@@ -1117,6 +1117,30 @@ fn workspace_list_show_and_clean_through_the_cli() {
     assert!(world.reno(&["run", "cancel", &run]).status.success());
     task.wait_with_output().expect("task run ends");
 
+    // `workspace diff` lists what the run changed against its base, and patches one file.
+    std::fs::write(path.join("later.txt"), "uncommitted\n").unwrap();
+    let diff = world.json(&["workspace", "diff", &run]);
+    assert_eq!(diff["commits"], 1);
+    let files: Vec<_> = diff["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(files, ["agent.txt", "later.txt"]);
+    let patch = text(
+        &world
+            .reno(&["workspace", "diff", &run, "--path", "agent.txt"])
+            .stdout,
+    );
+    assert!(patch.contains("+x"), "{patch}");
+    let escape = world.reno(&["workspace", "diff", &run, "--path", "../README.md"]);
+    assert!(
+        !escape.status.success(),
+        "a path outside the worktree is refused"
+    );
+    std::fs::remove_file(path.join("later.txt")).unwrap();
+
     let listed = text(&world.reno(&["workspace", "list"]).stdout);
     assert!(
         listed.contains(&run) && listed.contains("kept") && listed.contains("1 commit(s)"),

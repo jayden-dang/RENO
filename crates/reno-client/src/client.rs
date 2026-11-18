@@ -557,6 +557,20 @@ impl Client {
             .await?)
     }
 
+    /// `workspace.diff`: what a run changed against its base commit, and with `path` the patch
+    /// of that one file. Needs feature `run.changes`.
+    pub async fn workspace_diff(
+        &self,
+        run_id: reno_proto::RunId,
+        path: Option<String>,
+    ) -> Result<reno_proto::WorkspaceDiffResult, ClientError> {
+        self.require(reno_proto::FEATURE_RUN_CHANGES)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::WorkspaceDiff>(reno_proto::WorkspaceDiffParams { run_id, path })
+            .await?)
+    }
+
     /// `workspace.clean`: removes workspaces that hold nothing to lose (or merged ones, for
     /// `Merged` and a single run); with `force`, any. Needs feature `workspaces`.
     pub async fn clean_workspaces(

@@ -180,7 +180,10 @@ async fn work(script: &Script, prompt: &str) -> bool {
             .await
         && script
             .step(|w, run| {
-                w.push(run, data::tool_ok("t1", "Cargo.toml, crates/, docs/"));
+                w.push(
+                    run,
+                    data::tool_output("t1", true, "Cargo.toml, crates/, docs/", data::LS_OUTPUT),
+                );
                 w.push(
                     run,
                     ExecEvent::Usage {
@@ -276,6 +279,7 @@ pub(super) async fn resume(shared: Arc<Shared>, run: RunId, decision: ApprovalDe
                         id,
                         ok: approved,
                         summary: Some(summary.to_owned()),
+                        output: None,
                     },
                 );
                 true

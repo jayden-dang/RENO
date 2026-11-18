@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
-use reno_proto::{RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
+use reno_proto::{ChangedFile, RunId, WorkspaceChanges, WorkspaceInfo, WorkspaceStatus};
 
 /// Why a workspace could not be prepared, inspected or released. Typed, so the run's diagnostic
 /// and the wire error say which rule applied.
@@ -91,6 +91,19 @@ pub struct Inspection {
     pub branch_exists: bool,
     /// What it holds.
     pub changes: WorkspaceChanges,
+}
+
+/// What a run changed against its base commit: see [`Workspace::changes_since_base`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunChanges {
+    /// Commits on the branch beyond the base.
+    pub commits: u32,
+    /// The changed files, by path.
+    pub files: Vec<ChangedFile>,
+    /// The patch of the requested file, already cut.
+    pub patch: Option<String>,
+    /// Whether `patch` was cut.
+    pub patch_truncated: bool,
 }
 
 /// How much [`Workspace::release`] may remove.
@@ -157,6 +170,17 @@ pub trait Workspace: Send + Sync + fmt::Debug {
         &self,
         workspace: &WorkspaceInfo,
     ) -> Result<Vec<String>, WorkspaceError>;
+
+    /// What `workspace` holds against its base commit: committed, staged, unstaged and untracked
+    /// files, and the patch of `path` (repository-relative; refused with
+    /// [`WorkspaceError::Unsafe`] when it leaves the worktree) when it is one of them. Read-only:
+    /// it takes no write lock and changes neither the index nor the worktree. A worktree whose
+    /// directory is gone has no changes.
+    async fn changes_since_base(
+        &self,
+        workspace: &WorkspaceInfo,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError>;
 
     /// Puts `paths` (from [`Workspace::protected_changes`]) back as they are at the base
     /// commit: restored where the base has them, removed where it does not. Only inside the
@@ -238,6 +262,8 @@ struct FakeState {
     /// Protected paths a run's worktree holds changed, as a test says an agent left them.
     protected: BTreeMap<RunId, Vec<String>>,
     reverted: Vec<(RunId, Vec<String>)>,
+    /// What a run's worktree holds against its base, as a test says an agent left it.
+    diffs: BTreeMap<RunId, RunChanges>,
 }
 
 #[derive(Debug)]
@@ -301,6 +327,11 @@ impl FakeWorkspace {
     /// Every revert asked of the port, in order.
     pub fn reverts(&self) -> Vec<(RunId, Vec<String>)> {
         self.lock().reverted.clone()
+    }
+
+    /// Says what `run`'s worktree holds against its base commit.
+    pub fn set_diff(&self, run: &RunId, changes: RunChanges) {
+        self.lock().diffs.insert(run.clone(), changes);
     }
 
     /// Marks `run`'s branch as merged into its repository's `HEAD`.
@@ -466,6 +497,25 @@ impl Workspace for FakeWorkspace {
         workspace: &WorkspaceInfo,
     ) -> Result<Vec<String>, WorkspaceError> {
         Ok(self.protected_left(&workspace.run_id))
+    }
+
+    async fn changes_since_base(
+        &self,
+        workspace: &WorkspaceInfo,
+        path: Option<&str>,
+    ) -> Result<RunChanges, WorkspaceError> {
+        let mut state = self.lock();
+        state.calls.push(format!("diff {}", workspace.run_id));
+        let mut changes = state
+            .diffs
+            .get(&workspace.run_id)
+            .cloned()
+            .unwrap_or_default();
+        if path.is_none() {
+            changes.patch = None;
+            changes.patch_truncated = false;
+        }
+        Ok(changes)
     }
 
     async fn revert_protected(

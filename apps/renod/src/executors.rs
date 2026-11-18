@@ -94,6 +94,7 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
             id: "mock-call-1".into(),
             ok: true,
             summary: Some("the mock tool finished".into()),
+            output: None,
         }),
         MockStep::text("All done."),
         MockStep::Emit(ExecEvent::Done {

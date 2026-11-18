@@ -7,31 +7,40 @@
 //! tells the list to re-measure from there, so a streamed delta costs one row, not the list.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
-    ListState, Render, SharedString, Subscription, Window, div, list, prelude::*, px,
+    ListState, Render, ScrollHandle, SharedString, Subscription, Task, Window, div, list,
+    prelude::*, px,
 };
 use reno_proto::{
-    Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunSummary,
-    StopReason,
+    Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
+    RunSummary, StopReason,
 };
 
 use super::ScreenEvent;
 use super::executors::health_lines;
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self, Built, Facts, Key, Outcome, Resolution, Row, ToolEntry};
+use crate::transcript::{self, Built, Facts, Key, Resolution, Row, ToolEntry};
 use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
 use crate::ui::toast;
+use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane};
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 use crate::vm::rules;
 use crate::vm::runs as run_facts;
+
+mod changes;
+mod output;
+
+/// How long a burst of finished tool calls waits before the changes are read again.
+const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
@@ -51,6 +60,24 @@ pub(crate) struct RunScreen {
     /// Tool groups and reasoning rows the user opened.
     open: HashSet<Key>,
     details_open: bool,
+    /// Tool calls whose output shows (in a group of more than one), and those showing all of it.
+    outputs_open: HashSet<String>,
+    outputs_full: HashSet<String>,
+    /// The Changes view is showing in place of the transcript, and the file it has picked.
+    showing_changes: bool,
+    selected: Option<String>,
+    diff_scroll: ScrollHandle,
+    /// The patch rows of the picked file, with the answer they were made from.
+    patch_key: Option<(String, Loaded<Patch>)>,
+    patch_pane: PatchPane,
+    /// The line under the Done row naming the branch and what it holds.
+    result: Option<String>,
+    /// Whether the changes were asked for, the run's status and tool calls when they were last
+    /// looked at, and the wait before reading them again.
+    asked_changes: bool,
+    last_status: Option<reno_proto::RunStatus>,
+    last_writes: usize,
+    changes_timer: Option<Task<()>>,
     steer: Entity<Composer>,
     /// The reason field under each held action of this run: typing in it and pressing Deny (or
     /// Enter) denies with those words (ui-brief 2026-11-17, from direction B).
@@ -81,6 +108,18 @@ impl RunScreen {
             markdown: HashMap::new(),
             open: HashSet::new(),
             details_open: true,
+            outputs_open: HashSet::new(),
+            outputs_full: HashSet::new(),
+            showing_changes: false,
+            selected: None,
+            diff_scroll: ScrollHandle::new(),
+            patch_key: None,
+            patch_pane: PatchPane::Loading,
+            result: None,
+            asked_changes: false,
+            last_status: None,
+            last_writes: 0,
+            changes_timer: None,
             steer,
             reasons: HashMap::new(),
             menu_open: None,
@@ -180,6 +219,74 @@ impl RunScreen {
         let (built, pending) = built;
         self.keep_reasons(&pending, cx);
         self.apply(built);
+        self.follow_changes(cx);
+    }
+
+    /// Keeps what the run changed current: read when the run opens and when it ends, and about
+    /// once a second while it works (a tool call that can write finished, or its status moved).
+    fn follow_changes(&mut self, cx: &mut Context<Self>) {
+        if self.store.read(cx).supports_changes() {
+            let status = self.summary(cx).map(|r| r.status);
+            let ended = status.is_some_and(RunStatus::is_terminal);
+            let writes = self
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Tools { calls, .. } => Some(calls),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|c| c.kind != transcript::ToolKind::Other && c.finished())
+                .count();
+            let moved = self.last_status != status || writes > self.last_writes;
+            if !self.asked_changes || (ended && self.last_status != status) {
+                self.asked_changes = true;
+                self.reload_changes(cx);
+            } else if moved {
+                self.schedule_changes(cx);
+            }
+            self.last_status = status;
+            self.last_writes = writes;
+        }
+        self.ensure_selection(cx);
+        self.update_result(cx);
+    }
+
+    /// Reads the changes in a second, once however many calls finish meanwhile.
+    fn schedule_changes(&mut self, cx: &mut Context<Self>) {
+        if self.changes_timer.is_some() {
+            return;
+        }
+        self.changes_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CHANGES_EVERY).await;
+            this.update(cx, |this, cx| {
+                this.changes_timer = None;
+                this.reload_changes(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Sets the result line under the Done row and measures that row again when it changes.
+    fn update_result(&mut self, cx: &mut Context<Self>) {
+        let ended = self.summary(cx).is_some_and(|r| r.status.is_terminal());
+        let line = match (ended, self.pane(cx)) {
+            (true, change_facts::Pane::Files(_)) => self
+                .store
+                .read(cx)
+                .changes(&self.run)
+                .and_then(|c| match &c.diff {
+                    Loaded::Ready(d) => change_facts::result_line(d),
+                    _ => None,
+                }),
+            _ => None,
+        };
+        if line != self.result {
+            self.result = line;
+            if let Some(ix) = self.rows.iter().position(|r| matches!(r, Row::Done { .. })) {
+                self.list.splice(ix..ix + 1, 1);
+            }
+        }
     }
 
     /// One reason field per held action of this run; a field goes when its action is answered.
@@ -323,6 +430,7 @@ impl RunScreen {
                 )
             })
             .child(div().flex_1())
+            .children(self.changes_button(theme, cx))
             .child(
                 kit::icon_button(theme, "details-toggle", Icon::Sidebar, 30.0)
                     .debug_selector(|| "details-toggle".to_owned())
@@ -383,13 +491,16 @@ impl RunScreen {
                 diagnostic,
                 reason,
                 ..
-            } => done_line(
-                &theme,
-                *stop,
-                result.as_deref(),
-                diagnostic.as_deref(),
-                reason.as_ref(),
-            ),
+            } => div()
+                .child(done_line(
+                    &theme,
+                    *stop,
+                    result.as_deref(),
+                    diagnostic.as_deref(),
+                    reason.as_ref(),
+                ))
+                .children(self.result_line(&theme, cx))
+                .into_any_element(),
         };
         div()
             .w_full()
@@ -617,7 +728,11 @@ impl RunScreen {
                         .bg(theme.surface)
                         .flex()
                         .flex_col()
-                        .children(calls.iter().map(|call| tool_line(theme, call))),
+                        .children(
+                            calls
+                                .iter()
+                                .map(|call| self.tool_entry(theme, key, call, calls.len(), cx)),
+                        ),
                 )
             })
             .into_any_element()
@@ -848,6 +963,7 @@ impl RunScreen {
 
         let mut pane = div()
             .id("details")
+            .debug_selector(|| "details".to_owned())
             .w(px(DETAILS))
             .flex_none()
             .h_full()
@@ -1005,6 +1121,7 @@ impl RunScreen {
                 .child(health_lines(theme, &failed.row))
                 .child(self.executor_actions(&failed.row, theme, cx));
         }
+        pane = pane.children(self.changes_section(theme, cx));
         pane.child(div().h(px(14.0)))
             .child(section("USAGE"))
             .child(kv("Tokens", usage))
@@ -1110,8 +1227,10 @@ fn disclosure(
     open: bool,
     label: String,
 ) -> gpui::Stateful<gpui::Div> {
+    let selector = id.to_string();
     div()
         .id(id)
+        .debug_selector(move || selector.clone())
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -1128,40 +1247,6 @@ fn disclosure(
             theme.muted,
         ))
         .child(label)
-}
-
-fn tool_line(theme: &Theme, call: &ToolEntry) -> impl IntoElement {
-    let (summary_text, color) = match &call.outcome {
-        Outcome::Pending => ("running".to_owned(), theme.faint),
-        Outcome::Ok(s) => (s.clone().unwrap_or_else(|| "ok".to_owned()), theme.muted),
-        Outcome::Failed(s) => (
-            s.clone().unwrap_or_else(|| "failed".to_owned()),
-            theme.danger,
-        ),
-    };
-    div()
-        .flex()
-        .items_start()
-        .justify_between()
-        .gap(px(16.0))
-        .px(px(14.0))
-        .py(px(8.0))
-        .child(
-            div()
-                .min_w_0()
-                .font_family(MONO)
-                .text_size(px(12.5))
-                .child(SharedString::from(call.label.clone())),
-        )
-        .child(
-            div()
-                .flex_none()
-                .max_w(px(280.0))
-                .truncate()
-                .text_size(px(12.5))
-                .text_color(color)
-                .child(summary_text),
-        )
 }
 
 /// The tone of the card's leading "?": warning while the question waits, then the tone of how
@@ -1380,6 +1465,11 @@ impl Render for RunScreen {
             .px(px(24.0))
             .child(transcript)
             .child(dock);
+        let main = if self.showing_changes {
+            self.changes_view(&theme, cx)
+        } else {
+            main.into_any_element()
+        };
 
         div()
             .id("run")
@@ -1400,3 +1490,6 @@ impl Render for RunScreen {
 
 #[cfg(test)]
 mod question_card_tests;
+
+#[cfg(test)]
+mod changes_tests;

@@ -29,7 +29,7 @@ use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ApprovalRecord, ApprovalStatus, CancelledBy, CleanItem,
     CleanTarget, Effort, ExecutorId, ExecutorInfo, RULE_MAX_EXPIRY_SECS, Remember, RoutingDecision,
     RuleId, RunEventItem, RunId, RunStatus, RunSummary, Seq, StopDetail, TaskId, TriggerFireResult,
-    TriggerInfo, WorkspaceInfo, WorkspaceStatus,
+    TriggerInfo, WorkspaceDiffResult, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_proto::{
     ActionClass, CommandPattern, RULE_ADD_COMMAND_MAX_CHARS, RULE_ADD_DEFAULT_TOOL, RuleMatcher,
@@ -609,6 +609,34 @@ impl Kernel {
             .get_workspace(run)
             .await?
             .ok_or_else(|| KernelError::WorkspaceNotFound(run.clone()))
+    }
+
+    /// What `run` changed in its workspace against the base commit, and the patch of `path`.
+    /// A workspace that was removed or lost, or a kernel with no `Workspace` port, has no
+    /// changes to show: the files are empty, the branch and base are the recorded ones. No
+    /// workspace for the run: [`KernelError::WorkspaceNotFound`].
+    pub async fn workspace_diff(
+        &self,
+        run: &RunId,
+        path: Option<&str>,
+    ) -> Result<WorkspaceDiffResult> {
+        let info = self.workspace(run).await?;
+        let changes = match (&self.shared.workspace, info.status) {
+            (
+                Some(port),
+                WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept,
+            ) => port.changes_since_base(&info, path).await?,
+            _ => crate::workspace::RunChanges::default(),
+        };
+        Ok(WorkspaceDiffResult {
+            run_id: info.run_id,
+            branch: info.branch,
+            base_sha: info.base_sha,
+            commits: changes.commits,
+            files: changes.files,
+            patch: changes.patch,
+            patch_truncated: changes.patch_truncated,
+        })
     }
 
     /// Workspaces in one of `status` (all when `None`), newest first.

@@ -37,6 +37,7 @@
 //! clone of a client made by [`FakeDaemon::spawn`], cancels them; [`FakeDaemon::shutdown`] also
 //! waits.
 
+mod changes;
 pub mod data;
 mod extras;
 mod jobs;
@@ -1089,6 +1090,30 @@ fn router(shared: &Arc<Shared>) -> Router {
         }
     };
 
+    let s = Arc::clone(shared);
+    let workspace_get = move |p: reno_proto::WorkspaceGetParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "workspace.get")?;
+            s.read(|w| {
+                let status = w.run(&p.run_id)?.summary.status;
+                changes::info(&p.run_id, status)
+            })
+            .ok_or_else(|| not_found("workspace"))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let workspace_diff = move |p: reno_proto::WorkspaceDiffParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "workspace.diff")?;
+            s.read(|w| w.run(&p.run_id).map(|_| ()))
+                .and_then(|()| changes::diff(&p.run_id, p.path.as_deref()))
+                .ok_or_else(|| not_found("workspace"))
+        }
+    };
+
     Router::new()
         .method::<DaemonHello, _, _>(hello)
         .method::<DaemonStatus, _, _>(status)
@@ -1096,6 +1121,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<DaemonShutdown, _, _>(|_: NoParams, _| async { Ok(DaemonShutdownResult {}) })
         .method::<TaskRun, _, _>(task_run)
         .method::<RunGet, _, _>(run_get)
+        .method::<reno_proto::WorkspaceGet, _, _>(workspace_get)
+        .method::<reno_proto::WorkspaceDiff, _, _>(workspace_diff)
         .method::<reno_proto::RunRouting, _, _>(run_routing)
         .method::<reno_proto::RoutePreview, _, _>(route_preview)
         .method::<reno_proto::RuleList, _, _>(rule_list)

@@ -313,3 +313,124 @@ async fn unknown_workspaces_are_not_found() {
     assert!(fx.client.list_workspaces(None).await.unwrap().is_empty());
     fx.stop().await;
 }
+
+/// A bare RPC connection to the daemon: `workspace.diff` is called without the typed client.
+async fn raw(fx: &Fixture) -> reno_rpc::Client {
+    let rpc = reno_rpc::connect_unix(&fx.paths.socket, tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    rpc.call::<reno_proto::DaemonHello>(reno_proto::HelloParams {
+        client_name: "workspace-diff-test".into(),
+        protocol_version: reno_proto::PROTOCOL_VERSION,
+        features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
+    })
+    .await
+    .unwrap();
+    rpc
+}
+
+fn remote_code(error: reno_rpc::RpcError) -> ErrorCode {
+    match error {
+        reno_rpc::RpcError::Remote(object) => object.code,
+        other => panic!("not a remote error: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_diff_lists_what_a_run_changed_and_patches_one_file() {
+    use reno_proto::{ChangeKind, WorkspaceDiff, WorkspaceDiffParams};
+    let fx = Fixture::start().await;
+    assert!(FEATURES.contains(&"run.changes"));
+    let rpc = raw(&fx).await;
+    let repo = repo(&fx);
+    let before = snapshot(&repo);
+
+    let run = run_in(&fx, "mock-hold", &repo).await;
+    until_status(&fx, &run, RunStatus::Running).await;
+    let info = within(async {
+        loop {
+            if let Ok(info) = fx.client.get_workspace(run.clone()).await
+                && info.status == WorkspaceStatus::Active
+            {
+                return info;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    // A clean worktree has nothing yet.
+    let diff = |path: Option<&str>| {
+        rpc.call::<WorkspaceDiff>(WorkspaceDiffParams {
+            run_id: run.clone(),
+            path: path.map(str::to_owned),
+        })
+    };
+    let none = diff(None).await.unwrap();
+    assert!(none.files.is_empty());
+    assert_eq!(none.base_sha, info.base_sha);
+    assert_eq!(none.branch, info.branch);
+
+    // The agent commits one file, edits another and adds an untracked one with a space.
+    std::fs::write(info.path.join("agent.txt"), "work\nmore\n").unwrap();
+    git(&info.path, &["add", "agent.txt"]);
+    git(&info.path, &["commit", "-qm", "agent"]);
+    std::fs::write(info.path.join("README.md"), "changed\n").unwrap();
+    std::fs::write(info.path.join("new file.txt"), "a\nb\nc\n").unwrap();
+
+    let list = diff(None).await.unwrap();
+    assert_eq!(list.commits, 1);
+    let found: Vec<(&str, ChangeKind, u32)> = list
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.kind, f.additions))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("README.md", ChangeKind::Modified, 1),
+            ("agent.txt", ChangeKind::Added, 2),
+            ("new file.txt", ChangeKind::Added, 3),
+        ]
+    );
+    assert_eq!(list.patch, None);
+
+    let one = diff(Some("new file.txt")).await.unwrap();
+    assert!(one.patch.unwrap().contains("+a\n+b\n+c\n"));
+    let committed = diff(Some("agent.txt")).await.unwrap();
+    assert!(committed.patch.unwrap().contains("+work"));
+
+    // A path out of the worktree, and an unknown run, are refused as such.
+    for bad in ["../README.md", "/etc/passwd"] {
+        let err = diff(Some(bad)).await.unwrap_err();
+        assert_eq!(remote_code(err), ErrorCode::InvalidParams, "{bad}");
+    }
+    let err = rpc
+        .call::<WorkspaceDiff>(WorkspaceDiffParams {
+            run_id: RunId::from_suffix("nope").unwrap(),
+            path: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(remote_code(err), ErrorCode::NotFound);
+
+    // Once the run ends and the workspace is forced away: empty, not an error.
+    within(fx.client.cancel_run(&run, None)).await.unwrap();
+    until_status(&fx, &run, RunStatus::Cancelled).await;
+    ended(&fx, &run).await;
+    fx.client
+        .clean_workspaces(
+            CleanTarget::Run {
+                run_id: run.clone(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    let gone = diff(Some("agent.txt")).await.unwrap();
+    assert!(gone.files.is_empty() && gone.patch.is_none());
+    assert_eq!(gone.branch, info.branch);
+
+    assert_eq!(snapshot(&repo), before, "the user's checkout is untouched");
+    fx.stop().await;
+}

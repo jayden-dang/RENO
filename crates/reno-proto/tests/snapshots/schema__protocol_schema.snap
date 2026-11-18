@@ -715,7 +715,8 @@ expression: protocol_schema()
     "rules.project",
     "run.model",
     "run.effort",
-    "executor.maintain"
+    "executor.maintain",
+    "run.changes"
   ],
   "methods": [
     {
@@ -15433,6 +15434,17 @@ expression: protocol_schema()
                     "description": "Whether it succeeded.",
                     "type": "boolean"
                   },
+                  "output": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ToolOutput"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "What the tool printed or returned, cut to [`ToolOutput::MAX_BYTES`]. The journal is the\nonly record of it: an event written without it cannot be given one later."
+                  },
                   "summary": {
                     "description": "Short human-readable outcome.",
                     "type": [
@@ -16084,6 +16096,30 @@ expression: protocol_schema()
             },
             "required": [
               "name"
+            ],
+            "type": "object"
+          },
+          "ToolOutput": {
+            "description": "What a tool call returned, kept in the journal so the transcript can show it and a later\nreader (the app, a verifier, a teammate) does not have to run the call again.",
+            "properties": {
+              "bytes": {
+                "description": "The size of the whole output in bytes before it was cut.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "text": {
+                "description": "The text, with the middle cut out when it was longer than [`Self::MAX_BYTES`]: the head and\nthe tail are kept, joined by a line saying how much is missing. Always valid UTF-8 cut on a\ncharacter boundary, with secrets redacted like the rest of the journal.",
+                "type": "string"
+              },
+              "truncated": {
+                "description": "Whether `text` is shorter than the whole output.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "text",
+              "bytes"
             ],
             "type": "object"
           }

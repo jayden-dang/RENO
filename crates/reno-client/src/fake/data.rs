@@ -130,11 +130,58 @@ pub(super) fn tool(id: &str, name: &str, input: serde_json::Value) -> ExecEvent 
     }
 }
 
+/// A tool result that carries the text the tool printed.
+pub(super) fn tool_output(id: &str, ok: bool, summary: &str, text: &str) -> ExecEvent {
+    ExecEvent::ToolResult {
+        id: id.to_owned(),
+        ok,
+        summary: Some(summary.to_owned()),
+        output: Some(reno_proto::ToolOutput {
+            text: text.to_owned(),
+            bytes: text.len() as u64,
+            truncated: false,
+        }),
+    }
+}
+
+/// The listing `ls` prints in the demo repository.
+pub(super) const LS_OUTPUT: &str = "Cargo.toml\nCargo.lock\ncrates\ndocs\napps\n";
+
+/// A failing `cargo test` whose output was longer than the journal keeps: the head and the tail
+/// are there, with the marker the daemon joins them with.
+fn failing_test_output() -> ExecEvent {
+    let mut text = String::from("running 48 tests\n");
+    for i in 0..18 {
+        text.push_str(&format!("test lease::tests::case_{i:02} ... ok\n"));
+    }
+    text.push_str("\n[... 476 KiB cut from the middle ...]\n\n");
+    text.push_str(
+        "test lease::tests::expires_after_renewals ... FAILED\n\n\
+failures:\n\n\
+---- lease::tests::expires_after_renewals stdout ----\n\
+thread 'lease::tests::expires_after_renewals' panicked at crates/reno-kernel/src/lease.rs:48:9:\n\
+assertion `left == right` failed\n  left: Active\n right: Expired\n\n\
+failures:\n    lease::tests::expires_after_renewals\n\n\
+test result: FAILED. 47 passed; 1 failed; 0 ignored\n",
+    );
+    ExecEvent::ToolResult {
+        id: "t2".to_owned(),
+        ok: false,
+        summary: Some("1 test failed".to_owned()),
+        output: Some(reno_proto::ToolOutput {
+            text,
+            bytes: 493_568,
+            truncated: true,
+        }),
+    }
+}
+
 pub(super) fn tool_ok(id: &str, summary: &str) -> ExecEvent {
     ExecEvent::ToolResult {
         id: id.to_owned(),
         ok: true,
         summary: Some(summary.to_owned()),
+        output: None,
     }
 }
 
@@ -273,7 +320,7 @@ pub(super) fn seed() -> Ids<Seed> {
                 started(),
                 text("Reading the shell layout before adding the inspector pane."),
                 ls(),
-                tool_ok("t1", "apps/, crates/, docs/"),
+                tool_output("t1", true, "apps/, crates/, docs/", LS_OUTPUT),
             ],
         },
         SeedRun {
@@ -317,6 +364,12 @@ pub(super) fn seed() -> Ids<Seed> {
             journal: vec![
                 started(),
                 text("Running the pagination test in a loop to reproduce the flake."),
+                tool(
+                    "t2",
+                    "bash",
+                    json!({ "command": "cargo test -p reno-kernel" }),
+                ),
+                failing_test_output(),
                 done(
                     StopReason::Error,
                     None,

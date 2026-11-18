@@ -41,10 +41,12 @@ use reno_proto::defs::DefKind;
 use reno_proto::{
     ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, FiringOutcome, JobFailure, JobKind,
     JobPhase, RoutingDecision, RunId, RunListParams, RunStatus, SignedIn, TaskRunParams,
+    WorkspaceDiffResult, WorkspaceInfo,
 };
 
 use crate::summary;
 use crate::vm;
+use crate::vm::changes::{Loaded, Patch};
 
 /// How many runs one page of the runs list asks for.
 pub(crate) const RUNS_PAGE: u32 = 50;
@@ -147,6 +149,15 @@ fn job_events(before: &[ExecutorInfo], after: &[ExecutorInfo]) -> Vec<StoreEvent
     events
 }
 
+/// What the daemon said about a run's workspace: where it is, and what changed in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunChanges {
+    /// `workspace.get`; `Ready(None)` for a run that never had a workspace.
+    pub(crate) workspace: Loaded<Option<WorkspaceInfo>>,
+    /// `workspace.diff` without a path: the list of files.
+    pub(crate) diff: Loaded<WorkspaceDiffResult>,
+}
+
 /// A run's routing, and what it was fetched for: the decision changes while the run starts (a
 /// fallback), so it is fetched again when the run's executor or status changes.
 struct RoutingEntry {
@@ -197,6 +208,13 @@ pub(crate) struct Store {
     status_seen_at_ms: u64,
     /// The run the Run screen shows: its transcript changes notify.
     open: Option<RunId>,
+    /// What each run changed, as `workspace.get` and `workspace.diff` last said.
+    changes: BTreeMap<RunId, RunChanges>,
+    /// Runs whose changes are being read, and those asked again meanwhile.
+    reading_changes: BTreeSet<RunId>,
+    reread_changes: BTreeSet<RunId>,
+    /// The patch of one file of a run, by `(run, path)`.
+    patches: BTreeMap<(RunId, String), Loaded<Patch>>,
     /// Routing decisions by run, from `task.run` and `run.routing`.
     routings: BTreeMap<RunId, RoutingEntry>,
     /// Tasks and steers sent and not yet answered.
@@ -239,6 +257,10 @@ impl Store {
             system_clock: false,
             status_seen_at_ms: 0,
             open: None,
+            changes: BTreeMap::new(),
+            reading_changes: BTreeSet::new(),
+            reread_changes: BTreeSet::new(),
+            patches: BTreeMap::new(),
             routings: BTreeMap::new(),
             sending: 0,
             roots: crate::local::Roots::default(),
@@ -617,6 +639,138 @@ impl Store {
                         entry.routing = RunRouting::Failed("the daemon would not say".to_owned());
                         // Fetched again when the run changes, not in a loop.
                     }
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+        cx.notify();
+    }
+
+    /// What `run` changed, as last read; `None` before it was asked for.
+    pub(crate) fn changes(&self, run: &RunId) -> Option<&RunChanges> {
+        self.changes.get(run)
+    }
+
+    /// The patch of `path` in `run`, as last read.
+    pub(crate) fn patch(&self, run: &RunId, path: &str) -> Option<&Loaded<Patch>> {
+        self.patches.get(&(run.clone(), path.to_owned()))
+    }
+
+    /// Whether the daemon can say what a run changed.
+    pub(crate) fn supports_changes(&self) -> bool {
+        self.state.supports(reno_proto::FEATURE_RUN_CHANGES)
+    }
+
+    /// Reads where `run` works and which files it changed (`workspace.get` and `workspace.diff`).
+    /// What was read before stays on screen while the new answer comes. Asked again while a read
+    /// is in flight, it reads once more when that ends.
+    pub(crate) fn load_changes(&mut self, run: &RunId, cx: &mut Context<Self>) {
+        if !self.supports_changes() {
+            return;
+        }
+        if !self.reading_changes.insert(run.clone()) {
+            self.reread_changes.insert(run.clone());
+            return;
+        }
+        self.changes.entry(run.clone()).or_insert(RunChanges {
+            workspace: Loaded::Loading,
+            diff: Loaded::Loading,
+        });
+        let (ok_run, err_run, id) = (run.clone(), run.clone(), run.clone());
+        self.call(
+            "Could not read the run's changes",
+            move |client| async move {
+                let (workspace, diff) = futures::future::join(
+                    client.get_workspace(id.clone()),
+                    client.workspace_diff(id, None),
+                )
+                .await;
+                let workspace = match workspace {
+                    Ok(info) => Loaded::Ready(Some(info)),
+                    Err(e) if e.code() == Some(reno_proto::ErrorCode::NotFound) => {
+                        Loaded::Ready(None)
+                    }
+                    Err(e) => Loaded::Failed(reason(&e)),
+                };
+                let diff = match diff {
+                    Ok(diff) => Loaded::Ready(diff),
+                    Err(e) => Loaded::Failed(reason(&e)),
+                };
+                Ok(RunChanges { workspace, diff })
+            },
+            cx,
+            D {
+                ok: Box::new(move |store, read: RunChanges, cx| {
+                    store.reading_changes.remove(&ok_run);
+                    // A patch read for the old list may not fit the new one.
+                    if store.changes.get(&ok_run).map(|c| &c.diff) != Some(&read.diff) {
+                        store.patches.retain(|(run, _), _| run != &ok_run);
+                    }
+                    store.changes.insert(ok_run.clone(), read);
+                    if store.reread_changes.remove(&ok_run) {
+                        store.load_changes(&ok_run, cx);
+                    }
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.reading_changes.remove(&err_run);
+                    store.reread_changes.remove(&err_run);
+                    if let Some(c) = store.changes.get_mut(&err_run)
+                        && c.diff == Loaded::Loading
+                    {
+                        c.diff = Loaded::Failed("the daemon is not connected".to_owned());
+                    }
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+        cx.notify();
+    }
+
+    /// Forgets a failed read of a patch, so the next [`Self::load_patch`] asks again.
+    pub(crate) fn forget_failed_patch(&mut self, run: &RunId, path: &str) {
+        let key = (run.clone(), path.to_owned());
+        if matches!(self.patches.get(&key), Some(Loaded::Failed(_))) {
+            self.patches.remove(&key);
+        }
+    }
+
+    /// Reads the patch of `path` in `run` unless it was read, failed or is on its way.
+    pub(crate) fn load_patch(&mut self, run: &RunId, path: &str, cx: &mut Context<Self>) {
+        if !self.supports_changes() {
+            return;
+        }
+        let key = (run.clone(), path.to_owned());
+        if self.patches.contains_key(&key) {
+            return;
+        }
+        self.patches.insert(key.clone(), Loaded::Loading);
+        let (id, file) = (run.clone(), path.to_owned());
+        let (ok_key, err_key) = (key.clone(), key);
+        self.call(
+            "Could not read the patch",
+            move |client| async move {
+                Ok(match client.workspace_diff(id, Some(file)).await {
+                    Ok(d) => Loaded::Ready(Patch {
+                        text: d.patch,
+                        truncated: d.patch_truncated,
+                    }),
+                    Err(e) => Loaded::Failed(reason(&e)),
+                })
+            },
+            cx,
+            D {
+                ok: Box::new(move |store, patch, cx| {
+                    store.patches.insert(ok_key, patch);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.patches.insert(
+                        err_key,
+                        Loaded::Failed("the daemon is not connected".to_owned()),
+                    );
                     cx.notify();
                 }),
                 quiet: true,
@@ -1533,6 +1687,14 @@ impl<T: 'static> D<T> {
 impl D<()> {
     fn fire_and_forget() -> Self {
         Self::then(|_, (), _| {})
+    }
+}
+
+/// A failed request in the daemon's own words (its JSON-RPC code means nothing to a person).
+fn reason(e: &ClientError) -> String {
+    match e {
+        ClientError::Remote(error) => error.message.clone(),
+        e => e.to_string(),
     }
 }
 

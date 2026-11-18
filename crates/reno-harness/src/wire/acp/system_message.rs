@@ -234,6 +234,7 @@ mod tests {
                 id: "background-task".into(),
                 ok: true,
                 summary: None,
+                output: None,
             },
         ];
         for reasoning in [false, true] {
