@@ -14,6 +14,7 @@ pub(crate) mod ring;
 pub(crate) mod running_pill;
 pub(crate) mod sidebar;
 pub(crate) mod text_area;
+pub(crate) mod terminal_view;
 pub(crate) mod text_model;
 pub(crate) mod theme;
 pub(crate) mod toast;

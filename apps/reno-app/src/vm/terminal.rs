@@ -566,6 +566,7 @@ impl InputQueue {
         self.in_flight = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn pending(&self) -> &[u8] {
         &self.pending
     }

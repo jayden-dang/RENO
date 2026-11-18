@@ -17,6 +17,8 @@ use crate::vm::changes::Pane;
 const REMOVED: &str = "workspace removed";
 /// The words of a disabled row whose run has no repository.
 const NO_REPO: &str = "no repository";
+/// The words of a disabled row whose tab the connected daemon cannot serve.
+const NEWER_DAEMON: &str = "needs a newer daemon";
 
 // --- rows ----------------------------------------------------------------------------------------
 
@@ -93,10 +95,10 @@ impl HomeKind {
         }
     }
 
-    /// Whether the tab behind the row exists yet. Changes and Files do; the UI opens a
+    /// Whether the tab behind the row exists yet. Changes, Files and Terminal do; the UI opens a
     /// placeholder tab for the rest.
     pub(crate) const fn built(self) -> bool {
-        matches!(self, Self::Changes | Self::Files)
+        matches!(self, Self::Changes | Self::Files | Self::Terminal)
     }
 }
 
@@ -199,6 +201,10 @@ pub(crate) fn record(connected: bool, supports_changes: bool, answer: Option<boo
 /// What the home needs to know about a run beyond its changes pane.
 #[derive(Clone, Debug)]
 pub(crate) struct HomeFacts<'a> {
+    /// The daemon serves the Files tab (feature `files`).
+    pub(crate) files: bool,
+    /// The daemon serves the Terminal tab (feature `terminals`).
+    pub(crate) terminals: bool,
     pub(crate) status: RunStatus,
     /// The agent's reported problem on a passed run.
     pub(crate) problem: Option<Problem>,
@@ -448,7 +454,9 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
     let place = place(pane, facts);
     let branch_full = pane_branch(pane).map(str::to_owned);
 
+    let needs_newer = |kind| HomeRow::off(kind, NEWER_DAEMON);
     let terminal = match place {
+        _ if !facts.terminals => needs_newer(HomeKind::Terminal),
         Place::SameFolder => gated(
             HomeKind::Terminal,
             place,
@@ -494,14 +502,18 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
         meta: meta(facts, pane),
         inspect: vec![
             changes_row(pane, place),
-            gated(
-                HomeKind::Files,
-                place,
-                match place {
-                    Place::SameFolder => "browse the folder \u{b7} read-only",
-                    _ => "browse the worktree \u{b7} read-only",
-                },
-            ),
+            if facts.files {
+                gated(
+                    HomeKind::Files,
+                    place,
+                    match place {
+                        Place::SameFolder => "browse the folder \u{b7} read-only",
+                        _ => "browse the worktree \u{b7} read-only",
+                    },
+                )
+            } else {
+                needs_newer(HomeKind::Files)
+            },
             gated(
                 HomeKind::History,
                 place,
@@ -771,6 +783,8 @@ mod tests {
 
     fn facts(status: RunStatus) -> HomeFacts<'static> {
         HomeFacts {
+            files: true,
+            terminals: true,
             status,
             problem: None,
             executor: "claude-code",
@@ -1042,12 +1056,15 @@ mod tests {
     }
 
     #[test]
-    fn only_changes_and_files_have_a_tab_built() {
+    fn only_changes_files_and_terminal_have_a_tab_built() {
         let h = home(&facts(RunStatus::Running), &Pane::Loading);
         for r in h.rows() {
             assert_eq!(
                 r.built,
-                matches!(r.kind, HomeKind::Changes | HomeKind::Files),
+                matches!(
+                    r.kind,
+                    HomeKind::Changes | HomeKind::Files | HomeKind::Terminal
+                ),
                 "{:?}",
                 r.kind
             );
@@ -1059,7 +1076,30 @@ mod tests {
         let h = home(&facts(RunStatus::Succeeded), &pane);
         assert!(row(&h, HomeKind::Files).built);
         assert!(!row(&h, HomeKind::History).built);
-        assert_eq!(h.rows().filter(|r| r.built).count(), 2);
+        assert_eq!(h.rows().filter(|r| r.built).count(), 3);
+    }
+
+    #[test]
+    fn files_and_terminal_need_a_daemon_that_serves_them() {
+        let mut f = facts(RunStatus::Running);
+        f.files = false;
+        let h = home(&f, &Pane::Loading);
+        let files = row(&h, HomeKind::Files);
+        assert!(!files.enabled);
+        assert_eq!(files.detail, "needs a newer daemon");
+        assert_eq!(files.reason.as_deref(), Some("needs a newer daemon"));
+        assert!(row(&h, HomeKind::Terminal).enabled, "terminals is its own feature");
+        f.files = true;
+        f.terminals = false;
+        let h = home(&f, &Pane::Loading);
+        let terminal = row(&h, HomeKind::Terminal);
+        assert!(!terminal.enabled);
+        assert_eq!(terminal.detail, "needs a newer daemon");
+        assert!(row(&h, HomeKind::Files).enabled);
+        // The reason comes before the place: an in-place run on an old daemon says the daemon.
+        f.status = RunStatus::Succeeded;
+        let h = home(&f, &Pane::Unsupported);
+        assert_eq!(row(&h, HomeKind::Terminal).detail, "needs a newer daemon");
     }
 
     #[test]
