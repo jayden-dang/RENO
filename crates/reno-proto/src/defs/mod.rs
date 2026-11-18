@@ -58,6 +58,8 @@ mod eval;
 mod hash;
 mod normalize;
 mod pipeline;
+#[cfg(test)]
+pub(crate) use pipeline::FILTERS;
 mod policy;
 mod protect;
 mod time;
