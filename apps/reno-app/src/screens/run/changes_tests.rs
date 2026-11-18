@@ -9,6 +9,7 @@ use reno_proto::{ErrorCode, ErrorObject, RunStatus};
 
 use super::RunScreen;
 use crate::app::RootView;
+use crate::panel::surface::Surface;
 use crate::store::Store;
 use crate::tests::{click, draw, fake_store, painted, run_id, wait_drawn, wait_until, window};
 use crate::transcript::Row;
@@ -252,6 +253,33 @@ fn a_run_that_never_had_a_workspace_has_no_review_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_run_with_no_workspace_record_is_in_place_on_the_home(cx: &mut TestAppContext) {
+    use crate::vm::panel_home::HomeKind;
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open(vcx, &root, "reviewer1");
+    // "reading..." is not forever: once `workspace.get` answers there is no record.
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |s, cx| {
+            s.store.read(cx).changes(&run_id("reviewer1")).is_some()
+        })
+    });
+    let home = screen.read_with(vcx, |s, cx| s.home(cx).unwrap());
+    let path = screen.read_with(vcx, |s, cx| {
+        s.summary(cx).and_then(|r| r.cwd.clone()).expect("a cwd")
+    });
+    assert_eq!(
+        home.row(HomeKind::Terminal).unwrap().detail,
+        format!("in {}, not a worktree", path.display())
+    );
+    let changes = home.row(HomeKind::Changes).unwrap();
+    assert_eq!(changes.reason.as_deref(), Some("not a worktree"));
+    assert!(!changes.enabled);
+}
+
+#[gpui::test]
 fn a_failed_read_says_why_and_can_be_tried_again(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
@@ -295,4 +323,86 @@ fn an_older_daemon_has_no_review_tab_and_the_home_says_why(cx: &mut TestAppConte
     // An old daemon cannot say whether the folder is a repository (no `workspace.get`): that is
     // unknown, not "no repository", so the row says the daemon is too old.
     assert_eq!(row.detail, "daemon too old");
+}
+
+#[gpui::test]
+fn a_five_thousand_line_patch_draws_only_the_rows_in_view(cx: &mut TestAppContext) {
+    use crate::vm::changes::DiffRow;
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open(vcx, &root, "builder1");
+    let path = "Cargo.toml";
+    wait_drawn(vcx, |vcx| {
+        screen.read_with(vcx, |s, _| {
+            matches!(s.patch_pane_of(path), Some(PatchPane::Rows { .. }))
+        })
+    });
+    let rows: Vec<DiffRow> = (0..5_000u32)
+        .map(|i| DiffRow {
+            kind: RowKind::Add,
+            old: None,
+            new: Some(i + 1),
+            text: format!("line {i}"),
+        })
+        .collect();
+    super::changes::ROWS_BUILT.with(|n| n.set(0));
+    screen.update(vcx, |s, cx| s.inject_patch(path, rows, cx));
+    draw(vcx);
+    draw(vcx);
+    let built = super::changes::ROWS_BUILT.with(std::cell::Cell::get);
+    let total = screen.read_with(vcx, |s, _| s.review_row_count());
+    assert!(
+        total >= 4_001,
+        "a row per line (capped) and the bars: {total}"
+    );
+    assert!(built > 0, "the patch is on screen");
+    assert!(
+        built < 400,
+        "{built} rows were built for a patch of 5,000 lines: only the ones in view and the overdraw"
+    );
+    assert!(painted(vcx, &format!("change-patch-{path}")));
+    assert!(!painted(vcx, "patch-cut"), "the end is far below");
+    // The cap's message is the last row of that file.
+    screen.read_with(vcx, |s, _| s.review_scroll_to_end());
+    draw(vcx);
+    draw(vcx);
+    assert!(
+        painted(vcx, "patch-cut") || painted(vcx, "change-file-docs/old-notes.md"),
+        "the end of the list is in view"
+    );
+}
+
+#[gpui::test]
+fn the_arrow_on_a_file_opens_it_in_its_own_tab_with_its_diff(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let screen = open(vcx, &root, "builder1");
+    let lease = "crates/reno-kernel/src/lease.rs";
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("change-open-{lease}")));
+    click(vcx, &format!("change-open-{lease}"));
+    let file = Surface::File(lease.to_owned());
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("file-tab-{lease}")));
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(*s.panel.active(), file);
+        assert!(s.panel.tabs().contains(&Surface::Review), "Review stays");
+        assert!(
+            !s.review_folded.contains(lease),
+            "the arrow did not fold it"
+        );
+    });
+    assert!(painted(vcx, &format!("panel-tab-{}", file.slug())));
+    // The file's bar and its diff, from the same rows Review draws.
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("change-patch-{lease}")));
+    assert!(painted(vcx, &format!("change-file-{lease}")));
+    assert!(!painted(vcx, "review"), "Review is not the page now");
+    // Another file, not in the changes, says so.
+    screen.update_in(vcx, |s, window, cx| {
+        s.open_surface(Surface::File("nope.rs".into()), window, cx);
+    });
+    wait_drawn(vcx, |vcx| painted(vcx, "file-tab-nope.rs"));
+    assert!(!painted(vcx, "change-patch-nope.rs"));
 }

@@ -11,8 +11,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
-    ListState, Render, ScrollHandle, SharedString, Subscription, Task, Window, div, list,
-    prelude::*, px,
+    ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
@@ -78,7 +77,9 @@ pub(crate) struct RunScreen {
     /// Review's files the person folded, and whether the many-files default was applied.
     review_folded: HashSet<String>,
     review_default_applied: bool,
-    review_scroll: ScrollHandle,
+    review: changes::Flat,
+    /// One list per File tab, made when the tab first shows.
+    file_views: HashMap<String, changes::Flat>,
     /// The patch rows of each file Review shows, with the answer they were made from.
     patch_panes: HashMap<String, (Loaded<Patch>, PatchPane)>,
     /// The line under the Done row naming the branch and what it holds.
@@ -133,7 +134,8 @@ impl RunScreen {
             panel_focus: cx.focus_handle(),
             review_folded: HashSet::new(),
             review_default_applied: false,
-            review_scroll: ScrollHandle::new(),
+            review: changes::Flat::new(),
+            file_views: HashMap::new(),
             patch_panes: HashMap::new(),
             result: None,
             asked_changes: false,

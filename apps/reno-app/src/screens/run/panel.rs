@@ -396,7 +396,7 @@ impl RunScreen {
             Surface::History => view::planned_page(theme, HomeKind::History),
             Surface::Terminal(_) => view::planned_page(theme, HomeKind::Terminal),
             Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
-            Surface::File(_) => view::planned_page(theme, HomeKind::Files),
+            Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Commit(_) => view::planned_page(theme, HomeKind::History),
         };
         div()

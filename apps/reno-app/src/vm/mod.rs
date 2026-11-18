@@ -14,6 +14,7 @@ pub(crate) mod panel_home;
 pub(crate) mod picker;
 pub(crate) mod project;
 pub(crate) mod projects;
+pub(crate) mod review;
 pub(crate) mod routing;
 pub(crate) mod rules;
 pub(crate) mod runs;
