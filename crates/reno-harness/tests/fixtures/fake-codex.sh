@@ -190,17 +190,18 @@ case "$turnline" in
   # Verify the turn/start + thread/start params the driver must send.
   for want in '"method":"turn/start"' '"effort":"high"' '"model":"gpt-5.6-sol"' \
     '"sandboxPolicy":{"type":"dangerFullAccess"}' \
-    '"approvalPolicy":"never"' '"summary":"auto"'; do
+    '"approvalPolicy":"untrusted"' '"approvalsReviewer":"user"' '"summary":"auto"'; do
     has "$turnline" "$want" || { fail_turn "$tid" "turn param missing: $want"; exit 0; }
   done
   # The prompt is one text input, verbatim.
   has "$turnline" '"type":"text"' && has "$turnline" '"text":"scenario:happy"' ||
     { fail_turn "$tid" "turn input is not the prompt"; exit 0; }
-  for want in '"approvalPolicy":"never"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"'; do
+  for want in '"approvalPolicy":"untrusted"' '"approvalsReviewer":"user"' '"sandbox":"danger-full-access"' '"cwd":"/tmp"'; do
     has "$thread_line" "$want" || { fail_turn "$tid" "thread param missing: $want"; exit 0; }
   done
-  # Full access is never asked about, and no mode is named for a thread that never planned.
-  for unwanted in 'approvalsReviewer' 'collaborationMode'; do
+  # Full access asks (so Reno's kernel can refuse what policy denies), and no mode is named for
+  # a thread that never planned.
+  for unwanted in 'collaborationMode'; do
     if has "$thread_line" "$unwanted" || has "$turnline" "$unwanted"; then
       fail_turn "$tid" "full access sent $unwanted"; exit 0
     fi

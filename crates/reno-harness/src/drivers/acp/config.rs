@@ -27,6 +27,10 @@ pub(super) struct ConfigRules {
     /// Fixed for the run: the permissions the agent asks for follow the session mode chosen
     /// here, and the run's access mode is the one it was started with.
     pub access: AccessMode,
+    /// The run asked for full access and `access` is `Supervised` only so that the agent's
+    /// requests reach Reno ([`super::routed_access`]). A session that offers no asking mode is
+    /// then run as it opens (nothing reaches Reno: the residual gap) instead of refused.
+    pub routed_full_access: bool,
 }
 
 /// Normalize an option or model id for matching across naming styles (`fastMode` == `fast_mode`
@@ -544,6 +548,7 @@ pub(super) async fn select_session_config(
     // Left in a mode that approves on its own (one the agent offers no asking mode to leave), a
     // run that asks would never see a permission: it must not start.
     if rules.access != AccessMode::FullAccess
+        && !rules.routed_full_access
         && let Some(mode) = current_no_prompt_mode(&options_snapshot)
     {
         return Err(HarnessError::Protocol(format!(

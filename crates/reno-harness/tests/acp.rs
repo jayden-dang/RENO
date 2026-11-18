@@ -581,13 +581,19 @@ async fn looking_around_is_answered_without_asking() {
 }
 
 #[tokio::test]
-async fn full_access_answers_every_permission_itself_and_never_picks_allow_always() {
+async fn full_access_on_an_agent_that_can_ask_surfaces_every_permission_and_never_picks_allow_always()
+ {
     for kind in ["execute", "edit", "fetch", "other"] {
+        // The kernel (here the test) answers; a refusal is honoured in full access too.
         let (approvals, picked) = permission_of(kind, AccessMode::FullAccess, Decision::Deny).await;
-        assert!(approvals.is_empty(), "{kind}: {approvals:?}");
+        assert_eq!(approvals.len(), 1, "{kind}: {approvals:?}");
+        assert_eq!(picked, "no", "{kind}");
+        let (approvals, picked) =
+            permission_of(kind, AccessMode::FullAccess, Decision::Allow).await;
+        assert_eq!(approvals.len(), 1, "{kind}: {approvals:?}");
         assert_eq!(picked, "once", "{kind}");
     }
-    // Grok honors full access only, and takes the same path.
+    // Grok honors full access only and cannot ask: it answers itself (the residual gap).
     let mut live = start(&grok(), spec("scenario:permission execute")).await;
     let outcome = drive(&mut live, |_| Decision::Deny).await;
     assert!(outcome.approvals.is_empty());
@@ -702,14 +708,17 @@ fn kinds_and_commands(approvals: &[ApprovalSubject]) -> Vec<(ActionClass, Option
 }
 
 #[tokio::test]
-async fn antigravity_full_access_runs_in_yolo_and_allows_every_permission_unasked() {
+async fn antigravity_full_access_stays_in_default_and_surfaces_its_asks_for_the_kernel() {
+    // Full access is routed like supervised on an agent that can ask: it stays in `default`
+    // (not `yolo`) and its edits and commands reach the kernel, which allows them at once
+    // unless policy refuses, so a refusal is honoured here too.
     let (reply, approvals, events) =
         antigravity_permissions(AccessMode::FullAccess, "full", |_| Decision::Deny).await;
     assert_eq!(
         reply,
-        "sets:model=gemini-3.7-flash-medium;mode=yolo; perms:read=once;edit=once;execute=once;"
+        "sets:model=gemini-3.7-flash-medium; perms:read=once;edit=no;execute=no;"
     );
-    assert!(approvals.is_empty(), "{approvals:?}");
+    assert_eq!(approvals.len(), 2, "{approvals:?}");
     assert_completed(&events);
 }
 
@@ -861,7 +870,7 @@ async fn antigravity_config_sets(model: &str, effort: Option<Effort>) -> Vec<Exe
 async fn antigravity_runs_the_picked_effort_variant_unattended() {
     let events = antigravity_config_sets("gemini-3.7-flash", Some(Effort::Medium)).await;
     assert!(
-        events.contains(&text("sets:model=gemini-3.7-flash-medium;mode=yolo;")),
+        events.contains(&text("sets:model=gemini-3.7-flash-medium;")),
         "{events:?}"
     );
     assert_completed(&events);
@@ -889,12 +898,12 @@ async fn antigravity_stops_before_prompt_when_the_model_is_rejected() {
 async fn antigravity_clamps_to_an_offered_level_and_keeps_saved_variant_ids() {
     let clamped = antigravity_config_sets("gemini-3.1-pro", Some(Effort::Medium)).await;
     assert!(
-        clamped.contains(&text("sets:model=gemini-pro-agent;mode=yolo;")),
+        clamped.contains(&text("sets:model=gemini-pro-agent;")),
         "{clamped:?}"
     );
     let saved = antigravity_config_sets("gemini-3.7-flash-low", Some(Effort::High)).await;
     assert!(
-        saved.contains(&text("sets:model=gemini-3.7-flash-low;mode=yolo;")),
+        saved.contains(&text("sets:model=gemini-3.7-flash-low;")),
         "{saved:?}"
     );
 }
@@ -1500,7 +1509,9 @@ async fn fx_permissions_follow_reno_access_mode() {
     for (access, decision, expected, asked) in [
         (AccessMode::Supervised, Decision::Deny, "deny", 1),
         (AccessMode::Supervised, Decision::Allow, "allow", 1),
-        (AccessMode::FullAccess, Decision::Deny, "allow", 0),
+        // Full access asks too (the kernel answers at once; a refusal holds).
+        (AccessMode::FullAccess, Decision::Deny, "deny", 1),
+        (AccessMode::FullAccess, Decision::Allow, "allow", 1),
     ] {
         let mut spec = spec_with("permission", access);
         spec.model = Some("model-b".into());

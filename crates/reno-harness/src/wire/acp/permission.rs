@@ -45,6 +45,9 @@
 //! | `edit`, `delete`, `move` | allowed | allowed | asked |
 //! | anything else, or no kind | allowed | asked | asked |
 //!
+//! (`FullAccess` is this table's column only for an agent that cannot ask: on one that can, the
+//! driver runs the session as `Supervised` so the kernel sees the requests.)
+//!
 //! Looking around is allowed in every mode because an agent that
 //! cannot read or search cannot work. "Allowed" is answered with the `allow_once` option and
 //! never with `allow_always`: Reno decides every time.

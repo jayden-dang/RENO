@@ -230,15 +230,18 @@ fn too_old_message(version: Option<&semver::Version>) -> Option<String> {
 ///
 /// | `AccessMode` | `approvalPolicy` | Sandbox before the spec's ceiling | Codex asks about | Reaches Reno as `NeedsApproval` | This driver answers itself |
 /// |---|---|---|---|---|---|
-/// | `FullAccess` | `never` | `danger-full-access` | nothing | nothing | every command, file change and permission request that arrives anyway, when the sandbox is unrestricted; MCP tool approvals always |
+/// | `FullAccess`, sandbox unrestricted | `untrusted` | `danger-full-access` | everything but its known-safe reads, file changes included | all of it (the kernel allows at once unless policy or the run's history refuses) | nothing |
+/// | `FullAccess`, a narrower sandbox | `never` | the spec's | nothing | whatever arrives anyway | nothing; Codex's own sandbox is the only limit, and policy denies are not consulted for what it runs |
 /// | `AutoAcceptEdits` | `untrusted` | `workspace-write` (network on) | everything but its known-safe reads, file changes included | commands, permission grants, MCP tool calls, and file changes that are not provably inside the working directory | file changes whose every path, symlinks followed, is inside the working directory |
 /// | `Supervised` | `untrusted` | `read-only` | everything but its known-safe reads | all of it | nothing |
 ///
 /// A run whose mode asks routes its approvals to the person explicitly (`approvalsReviewer:
-/// user`): a configured reviewer could otherwise hand them to an AI. Under `FullAccess` with a
-/// sandbox narrower than unrestricted, Codex never asks, so a request that arrives anyway asks
-/// to leave the sandbox the spec asked for: it is asked, not accepted (its file changes inside
-/// the working directory excepted, as under `AutoAcceptEdits`). Whatever the mode, an approval
+/// user`): a configured reviewer could otherwise hand them to an AI. `FullAccess` asks like the
+/// others (under an unrestricted sandbox) only so the kernel can refuse what policy denies: it
+/// allows the rest at once and nobody is asked. Under a narrower sandbox Codex never asks
+/// (`never`), so policy denies are not consulted for what it runs and the sandbox is the only
+/// limit; a request that arrives anyway asks to leave the sandbox the spec asked for and is
+/// asked, not accepted. Whatever the mode, an approval
 /// that is neither a command, a file change, a permission grant nor an MCP tool call (another
 /// privileged elicitation, `browser_auth` for one) is asked: no mode answers it unseen. The
 /// table is applied by `wire::codex::permission`, and the symlinks by this module. An access
@@ -1118,7 +1121,7 @@ impl TurnParams {
         Self {
             thread_id,
             policy: permission::policy(spec.access, spec.sandbox),
-            asks_person: permission::asks_person(spec.access),
+            asks_person: permission::policy(spec.access, spec.sandbox).asks(),
             model: spec.model.clone(),
             effort: spec.effort.map(catalog::effort),
             names_mode: thread.plan,
@@ -1559,8 +1562,8 @@ impl Run {
     /// One server-to-client request. The app-server blocks until SOME response arrives, so every
     /// request is answered or recorded as open.
     ///
-    /// What the run's access mode covers is accepted at once (see [`CodexExecutor`]); anything
-    /// else becomes a `NeedsApproval` and waits for `ExecHandle::decide`. Questions become
+    /// Every approval becomes a `NeedsApproval` and waits for `ExecHandle::decide`, except the
+    /// file changes `AutoAcceptEdits` accepts (see [`CodexExecutor`]). Questions become
     /// `NeedsInput`. A request after cancel is refused at once; one of an unknown method is
     /// answered with an error, so the server never wedges awaiting a reply.
     async fn request(&mut self, id: Value, method: &str, params: Value) -> Step {
@@ -1574,9 +1577,6 @@ impl Run {
             .unwrap_or_default();
         let ask = match method {
             "item/commandExecution/requestApproval" => {
-                if self.authority.accepts_command() {
-                    return self.accept(&id, method, &params);
-                }
                 Ask::Approval(permission::command_subject(&params), ApprovalKind::Decision)
             }
             "item/fileChange/requestApproval" => {
@@ -1587,22 +1587,16 @@ impl Run {
                 if self
                     .authority
                     .accepts_file_change(&change.subject.paths, change.grant_root)
-                    && (!self.authority.judges_file_changes_by_path()
-                        || resolves_inside(&change.subject.paths, &self.cwd).await)
+                    && resolves_inside(&change.subject.paths, &self.cwd).await
                 {
                     return self.accept(&id, method, &params);
                 }
                 Ask::Approval(change.subject, ApprovalKind::Decision)
             }
-            "item/permissions/requestApproval" => {
-                if self.authority.accepts_permissions() {
-                    return self.accept(&id, method, &params);
-                }
-                Ask::Approval(
-                    permission::permissions_subject(&params),
-                    ApprovalKind::Permissions(params.clone()),
-                )
-            }
+            "item/permissions/requestApproval" => Ask::Approval(
+                permission::permissions_subject(&params),
+                ApprovalKind::Permissions(params.clone()),
+            ),
             "mcpServer/elicitation/request" => {
                 match permission::classify_elicitation(&key, &params) {
                     Elicitation::Decline => {
@@ -1616,12 +1610,6 @@ impl Run {
                     }
                     Elicitation::Form(form) => Ask::Form(form),
                     Elicitation::Approval(subject) => {
-                        if subject.action == reno_proto::ActionClass::McpTool
-                            && self.authority.accepts_mcp_tool()
-                        {
-                            self.client.respond(&id, elicitation::accept());
-                            return Step::Continue;
-                        }
                         Ask::Approval(subject, ApprovalKind::Elicitation)
                     }
                 }
@@ -1874,7 +1862,8 @@ fn thread_params(
     if !cwd.is_empty() {
         p.insert("cwd".into(), Value::String(cwd.to_owned()));
     }
-    let overrides = mcp_overrides(&spec.mcp, spec.access == AccessMode::FullAccess);
+    // Reno's server is pre-approved only where Codex cannot ask at all.
+    let overrides = mcp_overrides(&spec.mcp, !policy.asks());
     if !overrides.is_empty() {
         // Reno's own MCP server and the plugins' as dotted config overrides on top of the user's
         // `mcp_servers` table.
@@ -1890,7 +1879,7 @@ fn thread_params(
     );
     // A mode that asks routes its approvals to the person explicitly: a configured
     // `approvals_reviewer` could otherwise hand them to an AI reviewer instead.
-    if permission::asks_person(spec.access) {
+    if policy.asks() {
         p.insert("approvalsReviewer".into(), "user".into());
     }
     if let Some(model) = &spec.model {
@@ -2495,9 +2484,24 @@ mod tests {
             },
         )
         .build("x");
-        assert_eq!(full["approvalPolicy"], "never");
+        // Full access asks (and the kernel answers), so policy can refuse what it runs.
+        assert_eq!(full["approvalPolicy"], "untrusted");
         assert_eq!(full["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
-        assert!(full.get("approvalsReviewer").is_none());
+        assert_eq!(full["approvalsReviewer"], "user");
+
+        // A narrower sandbox stays on `never`: nothing may ask to leave it.
+        let confined = TurnParams::new(
+            &spec(AccessMode::FullAccess, SandboxLevel::ReadOnly),
+            "th-1".into(),
+            ThreadMode {
+                model: String::new(),
+                effort: None,
+                plan: false,
+            },
+        )
+        .build("x");
+        assert_eq!(confined["approvalPolicy"], "never");
+        assert!(confined.get("approvalsReviewer").is_none());
     }
 
     #[test]

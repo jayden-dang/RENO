@@ -739,10 +739,16 @@ async fn a_file_change_request_carrying_its_changes_needs_no_earlier_item() {
 }
 
 #[tokio::test]
-async fn full_access_asks_nothing() {
+async fn full_access_surfaces_every_request_so_the_kernel_can_refuse_a_policy_deny() {
     for scenario in ["scenario:one-approval", "scenario:file-change-inline"] {
         let outcome = run_with(&executor(), spec(scenario), |_| Decision::Deny).await;
-        assert!(outcome.approvals.is_empty(), "{scenario}");
+        assert_eq!(outcome.approvals.len(), 1, "{scenario}");
+        assert!(
+            ["declined", "refused", "file=decline"].contains(&result_of(&outcome.events).as_str()),
+            "{scenario}: {:?}",
+            outcome.events
+        );
+        let outcome = run_with(&executor(), spec(scenario), |_| Decision::Allow).await;
         assert!(
             ["ran", "file=accept"].contains(&result_of(&outcome.events).as_str()),
             "{scenario}: {:?}",
@@ -756,13 +762,13 @@ async fn full_access_asks_nothing() {
 /// widen are the sandbox's whole point.
 #[tokio::test]
 async fn a_permission_widening_is_asked_unless_nothing_is_confined() {
-    // Unrestricted sandbox under full access: nothing to widen, answered here.
+    // Unrestricted sandbox under full access: asked too, so the kernel's policy can refuse.
     let outcome = run_with(&executor(), spec("scenario:permissions"), |_| {
         Decision::Deny
     })
     .await;
-    assert!(outcome.approvals.is_empty());
-    assert_eq!(result_of(&outcome.events), "permissions=turn");
+    assert_eq!(outcome.approvals.len(), 1);
+    assert_eq!(result_of(&outcome.events), "permissions=none");
 
     // Confined sandbox: Other, with what was asked in `raw`.
     let mut confined = spec("scenario:permissions");
@@ -1063,9 +1069,10 @@ async fn each_access_mode_launches_with_its_policy_and_never_a_looser_sandbox_th
         (
             AccessMode::FullAccess,
             SandboxLevel::Unrestricted,
-            "thread=never/danger-full-access turn=never/dangerFullAccess",
+            "thread=untrusted/danger-full-access turn=untrusted/dangerFullAccess",
         ),
-        // The spec's sandbox is a ceiling: full access never asks, but stays confined.
+        // The spec's sandbox is a ceiling: a confined full access never asks (nothing may
+        // ask to leave the sandbox), and stays confined.
         (
             AccessMode::FullAccess,
             SandboxLevel::WorkspaceWrite,

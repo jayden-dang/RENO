@@ -71,13 +71,21 @@
 //! | `toolCall.kind` | `FullAccess` | `AutoAcceptEdits` | `Supervised` |
 //! |---|---|---|---|
 //! | `read`, `search`, `think` | answered here | answered here | answered here |
-//! | `edit`, `delete`, `move` | answered here | answered here | `NeedsApproval` |
-//! | anything else, or no kind | answered here | `NeedsApproval` | `NeedsApproval` |
+//! | `edit`, `delete`, `move` | `NeedsApproval`, or answered here (agent that cannot ask) | answered here | `NeedsApproval` |
+//! | anything else, or no kind | `NeedsApproval`, or answered here (agent that cannot ask) | `NeedsApproval` | `NeedsApproval` |
 //!
 //! "Answered here" is `allow_once`, never `allow_always`; looking around (`read`, `search`,
 //! `think`) is allowed in every mode, and that is the only place it
-//! is decided. In `FullAccess` the session is also switched to the agent's own no-prompts mode
-//! where it advertises one, and any other mode keeps an asking mode where it advertises one. A
+//! is decided.
+//!
+//! `FullAccess` on an agent that also honors `Supervised` (so one with an asking mode, or whose
+//! requests reach Reno anyway) is run like `Supervised` ([`routed_access`]): the agent asks, and
+//! the kernel allows each request at once unless policy or the run's history refuses it, so a
+//! policy deny holds and the decision is journaled. On an agent that honors only `FullAccess`
+//! (Grok, Devin, Hermes) the session is switched to the agent's own no-prompts mode where it
+//! advertises one and everything is answered here: policy denies cannot reach it, a residual gap
+//! until such an agent has a mode that asks. Any other mode keeps an asking mode where the agent
+//! advertises one. A
 //! run that asks never starts in a session that approves on its own: an agent that rejects the
 //! switch to an asking mode, or has none to switch to while opening in a no-prompts mode, fails
 //! the run before it prompts. No mode is widened mid-run.
@@ -168,6 +176,18 @@ fn executor_id(harness: HarnessId) -> Result<ExecutorId, IdError> {
     match harness {
         HarnessId::Registry(agent) => agent.slug().parse(),
         other => format!("acp.{}", other.as_str()).parse(),
+    }
+}
+
+/// The access mode an ACP session is run in. Full access on an agent that can ask (it honors
+/// `Supervised` too) is run as `Supervised`, so its permission requests reach the kernel, which
+/// allows them at once for a full-access run unless policy denies them; an agent that cannot ask
+/// keeps full access and its own no-prompts mode.
+fn routed_access(access: AccessMode, honored: &[AccessMode]) -> AccessMode {
+    if access == AccessMode::FullAccess && honored.contains(&AccessMode::Supervised) {
+        AccessMode::Supervised
+    } else {
+        access
     }
 }
 
@@ -691,7 +711,7 @@ impl Executor for AcpExecutor {
             steering,
             cancel,
             answers,
-            access: spec.access,
+            access: routed_access(spec.access, &self.access_modes),
             spec,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
@@ -776,7 +796,8 @@ struct Session {
     cancel: CancellationToken,
     answers: mpsc::Receiver<ExecAnswer>,
     spec: ExecSpec,
-    /// The run's access mode: [`Executor::start`] refused any the agent does not honor.
+    /// The mode the session is run in: the run's access mode, except that full access on an agent
+    /// that can ask is run as `Supervised` (see [`routed_access`]).
     access: AccessMode,
     harness: HarnessId,
     agent_name: &'static str,
@@ -1056,6 +1077,7 @@ async fn run_session(session: Session) {
         effort_in_model_id,
         effort_values,
         access,
+        routed_full_access: spec.access == AccessMode::FullAccess && access != spec.access,
     };
 
     let (client, mut incoming) = {
