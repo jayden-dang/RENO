@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, DragMoveEvent, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    Render, Window, div, prelude::*, px,
+    AnyElement, App, Context, DragMoveEvent, IntoElement, KeyDownEvent, MouseButton, Render,
+    Window, div, prelude::*, px,
 };
 
 use super::RunScreen;
@@ -441,67 +441,5 @@ impl RunScreen {
             cx.stop_propagation();
             self.open_kind(kind, window, cx);
         }
-    }
-
-    // --- header pieces ----------------------------------------------------------------------
-
-    /// The header's Stop, on a run that can be stopped.
-    pub(super) fn stop_button(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Anything not finished can be stopped, a run waiting on you included.
-        let stoppable = self
-            .summary(cx)
-            .is_some_and(|r| !r.status.is_terminal() && !summary::stopped_by_person(r));
-        if !stoppable {
-            return None;
-        }
-        let run = self.run.clone();
-        Some(
-            crate::ui::kit::line_button(
-                theme,
-                "header-stop",
-                Some(crate::ui::icon::Icon::Stop),
-                "Stop",
-                crate::ui::kit::Tone::Quiet,
-                true,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let run = run.clone();
-                this.store.update(cx, |store, cx| store.cancel_run(run, cx));
-            }))
-            .into_any_element(),
-        )
-    }
-
-    /// The tokens chip: a ring and "1.4k". Hidden until there are tokens; it opens Session.
-    pub(super) fn usage_chip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let usage = self.facts.usage.filter(|u| u.total() > 0)?;
-        let hover = theme.text.opacity(0.06);
-        Some(
-            div()
-                .id("usage-chip")
-                .debug_selector(|| "usage-chip".to_owned())
-                .flex_none()
-                .h(px(30.0))
-                .px(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .rounded(px(8.0))
-                .text_size(px(12.5))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.muted)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child(crate::ui::icon::icon(
-                    crate::ui::icon::Icon::Ring,
-                    14.0,
-                    theme.muted,
-                ))
-                .child(panel_home::usage_chip(usage))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_surface(Surface::Session, window, cx);
-                }))
-                .into_any_element(),
-        )
     }
 }
