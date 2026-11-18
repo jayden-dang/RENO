@@ -34,7 +34,8 @@
 //!    like any other automatic answer. It applies where the run's sandbox is unrestricted (a
 //!    request to leave a narrower one is asked of a person, ARCH-15) or the request is an MCP
 //!    tool call, and never to an approval the run asked for itself (`request_approval`), which
-//!    is always a question for a person. So a policy deny, a standing deny and a repeat denial hold
+//!    is always a question for a person. A policy rule whose effect is `ask` is also left to a
+//!    person: only the default, and requests no rule names, are answered by the mode. So a policy deny, a standing deny and a repeat denial hold
 //!    in every access mode, and the audit trail has the same rows in all of them.
 //! 8. **Ask.** A pending record is stored with a deadline, the run waits in `waiting_approval`,
 //!    and the pending list is published. A human's `decide` answers it; if none comes by the
@@ -355,7 +356,10 @@ impl Supervisor {
         }
         // 7. Full access asks nobody: what steps 1-3 did not refuse is allowed, on record as
         // decided by the access mode.
+        // A rule that says `ask` is the owner naming a human decision: the mode does not answer it.
+        let asked_by_rule = matches!(decision, PolicyDecision::Ask { rule: Some(_) });
         if by_mode
+            && !asked_by_rule
             && self.info.access == AccessMode::FullAccess
             && (self.info.sandbox == SandboxLevel::Unrestricted
                 || subject.action == ActionClass::McpTool)

@@ -1768,6 +1768,32 @@ async fn full_access_allows_the_rest_without_a_human_and_records_the_mode() {
     assert_eq!(history[0].decided_by, Some(rule("builtin:full-access")));
 }
 
+const ASK_PUSH: &str = "default = \"allow\"\n[[rules]]\nnote = \"push needs a human\"\neffect = \"ask\"\nmatch = { action = \"command\", command = \"git push*\" }\n";
+
+#[tokio::test(start_paused = true)]
+async fn full_access_still_asks_a_person_where_a_policy_rule_says_ask() {
+    // An explicit `ask` rule is the owner saying "a human decides this"; the access mode must not
+    // answer it. Everything the rule does not name is still allowed without a question.
+    let rig = full_access_rig(
+        ASK_PUSH,
+        script(vec![
+            ("r1", command("cargo build")),
+            ("r2", command("git push origin main")),
+        ]),
+    )
+    .await;
+    let run = rig.run_as("keeper").await;
+    rig.fx.wait_status(&run, RunStatus::WaitingApproval).await;
+    // The status is published before the pending list (state before visibility): poll for it.
+    let pending = until(async || {
+        let list = rig.fx.kernel.pending_approvals().await.unwrap();
+        (!list.is_empty()).then_some(list)
+    })
+    .await;
+    assert_eq!(pending.len(), 1, "only the push is held");
+    assert!(format!("{:?}", pending[0].subject).contains("git push"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn full_access_holds_a_repeat_denial_even_after_the_policy_loosens() {
     let rig = full_access_rig(

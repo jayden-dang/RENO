@@ -1373,6 +1373,41 @@ mod tests {
     }
 
     #[test]
+    fn an_allow_survives_none_of_these_review_attacks() {
+        // Lead's QA pass: shapes the first implementation did not list.
+        let p = policy(
+            r#"
+            default = "ask"
+            [[rules]]
+            effect = "allow"
+            match = { action = "command", command = "echo *" }
+            "#,
+        );
+        let allowed =
+            |line: &str| matches!(eval(&p, None, &command(line)), PolicyDecision::Allow { .. });
+        for line in [
+            "echo hi | sh",
+            "echo hi |& sh",
+            "echo hi > ~/.zshrc",
+            "echo hi >> .git/config",
+            "echo hi\nrm -rf x",
+            "echo hi & rm x",
+            "echo <(rm x)",
+            "echo hi || rm x",
+            "zsh -lc 'echo hi | sh'",
+            "zsh -lc 'echo hi > x'",
+            "bash -c 'echo hi' && rm x",
+            "bash -c \"echo $(rm x)\"",
+            "bash -c 'echo `rm x`'",
+            "bash -c 'echo hi'\nrm x",
+            "timeout 5 sh -c 'echo hi; rm x'",
+            "nohup echo hi & rm x",
+        ] {
+            assert!(!allowed(line), "{line}");
+        }
+    }
+
+    #[test]
     fn an_unparseable_wrapped_line_falls_to_ask_not_allow() {
         let p = policy(
             "default = \"ask\"\n[[rules]]\neffect = \"allow\"\nmatch = { action = \"command\", command = \"cargo *\" }",
