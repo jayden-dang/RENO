@@ -145,6 +145,14 @@ impl Banners {
         let outcome =
             self.notifier
                 .step(&snapshot, now, !self.active.is_empty(), self.prefs.prefs());
+        if trace_on() {
+            trace(
+                &snapshot,
+                !self.active.is_empty(),
+                self.desktop.delivery(),
+                &outcome,
+            );
+        }
         self.apply(outcome.effects);
         if outcome.badge != self.badge {
             self.desktop.set_badge(outcome.badge.as_deref());
@@ -167,4 +175,25 @@ impl Banners {
             }
         }
     }
+}
+
+/// `RENO_NOTIFY_TRACE=1`: every pass of the notifier on stderr (what it saw, what it decided), for
+/// when a banner that should have come did not. Launch with
+/// `open --env RENO_NOTIFY_TRACE=1 --stderr /tmp/reno-notify.log ~/Applications/Reno.app`.
+fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RENO_NOTIFY_TRACE").is_some_and(|v| !v.is_empty()))
+}
+
+#[allow(clippy::print_stderr)]
+fn trace(snapshot: &Snapshot, active: bool, delivery: Delivery, outcome: &crate::notify::Outcome) {
+    eprintln!(
+        "[notify] conn={:?} loaded={} runs={} approvals={} active={active} delivery={delivery:?} effects={:?} badge={:?}",
+        snapshot.connection,
+        snapshot.loaded,
+        snapshot.runs.len(),
+        snapshot.approvals.len(),
+        outcome.effects,
+        outcome.badge,
+    );
 }

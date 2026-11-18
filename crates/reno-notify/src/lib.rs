@@ -28,7 +28,11 @@ mod macos;
 pub struct Banner {
     /// Stable identity: replaces an earlier banner with the same id, and [`withdraw`] takes it.
     pub id: String,
+    /// What happened, short: macOS cuts a long title to one line.
     pub title: String,
+    /// The specific: what is asked, why it failed. One line.
+    pub subtitle: Option<String>,
+    /// Shown on up to two lines.
     pub body: String,
     /// Opaque to this crate; handed back to the [`on_click`] handler.
     pub target: Option<String>,
@@ -161,6 +165,7 @@ mod tests {
         Banner {
             id: "done:r1".into(),
             title: "t".into(),
+            subtitle: None,
             body: "b".into(),
             target: Some("run:r1".into()),
         }

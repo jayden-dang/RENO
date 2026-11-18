@@ -41,6 +41,9 @@ pub(crate) fn post(banner: &Banner) {
     set_delegate(&center);
     let note = NSUserNotification::new();
     note.setTitle(Some(&NSString::from_str(&banner.title)));
+    if let Some(subtitle) = &banner.subtitle {
+        note.setSubtitle(Some(&NSString::from_str(subtitle)));
+    }
     note.setInformativeText(Some(&NSString::from_str(&banner.body)));
     note.setIdentifier(Some(&NSString::from_str(&banner.id)));
     if let Some(target) = &banner.target {

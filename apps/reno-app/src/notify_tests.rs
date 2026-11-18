@@ -105,8 +105,16 @@ fn an_approval_posts_one_banner_and_the_badge_and_deciding_it_withdraws_both(
     let posts = recorder.posts();
     assert_eq!(posts.len(), 1, "{posts:?}");
     assert_eq!(posts[0].id, format!("approval:{}", approval.id));
-    assert_eq!(posts[0].title, "push the branch");
-    assert_eq!(posts[0].body, "Wants to git push -u origin HEAD");
+    assert!(
+        posts[0].title.ends_with("needs you"),
+        "{:?}",
+        posts[0].title
+    );
+    assert_eq!(
+        posts[0].subtitle.as_deref(),
+        Some("Wants to git push -u origin HEAD")
+    );
+    assert_eq!(posts[0].body, "push the branch");
     assert_eq!(posts[0].target, Some(format!("run:{}", approval.run_id)));
     assert_eq!(recorder.badge(), Some(Some("1".to_owned())));
 
@@ -201,7 +209,7 @@ fn a_finished_run_rings_once_it_has_stood_two_seconds(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     let posts = recorder.posts();
     assert_eq!(posts.len(), 1, "{:?}", recorder.calls());
-    assert_eq!(posts[0].body, "Finished");
+    assert!(posts[0].title.ends_with("finished"), "{:?}", posts[0].title);
     assert!(posts[0].id.starts_with("done:"));
 }
 

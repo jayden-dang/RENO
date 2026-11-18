@@ -31,8 +31,8 @@ pub(crate) const DAEMON_QUIET: Duration = Duration::from_secs(5);
 pub(crate) const BURST_OVER: usize = 3;
 /// Longest subject in "Wants to <subject>", in characters.
 const SUBJECT_CHARS: usize = 120;
-/// Longest run label, in characters.
-const LABEL_CHARS: usize = 80;
+/// Longest run title in a banner's body (macOS shows two lines), in characters.
+const WHAT_CHARS: usize = 120;
 /// A stop reason longer than this is left out of "Failed: <reason>".
 const REASON_CHARS: usize = 60;
 
@@ -249,18 +249,31 @@ pub(crate) fn badge_label(snapshot: &Snapshot, prefs: &Prefs) -> Option<String> 
 /// `keeper · Fix the flaky test`: the bot and what the run does, cut to 80 characters. The title
 /// alone for a run with no bot. A title that already leads with `<bot> · <repo>: ` loses that
 /// lead, the bot being named once.
-pub(crate) fn run_label(run: &RunFact) -> String {
+/// Who a banner is about: the run's bot, else "A run". Banner titles start with it ("keeper
+/// finished"), short enough that macOS never cuts what happened.
+pub(crate) fn who(run: Option<&RunFact>) -> String {
+    run.and_then(|run| run.bot.clone())
+        .unwrap_or_else(|| "A run".to_owned())
+}
+
+/// What the run is doing: its title without the bot prefix, on one line, for the banner's body.
+pub(crate) fn what(run: &RunFact) -> String {
     let parts = summary::parse_title(&run.title);
     let what = if parts.bot.is_some() {
         parts.what
     } else {
         run.title.as_str()
     };
-    let label = match &run.bot {
-        Some(bot) => format!("{bot} \u{b7} {what}"),
-        None => what.to_owned(),
-    };
-    one_line(&label, LABEL_CHARS)
+    one_line(what, WHAT_CHARS)
+}
+
+/// `text` with its first letter in capitals: a reason that reads mid-sentence ("the model
+/// refused") as a line of its own.
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// `text` on one line (whitespace runs become one space), cut to `max` characters with `…`.
@@ -435,6 +448,7 @@ impl Notifier {
                     banner: Banner {
                         id: DAEMON_ID.to_owned(),
                         title: "Reno daemon unreachable".to_owned(),
+                        subtitle: None,
                         body: "Runs keep going in the daemon if it is still up; Reno reconnects on its own."
                             .to_owned(),
                         target: Some(Target::Home.encode()),
@@ -474,8 +488,12 @@ impl Notifier {
                     kind: Kind::NeedsYou,
                     banner: Banner {
                         id: format!("approval:{}", approval.id),
-                        title: run.map_or_else(|| "A run".to_owned(), run_label),
-                        body: format!("Wants to {}", one_line(&approval.subject, SUBJECT_CHARS)),
+                        title: format!("{} needs you", who(run)),
+                        subtitle: Some(format!(
+                            "Wants to {}",
+                            one_line(&approval.subject, SUBJECT_CHARS)
+                        )),
+                        body: run.map(what).unwrap_or_default(),
                         target: Some(Target::Run(approval.run.clone()).encode()),
                     },
                 });
@@ -505,8 +523,9 @@ impl Notifier {
                     kind: Kind::NeedsYou,
                     banner: Banner {
                         id: format!("question:{}", run.id),
-                        title: run_label(run),
-                        body: "Asks you a question".to_owned(),
+                        title: format!("{} has a question", who(Some(run))),
+                        subtitle: None,
+                        body: what(run),
                         target: Some(Target::Run(run.id.clone()).encode()),
                     },
                 }),
@@ -548,34 +567,38 @@ impl Notifier {
             {
                 continue;
             }
-            let label = run_label(run);
+            let who = who(Some(run));
             let target = Some(Target::Run(id.clone()).encode());
-            let (kind, banner_id, body) = match run.status {
-                RunStatus::Succeeded => {
-                    (Kind::Finished, format!("done:{id}"), "Finished".to_owned())
-                }
+            let (kind, banner_id, title, subtitle) = match run.status {
+                RunStatus::Succeeded => (
+                    Kind::Finished,
+                    format!("done:{id}"),
+                    format!("{who} finished"),
+                    None,
+                ),
                 RunStatus::Failed => (
                     Kind::Problem,
                     format!("problem:{id}"),
-                    match run.reason.as_deref() {
-                        Some(reason) if reason.chars().count() <= REASON_CHARS => {
-                            format!("Failed: {}", one_line(reason, REASON_CHARS))
-                        }
-                        _ => "Failed".to_owned(),
-                    },
+                    format!("{who} failed"),
+                    run.reason
+                        .as_deref()
+                        .filter(|reason| reason.chars().count() <= REASON_CHARS)
+                        .map(|reason| upper_first(&one_line(reason, REASON_CHARS))),
                 ),
                 _ => (
                     Kind::Problem,
                     format!("problem:{id}"),
-                    "Interrupted".to_owned(),
+                    format!("{who} was interrupted"),
+                    None,
                 ),
             };
             due.push(Due {
                 kind,
                 banner: Banner {
                     id: banner_id,
-                    title: label,
-                    body,
+                    title,
+                    subtitle,
+                    body: what(run),
                     target,
                 },
             });
@@ -610,6 +633,7 @@ impl Notifier {
                 effects.push(Effect::Post(Banner {
                     id: kind.burst_id(),
                     title: kind.burst_title(ringing.len()),
+                    subtitle: None,
                     body: String::new(),
                     target: Some(kind.burst_id()),
                 }));
@@ -742,8 +766,9 @@ mod tests {
             posts(&out),
             vec![&Banner {
                 id: format!("approval:{}", appr_id("p1")),
-                title: "keeper \u{b7} Task a".to_owned(),
-                body: "Wants to git push -u origin HEAD".to_owned(),
+                title: "keeper needs you".to_owned(),
+                subtitle: Some("Wants to git push -u origin HEAD".to_owned()),
+                body: "Task a".to_owned(),
                 target: Some(format!("run:{}", run_id("a"))),
             }]
         );
@@ -763,9 +788,9 @@ mod tests {
                 vec![approval("p1", "a", &long)],
             ),
         );
-        let body = &posts(&out)[0].body;
-        assert!(!body.contains('\n'));
-        let subject = body.strip_prefix("Wants to ").unwrap();
+        let subtitle = posts(&out)[0].subtitle.clone().unwrap();
+        assert!(!subtitle.contains('\n'));
+        let subject = subtitle.strip_prefix("Wants to ").unwrap();
         assert_eq!(subject.chars().count(), 120);
         assert!(subject.ends_with('\u{2026}'));
     }
@@ -778,8 +803,9 @@ mod tests {
             posts(&out),
             vec![&Banner {
                 id: format!("question:{}", run_id("a")),
-                title: "keeper \u{b7} Task a".to_owned(),
-                body: "Asks you a question".to_owned(),
+                title: "keeper has a question".to_owned(),
+                subtitle: None,
+                body: "Task a".to_owned(),
                 target: Some(format!("run:{}", run_id("a"))),
             }]
         );
@@ -798,8 +824,9 @@ mod tests {
             posts(&out),
             vec![&Banner {
                 id: format!("done:{}", run_id("a")),
-                title: "keeper \u{b7} Task a".to_owned(),
-                body: "Finished".to_owned(),
+                title: "keeper finished".to_owned(),
+                subtitle: None,
+                body: "Task a".to_owned(),
                 target: Some(format!("run:{}", run_id("a"))),
             }]
         );
@@ -820,8 +847,17 @@ mod tests {
         let s = snap(vec![a, b], vec![]);
         rig.at(1, &s);
         let out = rig.at(3, &s);
-        let bodies: Vec<_> = posts(&out).iter().map(|b| b.body.as_str()).collect();
-        assert_eq!(bodies, vec!["Failed: the model refused", "Failed"]);
+        let lines: Vec<_> = posts(&out)
+            .iter()
+            .map(|b| (b.title.as_str(), b.subtitle.as_deref()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("keeper failed", Some("The model refused")),
+                ("keeper failed", None)
+            ]
+        );
         assert_eq!(posts(&out)[0].id, format!("problem:{}", run_id("a")));
     }
 
@@ -833,7 +869,7 @@ mod tests {
         assert!(rig.at(5, &s).effects.is_empty());
         let out = rig.at(6, &s);
         assert_eq!(posts(&out).len(), 1);
-        assert_eq!(posts(&out)[0].body, "Interrupted");
+        assert_eq!(posts(&out)[0].title, "keeper was interrupted");
         assert_eq!(posts(&out)[0].id, format!("problem:{}", run_id("a")));
     }
 
@@ -1052,6 +1088,7 @@ mod tests {
             vec![&Banner {
                 id: "daemon".to_owned(),
                 title: "Reno daemon unreachable".to_owned(),
+                subtitle: None,
                 body:
                     "Runs keep going in the daemon if it is still up; Reno reconnects on its own."
                         .to_owned(),
@@ -1133,6 +1170,7 @@ mod tests {
             vec![&Banner {
                 id: "burst:needs".to_owned(),
                 title: "4 runs need you".to_owned(),
+                subtitle: None,
                 body: String::new(),
                 target: Some("burst:needs".to_owned()),
             }]
@@ -1190,7 +1228,7 @@ mod tests {
         let titles: Vec<&str> = posts(&out).iter().map(|b| b.title.as_str()).collect();
         assert_eq!(titles.len(), 2, "{titles:?}");
         assert!(titles.contains(&"4 runs finished"));
-        assert!(titles.contains(&"keeper \u{b7} Task e"));
+        assert!(titles.contains(&"keeper failed"));
     }
 
     // --- Preferences and the window ---
@@ -1326,25 +1364,23 @@ mod tests {
     // --- Labels and targets ---
 
     #[test]
-    fn the_run_label_is_bot_and_title_cut_to_80() {
+    fn a_banner_says_who_in_its_title_and_the_run_title_cut_to_120_in_its_body() {
         let mut r = run("a", RunStatus::Running);
         r.title = "Fix the flaky test".to_owned();
-        assert_eq!(run_label(&r), "keeper \u{b7} Fix the flaky test");
+        assert_eq!(who(Some(&r)), "keeper");
+        assert_eq!(what(&r), "Fix the flaky test");
         r.bot = None;
-        assert_eq!(run_label(&r), "Fix the flaky test");
+        assert_eq!(who(Some(&r)), "A run");
+        assert_eq!(who(None), "A run");
         r.bot = Some("keeper".to_owned());
         r.title = "keeper \u{b7} porch: Fix the flaky test".to_owned();
-        assert_eq!(
-            run_label(&r),
-            "keeper \u{b7} Fix the flaky test",
-            "the bot is named once"
-        );
+        assert_eq!(what(&r), "Fix the flaky test", "the bot is named once");
         r.title = "w".repeat(200);
-        let label = run_label(&r);
-        assert_eq!(label.chars().count(), 80);
-        assert!(label.ends_with('\u{2026}'));
+        let body = what(&r);
+        assert_eq!(body.chars().count(), 120);
+        assert!(body.ends_with('\u{2026}'));
         r.title = "two\nlines".to_owned();
-        assert_eq!(run_label(&r), "keeper \u{b7} two lines");
+        assert_eq!(what(&r), "two lines");
     }
 
     #[test]
