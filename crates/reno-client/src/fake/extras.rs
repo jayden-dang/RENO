@@ -568,6 +568,37 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             }),
         )?,
         info(
+            "opencode",
+            "opencode",
+            &all,
+            &unrestricted,
+            ("1.19.5", "2.3.2"),
+            ExecutorHealth {
+                installed: installed("/opt/homebrew/bin/opencode", "1.19.5"),
+                version_gate: VersionGate::Ok,
+                signed_in: SignedIn::Yes { account: None },
+                models: ModelCatalog::live(models(&[
+                    ("opencode/big-pickle", "Big Pickle"),
+                    ("anthropic/claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                ])),
+                checked_at_ms: at,
+                plan_usage: None,
+            },
+            // A Homebrew formula install: `brew upgrade anomalyco/tap/opencode`.
+            Some(Maintenance {
+                setup: None,
+                sign_in: Some(person("Sign in", "opencode auth login")),
+                updater: Some(updater(
+                    "brew upgrade anomalyco/tap/opencode",
+                    false,
+                    false,
+                    Some("1.19.6"),
+                )),
+                managed: false,
+                auto_update: auto,
+            }),
+        )?,
+        info(
             "acp.grok",
             "Grok",
             &all,

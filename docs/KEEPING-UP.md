@@ -1,6 +1,6 @@
 # Keeping up with the agent CLIs
 
-Reno drives Claude Code, Codex, Pi and the ACP agents (Grok, Devin, Hermes and the registry's) through
+Reno drives Claude Code, Codex, Pi, opencode and the ACP agents (Grok, Devin, Hermes and the registry's) through
 their own command-line programs. Those programs update on their own schedule and Reno's drivers
 read their wire formats directly, so the drivers can fall behind without any test of ours
 noticing. Four things tell us when they have; this page is what to do about each, and the weekly
@@ -29,6 +29,23 @@ RENO_PI_LIVE=1 cargo test -p reno-harness --test pi -- --ignored --nocapture
 ```
 
 and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/pi/mod.rs` by hand.
+
+opencode (`opencode serve`, `cli_verified` 1.19.5 to 2.3.2) is covered by the same two signals and
+not by the live conformance suite. Both server generations are spoken (1.x `/session/*`, 2.x
+`/api/*`), so a new opencode can move either. The module docs of
+`crates/reno-harness/src/drivers/opencode/mod.rs` say exactly what was run on each. To clear
+`untested`, run the live test against a throwaway HOME (its own XDG directories; nothing under
+`~/.config/opencode` or `~/.local/share/opencode` is read or written), on opencode's free
+`opencode/big-pickle` model for the optional prompt:
+
+```
+RENO_OPENCODE_LIVE=1 cargo test -p reno-harness --test opencode -- --ignored --nocapture
+RENO_OPENCODE_LIVE=1 RENO_OPENCODE_LIVE_PROMPT=1 OPENCODE_EXECUTABLE=/path/to/opencode \
+  cargo test -p reno-harness --test opencode -- --ignored --nocapture
+```
+
+and raise `VERIFIED_CLI_VERSION` in `crates/reno-harness/src/drivers/opencode/mod.rs` by hand. Watch
+the unrecognised-frame counters (`type:` and `type:v2:` kinds): a 2.x release adds frame kinds.
 
 ## The weekly checklist
 

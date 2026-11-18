@@ -126,6 +126,9 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("grok-build", "grok"),
     ("antigravity-acp", "antigravity"),
     ("pi-acp", "pi"),
+    // opencode has a native driver; the registry lists it twice (the 1.x and the 2.x archives).
+    ("opencode", "opencode"),
+    ("opencode-v2", "opencode"),
 ];
 
 /// The built-in harness slug for a registry id Reno drives itself.
@@ -1384,6 +1387,9 @@ mod tests {
         assert_eq!(built_in("grok-build"), Some("grok"));
         // Pi has a native driver: the registry's adapter copy is not offered beside it.
         assert_eq!(built_in("pi-acp"), Some("pi"));
+        // Neither registry copy of opencode is offered beside the native driver.
+        assert_eq!(built_in("opencode"), Some("opencode"));
+        assert_eq!(built_in("opencode-v2"), Some("opencode"));
         assert_eq!(built_in("gemini"), None);
     }
 

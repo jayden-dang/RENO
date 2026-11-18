@@ -436,6 +436,40 @@ mod tests {
     }
 
     #[test]
+    fn opencode_updates_a_homebrew_formula_and_nothing_else() {
+        let opencode = declaration(&HarnessId::Opencode).unwrap();
+        // A Cellar path is a formula install; an npm or script install has no updater at all.
+        let cellar = std::path::Path::new("/opt/homebrew/Cellar/opencode/1.19.5/bin/opencode");
+        let updater = opencode.updater_for(Some(cellar)).unwrap();
+        assert_eq!(updater.command, "brew upgrade anomalyco/tap/opencode");
+        assert!(
+            opencode
+                .updater_for(Some(std::path::Path::new(
+                    "/Users/me/.npm-global/bin/opencode"
+                )))
+                .is_none()
+        );
+        assert!(opencode.updater_for(None).is_none());
+        // Homebrew's real answer on the owner's Mac (exit 1, kept by `|| true`).
+        let real = "{\n  \"formulae\": [\n    {\n      \"name\": \"anomalyco/tap/opencode\",\n      \"installed_versions\": [\n        \"1.19.5\"\n      ],\n      \"current_version\": \"1.19.6\",\n      \"pinned\": false,\n      \"pinned_version\": null\n    }\n  ],\n  \"casks\": []\n}\n";
+        let check = updater.check.unwrap();
+        assert_eq!(
+            check.parse.latest(real, Some("1.19.5")).as_deref(),
+            Some("1.19.6")
+        );
+        // Nothing outdated lists nothing: it is the newest.
+        assert_eq!(
+            check
+                .parse
+                .latest("{\"formulae\":[],\"casks\":[]}", Some("1.19.6"))
+                .as_deref(),
+            Some("1.19.6")
+        );
+        assert_eq!(updater.update_steps(Some("1.19.6")), None, "it cannot pin");
+        assert!(!updater.self_updating && updater.switch.is_none());
+    }
+
+    #[test]
     fn grok_pins_with_the_update_command() {
         let grok = declaration(&HarnessId::Grok).unwrap();
         assert_eq!(
