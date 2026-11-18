@@ -347,3 +347,124 @@ async fn a_resumed_attempt_keeps_the_runs_effort() {
         Some(Effort::High)
     );
 }
+
+fn windowed(id: &str) -> ModelInfo {
+    ModelInfo {
+        options: vec![reno_proto::ModelOption {
+            id: "contextWindow".into(),
+            label: "Context window".into(),
+            choices: ["200k", "1m"]
+                .map(|c| reno_proto::ModelOptionChoice {
+                    id: c.into(),
+                    label: c.into(),
+                })
+                .into(),
+            default_choice: "1m".into(),
+        }],
+        ..model(id, &LMH)
+    }
+}
+
+fn with_window(request: TaskRequest, choice: &str) -> TaskRequest {
+    request.model_options([("contextWindow".to_owned(), choice.to_owned())].into())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_model_option_the_model_lists_reaches_the_executor_and_the_summary() {
+    let m = lister("mock", vec![windowed("mock-1")], &[]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(with_window(request("mock", Some("mock-1"), None), "200k"))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    let want: std::collections::BTreeMap<String, String> =
+        [("contextWindow".to_owned(), "200k".to_owned())].into();
+    assert_eq!(m.log().specs[0].model_options, want);
+    assert_eq!(fx.kernel.get_run(&run).await.unwrap().model_options, want);
+    let (listed, _) = fx.kernel.list_runs(None, None, None).await.unwrap();
+    assert_eq!(listed[0].model_options, want);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_option_or_choice_is_refused_naming_the_model_and_what_it_lists() {
+    let m = lister("mock", vec![windowed("mock-1"), model("plain", &LMH)], &[]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let why = invalid(
+        fx.kernel
+            .submit_task(with_window(request("mock", Some("mock-1"), None), "2m"))
+            .await
+            .unwrap_err(),
+    );
+    assert!(
+        why.contains("mock-1") && why.contains("2m") && why.contains("200k, 1m"),
+        "{why}"
+    );
+    let unknown = request("mock", Some("mock-1"), None)
+        .model_options([("fastMode".to_owned(), "on".to_owned())].into());
+    let why = invalid(fx.kernel.submit_task(unknown).await.unwrap_err());
+    assert!(
+        why.contains("fastMode") && why.contains("contextWindow"),
+        "{why}"
+    );
+    // A model that lists no options takes none; an unlisted model's are unknown.
+    for model in ["plain", "mystery"] {
+        let why = invalid(
+            fx.kernel
+                .submit_task(with_window(request("mock", Some(model), None), "1m"))
+                .await
+                .unwrap_err(),
+        );
+        assert!(why.contains(model), "{why}");
+    }
+    assert!(m.log().specs.is_empty());
+    assert!(
+        fx.kernel
+            .list_runs(None, None, None)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_attempt_that_resumes_keeps_the_runs_model_options() {
+    let m = lister("mock", vec![windowed("mock-1")], &[]);
+    let mut d = reno_harness::exec::Executor::descriptor(&m);
+    d.caps.models = vec![windowed("mock-1")];
+    let m = MockExecutor::new(id("mock"))
+        .with_steps([
+            MockStep::started("sess-1", "mock-1"),
+            MockStep::Emit(reno_proto::ExecEvent::Done {
+                stop: reno_proto::StopReason::Interrupted,
+                result: None,
+                diagnostic: None,
+                reason: None,
+            }),
+        ])
+        .with_descriptor(d);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let (run, _) = fx
+        .kernel
+        .submit_task(with_window(request("mock", Some("mock-1"), None), "200k"))
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.kernel.resume_run(&run, None).await.unwrap();
+    until(async || (m.log().specs.len() == 2).then_some(())).await;
+    let specs = m.log().specs;
+    assert_eq!(specs[0].model_options, specs[1].model_options);
+    assert_eq!(
+        specs[1]
+            .model_options
+            .get("contextWindow")
+            .map(String::as_str),
+        Some("200k")
+    );
+    assert_eq!(
+        fx.kernel.get_run(&run).await.unwrap().model_options,
+        specs[1].model_options
+    );
+}

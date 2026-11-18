@@ -16,6 +16,7 @@
 //! cannot deadlock in a cycle (ARCH-11). Every task is spawned on one `TaskTracker`; every
 //! run's cancel token is a child of the one root token.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -299,6 +300,7 @@ impl Kernel {
             request.executor.clone(),
             request.model.as_deref(),
             request.effort,
+            &request.model_options,
         )?;
         let cwd = request
             .cwd
@@ -312,6 +314,9 @@ impl Kernel {
             "model": planned.model,
             "effort": planned.effort.map(Effort::as_str),
         });
+        if !planned.model_options.is_empty() {
+            spec["modelOptions"] = serde_json::json!(planned.model_options);
+        }
         if request.in_place {
             spec["inPlace"] = serde_json::Value::Bool(true);
         }
@@ -392,6 +397,7 @@ impl Kernel {
             request.executor.clone(),
             request.model.as_deref(),
             request.effort,
+            &request.model_options,
         )?
         .decision)
     }
@@ -1103,6 +1109,9 @@ pub struct TaskRequest {
     /// The reasoning effort to ask for: one the run's model lists, else the task is refused.
     /// Absent: the bot's, else the model's own default.
     pub effort: Option<Effort>,
+    /// Per-model option choices (option id to choice id), each one the run's model lists
+    /// (`ModelInfo::options`); an unknown option or choice refuses the task.
+    pub model_options: BTreeMap<String, String>,
     /// Allow a write run in `cwd` when it is not a git repository, as a bot's `in_place_writes`
     /// does. A git repository is never written in place.
     pub in_place: bool,
@@ -1118,8 +1127,16 @@ impl TaskRequest {
             cwd,
             model: None,
             effort: None,
+            model_options: BTreeMap::new(),
             in_place: false,
         }
+    }
+
+    /// Asks for the model option choices `options` (option id to choice id).
+    #[must_use]
+    pub fn model_options(mut self, options: BTreeMap<String, String>) -> Self {
+        self.model_options = options;
+        self
     }
 
     /// Asks for `effort`.
@@ -1171,6 +1188,8 @@ pub(crate) struct Planned {
     pub(crate) model: Option<String>,
     /// The effort the run asks for: the task's, else its bot's; `None` leaves the model's own.
     pub(crate) effort: Option<Effort>,
+    /// The model option choices the run asks for; empty leaves the model's defaults.
+    pub(crate) model_options: BTreeMap<String, String>,
 }
 
 /// Routes a task: the access, sandbox and preference of its bot (else the kernel's defaults),
@@ -1181,6 +1200,7 @@ pub(crate) fn plan_route(
     explicit: Option<ExecutorId>,
     task_model: Option<&str>,
     task_effort: Option<Effort>,
+    model_options: &BTreeMap<String, String>,
 ) -> Result<Planned> {
     let (access, sandbox, preference, pin, bot_model, bot_effort) = match bot {
         Some(name) => {
@@ -1288,6 +1308,14 @@ pub(crate) fn plan_route(
     {
         effort::check(candidate, model.as_deref(), effort).map_err(KernelError::Invalid)?;
     }
+    if !model_options.is_empty()
+        && let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.descriptor.id == executor)
+    {
+        effort::check_options(candidate, model.as_deref(), model_options)
+            .map_err(KernelError::Invalid)?;
+    }
     // A model the executor's list lacks is a warning, never a refusal: the list may be curated
     // and incomplete, and an executor that really does not know the model fails the run itself.
     if let Some(model) = &model
@@ -1302,6 +1330,7 @@ pub(crate) fn plan_route(
         pin,
         model,
         effort,
+        model_options: model_options.clone(),
     })
 }
 
@@ -1362,7 +1391,7 @@ fn unlisted_model_warning(
 /// What a trigger's run starts with: the executor, the bot pin, the routing decision and the
 /// model and effort the bot asks for.
 pub(crate) fn bot_launch(shared: &Shared, bot: &str) -> Result<(Planned, BotPin)> {
-    let planned = plan_route(shared, Some(bot), None, None, None)?;
+    let planned = plan_route(shared, Some(bot), None, None, None, &BTreeMap::new())?;
     let pin = planned
         .pin
         .clone()

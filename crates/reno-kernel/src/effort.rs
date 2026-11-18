@@ -81,3 +81,68 @@ pub(crate) fn check(
         )),
     }
 }
+
+/// `Ok` when the model `model` of `candidate` lists every option in `options` with the choice
+/// asked for; otherwise what to tell the person. The model is resolved as [`check`] does; with
+/// none named, the options are accepted when some listed model lists all of them.
+pub(crate) fn check_options(
+    candidate: &Candidate,
+    model: Option<&str>,
+    options: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let executor: &ExecutorId = &candidate.descriptor.id;
+    let models = listed(candidate);
+    let caps = &candidate.descriptor.caps;
+    let refusal = |info: &ModelInfo| -> Option<String> {
+        for (option, choice) in options {
+            let Some(listed) = info.options.iter().find(|o| &o.id == option) else {
+                let have: Vec<&str> = info.options.iter().map(|o| o.id.as_str()).collect();
+                return Some(format!(
+                    "model {} of {executor} has no option {option:?}; it lists {}",
+                    info.id,
+                    if have.is_empty() {
+                        "no options".to_owned()
+                    } else {
+                        have.join(", ")
+                    }
+                ));
+            };
+            if !listed.choices.iter().any(|c| &c.id == choice) {
+                let have: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
+                return Some(format!(
+                    "model {} of {executor} takes no {choice:?} for option {option:?}; it lists {}",
+                    info.id,
+                    have.join(", ")
+                ));
+            }
+        }
+        None
+    };
+    let some_model = || {
+        let mut why = None;
+        for info in models {
+            match refusal(info) {
+                None => return Ok(()),
+                Some(w) => why = why.or(Some(w)),
+            }
+        }
+        Err(why.unwrap_or_else(|| format!("{executor} lists no models, so no option can be set")))
+    };
+    let Some(model) = model else {
+        return some_model();
+    };
+    let base = caps.base_model(model);
+    let named = models.iter().find(|m| m.id == model || m.id == base);
+    let resolved = named.or_else(|| {
+        caps.is_model_alias(model)
+            .then(|| models.iter().find(|m| m.id.contains(base)))
+            .flatten()
+    });
+    match resolved {
+        Some(info) => refusal(info).map_or(Ok(()), Err),
+        None if caps.is_model_alias(model) => some_model(),
+        None => Err(format!(
+            "model {model:?} is not in {executor}'s model list, so its options are unknown"
+        )),
+    }
+}

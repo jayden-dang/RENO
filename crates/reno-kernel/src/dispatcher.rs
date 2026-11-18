@@ -399,7 +399,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         None => row.goal.clone(),
     };
     Ok(ExecSpec {
-        model_options: Default::default(),
+        model_options: crate::shared::requested_model_options(&row.spec),
         run_id: row.id.clone(),
         prompt,
         cwd: PathBuf::from(cwd),

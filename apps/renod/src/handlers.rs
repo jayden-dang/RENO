@@ -541,6 +541,7 @@ fn task_request(p: TaskRunParams, cwd: PathBuf) -> TaskRequest {
     let mut request = TaskRequest::new(p.prompt, cwd)
         .model(p.model.filter(|model| !model.is_empty()))
         .effort(p.effort)
+        .model_options(p.model_options)
         .in_place(p.in_place);
     request.executor = p.executor;
     request.bot = p.bot;
