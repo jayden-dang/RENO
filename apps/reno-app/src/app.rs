@@ -60,7 +60,7 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
-    /// `RENO_PANEL=home|session|review`: with `RENO_OPEN=run_<id>`, put that tab of the side
+    /// `RENO_PANEL=home|session|review|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
     /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
@@ -125,6 +125,9 @@ impl Options {
             Some("home") => Some(Surface::Home),
             Some("session") => Some(Surface::Session),
             Some("review") => Some(Surface::Review),
+            Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
+                Some(Surface::File(other["file:".len()..].to_owned()))
+            }
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
@@ -1007,8 +1010,13 @@ mod tests {
         assert_eq!(tab("home"), Ok(Some(Surface::Home)));
         assert_eq!(tab("session"), Ok(Some(Surface::Session)));
         assert_eq!(tab("review"), Ok(Some(Surface::Review)));
+        assert_eq!(
+            tab("file:src/a.rs"),
+            Ok(Some(Surface::File("src/a.rs".into())))
+        );
         assert_eq!(tab(""), Ok(None));
         assert!(tab("files").is_err());
+        assert!(tab("file:").is_err());
     }
 
     #[test]
