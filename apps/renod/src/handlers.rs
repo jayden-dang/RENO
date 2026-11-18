@@ -115,8 +115,9 @@ use reno_proto::{
 use reno_proto::{
     FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
     FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
-    FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
-    GitStatusParams, GitStatusResult, RunId, Seq, StopDetail,
+    FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitLog,
+    GitLogSearch, GitStatus, GitStatusParams, GitStatusResult, RunId, Seq, StopDetail,
+    WorkspaceFileSources,
 };
 use reno_proto::{
     RuleAdd, RuleAddParams, RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams,
@@ -258,6 +259,9 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<FsSearchFiles, _, _>(bind(ctx, fs_search_files))
         .method::<FsSearchContent, _, _>(bind(ctx, fs_search_content))
         .method::<GitStatus, _, _>(bind(ctx, git_status))
+        .method::<GitLog, _, _>(bind(ctx, crate::history::git_log))
+        .method::<GitLogSearch, _, _>(bind(ctx, crate::history::git_log_search))
+        .method::<WorkspaceFileSources, _, _>(bind(ctx, crate::history::file_sources))
         .subscription::<FsWatch, _, _, _>(bind(ctx, fs_watch))
         .method::<TermOpen, _, _>(bind(ctx, term_open))
         .method::<TermWrite, _, _>(bind(ctx, term_write))
@@ -937,7 +941,7 @@ async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceI
 /// (`WorkspaceUnavailable`) for a worktree that was removed, a run that has not started (its
 /// place is not decided yet, and its folder may be the person's own checkout), a run that was
 /// refused, and a run with no folder.
-async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
+pub(crate) async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
     use crate::files::{FsError, Served};
     use reno_proto::WorkspaceStatus;
     match ctx.kernel.workspace(run).await {
@@ -1529,6 +1533,9 @@ mod tests {
             "fs.search_files",
             "fs.search_content",
             "git.status",
+            "git.log",
+            "git.log_search",
+            "workspace.file_sources",
             "fs.watch",
             "term.open",
             "term.attach",

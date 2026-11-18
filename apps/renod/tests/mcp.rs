@@ -832,6 +832,44 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
             .map(|_| ())
             .unwrap_err(),
     );
+    // History and the Review upgrade (RP3): a run's token reads no log and no file's sources,
+    // and not the working tree's diff either.
+    assert!(run.supports("history"));
+    unauthorized(
+        within(run.git_log(reno_proto::GitLogParams {
+            run_id: me.clone(),
+            cursor: None,
+            limit: None,
+            rev: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.git_log_search(reno_proto::GitLogSearchParams {
+            run_id: me.clone(),
+            query: "a".into(),
+            limit: None,
+            rev: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.workspace_file_sources(reno_proto::FileSourcesParams {
+            run_id: me.clone(),
+            path: "README.md".into(),
+            scope: Some(reno_proto::DiffScope::WorkingTree),
+            checksum: None,
+        }))
+        .await
+        .unwrap_err(),
+    );
+    unauthorized(
+        within(run.workspace_diff_scoped(me.clone(), None, reno_proto::DiffScope::WorkingTree))
+            .await
+            .unwrap_err(),
+    );
     // And the Terminal tab (RP2): a run's token opens no shell, reads none, writes to none,
     // not even in its own worktree. The owner opens one first, so a refusal is the token's and
     // not a missing terminal's.
