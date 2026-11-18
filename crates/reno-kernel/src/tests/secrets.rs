@@ -527,7 +527,7 @@ async fn a_tool_output_is_cut_for_the_journal_even_when_the_run_has_no_secrets()
 async fn a_workspace_patch_and_paths_are_redacted_and_a_cut_value_is_dropped() {
     use crate::FakeWorkspace;
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
-    let m = mock([MockStep::Sleep(std::time::Duration::from_secs(5))]);
+    let m = mock([MockStep::Sleep(std::time::Duration::from_secs(3600))]);
     let secrets = Arc::new(FakeSecrets::new().with("GITHUB_TOKEN", TOKEN));
     let port = FakePort::with(vec![bot_with_secrets("secrets = [\"GITHUB_TOKEN\"]")]);
     let definitions = setup(&port).with_secrets(secrets.clone());
@@ -562,8 +562,7 @@ async fn a_workspace_patch_and_paths_are_redacted_and_a_cut_value_is_dropped() {
             patch_truncated: true,
         },
     );
-    fx.wait_status(&run, RunStatus::Succeeded).await;
-
+    // The run stays live while it is read: a finished run's workspace may already be released.
     let got = fx.kernel.workspace_diff(&run, Some("a")).await.unwrap();
     let shown = serde_json::to_string(&got).unwrap();
     assert!(!shown.contains(TOKEN), "{shown}");
