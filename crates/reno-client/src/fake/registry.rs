@@ -608,6 +608,11 @@ impl World {
                 format!("{} is built in: use {built_in}", listed.name),
             ));
         }
+        if let Some(why) =
+            reno_proto::cannot_run(listed.name, curated(listed.id, listed.version).1.as_ref())
+        {
+            return Err(err(ErrorCode::Conflict, why));
+        }
         let kind = match listed.readiness {
             RegistryReadiness::Ready => reno_proto::JobKind::Install,
             RegistryReadiness::NeedsNode => {

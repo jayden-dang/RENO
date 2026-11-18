@@ -72,6 +72,9 @@ async fn serve() -> String {
               "archive": format!("{base}/demo.tar.gz"), "cmd": "./demo", "sha256": sha } } } },
         { "id": "codex-acp", "name": "Codex CLI", "version": "0.4.0", "description": "",
           "distribution": { "npx": { "package": "@x/codex-acp@0.4.0" } } },
+        { "id": "crow-cli", "name": "crow-cli", "version": "0.1.49", "description": "",
+          "distribution": { "binary": { platform: {
+              "archive": format!("{base}/demo.tar.gz"), "cmd": "./demo", "sha256": sha } } } },
         { "id": "elsewhere", "name": "Elsewhere", "version": "2.0.0", "description": "",
           "distribution": { "binary": { "plan9-mips": {
               "archive": format!("{base}/x.tar.gz"), "cmd": "./x" } } } },
@@ -148,6 +151,14 @@ async fn the_registry_lists_adds_removes_and_keeps_own_agents_on_a_live_daemon()
     assert!(
         no_build.to_string().contains("no build for this Mac"),
         "{no_build}"
+    );
+    // Reno's own audit found this version broken: refused, though the device could install it.
+    assert_eq!(by("crow-cli").readiness, RegistryReadiness::Ready);
+    let broken = within(client.registry_add("crow-cli")).await.unwrap_err();
+    assert_eq!(broken.code(), Some(ErrorCode::Conflict));
+    assert!(
+        broken.to_string().contains("crow-cli is broken upstream"),
+        "{broken}"
     );
     let unknown = within(client.registry_add("nope")).await.unwrap_err();
     assert_eq!(unknown.code(), Some(ErrorCode::NotFound));

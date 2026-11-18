@@ -114,7 +114,15 @@ fn entry_line(entry: &RegistryEntry, width: usize) -> String {
         }
     } else {
         match entry.readiness {
-            RegistryReadiness::Ready => "ready to add".to_owned(),
+            RegistryReadiness::Ready => {
+                match reno_proto::cannot_run(&entry.name, entry.status.as_ref()) {
+                    Some(why) => why,
+                    None => match reno_proto::next_step(&entry.sign_in) {
+                        Some(next) => format!("ready to add; {next}"),
+                        None => "ready to add".to_owned(),
+                    },
+                }
+            }
             RegistryReadiness::NeedsNode => format!(
                 "needs Node.js: {}",
                 entry.fix.as_deref().unwrap_or("install Node.js")
@@ -503,8 +511,17 @@ mod tests {
             "{}",
             line("goose")
         );
-        assert!(line("goose").ends_with("ready to add"));
+        assert!(
+            line("goose").ends_with("ready to add; then run `goose configure`"),
+            "{}",
+            line("goose")
+        );
         assert!(line("vtcode").contains("NO CHECKSUM"), "{}", line("vtcode"));
+        assert!(
+            line("vtcode").contains("VT Code is broken upstream: exits before initialize"),
+            "{}",
+            line("vtcode")
+        );
         assert!(line("fast-agent").ends_with("needs uv: brew install uv"));
         assert!(line("gemini").ends_with("needs Node.js: brew install node"));
         assert!(line("windows-only").ends_with("no build for this Mac"));
@@ -559,6 +576,11 @@ mod tests {
         let (_daemon, client) = daemon().await;
         let uv = add(&client, "fast-agent", |_| {}).await.unwrap_err();
         assert_eq!(uv.to_string(), "fast-agent needs uv: brew install uv");
+        let broken = add(&client, "vtcode", |_| {}).await.unwrap_err();
+        assert!(
+            broken.to_string().contains("is broken upstream"),
+            "{broken}"
+        );
         let node = add(&client, "gemini", |_| {}).await.unwrap_err();
         assert!(
             node.to_string()

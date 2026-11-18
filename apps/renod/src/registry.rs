@@ -243,6 +243,10 @@ pub(crate) async fn add(
     if let Some(message) = needs(entry, reg::readiness(entry)) {
         return Err(conflict(message));
     }
+    let known = reno_harness::acp_known::facts(&entry.id, &entry.version);
+    if let Some(why) = reno_proto::cannot_run(&entry.name, known.status.as_ref()) {
+        return Err(conflict(why));
+    }
     let executor = AcpExecutor::registry(agent, &entry.name)
         .map_err(|e| invalid(format!("{:?} cannot be an executor id: {e}", p.id)))?;
     tracing::info!(agent = %p.id, "registry add requested");

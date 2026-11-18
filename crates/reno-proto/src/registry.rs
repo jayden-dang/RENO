@@ -278,9 +278,96 @@ pub struct ExecutorRegistryEnvResult {
     pub env: String,
 }
 
+/// Why an agent the audit found broken cannot be added, as the sentence a person reads, or `None`
+/// when nothing is known against it. The daemon refuses an add with it; the CLI lists it.
+pub fn cannot_run(name: &str, status: Option<&RegistryStatus>) -> Option<String> {
+    match status? {
+        RegistryStatus::Ok => None,
+        RegistryStatus::BrokenUpstream { reason } => Some(format!(
+            "{name} is broken upstream: {reason}. Add stays off until a new version is published"
+        )),
+        RegistryStatus::NeedsRenoFix { reason } => {
+            Some(format!("{name} can't run in Reno yet: {reason}"))
+        }
+    }
+}
+
+/// What a person does after adding an agent, from its first sign-in way, or `None` when nothing
+/// is known.
+pub fn next_step(sign_in: &[RegistrySignInOption]) -> Option<String> {
+    Some(match sign_in.first()? {
+        RegistrySignInOption::None => "no sign-in".to_owned(),
+        RegistrySignInOption::Terminal { command } => format!("then run `{command}`"),
+        RegistrySignInOption::Env { vars } => format!("then set {}", vars.join(", ")),
+        RegistrySignInOption::Browser { .. } => "then sign in in the browser".to_owned(),
+        RegistrySignInOption::Setup { .. } => "then set it up by hand".to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_known_broken_agent_is_refused_in_words_and_a_working_one_is_not() {
+        let broken = RegistryStatus::BrokenUpstream {
+            reason: "exits before initialize".to_owned(),
+        };
+        assert_eq!(
+            cannot_run("crow-cli", Some(&broken)).as_deref(),
+            Some(
+                "crow-cli is broken upstream: exits before initialize. Add stays off until a new \
+                 version is published"
+            )
+        );
+        let fix = RegistryStatus::NeedsRenoFix {
+            reason: "needs environmentPolicy".to_owned(),
+        };
+        assert_eq!(
+            cannot_run("harn", Some(&fix)).as_deref(),
+            Some("harn can't run in Reno yet: needs environmentPolicy")
+        );
+        assert_eq!(cannot_run("goose", Some(&RegistryStatus::Ok)), None);
+        assert_eq!(cannot_run("goose", None), None);
+    }
+
+    #[test]
+    fn the_first_sign_in_way_reads_as_the_next_step() {
+        let way = |w: RegistrySignInOption| next_step(std::slice::from_ref(&w));
+        assert_eq!(
+            way(RegistrySignInOption::None).as_deref(),
+            Some("no sign-in")
+        );
+        assert_eq!(
+            way(RegistrySignInOption::Terminal {
+                command: "goose configure".to_owned()
+            })
+            .as_deref(),
+            Some("then run `goose configure`")
+        );
+        assert_eq!(
+            way(RegistrySignInOption::Env {
+                vars: vec!["A_KEY".to_owned(), "B_KEY".to_owned()]
+            })
+            .as_deref(),
+            Some("then set A_KEY, B_KEY")
+        );
+        assert_eq!(
+            way(RegistrySignInOption::Browser {
+                methods: vec!["oauth".to_owned()]
+            })
+            .as_deref(),
+            Some("then sign in in the browser")
+        );
+        assert_eq!(
+            way(RegistrySignInOption::Setup {
+                text: "set it up".to_owned()
+            })
+            .as_deref(),
+            Some("then set it up by hand")
+        );
+        assert_eq!(next_step(&[]), None);
+    }
 
     #[test]
     fn a_builtin_source_is_left_off_the_wire_and_read_back_by_default() {
