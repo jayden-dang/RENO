@@ -490,3 +490,36 @@ async fn with_auto_update_off_the_daily_check_leaves_a_registry_agent_alone() {
 }
 
 const DAY: i64 = 24 * 60 * 60 * 1000;
+
+/// A run that queued for an agent between the check of the store and the unregister: the agent is
+/// gone when it dispatches, and the run ends terminal with the reason, never stuck.
+#[tokio::test(start_paused = true)]
+async fn a_run_queued_on_an_agent_that_goes_away_ends_terminal_with_a_reason() {
+    let w = World::new(1, vec![]).await;
+    w.index.list("demo", "1.0.0");
+    w.fx.kernel
+        .add_registry_executor(Arc::new(w.agent("acp.demo")))
+        .await
+        .unwrap();
+    until(async || w.info("acp.demo")?.job.is_none().then_some(())).await;
+    let kernel = &w.fx.kernel;
+    let live = kernel
+        .submit("go", id("acp.demo"), PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    w.fx.wait_status(&live, RunStatus::Running).await;
+    let queued = kernel
+        .submit("go", id("acp.demo"), PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    // The race, made certain: the executor leaves the set while both runs hold its id.
+    kernel.forget(&id("acp.demo")).await;
+    kernel.cancel(&live).await.unwrap();
+    w.fx.wait_status(&queued, RunStatus::Failed).await;
+    let events = w.fx.events(&queued, None).await;
+    let done = events.last().unwrap().as_ref().unwrap().event.clone();
+    assert!(
+        matches!(&done, ExecEvent::Done { diagnostic: Some(why), .. } if why.contains("unknown executor acp.demo")),
+        "{done:?}"
+    );
+}

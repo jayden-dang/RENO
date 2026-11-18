@@ -228,12 +228,12 @@ mod tests {
     fn an_entry_without_optional_fields_round_trips() {
         let entry: RegistryEntry = serde_json::from_value(serde_json::json!({
             "id": "goose", "executor": "acp.goose", "name": "goose", "version": "1.0.0",
-            "readiness": "needs_uv", "sha256": false
+            "readiness": "needs_uv"
         }))
         .unwrap();
         assert_eq!(entry.readiness, RegistryReadiness::NeedsUv);
         assert!(entry.added.is_none() && entry.built_in.is_none());
         let json = serde_json::to_value(&entry).unwrap();
-        assert!(json.get("added").is_none() && json.get("iconSvg").is_none());
+        assert!(json.get("added").is_none() && json.get("icon").is_none());
     }
 }

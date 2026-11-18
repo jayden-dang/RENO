@@ -215,10 +215,13 @@ pub(crate) async fn remove(
     let agent = agent_of(&p.id)?;
     let executor = executor_of(&p.id)?;
     tracing::info!(agent = %p.id, "registry remove requested");
-    kernel
-        .remove_registry_executor(&executor)
-        .await
-        .map_err(|e| kernel_error(&e))?;
+    match kernel.remove_registry_executor(&executor).await {
+        Ok(()) => {}
+        // An agent that is added on disk but not registered (an add whose failure was dismissed
+        // after the install had landed): it can still be removed.
+        Err(reno_kernel::KernelError::ExecutorNotFound(_)) if reg::record(agent).is_some() => {}
+        Err(error) => return Err(kernel_error(&error)),
+    }
     tokio::task::spawn_blocking(move || reg::remove(agent))
         .await
         .map_err(|e| ErrorObject::new(ErrorCode::Internal, e.to_string()))?

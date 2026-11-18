@@ -212,6 +212,17 @@ async fn the_registry_lists_adds_removes_and_keeps_own_agents_on_a_live_daemon()
     let gone = within(client.registry_remove("demo")).await.unwrap_err();
     assert_eq!(gone.code(), Some(ErrorCode::NotFound));
 
+    // An agent that is added on disk but not registered (the failure of its add was dismissed
+    // after the install landed) can still be removed.
+    std::fs::create_dir_all(agents.path().join("ghost")).unwrap();
+    std::fs::write(
+        agents.path().join("ghost/agent.json"),
+        r#"{"id":"ghost","name":"Ghost","version":"1.0.0","kind":"binary","program":"/bin/true"}"#,
+    )
+    .unwrap();
+    within(client.registry_remove("ghost")).await.unwrap();
+    assert!(!agents.path().join("ghost").exists());
+
     // An own agent: from its command, with its environment kept in the agents root.
     let script = agents.path().join("my-agent.sh");
     std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();

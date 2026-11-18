@@ -1525,7 +1525,7 @@ impl crate::Kernel {
     }
 
     /// Takes `id` out of the set and forgets everything the kernel held for it.
-    async fn forget(&self, id: &ExecutorId) {
+    pub(crate) async fn forget(&self, id: &ExecutorId) {
         let shared = self.shared();
         let removed = shared.executors.remove(id);
         shared.purge_executor(id);

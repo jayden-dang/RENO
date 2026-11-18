@@ -329,6 +329,10 @@ impl World {
     /// The version the fake index lists for the executor `id` (an add installs this version).
     pub(super) fn index_version(&self, id: &ExecutorId) -> Option<String> {
         let rid = id.as_str().strip_prefix("acp.")?;
+        // (A built-in executor with a registry id, `acp.devin`, is not installed from the index.)
+        self.executors
+            .iter()
+            .find(|e| &e.descriptor.id == id && e.source == ExecutorSource::Registry)?;
         INDEX
             .iter()
             .find(|l| l.id == rid)

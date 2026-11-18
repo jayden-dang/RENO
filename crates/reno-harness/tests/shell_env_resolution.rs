@@ -27,7 +27,9 @@ async fn cli_on_login_shell_path_only_is_resolved() {
     write_executable(&shell_bin.join("hermes"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("codex"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("claude"), "#!/bin/sh\nexit 0\n");
-    write_executable(&shell_bin.join("pi"), "#!/bin/sh\nexit 0\n");
+    // Reports a version, as a real Pi does: of two candidates the newer wins, and a Pi on this
+    // machine's own PATH now reads its version too (it used to read as unknown, which lost).
+    write_executable(&shell_bin.join("pi"), "#!/bin/sh\necho 999.0.0\n");
     write_executable(&shell_bin.join("muse"), "#!/bin/sh\nexit 0\n");
     write_executable(&shell_bin.join("opencode"), "#!/bin/sh\nexit 0\n");
 
