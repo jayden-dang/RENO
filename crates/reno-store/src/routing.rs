@@ -8,15 +8,32 @@
 //! clock: every call takes `now`.
 
 use reno_proto::defs::BotPin;
-use reno_proto::{ExecutorId, RoutingDecision, RunId, TaskId};
+use reno_proto::{ExecutorId, RoutingDecision, RunId, TaskId, ThreadId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
 use crate::db::Store;
 use crate::error::{DbResult, Result, StoreError};
 use crate::events;
-use crate::runs::{load_fenced, tx_enqueue_run};
+use crate::runs::{NewRun, load_fenced, tx_enqueue_run};
 use crate::writer::Durability;
+
+/// A routed run to queue: see [`Store::enqueue_routed`].
+#[derive(Debug, Clone)]
+pub struct RoutedRun {
+    /// The task.
+    pub task: TaskId,
+    /// The new run.
+    pub run: RunId,
+    /// The executor the run is recorded against.
+    pub executor: ExecutorId,
+    /// The bot version it is pinned to.
+    pub bot: Option<BotPin>,
+    /// The routing decision to store with it.
+    pub decision: RoutingDecision,
+    /// The thread to continue (a follow-up); `None` starts a thread of its own.
+    pub thread: Option<ThreadId>,
+}
 
 /// Stores `decision` as the routing of `run`, replacing an earlier one, and writes the
 /// `run.routed` event.
@@ -58,16 +75,34 @@ impl Store {
         decision: &RoutingDecision,
         now: i64,
     ) -> Result<()> {
-        let (task, run, executor) = (task.clone(), run.clone(), executor.clone());
-        let (bot, decision) = (bot.cloned(), decision.clone());
+        let new = RoutedRun {
+            task: task.clone(),
+            run: run.clone(),
+            executor: executor.clone(),
+            bot: bot.cloned(),
+            decision: decision.clone(),
+            thread: None,
+        };
+        self.enqueue_routed(new, now).await
+    }
+
+    /// Queues `new` and stores its routing decision, in one transaction. A run for a thread
+    /// (`new.thread`) is that thread's next: its `parent_run` is the thread's newest run, and a
+    /// thread whose worktree was removed, or that has a run queued or live, refuses it
+    /// ([`StoreError::ThreadClosed`], [`StoreError::ThreadBusy`]). A closed thread whose
+    /// worktree was kept is reopened. A run with no thread starts one.
+    pub async fn enqueue_routed(&self, new: RoutedRun, now: i64) -> Result<()> {
         self.write(Durability::Normal, move |c| {
             tx_enqueue_run(
                 c,
-                &task,
-                &run,
-                &executor,
-                bot.as_ref(),
-                Some(&decision),
+                &NewRun {
+                    task: &new.task,
+                    run: &new.run,
+                    executor: &new.executor,
+                    bot: new.bot.as_ref(),
+                    routing: Some(&new.decision),
+                    thread: new.thread.as_ref(),
+                },
                 now,
             )
         })

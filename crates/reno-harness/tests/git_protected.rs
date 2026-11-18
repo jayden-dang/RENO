@@ -191,3 +191,64 @@ async fn a_revert_refuses_a_path_that_is_not_protected_or_leaves_the_worktree() 
     }
     assert!(loc.path.join("src/lib.rs").exists());
 }
+
+/// A follow-up run is judged on its own writes: the guard's base is where the run started, so a
+/// protected path an earlier run of the thread left changed is not charged to it, and a new
+/// write is found alone, and put back to the start, not to the thread's base.
+#[tokio::test]
+async fn a_run_is_judged_against_where_it_started_not_the_threads_base() {
+    let world = World::new();
+    let loc = world.prepared("thr_f1").await;
+    let wt = &loc.path;
+    // An earlier run of the thread committed a changed protected file (a person allowed it).
+    std::fs::write(wt.join(".claude/settings.json"), "{\"earlier\":true}\n").unwrap();
+    git(wt, &["commit", "-qam", "earlier run"]);
+    let start = world.mgr.head(&loc).await.unwrap();
+    assert_eq!(
+        world.mgr.protected_changes(&loc).await.unwrap(),
+        [".claude/settings.json"],
+        "against the thread's base, the earlier change shows"
+    );
+
+    // Judged from where the follow-up started, the follow-up has written nothing protected.
+    let from_start = Location {
+        base_sha: start,
+        ..loc.clone()
+    };
+    assert!(
+        world
+            .mgr
+            .protected_changes(&from_start)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Its own write is found, and put back to what the file was when it began.
+    std::fs::write(wt.join(".mcp.json"), "{\"evil\":true}\n").unwrap();
+    std::fs::write(wt.join(".claude/settings.json"), "{\"evil\":true}\n").unwrap();
+    let found = world.mgr.protected_changes(&from_start).await.unwrap();
+    assert_eq!(found, [".claude/settings.json", ".mcp.json"]);
+    world
+        .mgr
+        .revert_protected(&from_start, &found)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(wt.join(".claude/settings.json")).unwrap(),
+        "{\"earlier\":true}\n",
+        "the earlier run's change is what the follow-up started with"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join(".mcp.json")).unwrap(),
+        "{}\n"
+    );
+    assert!(
+        world
+            .mgr
+            .protected_changes(&from_start)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

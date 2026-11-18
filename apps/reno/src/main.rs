@@ -65,6 +65,7 @@ async fn dispatch(env: &Env, command: Command) -> anyhow::Result<ExitCode> {
         Command::Resume(args) => commands::resume(env, args).await,
         Command::Budget => commands::budget(env).await,
         Command::Workspace(command) => commands::workspace(env, command).await,
+        Command::Thread(command) => commands::thread(env, command).await,
         Command::Executor(command) => commands::executor(env, command).await,
         Command::Defs(command) => defs::run(env, command).await,
         Command::Secret(command) => secret::run(env, command).await,

@@ -374,3 +374,107 @@ async fn reading_the_changes_leaves_the_index_and_head_alone() {
     assert_eq!(std::fs::read(&index).unwrap(), before);
     assert_eq!(git(wt, &["status", "--porcelain"]), status);
 }
+
+#[tokio::test]
+async fn head_follows_the_branch_and_a_run_scope_starts_there() {
+    let world = World::new();
+    let loc = world.prepared("thr_h1").await;
+    let wt = &loc.path;
+    assert_eq!(world.mgr.head(&loc).await.unwrap(), loc.base_sha);
+
+    // The first run commits one file; the second starts from there.
+    std::fs::write(wt.join("first.txt"), "one\n").unwrap();
+    git(wt, &["add", "first.txt"]);
+    git(wt, &["commit", "-qm", "first run"]);
+    let start = world.mgr.head(&loc).await.unwrap();
+    assert_ne!(start, loc.base_sha);
+    std::fs::write(wt.join("second.txt"), "two\n").unwrap();
+
+    // The whole thread against its base holds both; the second run, against where it began,
+    // only its own.
+    let thread = world.mgr.changes_since_base(&loc, None).await.unwrap();
+    let mut names: Vec<_> = thread.files.iter().map(|f| f.path.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        (thread.commits, names),
+        (1, vec!["first.txt", "second.txt"])
+    );
+    let from_start = Location {
+        base_sha: start,
+        ..loc.clone()
+    };
+    let run = world
+        .mgr
+        .changes_since_base(&from_start, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            run.commits,
+            run.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>()
+        ),
+        (0, vec!["second.txt"])
+    );
+}
+
+#[tokio::test]
+async fn one_commit_is_shown_against_its_parent_and_only_a_commit_of_the_branch() {
+    let world = World::new();
+    let loc = world.prepared("thr_c1").await;
+    let wt = &loc.path;
+    std::fs::write(wt.join("src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    git(wt, &["commit", "-qam", "edit lib"]);
+    let first = world.mgr.head(&loc).await.unwrap();
+    std::fs::write(wt.join("added.txt"), "x\ny\n").unwrap();
+    git(wt, &["add", "added.txt"]);
+    git(wt, &["commit", "-qm", "add a file"]);
+    let second = world.mgr.head(&loc).await.unwrap();
+    // Dirty and untracked work is not in any commit.
+    std::fs::write(wt.join("untracked.txt"), "u\n").unwrap();
+    std::fs::write(wt.join("keep.txt"), "changed\n").unwrap();
+
+    let one = world.mgr.commit_changes(&loc, &first, None).await.unwrap();
+    assert_eq!(one.commits, 1);
+    assert_eq!(one.files.len(), 1);
+    let lib = file(&one.files, "src/lib.rs");
+    assert_eq!(
+        (lib.kind, lib.additions, lib.deletions),
+        (ChangeKind::Modified, 1, 0)
+    );
+    assert_eq!(one.patch, None, "no path, no patch");
+
+    // The patch of one file of it, by an abbreviated name.
+    let abbreviated = &second[..10];
+    let two = world
+        .mgr
+        .commit_changes(&loc, abbreviated, Some("added.txt"))
+        .await
+        .unwrap();
+    assert_eq!(two.files.len(), 1);
+    assert_eq!(file(&two.files, "added.txt").kind, ChangeKind::Added);
+    let patch = two.patch.unwrap();
+    assert!(patch.contains("+x") && patch.contains("+y"), "{patch}");
+
+    // The repository's own first commit is before the branch: not this thread's.
+    for refused in [
+        loc.base_sha.clone(),
+        "deadbeefdeadbeef".to_owned(),
+        "xyz1234".to_owned(),
+        "HEAD".to_owned(),
+        "--output=x".to_owned(),
+        format!("{first};ls"),
+    ] {
+        let got = world.mgr.commit_changes(&loc, &refused, None).await;
+        assert!(
+            matches!(got, Err(GitError::Unsafe(_))),
+            "{refused}: {got:?}"
+        );
+    }
+    // A worktree that is gone has nothing to show.
+    std::fs::remove_dir_all(wt).unwrap();
+    let gone = world.mgr.commit_changes(&loc, &first, None).await.unwrap();
+    assert_eq!((gone.commits, gone.files.len()), (0, 0));
+}

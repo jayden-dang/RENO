@@ -1,6 +1,6 @@
 //! The one error type of the crate. SQLite errors are wrapped, never exposed as a type (ARCH-5).
 
-use reno_proto::{RunId, RunStatus};
+use reno_proto::{RunId, RunStatus, ThreadId};
 
 /// Everything that can go wrong in `reno-store`.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +55,18 @@ pub enum StoreError {
         /// Its current status.
         status: RunStatus,
     },
+    /// The thread has a run queued or live, so it takes no other (at most one run of a thread is
+    /// live at a time).
+    #[error("thread {thread} has a run in progress ({run})")]
+    ThreadBusy {
+        /// The thread.
+        thread: ThreadId,
+        /// Its live run.
+        run: RunId,
+    },
+    /// The thread's worktree was removed, so there is nothing left to continue.
+    #[error("thread {0} is closed and its worktree is gone; start a new one")]
+    ThreadClosed(ThreadId),
     /// A stored value does not parse. The database was edited by something other than this crate.
     #[error("corrupt stored value: {0}")]
     Corrupt(String),

@@ -1054,14 +1054,26 @@ async fn a_cron_trigger_with_a_cwd_runs_in_a_worktree_of_that_repository() {
     let made = runs(&fx).await;
     assert_eq!(made.len(), 1);
     let cwd = m.log().specs[0].cwd.clone();
+    let thread = fx.kernel.run_thread(&made[0].id).await.unwrap();
     assert_eq!(
         cwd,
         std::path::PathBuf::from(crate::FAKE_WORKTREES)
             .join("app-000000000000")
-            .join(made[0].id.as_str()),
+            .join(thread.as_str()),
         "the run works in a worktree, never in the repository itself"
     );
     assert_ne!(cwd, std::path::PathBuf::from("/repos/app"));
+    // Nobody follows up a nightly job: its thread closes with its run, releasing the worktree.
+    let run = made[0].id.clone();
+    until(async || {
+        (fx.kernel.workspace(&run).await.unwrap().status == reno_proto::WorkspaceStatus::Removed)
+            .then_some(())
+    })
+    .await;
+    assert_eq!(
+        fx.kernel.thread(&thread).await.unwrap().status,
+        reno_proto::ThreadStatus::Closed
+    );
 }
 
 #[tokio::test(start_paused = true)]

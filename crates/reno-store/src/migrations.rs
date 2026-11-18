@@ -465,6 +465,52 @@ CREATE TABLE executor_settings (
 ) WITHOUT ROWID;
 ";
 
+/// Migration 18 (RP0.5, threads): a thread is a conversation in one project, and owns the
+/// worktree its runs share. A run gains `thread_id`, `parent_run` (the thread's previous run,
+/// when it is a follow-up) and `start_sha` (the commit the branch stood at when the run began,
+/// the base the protected-path guard and the "this run" diff compare with). A thread is closed
+/// when `closed_at` is set; whether it is active or idle follows from its runs, so the two never
+/// drift. `updated_at` is when a run was added or the last one ended, which is when the idle
+/// limit starts.
+///
+/// Every existing run becomes its own one-run thread, `thr_` plus the run's own suffix, closed
+/// when the run is terminal (a run that ended under the old rules already released its
+/// worktree), so history reads as it did. Each existing run's `start_sha` is its workspace's
+/// base commit. A workspace belongs to one thread (`workspaces.thread_id`, unique): the thread's
+/// worktree is the row of the run that made it.
+const V18: &str = "
+CREATE TABLE threads (
+    id         TEXT PRIMARY KEY,
+    cwd        TEXT,
+    closed_at  INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
+ALTER TABLE runs ADD COLUMN thread_id TEXT REFERENCES threads (id);
+ALTER TABLE runs ADD COLUMN parent_run TEXT REFERENCES runs (id);
+ALTER TABLE runs ADD COLUMN start_sha TEXT;
+ALTER TABLE workspaces ADD COLUMN thread_id TEXT REFERENCES threads (id);
+
+INSERT INTO threads (id, cwd, closed_at, created_at, updated_at)
+SELECT 'thr_' || substr(r.id, 5),
+       CASE WHEN json_valid(t.spec) THEN json_extract(t.spec, '$.cwd') END,
+       CASE WHEN r.status IN ('succeeded', 'failed', 'cancelled')
+            THEN COALESCE(r.ended_at, r.created_at) END,
+       r.created_at,
+       COALESCE(r.ended_at, r.started_at, r.created_at)
+FROM runs r JOIN tasks t ON t.id = r.task_id;
+
+UPDATE runs SET thread_id = 'thr_' || substr(id, 5);
+UPDATE runs SET start_sha = (SELECT w.base_sha FROM workspaces w WHERE w.run_id = runs.id);
+UPDATE workspaces SET thread_id = 'thr_' || substr(run_id, 5);
+
+CREATE INDEX runs_thread ON runs (thread_id, created_at);
+CREATE UNIQUE INDEX workspaces_thread ON workspaces (thread_id);
+CREATE UNIQUE INDEX runs_one_live_per_thread ON runs (thread_id)
+    WHERE status IN ('queued', 'leased', 'running', 'waiting_input', 'waiting_approval', 'evaluating');
+";
+
 /// The ordered migration set. Append new migrations; never edit an old one.
 pub(crate) fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -485,6 +531,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(V15),
         M::up(V16),
         M::up(V17),
+        M::up(V18),
     ])
 }
 
@@ -533,7 +580,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
     }
 
     /// The upgrade path of ARCHITECTURE 17.4: a database written by the previous phase (schema
@@ -917,5 +964,104 @@ mod tests {
             conn.execute("UPDATE bot_usage SET cache_read_tokens = -1", [])
                 .is_err()
         );
+    }
+
+    /// A database written before threads (schema 17), with runs in every state: each run becomes
+    /// its own one-run thread, a terminal one closed, history untouched, `start_sha` taken from
+    /// the workspace's base commit, and the workspace owned by that thread.
+    #[test]
+    fn upgrade_from_a_version_seventeen_database_makes_each_run_its_own_thread() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 17).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, spec, created_at) VALUES
+                 ('task_a', 'a', '{\"cwd\":\"/work/app\"}', 1),
+                 ('task_b', 'b', '{}', 2),
+                 ('task_c', 'c', '{\"cwd\":\"/work/app/sub\"}', 3);
+             INSERT INTO runs (id, task_id, executor, status, created_at, started_at, ended_at)
+             VALUES ('run_ended', 'task_a', 'mock', 'succeeded', 10, 11, 12),
+                    ('run_queued', 'task_b', 'mock', 'queued', 20, NULL, NULL),
+                    ('run_paused', 'task_c', 'mock', 'interrupted', 30, 31, 32);
+             INSERT INTO workspaces (run_id, repo, repo_key, path, subdir, branch, base_sha,
+                                     status, commits, dirty, created_at, updated_at)
+             VALUES ('run_ended', '/work/app', 'app-1', '/wt/app-1/run_ended', '',
+                     'reno/run_ended', 'abc123', 'kept', 2, 0, 10, 12);
+             INSERT INTO events (ts, kind, subject_type, subject_id, data)
+             VALUES (12, 'run.transitioned', 'run', 'run_ended', '{}');",
+        )
+        .unwrap();
+        assert!(conn.prepare("SELECT thread_id FROM runs").is_err());
+
+        run(&mut conn).unwrap();
+
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = conn
+            .prepare("SELECT id, thread_id, start_sha, parent_run FROM runs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "run_ended".into(),
+                    "thr_ended".into(),
+                    Some("abc123".into()),
+                    None
+                ),
+                ("run_paused".into(), "thr_paused".into(), None, None),
+                ("run_queued".into(), "thr_queued".into(), None, None),
+            ]
+        );
+        type Thread = (String, Option<String>, Option<i64>, i64, i64);
+        let threads: Vec<Thread> = conn
+            .prepare("SELECT id, cwd, closed_at, created_at, updated_at FROM threads ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            threads,
+            vec![
+                (
+                    "thr_ended".into(),
+                    Some("/work/app".into()),
+                    Some(12),
+                    10,
+                    12
+                ),
+                (
+                    "thr_paused".into(),
+                    Some("/work/app/sub".into()),
+                    None,
+                    30,
+                    32
+                ),
+                ("thr_queued".into(), None, None, 20, 20),
+            ]
+        );
+        let owner: String = conn
+            .query_row(
+                "SELECT thread_id FROM workspaces WHERE run_id = 'run_ended'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "thr_ended");
+        // History is untouched, and a thread has one live run at most.
+        let events: i64 = conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 1);
+        conn.execute_batch(
+            "INSERT INTO tasks (id, goal, created_at) VALUES ('task_d', 'd', 40);
+             INSERT INTO runs (id, task_id, executor, status, created_at, thread_id)
+             VALUES ('run_new', 'task_d', 'mock', 'queued', 40, 'thr_queued');",
+        )
+        .unwrap_err();
     }
 }

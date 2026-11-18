@@ -84,13 +84,33 @@ fn text(path: &std::path::Path) -> Result<&str> {
         .ok_or_else(|| StoreError::InvalidArgument("a workspace path is not UTF-8".into()))
 }
 
+/// The workspace `run` works in: its thread's worktree. Its `run_id` is the run that made it,
+/// which is not always `run`.
 fn load(conn: &Connection, run: &RunId) -> Result<Option<WorkspaceInfo>> {
-    conn.prepare_cached(&format!("SELECT {COLS} FROM workspaces WHERE run_id = ?1"))
-        .db()?
-        .query_row(params![run.as_str()], from_row)
-        .optional()
-        .db()?
-        .transpose()
+    conn.prepare_cached(&format!(
+        "SELECT {COLS} FROM workspaces
+         WHERE thread_id = (SELECT thread_id FROM runs WHERE id = ?1)"
+    ))
+    .db()?
+    .query_row(params![run.as_str()], from_row)
+    .optional()
+    .db()?
+    .transpose()
+}
+
+/// The worktree of `thread`, if it has one.
+pub(crate) fn load_for_thread(
+    conn: &Connection,
+    thread: &reno_proto::ThreadId,
+) -> Result<Option<WorkspaceInfo>> {
+    conn.prepare_cached(&format!(
+        "SELECT {COLS} FROM workspaces WHERE thread_id = ?1"
+    ))
+    .db()?
+    .query_row(params![thread.as_str()], from_row)
+    .optional()
+    .db()?
+    .transpose()
 }
 
 fn event_data(info: &WorkspaceInfo) -> serde_json::Value {
@@ -126,8 +146,10 @@ impl Store {
             }
             c.prepare_cached(
                 "INSERT INTO workspaces (run_id, repo, repo_key, path, subdir, branch, base_sha,
-                                         status, commits, dirty, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'preparing', NULL, NULL, ?8, ?8)
+                                         status, commits, dirty, created_at, updated_at,
+                                         thread_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'preparing', NULL, NULL, ?8, ?8,
+                         (SELECT thread_id FROM runs WHERE id = ?1))
                  ON CONFLICT (run_id) DO UPDATE SET
                      repo = excluded.repo, repo_key = excluded.repo_key, path = excluded.path,
                      subdir = excluded.subdir, branch = excluded.branch,
@@ -189,7 +211,7 @@ impl Store {
             )
             .db()?
             .execute(params![
-                run.as_str(),
+                info.run_id.as_str(),
                 status_str(status),
                 changes.map(|c| i64::from(c.commits)),
                 changes.map(|c| c.dirty),

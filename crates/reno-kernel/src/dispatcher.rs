@@ -771,7 +771,10 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
                 .then_some(StartFailure::WorkingDirMissing);
             return fail_start(shared, &run_id, fence, why, refusal, account, cmd_rx, slot).await;
         }
-        Some(Ok(placement)) => spec.cwd = placement.cwd(),
+        Some(Ok(placement)) => {
+            workspaces::record_start(shared, &run_id, fence, &placement).await;
+            spec.cwd = placement.cwd();
+        }
     }
     // Reno's own MCP server, with a token for this run (T1.9).
     if let Err(why) = agent::provision(shared, &row, settings.wall_time, &mut spec).await {
@@ -1042,7 +1045,7 @@ async fn conclude(
     .await
     {
         Ok(_) => {
-            workspaces::release_after_run(shared, run).await;
+            workspaces::run_ended(shared, run).await;
             let done = ExecEvent::Done {
                 stop,
                 result: None,

@@ -1,42 +1,46 @@
-//! What the kernel does with the `Workspace` port: place a run, release its worktree when it
-//! ends, clean on request, and reconcile at start-up.
+//! What the kernel does with the `Workspace` port: place a run, release a thread's worktree when
+//! the thread closes, clean on request, and reconcile at start-up.
 //!
 //! # Placement (see [`crate::workspace`] for the table)
 //!
-//! A write run's worktree is recorded (`preparing`, durably) before it is created, then marked
-//! `active`. A run that is claimed again finds its row: a worktree that is still there is reused
-//! (its uncommitted work and commits are the continuation), one whose directory vanished is made
-//! again on the branch it had, if that survives.
+//! A worktree belongs to a **thread** (see [`crate::threads`]), not to a run. The first run of a
+//! thread records its worktree (`preparing`, durably) before creating it, then marks it
+//! `active`, on the branch `reno/<thread>`. A follow-up run of the thread finds the row and
+//! reuses the worktree as it stands: its commits and uncommitted work are the continuation. One
+//! whose directory vanished is made again on the branch it had, if that survives. A run that is
+//! claimed again (retried or resumed) is the same case.
 //!
 //! # Release policy
 //!
-//! When a run ends, in any state, its worktree is released under `IfClean`:
+//! A run's end releases nothing: it only starts the thread's idle clock. The worktree is
+//! released when the thread closes (a person, or the idle limit), under `IfMerged`:
 //!
-//! - no commits beyond the base and nothing uncommitted: the worktree is removed and its branch
-//!   deleted (compare-and-delete against the base commit), status `removed`;
-//! - commits or uncommitted changes: worktree and branch stay, status `kept`, with what they
-//!   hold recorded, for a later integration step;
+//! - no commits beyond the base and nothing uncommitted, or merged and clean: the worktree is
+//!   removed and its branch deleted (compare-and-delete against the branch tip), status
+//!   `removed`;
+//! - unmerged commits or uncommitted changes: worktree and branch stay, status `kept`, with what
+//!   they hold recorded, for a later integration step;
 //! - the directory had vanished: the registration is pruned; the branch goes if it holds
 //!   nothing (`removed`), else it stays (`lost`).
 //!
-//! A branch with commits that are not merged is deleted only by `workspace.clean` with `force`.
-//! A release that fails (git is gone, a timeout) leaves the row as it was; the next start's
-//! sweep, or an explicit clean, tries again. `interrupted` is not special: a run that may be
-//! resumed with nothing to lose simply gets a fresh worktree when it is claimed again.
+//! A branch with commits that are not merged is deleted only with `force`. A release that fails
+//! (git is gone, a timeout) leaves the row as it was; the next start's sweep, or an explicit
+//! clean, tries again.
 //!
 //! # Start-up sweep
 //!
 //! After run recovery no run is live, so every open workspace (`preparing`, `active`, `kept`)
-//! is reconciled by the same release: partial creations are cleaned, vanished directories are
-//! pruned, ended runs' worktrees are released. Directories under the worktrees area that no row
-//! accounts for are logged, never removed.
+//! is reconciled: a partial creation is cleaned, and the worktree of a thread that is closed (or
+//! unknown) is released again under `IfClean`. The worktree of an open thread is left alone: an
+//! idle thread keeps its worktree until it closes. Directories under the worktrees area that no
+//! row accounts for are logged, never removed.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reno_proto::{
-    CleanItem, CleanOutcome, CleanTarget, RunId, RunStatus, SandboxLevel, WorkspaceChanges,
+    CleanItem, CleanOutcome, CleanTarget, RunId, SandboxLevel, ThreadStatus, WorkspaceChanges,
     WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::RunRecord;
@@ -81,6 +85,25 @@ pub(crate) async fn place(
     if named == Some(true) && !port.dir_exists(&cwd).await {
         return Err(WorkspaceError::DirMissing { dir: cwd });
     }
+    // A thread that has a worktree continues in it, whatever the access of this run: a read-only
+    // follow-up (a reviewer) must see what the runs before it committed, not the person's
+    // checkout.
+    let previous = shared
+        .db
+        .get_workspace(&row.id)
+        .await
+        .map_err(store_failed)?;
+    if let Some(old) = previous.as_ref().filter(|w| OPEN.contains(&w.status)) {
+        let seen = port.inspect(old).await?;
+        if seen.exists {
+            let info = shared
+                .db
+                .set_workspace_status(&row.id, WorkspaceStatus::Active, None)
+                .await
+                .map_err(store_failed)?;
+            return Ok(Placement::Isolated(info));
+        }
+    }
     let decided = if sandbox == SandboxLevel::ReadOnly {
         Some(InPlace::ReadOnly)
     } else if shared
@@ -98,43 +121,36 @@ pub(crate) async fn place(
         return Ok(in_place(why));
     }
 
-    let previous = shared
-        .db
-        .get_workspace(&row.id)
-        .await
-        .map_err(store_failed)?;
-    if let Some(old) = previous.as_ref().filter(|w| OPEN.contains(&w.status)) {
-        let seen = port.inspect(old).await?;
-        if seen.exists {
-            let info = shared
-                .db
-                .set_workspace_status(&row.id, WorkspaceStatus::Active, None)
-                .await
-                .map_err(store_failed)?;
-            return Ok(Placement::Isolated(info));
-        }
-    }
-
-    let Some(mut plan) = port.plan(&row.id, &cwd).await? else {
+    let Some(mut plan) = port.plan(&row.thread_id, &row.id, &cwd).await? else {
         if opted_in {
             record_in_place(shared, row, &cwd, InPlace::OptedIn).await;
             return Ok(in_place(InPlace::OptedIn));
         }
         return Err(WorkspaceError::NotAGitRepo { dir: cwd });
     };
-    // A branch that survived a vanished worktree keeps the base it was cut from.
-    if let Some(old) = previous.as_ref().filter(|w| OPEN.contains(&w.status))
-        && old.branch == plan.branch
-        && port.inspect(old).await?.branch_exists
-    {
-        plan.base_sha.clone_from(&old.base_sha);
+    // The thread has one worktree row, the one its first run made: it is replaced, not added to.
+    if let Some(old) = previous.as_ref() {
+        plan.run_id = old.run_id.clone();
+        // A branch that survived a vanished worktree keeps the base it was cut from.
+        if OPEN.contains(&old.status)
+            && old.branch == plan.branch
+            && port.inspect(old).await?.branch_exists
+        {
+            plan.base_sha.clone_from(&old.base_sha);
+        }
     }
     shared
         .db
         .begin_workspace(plan.clone())
         .await
         .map_err(store_failed)?;
-    port.create(&plan).await?;
+    if let Err(error) = port.create(&plan).await {
+        // A half-made worktree is not left for the next start to find.
+        if let Err(why) = release(shared, port, &plan, ReleasePolicy::IfClean).await {
+            tracing::warn!(run = %row.id, %why, "could not clean up a worktree that was not made");
+        }
+        return Err(error);
+    }
     let info = shared
         .db
         .set_workspace_status(&row.id, WorkspaceStatus::Active, None)
@@ -154,25 +170,67 @@ async fn record_in_place(shared: &Shared, row: &RunRecord, cwd: &Path, why: InPl
     }
 }
 
-/// Releases `run`'s worktree after the run ended, under `IfClean`. Never fails the caller: a
-/// problem is logged and the row left for the sweep or an explicit clean.
-pub(crate) async fn release_after_run(shared: &Shared, run: &RunId) {
-    let Some(port) = shared.workspace.as_ref() else {
+/// A run ended: its thread's idle clock starts. The worktree stays, for the next run of the
+/// thread, except for a run a trigger started (see [`close_if_unattended`]). Never fails the
+/// caller: a problem is logged.
+///
+/// The clock starts on a task of its own: the run's slot is freed, and its `Done` published,
+/// without waiting for a store write that only starts a clock.
+pub(crate) async fn run_ended(shared: &Arc<Shared>, run: &RunId) {
+    let (task, id) = (Arc::clone(shared), run.clone());
+    shared.spawn(async move {
+        if let Err(error) = task.db.thread_went_idle(&id).await {
+            tracing::warn!(run = %id, %error, "could not record that the run's thread went idle");
+        }
+        task.thread_idle.notify_one();
+    });
+    close_if_unattended(shared, run).await;
+}
+
+/// A run a trigger started is not a conversation: nobody sends a follow-up to a nightly job, and
+/// a worktree kept for a week per firing would pile up. When such a run has ended for good, its
+/// thread closes with it, releasing its worktree as a run's end always did: removed when it
+/// holds nothing, kept (and listed) when it holds work. An `interrupted` run may still be
+/// resumed, so it keeps its worktree.
+async fn close_if_unattended(shared: &Shared, run: &RunId) {
+    let row = match shared.run_record(run).await {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(%run, %error, "could not read the run that ended");
+            return;
+        }
+    };
+    if row.spec.get("trigger").is_none() || !row.status.is_terminal() {
+        return;
+    }
+    if let Err(error) =
+        crate::threads::close_with(shared, &row.thread_id, ReleasePolicy::IfClean).await
+    {
+        tracing::warn!(%run, %error, "could not close the thread of a run a trigger started");
+    }
+}
+
+/// Records where the run's branch stood when it started, for its guard and its "this run" diff.
+/// A run that works in place has none. A failure is logged: the guard then falls back to the
+/// thread's base commit.
+pub(crate) async fn record_start(shared: &Shared, run: &RunId, fence: u64, placement: &Placement) {
+    let (Some(port), Placement::Isolated(info)) = (shared.workspace.as_ref(), placement) else {
         return;
     };
-    match shared.db.get_workspace(run).await {
-        Ok(Some(info)) if OPEN.contains(&info.status) => {
-            if let Err(error) = release(shared, port, &info, ReleasePolicy::IfClean).await {
-                tracing::warn!(%run, %error, "could not release the run's workspace");
-            }
+    let head = match port.head(info).await {
+        Ok(head) => head,
+        Err(error) => {
+            tracing::warn!(%run, %error, "could not read where the run's branch stands");
+            return;
         }
-        Ok(_) => {}
-        Err(error) => tracing::warn!(%run, %error, "could not read the run's workspace"),
+    };
+    if let Err(error) = shared.db.record_start_sha(run, fence, &head).await {
+        tracing::warn!(%run, %error, "could not record where the run started");
     }
 }
 
 /// Releases one workspace under `policy` and records the result.
-async fn release(
+pub(crate) async fn release(
     shared: &Shared,
     port: &Arc<dyn Workspace>,
     info: &WorkspaceInfo,
@@ -210,6 +268,11 @@ pub(crate) async fn sweep(shared: &Shared) -> Result<()> {
         return Ok(());
     };
     for info in shared.db.list_workspaces(&OPEN).await? {
+        // An idle or active thread keeps its worktree; only a half-made one is cleaned.
+        let keep = info.status == WorkspaceStatus::Active && thread_is_open(shared, &info).await;
+        if keep {
+            continue;
+        }
         if let Err(error) = release(shared, port, &info, ReleasePolicy::IfClean).await {
             tracing::warn!(run = %info.run_id, %error, "could not reconcile a workspace");
         }
@@ -227,7 +290,20 @@ pub(crate) async fn sweep(shared: &Shared) -> Result<()> {
     Ok(())
 }
 
-/// `workspace.clean`: see `CleanTarget`.
+/// Whether the thread that owns `info` is still open (not closed). A thread that cannot be read
+/// counts as closed, so the sweep releases what nobody can continue.
+async fn thread_is_open(shared: &Shared, info: &WorkspaceInfo) -> bool {
+    let Ok(row) = shared.run_record(&info.run_id).await else {
+        return false;
+    };
+    matches!(
+        shared.db.get_thread(&row.thread_id).await,
+        Ok(Some(thread)) if thread.status != ThreadStatus::Closed
+    )
+}
+
+/// `workspace.clean`: see `CleanTarget`. A workspace is a thread's, so cleaning one acts on its
+/// thread: a worktree that is removed closes the thread.
 pub(crate) async fn clean(
     shared: &Shared,
     target: CleanTarget,
@@ -245,6 +321,19 @@ pub(crate) async fn clean(
                 .ok_or_else(|| KernelError::WorkspaceNotFound(run_id.clone()))?;
             (vec![info], ReleasePolicy::IfMerged)
         }
+        CleanTarget::Thread { thread_id } => {
+            if shared.db.get_thread(thread_id).await?.is_none() {
+                return Err(KernelError::ThreadNotFound(thread_id.clone()));
+            }
+            let info = shared
+                .db
+                .get_thread_workspace(thread_id)
+                .await?
+                .ok_or_else(|| {
+                    KernelError::Invalid(format!("thread {thread_id} has no workspace"))
+                })?;
+            (vec![info], ReleasePolicy::IfMerged)
+        }
         CleanTarget::Merged => (
             shared.db.list_workspaces(&[WorkspaceStatus::Kept]).await?,
             ReleasePolicy::IfMerged,
@@ -255,7 +344,7 @@ pub(crate) async fn clean(
         ),
     };
     let policy = if force { ReleasePolicy::Force } else { policy };
-    let single = matches!(target, CleanTarget::Run { .. });
+    let single = matches!(target, CleanTarget::Run { .. } | CleanTarget::Thread { .. });
 
     let mut items = Vec::new();
     for info in candidates {
@@ -269,18 +358,21 @@ pub(crate) async fn clean(
             }
             continue;
         }
-        if run_is_live(shared, &info.run_id).await? {
+        if thread_is_live(shared, &info).await? {
             if single {
                 return Err(WorkspaceError::InUse(info.run_id).into());
             }
             continue;
         }
         match release(shared, port, &info, policy).await {
-            Ok(Released::Removed) => items.push(CleanItem {
-                run_id: info.run_id,
-                outcome: CleanOutcome::Removed,
-                reason: None,
-            }),
+            Ok(Released::Removed) => {
+                close_thread_of(shared, &info).await;
+                items.push(CleanItem {
+                    run_id: info.run_id,
+                    outcome: CleanOutcome::Removed,
+                    reason: None,
+                });
+            }
             Ok(Released::Kept(changes)) => items.push(CleanItem {
                 run_id: info.run_id,
                 outcome: CleanOutcome::Kept,
@@ -305,7 +397,18 @@ pub(crate) async fn clean(
     Ok(items)
 }
 
-fn describe(changes: WorkspaceChanges, policy: ReleasePolicy) -> String {
+/// Closes the thread whose worktree was just removed: there is nothing left to continue. A
+/// thread that cannot be closed (it is busy again, or gone) is left as it is.
+async fn close_thread_of(shared: &Shared, info: &WorkspaceInfo) {
+    let Ok(row) = shared.run_record(&info.run_id).await else {
+        return;
+    };
+    if let Err(error) = shared.db.close_thread(&row.thread_id).await {
+        tracing::debug!(thread = %row.thread_id, %error, "left a thread open after its worktree went");
+    }
+}
+
+pub(crate) fn describe(changes: WorkspaceChanges, policy: ReleasePolicy) -> String {
     let mut parts = Vec::new();
     if changes.commits > 0 {
         parts.push(match policy {
@@ -322,19 +425,11 @@ fn describe(changes: WorkspaceChanges, policy: ReleasePolicy) -> String {
     format!("{}; use --force to remove it anyway", parts.join(" and "))
 }
 
-/// Whether a run still holds its workspace: it is live in this kernel or in a state that is
-/// not at rest.
-async fn run_is_live(shared: &Shared, run: &RunId) -> Result<bool> {
-    if shared.is_live(run) {
-        return Ok(true);
-    }
-    let row = shared.run_record(run).await?;
+/// Whether a run of the workspace's thread is queued or live, which holds the worktree.
+async fn thread_is_live(shared: &Shared, info: &WorkspaceInfo) -> Result<bool> {
+    let row = shared.run_record(&info.run_id).await?;
     Ok(matches!(
-        row.status,
-        RunStatus::Leased
-            | RunStatus::Running
-            | RunStatus::WaitingInput
-            | RunStatus::WaitingApproval
-            | RunStatus::Evaluating
+        shared.db.get_thread(&row.thread_id).await?,
+        Some(thread) if thread.status == ThreadStatus::Active
     ))
 }

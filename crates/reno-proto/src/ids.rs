@@ -143,6 +143,10 @@ prefixed_id!(
     RunId, "run"
 );
 prefixed_id!(
+    /// A conversation in one project: its runs share one worktree and one branch (`thr_...`).
+    ThreadId, "thr"
+);
+prefixed_id!(
     /// A unit of work (`task_...`).
     TaskId, "task"
 );

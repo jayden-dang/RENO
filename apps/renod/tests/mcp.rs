@@ -92,6 +92,7 @@ impl Live {
 async fn start(fx: &Fixture, bot: Option<&str>) -> Live {
     let before = fx.executors.hold.log().specs.len();
     let run = within(fx.client.run_task(TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "go".into(),
@@ -736,6 +737,32 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
     unauthorized(within(run.resume(None)).await.unwrap_err());
     unauthorized(within(run.budget_status()).await.unwrap_err());
     unauthorized(within(run.status()).await.unwrap_err());
+    // Threads are a person's: a run's token closes none, not even its own, and reads none.
+    let own = within(fx.client.list_threads(None)).await.unwrap()[0]
+        .thread_id
+        .clone();
+    unauthorized(
+        within(run.close_thread(own.clone(), true))
+            .await
+            .unwrap_err(),
+    );
+    unauthorized(within(run.get_thread(own.clone())).await.unwrap_err());
+    unauthorized(within(run.list_threads(None)).await.unwrap_err());
+    unauthorized(
+        within(run.workspace_diff_scoped(live.run.clone(), None, reno_proto::DiffScope::Run))
+            .await
+            .unwrap_err(),
+    );
+    unauthorized(
+        within(run.clean_workspaces(
+            reno_proto::CleanTarget::Thread {
+                thread_id: own.clone(),
+            },
+            true,
+        ))
+        .await
+        .unwrap_err(),
+    );
     unauthorized(within(run.list_runs(Default::default())).await.unwrap_err());
     unauthorized(within(run.cancel_run(&live.run, None)).await.unwrap_err());
     unauthorized(
@@ -747,6 +774,7 @@ async fn a_run_connection_cannot_call_a_single_method_of_the_owner() {
     unauthorized(within(run.list_executors()).await.unwrap_err());
     unauthorized(
         within(run.run_task(TaskRunParams {
+            thread_id: None,
             model_options: Default::default(),
             effort: None,
             prompt: "do more".into(),

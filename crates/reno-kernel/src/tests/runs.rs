@@ -875,8 +875,8 @@ async fn shutdown_interrupts_live_runs_and_leaves_no_task() {
     let queued = fx.submit("c").await;
     fx.wait_status(&a, RunStatus::Running).await;
     fx.wait_status(&b, RunStatus::Running).await;
-    // Dispatcher, hub and two supervisors.
-    until(async || (fx.kernel.live_tasks() == 4).then_some(())).await;
+    // Dispatcher, hub, the thread reaper and two supervisors.
+    until(async || (fx.kernel.live_tasks() == 5).then_some(())).await;
 
     let stopping = {
         let kernel = fx.kernel.clone();

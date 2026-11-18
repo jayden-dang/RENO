@@ -30,7 +30,7 @@ open, and the logins you already have.
 - **Evaluations**: tests first, then a verifier on a *different* harness, then your verdict
 - **Self-improvement under a gate**: proposals are replay-tested, need your approval, and revert themselves if they do worse
 - **Triggers**: cron, file changes, board writes, git pushes and messages
-- **A git worktree per task**, so parallel agents never write over each other
+- **A git worktree per thread**, so parallel agents never write over each other, and a follow-up continues on the branch the last run left
 
 <table>
 <tr>

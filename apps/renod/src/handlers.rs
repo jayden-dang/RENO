@@ -32,6 +32,7 @@
 //! | `workspace.list`, `workspace.get` | `workspaces`, `workspace` |
 //! | `workspace.diff` | `workspace_diff` |
 //! | `workspace.clean` | `clean_workspaces` |
+//! | `thread.list`, `thread.get`, `thread.close` | `threads`, `thread`, `close_thread` |
 //! | `secret.list`, `secret.set`, `secret.delete` | none: the `Secrets` port directly (`current_defs` for who uses a name) |
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.frames` | `executor_frames` |
@@ -110,9 +111,10 @@ use reno_proto::{
     SecretInfo, SecretList, SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
 };
 use reno_proto::{
-    WorkspaceClean, WorkspaceCleanParams, WorkspaceCleanResult, WorkspaceDiff, WorkspaceDiffParams,
-    WorkspaceDiffResult, WorkspaceGet, WorkspaceGetParams, WorkspaceInfo, WorkspaceList,
-    WorkspaceListParams, WorkspaceListResult,
+    ThreadClose, ThreadCloseParams, ThreadCloseResult, ThreadGet, ThreadGetParams, ThreadInfo,
+    ThreadList, ThreadListParams, ThreadListResult, WorkspaceClean, WorkspaceCleanParams,
+    WorkspaceCleanResult, WorkspaceDiff, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceGet,
+    WorkspaceGetParams, WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
 };
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
@@ -230,6 +232,9 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<WorkspaceGet, _, _>(bind(ctx, workspace_get))
         .method::<WorkspaceDiff, _, _>(bind(ctx, workspace_diff))
         .method::<WorkspaceClean, _, _>(bind(ctx, workspace_clean))
+        .method::<ThreadList, _, _>(bind(ctx, thread_list))
+        .method::<ThreadGet, _, _>(bind(ctx, thread_get))
+        .method::<ThreadClose, _, _>(bind(ctx, thread_close))
         .subscription::<RunEvents, _, _, _>(bind(ctx, run_events))
         .subscription::<RunsWatch, _, _, _>(bind(ctx, runs_watch))
         .subscription::<ApprovalsWatch, _, _, _>(bind(ctx, approvals_watch))
@@ -476,9 +481,12 @@ async fn task_run(ctx: Arc<Ctx>, p: TaskRunParams) -> Reply<TaskRunResult> {
         .submit_task(request)
         .await
         .map_err(|e| kernel_error(&e))?;
+    // Every run is in a thread; the caller learns which, so a follow-up can name it.
+    let thread_id = ctx.kernel.run_thread(&run_id).await.ok();
     Ok(TaskRunResult {
         run_id,
         routing: Some(decision),
+        thread_id,
     })
 }
 
@@ -545,7 +553,8 @@ fn task_request(p: TaskRunParams, cwd: PathBuf) -> TaskRequest {
         .model(p.model.filter(|model| !model.is_empty()))
         .effort(p.effort)
         .model_options(p.model_options)
-        .in_place(p.in_place);
+        .in_place(p.in_place)
+        .thread(p.thread_id);
     request.executor = p.executor;
     request.bot = p.bot;
     request
@@ -888,8 +897,10 @@ async fn workspace_get(ctx: Arc<Ctx>, p: WorkspaceGetParams) -> Reply<WorkspaceI
 }
 
 async fn workspace_diff(ctx: Arc<Ctx>, p: WorkspaceDiffParams) -> Reply<WorkspaceDiffResult> {
+    // `scope: thread` is what the method did before threads; a person's client that sends
+    // none gets exactly that.
     ctx.kernel
-        .workspace_diff(&p.run_id, p.path.as_deref())
+        .workspace_diff_scoped(&p.run_id, p.path.as_deref(), &p.scope.unwrap_or_default())
         .await
         .map_err(|e| kernel_error(&e))
 }
@@ -964,6 +975,33 @@ async fn workspace_clean(ctx: Arc<Ctx>, p: WorkspaceCleanParams) -> Reply<Worksp
             .await
             .map_err(|e| kernel_error(&e))?,
     })
+}
+
+async fn thread_list(ctx: Arc<Ctx>, p: ThreadListParams) -> Reply<ThreadListResult> {
+    Ok(ThreadListResult {
+        threads: ctx
+            .kernel
+            .threads(p.status.as_deref(), p.limit)
+            .await
+            .map_err(|e| kernel_error(&e))?,
+    })
+}
+
+async fn thread_get(ctx: Arc<Ctx>, p: ThreadGetParams) -> Reply<ThreadInfo> {
+    ctx.kernel
+        .thread(&p.thread_id)
+        .await
+        .map_err(|e| kernel_error(&e))
+}
+
+/// A person's call: a connection bound to a run by `agent.auth` may call `agent.*` only (the
+/// router's guard), so a run's own token cannot close a thread, its own or another's.
+async fn thread_close(ctx: Arc<Ctx>, p: ThreadCloseParams) -> Reply<ThreadCloseResult> {
+    tracing::info!(thread = %p.thread_id, force = p.force, "thread close requested");
+    ctx.kernel
+        .close_thread(&p.thread_id, p.force)
+        .await
+        .map_err(|e| kernel_error(&e))
 }
 
 // ---- subscriptions -------------------------------------------------------------------------

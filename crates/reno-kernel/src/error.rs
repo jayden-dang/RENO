@@ -1,7 +1,7 @@
 //! The kernel's one error type (ARCH-14).
 
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq};
+use reno_proto::{ApprovalId, BudgetStop, ExecutorId, NotResumed, RunId, RunStatus, Seq, ThreadId};
 use reno_store::StoreError;
 
 use crate::workspace::WorkspaceError;
@@ -77,6 +77,21 @@ pub enum KernelError {
     /// The `Workspace` port refused or failed.
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    /// No such thread.
+    #[error("thread {0} not found")]
+    ThreadNotFound(ThreadId),
+    /// The thread has a run queued or live, so it takes no other and cannot be closed. Send to
+    /// the live run instead (a steer).
+    #[error("thread {thread} has a run in progress ({run})")]
+    ThreadBusy {
+        /// The thread.
+        thread: ThreadId,
+        /// Its live run.
+        run: RunId,
+    },
+    /// The thread's worktree was removed, so there is nothing to continue: start a new thread.
+    #[error("thread {0} is closed and its worktree is gone; start a new one")]
+    ThreadClosed(ThreadId),
     /// The `Definitions` port failed.
     #[error("definitions: {0}")]
     Definitions(String),
@@ -140,3 +155,15 @@ pub enum KernelError {
 
 /// Result alias for the kernel.
 pub type Result<T, E = KernelError> = std::result::Result<T, E>;
+
+impl KernelError {
+    /// A store error from a call that names a thread, with the thread outcomes typed.
+    pub(crate) fn of_thread(error: StoreError, thread: &ThreadId) -> Self {
+        match error {
+            StoreError::NotFound { kind: "thread", .. } => Self::ThreadNotFound(thread.clone()),
+            StoreError::ThreadBusy { thread, run } => Self::ThreadBusy { thread, run },
+            StoreError::ThreadClosed(thread) => Self::ThreadClosed(thread),
+            other => Self::Store(other),
+        }
+    }
+}

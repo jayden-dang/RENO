@@ -399,9 +399,14 @@ async fn every_status_satisfies_the_check_constraint() {
         .write(Durability::Normal, |c| {
             for (i, s) in RunStatus::ALL.into_iter().enumerate() {
                 c.execute(
-                    "INSERT INTO runs (id, task_id, executor, status, created_at)
-                     VALUES (?1, 'task_t0', 'claude', ?2, 0)",
-                    rusqlite::params![format!("run_s{i}"), status_str(s)],
+                    "INSERT INTO threads (id, created_at, updated_at) VALUES (?1, 0, 0)",
+                    rusqlite::params![format!("thr_s{i}")],
+                )
+                .db()?;
+                c.execute(
+                    "INSERT INTO runs (id, task_id, executor, status, created_at, thread_id)
+                     VALUES (?1, 'task_t0', 'claude', ?2, 0, ?3)",
+                    rusqlite::params![format!("run_s{i}"), status_str(s), format!("thr_s{i}")],
                 )
                 .db()?;
                 // The storage name is also the serde name.

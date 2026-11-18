@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use reno_proto::defs::{DefKind, DefRecord, DefValidateResult, DefsSnapshot};
 use reno_proto::{
     Approval, ApprovalRecord, DaemonStatusInfo, ExecEvent, ExecutorInfo, HelloResult, RunId,
-    RunStatus, RunSummary, Seq, TriggerInfo,
+    RunStatus, RunSummary, Seq, ThreadId, ThreadInfo, TriggerInfo,
 };
 
 /// The state of the connection to the daemon.
@@ -85,6 +85,8 @@ pub enum Feed {
     Executors,
     /// `approval.history`, fetched on demand.
     ApprovalHistory,
+    /// `thread.list`, refetched when the runs change.
+    Threads,
 }
 
 /// Where one [`Feed`] stands.
@@ -177,6 +179,9 @@ pub enum Update {
     Defs(DefsSnapshot),
     /// Decided approvals, newest decision first (`approval.history`).
     ApprovalHistory(Vec<ApprovalRecord>),
+    /// Every thread (`thread.list`): the conversations, each with its runs and its worktree. A
+    /// thread missing from it is removed from the mirror.
+    Threads(Vec<ThreadInfo>),
     /// One page of `run.list` for the filter `filter` (see [`filter_key`]). The runs are added to
     /// the paged set; `next` is the cursor for the following page, `None` on the last.
     RunsPage {
@@ -235,6 +240,8 @@ pub struct Changed {
     pub defs: bool,
     /// The approval history changed.
     pub history: bool,
+    /// The threads changed.
+    pub threads: bool,
     /// A [`Feed`] changed state.
     pub feeds: bool,
     touched: BTreeSet<RunId>,
@@ -251,6 +258,7 @@ impl Changed {
             || self.executors
             || self.defs
             || self.history
+            || self.threads
             || self.feeds)
             && self.touched.is_empty()
     }
@@ -275,6 +283,7 @@ impl Changed {
         self.executors |= other.executors;
         self.defs |= other.defs;
         self.history |= other.history;
+        self.threads |= other.threads;
         self.feeds |= other.feeds;
         self.touched.extend(other.touched);
     }
@@ -297,6 +306,9 @@ pub struct State {
     def_records: BTreeMap<(DefKind, String, u32), DefRecord>,
     validations: BTreeMap<(DefKind, String), DefValidateResult>,
     history: Vec<ApprovalRecord>,
+    threads: BTreeMap<ThreadId, ThreadInfo>,
+    /// Which thread each run of `threads` belongs to.
+    run_threads: BTreeMap<RunId, ThreadId>,
     offline: Option<Offline>,
     feeds: BTreeMap<Feed, FeedState>,
 }
@@ -383,6 +395,34 @@ impl State {
                     changed.history = true;
                 }
                 self.set_feed(Feed::ApprovalHistory, FeedState::Live, &mut changed);
+            }
+            Update::Threads(list) => {
+                let next: BTreeMap<ThreadId, ThreadInfo> = list
+                    .into_iter()
+                    .map(|thread| (thread.thread_id.clone(), thread))
+                    .collect();
+                if self.threads != next {
+                    self.run_threads = next
+                        .values()
+                        .flat_map(|thread| {
+                            thread
+                                .runs
+                                .iter()
+                                .map(|run| (run.run_id.clone(), thread.thread_id.clone()))
+                        })
+                        .collect();
+                    // A run whose thread changed is touched, so a view of it re-renders.
+                    for thread in next.values() {
+                        if self.threads.get(&thread.thread_id) != Some(thread) {
+                            changed
+                                .touched
+                                .extend(thread.runs.iter().map(|run| run.run_id.clone()));
+                        }
+                    }
+                    self.threads = next;
+                    changed.threads = true;
+                }
+                self.set_feed(Feed::Threads, FeedState::Live, &mut changed);
             }
             Update::RunsPage { filter, runs, next } => {
                 let key = filter_key(&filter);
@@ -527,6 +567,41 @@ impl State {
     /// Every executor with its last health, by id.
     pub fn executors(&self) -> &[ExecutorInfo] {
         &self.executors
+    }
+
+    /// Every thread, most recently changed first, then by id.
+    pub fn threads(&self) -> Vec<&ThreadInfo> {
+        let mut all: Vec<&ThreadInfo> = self.threads.values().collect();
+        all.sort_by(|a, b| {
+            b.updated_at_ms
+                .cmp(&a.updated_at_ms)
+                .then_with(|| a.thread_id.cmp(&b.thread_id))
+        });
+        all
+    }
+
+    /// One thread.
+    pub fn thread(&self, id: &ThreadId) -> Option<&ThreadInfo> {
+        self.threads.get(id)
+    }
+
+    /// The thread a run belongs to (`RunSummary` does not carry it: the daemon says it in
+    /// `thread.list`). `None` until the threads were fetched, or for a run newer than them.
+    pub fn thread_of(&self, run: &RunId) -> Option<&ThreadId> {
+        self.run_threads.get(run)
+    }
+
+    /// The runs of a thread the mirror knows, oldest first. A run not in the mirror's run
+    /// window or fetched pages is left out.
+    pub fn thread_runs(&self, id: &ThreadId) -> Vec<&RunSummary> {
+        let Some(thread) = self.threads.get(id) else {
+            return Vec::new();
+        };
+        thread
+            .runs
+            .iter()
+            .filter_map(|run| self.run(&run.run_id))
+            .collect()
     }
 
     /// The definitions in force and the file problems.
@@ -1054,5 +1129,68 @@ mod tests {
         c.merge(s.apply(event("b", 0, "y")));
         assert!(c.approvals && c.run(&run_id("a")) && c.run(&run_id("b")) && !c.runs);
         assert_eq!(c.touched_runs().count(), 2);
+    }
+
+    fn thread(name: &str, runs: &[&str], updated: u64) -> ThreadInfo {
+        ThreadInfo {
+            thread_id: ThreadId::from_suffix(name).unwrap(),
+            status: reno_proto::ThreadStatus::Idle,
+            cwd: None,
+            project: None,
+            worktree: None,
+            branch: None,
+            base_sha: None,
+            workspace: None,
+            runs: runs
+                .iter()
+                .map(|r| reno_proto::ThreadRun {
+                    run_id: run_id(r),
+                    parent_run: None,
+                    start_sha: None,
+                })
+                .collect(),
+            idle_expires_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: updated,
+        }
+    }
+
+    #[test]
+    fn threads_say_which_thread_a_run_is_in_and_a_repeat_changes_nothing() {
+        let mut s = State::new();
+        assert_eq!(s.feed(Feed::Threads), FeedState::Loading);
+        let list = vec![thread("t1", &["a", "b"], 5), thread("t2", &["c"], 9)];
+        let c = s.apply(Update::Threads(list.clone()));
+        assert!(c.threads && c.feeds);
+        assert!(
+            c.run(&run_id("a")) && c.run(&run_id("c")),
+            "its runs are touched"
+        );
+        assert_eq!(s.feed(Feed::Threads), FeedState::Live);
+        // Newest change first.
+        let order: Vec<_> = s
+            .threads()
+            .iter()
+            .map(|t| t.thread_id.to_string())
+            .collect();
+        assert_eq!(order, ["thr_t2", "thr_t1"]);
+        let t1 = ThreadId::from_suffix("t1").unwrap();
+        assert_eq!(s.thread_of(&run_id("b")), Some(&t1));
+        assert_eq!(s.thread_of(&run_id("zzz")), None);
+        assert_eq!(s.thread(&t1).unwrap().runs.len(), 2);
+
+        // Delivering the same list again is a no-op.
+        assert!(s.apply(Update::Threads(list)).is_empty());
+
+        // A thread missing from the next list is gone, with its runs' mapping.
+        let c = s.apply(Update::Threads(vec![thread("t2", &["c"], 9)]));
+        assert!(c.threads && !c.run(&run_id("a")));
+        assert_eq!(s.thread_of(&run_id("a")), None);
+        assert!(s.thread(&t1).is_none());
+        // Only the runs the mirror knows are listed.
+        s.apply(Update::RunUpserted(summary("c", RunStatus::Running, 1)));
+        let t2 = ThreadId::from_suffix("t2").unwrap();
+        assert_eq!(s.thread_runs(&t2).len(), 1);
+        assert!(s.thread_runs(&t1).is_empty());
     }
 }

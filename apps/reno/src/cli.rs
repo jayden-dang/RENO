@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use reno_proto::defs::DefKind;
-use reno_proto::{ApprovalId, ExecutorId, RunId, Seq, WorkspaceStatus};
+use reno_proto::{ApprovalId, ExecutorId, RunId, Seq, ThreadId, ThreadStatus, WorkspaceStatus};
 
 /// Talk to the Reno daemon.
 #[derive(Debug, Parser)]
@@ -49,6 +49,10 @@ pub(crate) enum Command {
     /// List the git worktrees write runs work in, and clean them up.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// List, show and close threads: the conversations that own a worktree. A follow-up
+    /// (`reno task run --thread`) continues the thread's branch.
+    #[command(subcommand)]
+    Thread(ThreadCommand),
     /// List the executors (the agent CLIs Reno drives) with what the daemon found out about
     /// each, and ask it to look again.
     #[command(subcommand)]
@@ -178,8 +182,61 @@ pub(crate) struct TaskRun {
     /// bot's `in_place_writes` does). A git repository is never written in place.
     #[arg(long)]
     pub(crate) in_place: bool,
+    /// Continue this thread (see `reno thread list`): the run works in its worktree, on its
+    /// branch, so it sees what the thread's earlier runs committed. Refused while a run of the
+    /// thread is live (steer it instead), and for a thread whose worktree was removed. The
+    /// thread's own folder is used, not --cwd.
+    #[arg(long, value_name = "THREAD")]
+    pub(crate) thread: Option<ThreadId>,
     /// What to do.
     pub(crate) prompt: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ThreadCommand {
+    /// List threads, most recently changed first: status, branch, runs, and where the worktree is.
+    List(ThreadList),
+    /// Show one thread: its worktree, its branch, and every run with the commit it started from.
+    Show(ThreadShow),
+    /// Close a thread and release its worktree: removed when it holds nothing unmerged, kept
+    /// when it does (unless --force). An idle thread closes by itself after seven days. Refused
+    /// while one of its runs is live.
+    ///
+    /// Exit status: a thread whose worktree was kept is closed, and exits 0.
+    Close(ThreadClose),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ThreadList {
+    /// Only threads in this status: active, idle or closed. Repeatable.
+    #[arg(long, value_name = "STATUS", value_parser = parse_thread_status)]
+    pub(crate) status: Vec<ThreadStatus>,
+    /// Show at most this many [default: 200; the daemon returns 1000 at most].
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) limit: Option<u32>,
+}
+
+fn parse_thread_status(text: &str) -> Result<ThreadStatus, String> {
+    ThreadStatus::ALL
+        .into_iter()
+        .find(|status| crate::render::wire_name(status) == text)
+        .ok_or_else(|| "expected one of active, idle, closed".to_owned())
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ThreadShow {
+    /// The thread.
+    pub(crate) thread: ThreadId,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ThreadClose {
+    /// The thread.
+    pub(crate) thread: ThreadId,
+    /// Remove the worktree even when it holds unmerged commits or uncommitted changes, deleting
+    /// its branch. This is the only way to lose work.
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -343,8 +400,9 @@ pub(crate) enum WorkspaceCommand {
     List(WorkspaceList),
     /// Show one run's workspace: where it is, which branch, what it was cut from, what it holds.
     Show(WorkspaceShow),
-    /// What one run changed in its workspace against the commit it was cut from: every changed
-    /// file with its added and removed lines. With --path, the patch of that file too.
+    /// What a run's workspace holds against the commit it was cut from: every changed file with
+    /// its added and removed lines. With --scope run, only what that run changed; with --scope
+    /// <commit>, one commit. With --path, the patch of that file too.
     Diff(WorkspaceDiffArgs),
     /// Remove workspaces that hold nothing to lose. A workspace with unmerged commits or
     /// uncommitted changes is kept unless --force.
@@ -379,6 +437,23 @@ pub(crate) struct WorkspaceDiffArgs {
     /// Also print this file's patch (repository-relative path).
     #[arg(long, value_name = "FILE")]
     pub(crate) path: Option<String>,
+    /// What to compare: `thread` (everything the thread holds against its base, the default),
+    /// `run` (what this run changed since it started), or a commit of the thread's branch.
+    #[arg(long, value_name = "SCOPE", default_value = "thread", value_parser = parse_diff_scope)]
+    pub(crate) scope: reno_proto::DiffScope,
+}
+
+fn parse_diff_scope(text: &str) -> Result<reno_proto::DiffScope, String> {
+    match text {
+        "thread" => Ok(reno_proto::DiffScope::Thread),
+        "run" => Ok(reno_proto::DiffScope::Run),
+        sha if (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Ok(reno_proto::DiffScope::Commit {
+                sha: sha.to_owned(),
+            })
+        }
+        _ => Err("expected `thread`, `run`, or a commit (7 to 64 hexadecimal characters)".into()),
+    }
 }
 
 #[derive(Debug, Args)]
@@ -388,10 +463,13 @@ pub(crate) struct WorkspaceShow {
 }
 
 #[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("target").required(true).args(["run", "merged", "all_clean"])))]
+#[command(group(clap::ArgGroup::new("target").required(true).args(["run", "thread", "merged", "all_clean"])))]
 pub(crate) struct WorkspaceClean {
-    /// Clean this run's workspace.
+    /// Clean this run's workspace (its thread's worktree).
     pub(crate) run: Option<RunId>,
+    /// Clean this thread's workspace. A removed worktree closes the thread.
+    #[arg(long, value_name = "THREAD")]
+    pub(crate) thread: Option<ThreadId>,
     /// Clean every kept workspace whose branch is merged into its repository's HEAD.
     #[arg(long)]
     pub(crate) merged: bool,

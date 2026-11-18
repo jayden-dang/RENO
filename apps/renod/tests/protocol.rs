@@ -47,7 +47,7 @@ daemon_test! {
             assert!(fx.client.supports(feature), "{feature} was not negotiated");
         }
 
-        let run = within(fx.client.run_task(TaskRunParams { model_options: Default::default(),
+        let run = within(fx.client.run_task(TaskRunParams { thread_id: None, model_options: Default::default(),
             effort: None,
             prompt: "say hello\nand then goodbye".into(),
             executor: Some(id("mock")),
@@ -149,7 +149,7 @@ daemon_test! {
 daemon_test! {
     async fn an_effort_no_model_lists_is_refused_as_invalid_params_and_nothing_runs() {
         let fx = Fixture::start().await;
-        let e = within(fx.client.run_task(TaskRunParams { model_options: Default::default(),
+        let e = within(fx.client.run_task(TaskRunParams { thread_id: None, model_options: Default::default(),
             effort: Some(reno_proto::Effort::High),
             prompt: "think hard".into(),
             executor: Some(id("mock")),
@@ -560,7 +560,7 @@ daemon_test! {
         assert_eq!(code(&e), ErrorCode::NotFound);
 
         // task.run: unknown executor, blank prompt, bad cwd.
-        let run = |prompt: &str, executor: &str, cwd: Option<&str>| TaskRunParams { model_options: Default::default(),
+        let run = |prompt: &str, executor: &str, cwd: Option<&str>| TaskRunParams { thread_id: None, model_options: Default::default(),
             effort: None,
             prompt: prompt.into(),
             executor: Some(id(executor)),
@@ -730,7 +730,7 @@ daemon_test! {
         let inside = repo.join("src");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(&inside).unwrap();
-        let task = |cwd: &std::path::Path, prompt: &str| TaskRunParams { model_options: Default::default(),
+        let task = |cwd: &std::path::Path, prompt: &str| TaskRunParams { thread_id: None, model_options: Default::default(),
             effort: None,
             prompt: prompt.into(),
             executor: Some(id("mock-approval")),

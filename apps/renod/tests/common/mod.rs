@@ -271,6 +271,7 @@ impl Fixture {
 
     pub(crate) async fn run(&self, executor: &str, prompt: &str) -> RunId {
         within(self.client.run_task(TaskRunParams {
+            thread_id: None,
             model_options: Default::default(),
             effort: None,
             prompt: prompt.into(),

@@ -17,8 +17,11 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         | KernelError::ApprovalNotFound(_)
         | KernelError::RuleNotFound(_)
         | KernelError::TriggerNotFound(_)
-        | KernelError::ExecutorNotFound(_) => ErrorCode::NotFound,
-        KernelError::TriggerDisabled(_) => ErrorCode::Conflict,
+        | KernelError::ExecutorNotFound(_)
+        | KernelError::ThreadNotFound(_) => ErrorCode::NotFound,
+        KernelError::TriggerDisabled(_)
+        | KernelError::ThreadBusy { .. }
+        | KernelError::ThreadClosed(_) => ErrorCode::Conflict,
         KernelError::JobRunning(_) => ErrorCode::JobRunning,
         KernelError::NothingToDo { .. } => ErrorCode::NothingToDo,
         KernelError::NoUpdater(_) => ErrorCode::NoUpdater,
@@ -61,7 +64,9 @@ fn store_code(error: &StoreError) -> ErrorCode {
         StoreError::NotFound { .. } => ErrorCode::NotFound,
         StoreError::AlreadyExists { .. }
         | StoreError::IllegalTransition { .. }
-        | StoreError::NotLeased { .. } => ErrorCode::Conflict,
+        | StoreError::NotLeased { .. }
+        | StoreError::ThreadBusy { .. }
+        | StoreError::ThreadClosed(_) => ErrorCode::Conflict,
         StoreError::StaleFence { .. } => ErrorCode::StaleFence,
         StoreError::InvalidArgument(_) => ErrorCode::InvalidParams,
         StoreError::Closed => ErrorCode::Unavailable,
@@ -162,6 +167,10 @@ mod tests {
 
     use super::*;
 
+    fn thread() -> reno_proto::ThreadId {
+        reno_proto::ThreadId::from_suffix("a").expect("id")
+    }
+
     fn run() -> RunId {
         RunId::from_suffix("a").expect("id")
     }
@@ -184,6 +193,15 @@ mod tests {
                 ErrorCode::Conflict,
             ),
             (KernelError::RunEnded(run()), ErrorCode::Conflict),
+            (KernelError::ThreadNotFound(thread()), ErrorCode::NotFound),
+            (
+                KernelError::ThreadBusy {
+                    thread: thread(),
+                    run: run(),
+                },
+                ErrorCode::Conflict,
+            ),
+            (KernelError::ThreadClosed(thread()), ErrorCode::Conflict),
             (
                 KernelError::NotResumable {
                     run: run(),

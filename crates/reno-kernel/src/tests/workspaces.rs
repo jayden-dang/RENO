@@ -1,7 +1,7 @@
 #![cfg(test)]
 
-//! Where runs work (T1.3): placement, release at a run's end, clean, and the start-up sweep,
-//! over the in-memory `FakeWorkspace`. No git, no disk.
+//! Where runs work (T1.3, threads RP0.5): placement, release when a thread closes, clean, and
+//! the start-up sweep, over the in-memory `FakeWorkspace`. No git, no disk.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,8 +10,8 @@ use std::time::Duration;
 use reno_harness::exec::MockStep;
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    CleanOutcome, CleanTarget, ExecEvent, RunId, RunStatus, SandboxLevel, Seq, WorkspaceChanges,
-    WorkspaceInfo, WorkspaceStatus,
+    CleanOutcome, CleanTarget, ExecEvent, RunId, RunStatus, SandboxLevel, Seq, ThreadId,
+    WorkspaceChanges, WorkspaceInfo, WorkspaceStatus,
 };
 use reno_store::NewTask;
 
@@ -23,10 +23,15 @@ fn changes(commits: u32, dirty: bool) -> WorkspaceChanges {
     WorkspaceChanges { commits, dirty }
 }
 
-fn worktree(run: &RunId, repo: &str) -> PathBuf {
+/// Where the fake puts the worktree named `name` (a thread id).
+fn worktree(name: &str, repo: &str) -> PathBuf {
     PathBuf::from(FAKE_WORKTREES)
         .join(format!("{repo}-000000000000"))
-        .join(run.as_str())
+        .join(name)
+}
+
+async fn thread_of(fx: &Fx, run: &RunId) -> ThreadId {
+    fx.kernel.run_thread(run).await.unwrap()
 }
 
 async fn submit_at(fx: &Fx, cwd: &str) -> RunId {
@@ -75,23 +80,37 @@ async fn with(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_write_run_in_a_repository_works_in_its_own_worktree_and_a_clean_one_is_removed() {
+async fn a_write_run_works_in_its_threads_worktree_which_stays_until_the_thread_closes() {
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
     let m = mock([]);
     let fx = with(&ws, config(2), std::slice::from_ref(&m)).await;
 
     let run = submit_at(&fx, "/repo/crates/x").await;
     ended(&fx, &run, RunStatus::Succeeded).await;
+    let thread = thread_of(&fx, &run).await;
 
     let specs = m.log().specs;
     assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].cwd, worktree(&run, "repo").join("crates/x"));
+    assert_eq!(
+        specs[0].cwd,
+        worktree(thread.as_str(), "repo").join("crates/x")
+    );
     assert_ne!(specs[0].cwd, PathBuf::from("/repo/crates/x"));
 
+    // The run's end releases nothing: the thread may be continued.
     let info = fx.kernel.workspace(&run).await.unwrap();
-    assert_eq!(info.status, WorkspaceStatus::Removed);
-    assert_eq!(info.branch, format!("reno/{run}"));
+    assert_eq!(info.status, WorkspaceStatus::Active);
+    assert_eq!(info.branch, format!("reno/{thread}"));
     assert_eq!(info.subdir, "crates/x");
+    assert!(ws.exists(&run));
+
+    // Closing it releases a clean worktree.
+    let closed = fx.kernel.close_thread(&thread, false).await.unwrap();
+    assert_eq!(closed.workspace, Some(CleanOutcome::Removed));
+    assert_eq!(
+        fx.kernel.workspace(&run).await.unwrap().status,
+        WorkspaceStatus::Removed
+    );
     assert!(!ws.exists(&run));
     assert_eq!(
         workspace_kinds(&fx).await,
@@ -107,13 +126,13 @@ async fn a_write_run_in_a_repository_works_in_its_own_worktree_and_a_clean_one_i
         [
             format!("plan {run}"),
             format!("create {run}"),
-            format!("release {run} IfClean")
+            format!("release {run} IfMerged")
         ]
     );
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_run_that_left_work_behind_keeps_its_worktree_and_branch() {
+async fn a_thread_closed_with_work_left_behind_keeps_its_worktree_and_branch() {
     let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
     let m = mock([MockStep::Sleep(Duration::from_secs(5))]);
     let fx = with(&ws, config(1), &[m]).await;
@@ -123,7 +142,16 @@ async fn a_run_that_left_work_behind_keeps_its_worktree_and_branch() {
     placed(&ws, &run).await;
     ws.set_changes(&run, changes(2, true));
     ended(&fx, &run, RunStatus::Succeeded).await;
+    assert_eq!(
+        fx.kernel.workspace(&run).await.unwrap().status,
+        WorkspaceStatus::Active
+    );
 
+    let thread = thread_of(&fx, &run).await;
+    let closed = fx.kernel.close_thread(&thread, false).await.unwrap();
+    assert_eq!(closed.workspace, Some(CleanOutcome::Kept));
+    assert!(closed.reason.unwrap().contains("--force"));
+    assert_eq!(closed.thread.status, reno_proto::ThreadStatus::Closed);
     let info = fx.kernel.workspace(&run).await.unwrap();
     assert_eq!(info.status, WorkspaceStatus::Kept);
     assert_eq!(info.changes, Some(changes(2, true)));
@@ -251,7 +279,8 @@ async fn only_a_bot_that_opts_in_may_write_in_place_and_never_in_a_repository() 
     // Opting in never lets a repository be written in place.
     let in_repo = go("loose", "/repo").await;
     ended(&fx, &in_repo, RunStatus::Succeeded).await;
-    assert_eq!(m.log().specs[1].cwd, worktree(&in_repo, "repo"));
+    let thread = thread_of(&fx, &in_repo).await;
+    assert_eq!(m.log().specs[1].cwd, worktree(thread.as_str(), "repo"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -305,7 +334,7 @@ fn info(run: &RunId) -> WorkspaceInfo {
         run_id: run.clone(),
         repo: "/repo".into(),
         repo_key: "repo-000000000000".into(),
-        path: worktree(run, "repo"),
+        path: worktree(run.as_str(), "repo"),
         subdir: String::new(),
         branch: format!("reno/{run}"),
         base_sha: "0".repeat(40),
@@ -396,13 +425,15 @@ async fn start_up_marks_a_vanished_directory_with_work_as_lost_and_without_work_
     assert!(ws.branch_exists(&lost), "the branch with commits stays");
 }
 
-/// A kept workspace for a finished run, made the way a run makes it.
+/// A kept workspace for a finished run whose thread was closed, made the way a run makes it.
 async fn kept_after_a_run(ws: &Arc<FakeWorkspace>, fx: &Fx, repo_dir: &str) -> RunId {
     let run = submit_at(fx, repo_dir).await;
     fx.wait_status(&run, RunStatus::Running).await;
     placed(ws, &run).await;
     ws.set_changes(&run, changes(2, false));
     ended(fx, &run, RunStatus::Succeeded).await;
+    let thread = thread_of(fx, &run).await;
+    fx.kernel.close_thread(&thread, false).await.unwrap();
     assert_eq!(
         fx.kernel.workspace(&run).await.unwrap().status,
         WorkspaceStatus::Kept
@@ -638,6 +669,10 @@ async fn a_removed_workspace_has_an_empty_diff_not_an_error_and_an_unknown_run_i
         },
     );
     ended(&fx, &run, RunStatus::Succeeded).await;
+    // The fake's tree holds nothing, so closing the thread removes it.
+    ws.set_changes(&run, changes(0, false));
+    let thread = thread_of(&fx, &run).await;
+    fx.kernel.close_thread(&thread, false).await.unwrap();
     let info = fx.kernel.workspace(&run).await.unwrap();
     assert_eq!(info.status, WorkspaceStatus::Removed);
 

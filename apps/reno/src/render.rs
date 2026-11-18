@@ -13,8 +13,9 @@ use reno_proto::{
     Approval, ApprovalId, ApprovalOutcome, ApprovalRecord, ApprovalStatus, ApprovalSubject,
     CleanItem, CleanOutcome, DaemonStatusInfo, ExecEvent, ExecutorInfo, FiringOutcome,
     InstallStatus, ModelSource, NotInstalledReason, ReportStatus, ResolvedBy, RoutingDecision,
-    RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, TriggerFireResult, TriggerInfo,
-    TriggerStatus, VersionGate, WorkspaceDiffResult, WorkspaceInfo, WorkspaceStatus,
+    RunEventItem, RunStatus, RunSummary, SignedIn, StopReason, ThreadCloseResult, ThreadInfo,
+    TriggerFireResult, TriggerInfo, TriggerStatus, VersionGate, WorkspaceDiffResult, WorkspaceInfo,
+    WorkspaceStatus,
 };
 use serde::Serialize;
 
@@ -592,6 +593,76 @@ pub(crate) fn workspace_detail(workspace: &WorkspaceInfo) -> Vec<String> {
     lines.push(format!("created    {}", at(workspace.created_at_ms)));
     lines.push(format!("updated    {}", at(workspace.updated_at_ms)));
     lines
+}
+
+/// One thread on one line: id, status, how many runs, branch, what its worktree is doing.
+pub(crate) fn thread_line(thread: &ThreadInfo) -> String {
+    let mut line = format!(
+        "{} {:<6} {} run(s)",
+        thread.thread_id,
+        wire_name(&thread.status),
+        thread.runs.len()
+    );
+    if let Some(branch) = &thread.branch {
+        line.push_str(&format!("  {branch}"));
+    }
+    if let Some(status) = &thread.workspace {
+        line.push_str(&format!("  worktree {}", wire_name(status)));
+    }
+    if let Some(project) = &thread.project {
+        line.push_str(&format!("  {}", project.display()));
+    }
+    line
+}
+
+/// Every field of a thread, one per line, then its runs.
+pub(crate) fn thread_detail(thread: &ThreadInfo) -> Vec<String> {
+    let at = |ms: u64| format_instant(i64::try_from(ms).unwrap_or(i64::MAX), None);
+    let mut lines = vec![
+        format!("thread     {}", thread.thread_id),
+        format!("status     {}", wire_name(&thread.status)),
+    ];
+    if let Some(cwd) = &thread.cwd {
+        lines.push(format!("folder     {}", cwd.display()));
+    }
+    if let Some(project) = &thread.project {
+        lines.push(format!("repository {}", project.display()));
+    }
+    if let Some(worktree) = &thread.worktree {
+        lines.push(format!("worktree   {}", worktree.display()));
+    }
+    if let Some(status) = &thread.workspace {
+        lines.push(format!("workspace  {}", wire_name(status)));
+    }
+    if let Some(branch) = &thread.branch {
+        lines.push(format!("branch     {branch}"));
+    }
+    if let Some(base) = &thread.base_sha {
+        lines.push(format!("base       {base}"));
+    }
+    lines.push(format!("created    {}", at(thread.created_at_ms)));
+    lines.push(format!("updated    {}", at(thread.updated_at_ms)));
+    if let Some(expires) = thread.idle_expires_at_ms {
+        lines.push(format!("closes     {} (idle)", at(expires)));
+    }
+    for (n, run) in thread.runs.iter().enumerate() {
+        let start = run.start_sha.as_deref().map_or(String::new(), |sha| {
+            format!("  started at {}", &sha[..sha.len().min(12)])
+        });
+        lines.push(format!("run {:<2}     {}{start}", n + 1, run.run_id));
+    }
+    lines
+}
+
+/// What `reno thread close` says.
+pub(crate) fn thread_closed_line(closed: &ThreadCloseResult) -> String {
+    let id = &closed.thread.thread_id;
+    match (closed.workspace, &closed.reason) {
+        (Some(CleanOutcome::Removed), _) => format!("{id} closed, worktree removed"),
+        (Some(CleanOutcome::Kept), Some(why)) => format!("{id} closed, worktree kept: {why}"),
+        (Some(CleanOutcome::Kept), None) => format!("{id} closed, worktree kept"),
+        (None, _) => format!("{id} closed"),
+    }
 }
 
 /// What `reno workspace clean` says about one workspace.

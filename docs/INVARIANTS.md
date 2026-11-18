@@ -84,7 +84,8 @@ There is no periodic wake: an idle scheduler arms no timer, and a busy one arms 
 earliest deadline.
 
 One rule says which clock a deadline is on. **Wall clock** (re-read on wake): trigger due times and
-retry times, approval expiry (`expires_at`), standing-rule expiry, run leases, the budget day. On
+retry times, approval expiry (`expires_at`), standing-rule expiry, run leases, the budget day, the idle limit of a thread (one deadline, for
+the thread that has been idle the longest). On
 wake a pending approval past its `expires_at` expires at once through the same path as its timer,
 every live run's lease is renewed before the queue is looked at again, and the scheduler fires
 what came due. A run token's `expires_at` is a wall-clock safety net (the greater of four times

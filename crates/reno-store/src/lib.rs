@@ -46,6 +46,7 @@ mod report_backfill;
 mod routing;
 pub mod rules;
 pub mod runs;
+mod threads;
 pub mod triggers;
 mod workspaces;
 mod writer;
@@ -62,6 +63,7 @@ pub use events::EventRecord;
 pub use executor_settings::ExecutorSetting;
 pub use journal::{JournalWriter, Journals, Replay};
 pub use report_backfill::Backfill;
+pub use routing::RoutedRun;
 pub use rules::NewRule;
 pub use runs::{Claim, NewTask, Note, Resumed, RunRecord};
 pub use triggers::{FireResult, FiringRecord, FiringRun, NewFiring, TriggerRow, firing_nonce};
@@ -87,6 +89,8 @@ mod routing_tests;
 mod rule_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod thread_tests;
 #[cfg(test)]
 mod trigger_tests;
 #[cfg(test)]

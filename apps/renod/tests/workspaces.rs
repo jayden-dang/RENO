@@ -84,6 +84,7 @@ fn snapshot(repo: &Path) -> BTreeMap<String, Vec<u8>> {
 
 async fn run_in(fx: &Fixture, executor: &str, cwd: &Path) -> RunId {
     within(fx.client.run_task(TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "work".into(),
@@ -146,7 +147,11 @@ async fn a_run_in_a_repository_works_in_a_worktree_and_the_checkout_is_untouched
     .await;
     assert_eq!(info.repo, repo);
     assert_eq!(info.subdir, "src");
-    assert_eq!(info.branch, format!("reno/{run}"));
+    // The worktree and the branch are the run's thread's.
+    let thread = fx.client.list_threads(None).await.unwrap()[0]
+        .thread_id
+        .clone();
+    assert_eq!(info.branch, format!("reno/{thread}"));
     assert_eq!(info.base_sha, head);
     assert!(
         info.path.starts_with(fx.paths.worktrees()),
@@ -172,16 +177,14 @@ async fn a_run_in_a_repository_works_in_a_worktree_and_the_checkout_is_untouched
     until_status(&fx, &run, RunStatus::Cancelled).await;
     ended(&fx, &run).await;
 
-    let kept = fx.client.get_workspace(run.clone()).await.unwrap();
-    assert_eq!(kept.status, WorkspaceStatus::Kept);
-    assert_eq!(kept.changes.unwrap().commits, 1);
-    assert!(kept.path.join("agent.txt").exists());
-    let listed = fx
-        .client
-        .list_workspaces(Some(vec![WorkspaceStatus::Kept]))
-        .await
-        .unwrap();
-    assert_eq!(listed.len(), 1);
+    // The run's end released nothing: its thread may be continued.
+    let held = fx.client.get_workspace(run.clone()).await.unwrap();
+    assert_eq!(held.status, WorkspaceStatus::Active);
+    assert!(held.path.join("agent.txt").exists());
+    assert_eq!(
+        fx.client.get_thread(thread.clone()).await.unwrap().status,
+        reno_proto::ThreadStatus::Idle
+    );
 
     // Unmerged commits survive every clean without force.
     for target in [
@@ -197,8 +200,18 @@ async fn a_run_in_a_repository_works_in_a_worktree_and_the_checkout_is_untouched
             "{items:?}"
         );
     }
+    // Cleaning looked at it and kept what it holds.
+    let kept = fx.client.get_workspace(run.clone()).await.unwrap();
+    assert_eq!(kept.status, WorkspaceStatus::Kept);
+    assert_eq!(kept.changes.unwrap().commits, 1);
     assert!(kept.path.exists());
     assert!(!git(&repo, &["branch", "--list", &kept.branch]).is_empty());
+    let listed = fx
+        .client
+        .list_workspaces(Some(vec![WorkspaceStatus::Kept]))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
 
     // Forced, it goes.
     let items = fx
@@ -229,12 +242,22 @@ async fn a_run_in_a_repository_works_in_a_worktree_and_the_checkout_is_untouched
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_run_that_changes_nothing_leaves_no_worktree_and_no_branch() {
+async fn a_run_that_changes_nothing_leaves_no_worktree_and_no_branch_once_its_thread_closes() {
     let fx = Fixture::start().await;
     let repo = repo(&fx);
     let run = run_in(&fx, "mock", &repo).await;
     until_status(&fx, &run, RunStatus::Succeeded).await;
     ended(&fx, &run).await;
+    // The thread may be continued, so the worktree is still there.
+    let info = fx.client.get_workspace(run.clone()).await.unwrap();
+    assert_eq!(info.status, WorkspaceStatus::Active);
+    assert!(info.path.exists());
+
+    let thread = fx.client.list_threads(None).await.unwrap()[0]
+        .thread_id
+        .clone();
+    let closed = fx.client.close_thread(thread, false).await.unwrap();
+    assert_eq!(closed.workspace, Some(CleanOutcome::Removed));
     let info = fx.client.get_workspace(run).await.unwrap();
     assert_eq!(info.status, WorkspaceStatus::Removed);
     assert!(!info.path.exists());
@@ -272,6 +295,7 @@ async fn a_bot_less_task_opts_in_to_in_place_writes_and_a_repository_is_still_ne
     let plain = fx.dir.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
     let in_place = |cwd: &Path| TaskRunParams {
+        thread_id: None,
         model_options: Default::default(),
         effort: None,
         prompt: "work".into(),
@@ -364,6 +388,7 @@ async fn workspace_diff_lists_what_a_run_changed_and_patches_one_file() {
     // A clean worktree has nothing yet.
     let diff = |path: Option<&str>| {
         rpc.call::<WorkspaceDiff>(WorkspaceDiffParams {
+            scope: None,
             run_id: run.clone(),
             path: path.map(str::to_owned),
         })
@@ -409,6 +434,7 @@ async fn workspace_diff_lists_what_a_run_changed_and_patches_one_file() {
     }
     let err = rpc
         .call::<WorkspaceDiff>(WorkspaceDiffParams {
+            scope: None,
             run_id: RunId::from_suffix("nope").unwrap(),
             path: None,
         })

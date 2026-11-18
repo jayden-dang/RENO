@@ -189,7 +189,7 @@ CREATE TABLE runs (
     created_at       INTEGER NOT NULL,
     started_at       INTEGER,
     ended_at         INTEGER
-, process_start INTEGER, bot_name TEXT, bot_version INTEGER, stop TEXT CHECK (stop IS NULL OR json_valid(stop)), not_resumed TEXT CHECK (not_resumed IS NULL OR json_valid(not_resumed)), resume_prompt TEXT, report TEXT CHECK (report IS NULL OR json_valid(report)));
+, process_start INTEGER, bot_name TEXT, bot_version INTEGER, stop TEXT CHECK (stop IS NULL OR json_valid(stop)), not_resumed TEXT CHECK (not_resumed IS NULL OR json_valid(not_resumed)), resume_prompt TEXT, report TEXT CHECK (report IS NULL OR json_valid(report)), thread_id TEXT REFERENCES threads (id), parent_run TEXT REFERENCES runs (id), start_sha TEXT);
 
 CREATE INDEX runs_bot ON runs (bot_name, bot_version) WHERE bot_name IS NOT NULL;
 
@@ -208,9 +208,14 @@ CREATE INDEX runs_claimable ON runs (created_at) WHERE status IN ('queued', 'lea
 
 CREATE INDEX runs_created ON runs (created_at);
 
+CREATE UNIQUE INDEX runs_one_live_per_thread ON runs (thread_id)
+    WHERE status IN ('queued', 'leased', 'running', 'waiting_input', 'waiting_approval', 'evaluating');
+
 CREATE INDEX runs_status ON runs (status);
 
 CREATE INDEX runs_task ON runs (task_id);
+
+CREATE INDEX runs_thread ON runs (thread_id, created_at);
 
 CREATE TABLE sqlite_sequence(name,seq);
 
@@ -266,6 +271,14 @@ CREATE TABLE tasks (
     created_at  INTEGER NOT NULL
 );
 
+CREATE TABLE threads (
+    id         TEXT PRIMARY KEY,
+    cwd        TEXT,
+    closed_at  INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+
 CREATE TABLE triggers (
     name          TEXT PRIMARY KEY,
     def_version   INTEGER NOT NULL CHECK (def_version >= 1),
@@ -291,11 +304,13 @@ CREATE TABLE workspaces (
     commits    INTEGER CHECK (commits IS NULL OR commits >= 0),
     dirty      INTEGER CHECK (dirty IS NULL OR dirty IN (0, 1)),
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL, thread_id TEXT REFERENCES threads (id),
     CHECK ((commits IS NULL) = (dirty IS NULL))
 );
 
 CREATE UNIQUE INDEX workspaces_live_path ON workspaces (path)
     WHERE status IN ('preparing', 'active', 'kept');
 
-CREATE INDEX workspaces_open ON workspaces (status) WHERE status IN ('preparing', 'active', 'kept')
+CREATE INDEX workspaces_open ON workspaces (status) WHERE status IN ('preparing', 'active', 'kept');
+
+CREATE UNIQUE INDEX workspaces_thread ON workspaces (thread_id)

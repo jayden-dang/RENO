@@ -249,7 +249,7 @@ daemon_test! {
         let fx = Fixture::with(|c| c.executors = set(&[&gone])).await;
         within(fx.client.refresh_executors(None)).await.unwrap();
 
-        let run = within(fx.client.run_task(TaskRunParams { model_options: Default::default(),
+        let run = within(fx.client.run_task(TaskRunParams { thread_id: None, model_options: Default::default(),
             effort: None,
             prompt: "go".into(),
             executor: Some(id("mock")),
@@ -324,7 +324,7 @@ daemon_test! {
         // received grew by a few KiB per run (the bench's memory budget caught it).
         let fx = Fixture::start().await;
         for _ in 0..3 {
-            let run = within(fx.client.run_task(TaskRunParams { model_options: Default::default(),
+            let run = within(fx.client.run_task(TaskRunParams { thread_id: None, model_options: Default::default(),
                 effort: None,
                 prompt: "go".into(),
                 executor: Some(id("mock")),

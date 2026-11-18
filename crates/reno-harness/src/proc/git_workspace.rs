@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! <root>/                       the data directory's `worktrees/`
-//!   <repo key>/<run id>/        one worktree per run, on the branch `reno/<run id>`
+//!   <repo key>/<thread id>/     one worktree per thread, on the branch `reno/<thread id>`
 //! ```
 //!
 //! The **repo key** is `<name>-<12 hex>`: `<name>` is the main working tree's directory name (the
@@ -137,7 +137,7 @@ pub struct Location {
     pub path: PathBuf,
     /// The directory the task targeted, relative to the repository root; empty for the root.
     pub subdir: String,
-    /// The branch, `reno/<run id>`.
+    /// The branch, `reno/<thread id>`.
     pub branch: String,
     /// The commit the branch is cut from.
     pub base_sha: String,
@@ -318,8 +318,9 @@ impl GitWorktrees {
         }))
     }
 
-    /// Plans the worktree for `run`: where it will be and which commit it starts from. Reads
-    /// the repository (`rev-parse` only) and writes nothing.
+    /// Plans the worktree named `run` (a thread id: the directory and the branch carry the
+    /// name): where it will be and which commit it starts from. Reads the repository
+    /// (`rev-parse` only) and writes nothing.
     ///
     /// `Ok(None)` means `dir` is not in a git repository.
     pub async fn plan(&self, run: &str, dir: &Path) -> Result<Option<Location>, GitError> {
@@ -659,6 +660,77 @@ impl GitWorktrees {
         loc: &Location,
         path: Option<&str>,
     ) -> Result<RunChanges, GitError> {
+        self.changes_against(loc, &loc.base_sha, None, path).await
+    }
+
+    /// The commit the worktree of `loc` stands at now (`HEAD`).
+    pub async fn head(&self, loc: &Location) -> Result<String, GitError> {
+        let out = self
+            .git(&loc.path, &["rev-parse", "--verify", "HEAD"])
+            .await?;
+        if !out.ok() {
+            return Err(failed("rev-parse HEAD", &out));
+        }
+        Ok(out.stdout.trim().to_owned())
+    }
+
+    /// What one commit of the branch of `loc` changed against its parent (a root commit, against
+    /// the empty tree), and the patch of `path` in it. The commit must be one of the branch's
+    /// own: after `loc.base_sha` and reachable from `HEAD`, else [`GitError::Unsafe`]. Reads
+    /// only. The name is resolved to a full commit id first, so nothing but a hexadecimal name
+    /// reaches git as a revision.
+    pub async fn commit_changes(
+        &self,
+        loc: &Location,
+        sha: &str,
+        path: Option<&str>,
+    ) -> Result<RunChanges, GitError> {
+        let hex = (7..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex {
+            return Err(GitError::Unsafe(format!("{sha:?} is not a commit name")));
+        }
+        if !tokio::fs::try_exists(&loc.path).await.unwrap_or(false) {
+            return Ok(RunChanges::default());
+        }
+        let spec = format!("{sha}^{{commit}}");
+        let resolved = self
+            .git(&loc.path, &["rev-parse", "--verify", "--quiet", &spec])
+            .await?;
+        if !resolved.ok() {
+            return Err(GitError::Unsafe(format!("{sha} is not a commit here")));
+        }
+        let full = resolved.stdout.trim().to_owned();
+        let range = format!("{}..HEAD", loc.base_sha);
+        let own = self.names(&loc.path, &["rev-list", "-z", &range]).await?;
+        if !own.contains(&full) {
+            return Err(GitError::Unsafe(format!(
+                "{sha} is not a commit of this thread's branch"
+            )));
+        }
+        let parent = format!("{full}^");
+        let has_parent = self
+            .git(&loc.path, &["rev-parse", "--verify", "--quiet", &parent])
+            .await?
+            .ok();
+        let base = if has_parent {
+            parent
+        } else {
+            EMPTY_TREE.to_owned()
+        };
+        let mut out = self.changes_against(loc, &base, Some(&full), path).await?;
+        out.commits = 1;
+        Ok(out)
+    }
+
+    /// Changes of the worktree of `loc` against `base`: with no `to`, committed, staged,
+    /// unstaged and untracked work; with `to`, the changes of that commit alone.
+    async fn changes_against(
+        &self,
+        loc: &Location,
+        base: &str,
+        to: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<RunChanges, GitError> {
         if let Some(path) = path
             && !is_clean_relative(path)
         {
@@ -670,56 +742,54 @@ impl GitWorktrees {
         if !tokio::fs::try_exists(&loc.path).await.unwrap_or(false) {
             return Ok(out);
         }
-        let base = loc.base_sha.as_str();
-        out.commits = self
-            .count(&loc.path, &format!("{base}..HEAD"))
-            .await
-            .unwrap_or(0);
-        let numstat = self
-            .git(
-                &loc.path,
-                &[
-                    "diff",
-                    "--numstat",
-                    "-z",
-                    "-M",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    base,
-                    "--",
-                ],
-            )
-            .await?;
+        let revisions: Vec<&str> = std::iter::once(base).chain(to).collect();
+        if to.is_none() {
+            out.commits = self
+                .count(&loc.path, &format!("{base}..HEAD"))
+                .await
+                .unwrap_or(0);
+        }
+        let mut numstat_args = vec![
+            "diff",
+            "--numstat",
+            "-z",
+            "-M",
+            "--no-ext-diff",
+            "--no-textconv",
+        ];
+        numstat_args.extend(&revisions);
+        numstat_args.push("--");
+        let numstat = self.git(&loc.path, &numstat_args).await?;
         if !numstat.ok() {
             return Err(failed("diff --numstat", &numstat));
         }
-        let status = self
-            .git(
-                &loc.path,
-                &[
-                    "diff",
-                    "--name-status",
-                    "-z",
-                    "-M",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    base,
-                    "--",
-                ],
-            )
-            .await?;
+        let mut status_args = vec![
+            "diff",
+            "--name-status",
+            "-z",
+            "-M",
+            "--no-ext-diff",
+            "--no-textconv",
+        ];
+        status_args.extend(&revisions);
+        status_args.push("--");
+        let status = self.git(&loc.path, &status_args).await?;
         if !status.ok() {
             return Err(failed("diff --name-status", &status));
         }
         let mut files = parse_changes(&status.stdout, &numstat.stdout);
         let tracked_paths: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
 
-        let untracked = self
-            .names(
+        // A commit has no untracked files.
+        let untracked = if to.is_none() {
+            self.names(
                 &loc.path,
                 &["ls-files", "-z", "--others", "--exclude-standard"],
             )
-            .await?;
+            .await?
+        } else {
+            Vec::new()
+        };
         for (n, name) in untracked.into_iter().enumerate() {
             if tracked_paths.contains(&name) {
                 continue;
@@ -753,9 +823,9 @@ impl GitWorktrees {
                     "--no-ext-diff",
                     "--no-textconv",
                     "-M",
-                    base,
-                    "--",
                 ];
+                args.extend(&revisions);
+                args.push("--");
                 let spec = format!(":(literal){path}");
                 let from_spec = entry.from.as_ref().map(|f| format!(":(literal){f}"));
                 args.push(&spec);
@@ -987,6 +1057,9 @@ pub const PATCH_CAP: usize = 256 * 1024;
 const COUNT_LIMIT: u64 = 1024 * 1024;
 /// At most this many untracked files are read to count their lines.
 const UNTRACKED_COUNTED: usize = 2000;
+
+/// The empty tree: what a root commit is compared with.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// What a run changed against its base commit: see [`GitWorktrees::changes_since_base`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
