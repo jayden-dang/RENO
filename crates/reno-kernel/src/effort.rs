@@ -123,6 +123,13 @@ pub(crate) fn check_options(
                     }
                 ));
             };
+            if !listed.settable {
+                return Some(format!(
+                    "option {option:?} of model {} on {executor} is read-only: the agent \
+                     reports it and has no way to set it",
+                    info.id
+                ));
+            }
             if !listed.choices.iter().any(|c| &c.id == choice) {
                 let have: Vec<&str> = listed.choices.iter().map(|c| c.id.as_str()).collect();
                 return Some(format!(

@@ -351,6 +351,7 @@ async fn a_resumed_attempt_keeps_the_runs_effort() {
 fn windowed(id: &str) -> ModelInfo {
     ModelInfo {
         options: vec![reno_proto::ModelOption {
+            settable: true,
             id: "contextWindow".into(),
             label: "Context window".into(),
             choices: ["200k", "1m"]
@@ -427,6 +428,22 @@ async fn an_unknown_option_or_choice_is_refused_naming_the_model_and_what_it_lis
             .0
             .is_empty()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_read_only_option_is_listed_but_cannot_be_set() {
+    let mut read_only = windowed("mock-1");
+    read_only.options[0].settable = false;
+    let m = lister("mock", vec![read_only], &[]);
+    let fx = Fx::new(config(1), registry(std::slice::from_ref(&m))).await;
+    let why = invalid(
+        fx.kernel
+            .submit_task(with_window(request("mock", Some("mock-1"), None), "200k"))
+            .await
+            .unwrap_err(),
+    );
+    assert!(why.contains("read-only"), "{why}");
+    assert!(m.log().specs.is_empty());
 }
 
 #[tokio::test(start_paused = true)]

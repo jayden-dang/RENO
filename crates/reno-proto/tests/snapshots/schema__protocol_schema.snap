@@ -8139,7 +8139,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -8149,6 +8149,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -9294,7 +9298,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -9304,6 +9308,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -10445,7 +10453,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -10455,6 +10463,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -11617,7 +11629,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -11627,6 +11639,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -12765,7 +12781,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -12775,6 +12791,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -13913,7 +13933,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -13923,6 +13943,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -15118,7 +15142,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -15128,6 +15152,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -19211,7 +19239,7 @@ expression: protocol_schema()
                 "type": "array"
               },
               "defaultChoice": {
-                "description": "The choice id used when none is asked for.",
+                "description": "The choice id used when none is asked for. For a read-only option, the choice in force.",
                 "type": "string"
               },
               "id": {
@@ -19221,6 +19249,10 @@ expression: protocol_schema()
               "label": {
                 "description": "Display name.",
                 "type": "string"
+              },
+              "settable": {
+                "description": "Whether `task.run` and `run.configure` may set it. False: the harness reports the value\n(Grok's context window) but offers no way to change it, so `choices` only say what\nsizes exist and a request for it is refused. Absent means true.",
+                "type": "boolean"
               }
             },
             "required": [

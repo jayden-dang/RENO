@@ -391,6 +391,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             _ => return Vec::new(),
         };
         vec![reno_proto::ModelOption {
+            settable: true,
             id: reno_proto::MODEL_OPTION_CONTEXT_WINDOW.to_owned(),
             label: "Context window".to_owned(),
             choices: [("200k", "200K"), ("1m", "1M")]

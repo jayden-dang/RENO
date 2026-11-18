@@ -14,6 +14,7 @@ use reno_proto::{
 /// (`<model>[1m]`), exactly how the CLI does it. Default 200K: the plain id runs 200K.
 pub(super) fn context_window() -> ModelOption {
     ModelOption {
+        settable: true,
         id: MODEL_OPTION_CONTEXT_WINDOW.into(),
         label: "Context window".into(),
         choices: vec![

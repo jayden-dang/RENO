@@ -662,8 +662,21 @@ pub struct ModelOption {
     pub label: String,
     /// The values it takes.
     pub choices: Vec<ModelOptionChoice>,
-    /// The choice id used when none is asked for.
+    /// The choice id used when none is asked for. For a read-only option, the choice in force.
     pub default_choice: String,
+    /// Whether `task.run` and `run.configure` may set it. False: the harness reports the value
+    /// (Grok's context window) but offers no way to change it, so `choices` only say what
+    /// sizes exist and a request for it is refused. Absent means true.
+    #[serde(default = "settable_default", skip_serializing_if = "is_settable")]
+    pub settable: bool,
+}
+
+fn settable_default() -> bool {
+    true
+}
+
+fn is_settable(settable: &bool) -> bool {
+    *settable
 }
 
 /// One value of a [`ModelOption`].

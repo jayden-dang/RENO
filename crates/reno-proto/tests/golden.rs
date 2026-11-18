@@ -1686,6 +1686,7 @@ fn run_context() {
             efforts: vec![],
             default_effort: None,
             options: vec![ModelOption {
+                settable: true,
                 id: MODEL_OPTION_CONTEXT_WINDOW.into(),
                 label: "Context window".into(),
                 choices: vec![
@@ -1713,6 +1714,22 @@ fn run_context() {
             ..TaskRunParams::default()
         },
         json!({"prompt": "p", "modelOptions": {"contextWindow": "200k"}}),
+    );
+    // A read-only option says so; settable is the default and stays off the wire.
+    golden(
+        &ModelOption {
+            id: MODEL_OPTION_CONTEXT_WINDOW.into(),
+            label: "Context window".into(),
+            choices: vec![ModelOptionChoice {
+                id: "256k".into(),
+                label: "256K".into(),
+            }],
+            default_choice: "256k".into(),
+            settable: false,
+        },
+        json!({"id": "contextWindow", "label": "Context window",
+               "choices": [{"id": "256k", "label": "256K"}],
+               "defaultChoice": "256k", "settable": false}),
     );
     assert_eq!(FEATURE_RUN_CONTEXT, "run.context");
     assert!(FEATURES.contains(&FEATURE_RUN_CONTEXT));
