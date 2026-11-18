@@ -190,6 +190,10 @@ prefixed_id!(
     /// A live subscription on one connection (`sub_...`).
     SubscriptionId, "sub"
 );
+prefixed_id!(
+    /// A terminal (a shell on a PTY) the daemon holds for a person (`term_...`).
+    TermId, "term"
+);
 
 string_id!(
     /// An installed harness, such as `claude-code`, `codex` or `acp.grok`. A slug, not prefixed.

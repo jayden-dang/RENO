@@ -313,7 +313,7 @@ fn daemon_hello() {
                "features": ["run.events.resume", "runs.watch", "sub.gap", "approvals",
                             "approval.history", "run.steer", "daemon.shutdown", "defs", "triggers", "workspaces", "executors",
                             "executor.install", "approval.message", "routing", "attachments", "budget", "agent",
-                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes", "executor.usage", "threads", "files"],
+                            "run.resume", "run.stop_detail", "secrets", "executor.frames", "rules", "rules.project", "run.model", "run.effort", "run.context", "run.configure", "executor.maintain", "run.changes", "executor.usage", "threads", "files", "terminals"],
                "pid": 4242}),
     );
 }
@@ -1122,6 +1122,7 @@ fn workspace_types_on_the_wire() {
             run_id: run_id(),
             outcome: CleanOutcome::Kept,
             reason: Some("unmerged commits".into()),
+            closed_terminals: Vec::new(),
         },
         json!({"runId": run_id(), "outcome": "kept", "reason": "unmerged commits"}),
     );
@@ -1905,4 +1906,96 @@ fn run_configure() {
     assert_eq!(<RunConfigure as Method>::NAME, "run.configure");
     assert_eq!(FEATURE_RUN_CONFIGURE, "run.configure");
     assert!(FEATURES.contains(&FEATURE_RUN_CONFIGURE));
+}
+
+#[test]
+fn terminal_wire_shapes() {
+    let id: TermId = "term_ab12".parse().unwrap();
+    golden(
+        &TermOpenParams {
+            run_id: run_id(),
+            cols: 120,
+            rows: 40,
+            command: None,
+        },
+        json!({"runId": "run_01HZX9", "cols": 120, "rows": 40}),
+    );
+    golden(
+        &TermOpened {
+            id: id.clone(),
+            cwd: "/w".into(),
+            shell: "zsh".into(),
+            sandboxed: true,
+            in_place: false,
+        },
+        json!({"id": "term_ab12", "cwd": "/w", "shell": "zsh", "sandboxed": true}),
+    );
+    golden(
+        &TermAttachParams {
+            id: id.clone(),
+            after_seq: Some(7),
+        },
+        json!({"id": "term_ab12", "afterSeq": 7}),
+    );
+    golden(
+        &TermEvent::Data {
+            seq: 8,
+            data: encode_bytes(b"\x1b[1mhi"),
+        },
+        json!({"type": "data", "seq": 8, "data": "G1sxbWhp"}),
+    );
+    golden(
+        &TermEvent::Exit {
+            seq: 9,
+            code: None,
+            signal: Some("Hangup".into()),
+        },
+        json!({"type": "exit", "seq": 9, "signal": "Hangup"}),
+    );
+    golden(
+        &TermEvent::Gap {
+            lost_from: 1,
+            seq: 40,
+        },
+        json!({"type": "gap", "lostFrom": 1, "seq": 40}),
+    );
+    golden(
+        &TermStatusResult {
+            busy: true,
+            exited: false,
+            sandboxed: true,
+        },
+        json!({"busy": true, "exited": false, "sandboxed": true}),
+    );
+    golden(
+        &TermListResult {
+            terminals: vec![TermInfo {
+                id,
+                cwd: "/w".into(),
+                shell: "zsh".into(),
+                sandboxed: false,
+                in_place: true,
+                exited: true,
+                opened_at_ms: 5,
+            }],
+        },
+        json!({"terminals": [{"id": "term_ab12", "cwd": "/w", "shell": "zsh",
+               "sandboxed": false, "inPlace": true, "exited": true, "openedAtMs": 5}]}),
+    );
+    assert_eq!(<TermOpen as Method>::NAME, "term.open");
+    assert_eq!(<TermAttach as Subscription>::NAME, "term.attach");
+    assert!(FEATURES.contains(&FEATURE_TERMINALS));
+    // The additive fields of the clean and close outcomes stay off the wire when empty.
+    assert_eq!(
+        serde_json::to_value(CleanItem {
+            run_id: run_id(),
+            outcome: CleanOutcome::Removed,
+            reason: None,
+            closed_terminals: Vec::new(),
+        })
+        .unwrap(),
+        json!({"runId": "run_01HZX9", "outcome": "removed"})
+    );
+    assert_eq!(ErrorCode::TerminalLimit.code(), -32015);
+    assert_eq!(ErrorCode::SandboxUnavailable.code(), -32016);
 }

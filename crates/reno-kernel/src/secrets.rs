@@ -267,3 +267,30 @@ mod tests {
         assert!(!error.to_string().contains("hunter2"));
     }
 }
+
+/// Redacts the values of one run's secrets from text a person reads (see
+/// [`Kernel::run_redactor`](crate::Kernel::run_redactor)).
+#[derive(Debug)]
+pub struct RunRedactor(pub(crate) Option<reno_harness::ValueRedactor>);
+
+impl RunRedactor {
+    /// `text` with every value replaced by `[secret:NAME]`.
+    pub fn redact(&self, text: &str) -> String {
+        match &self.0 {
+            Some(redactor) => redactor.redact_str(text).into_owned(),
+            None => text.to_owned(),
+        }
+    }
+
+    /// Like [`redact`](Self::redact) for `text` that was cut short somewhere else (a file cut at
+    /// its size limit, a search line cut at its width): a trailing fragment of a value, which no
+    /// exact match would see, is dropped as well.
+    pub fn redact_cut(&self, text: &str) -> String {
+        match &self.0 {
+            Some(redactor) => redactor
+                .redact_str(redactor.without_cut_tail(text))
+                .into_owned(),
+            None => text.to_owned(),
+        }
+    }
+}

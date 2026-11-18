@@ -34,6 +34,8 @@ getrandom.workspace = true
 globset.workspace = true
 mimalloc = { workspace = true, optional = true }
 notify.workspace = true
+portable-pty.workspace = true
+tempfile.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -48,7 +50,6 @@ security-framework.workspace = true
 
 [dev-dependencies]
 reno-client.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 
 [lints]

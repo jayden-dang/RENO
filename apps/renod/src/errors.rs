@@ -33,6 +33,7 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         KernelError::SteerQueueFull(_)
         | KernelError::ModelSwitchTimedOut(_)
         | KernelError::ShuttingDown
+        | KernelError::SecretsUnreadable(_)
         | KernelError::Gap { .. } => ErrorCode::Unavailable,
         KernelError::DefinitionNotFound { .. } => ErrorCode::NotFound,
         KernelError::Invalid(_) => ErrorCode::InvalidParams,
@@ -215,6 +216,10 @@ mod tests {
                 ErrorCode::Unavailable,
             ),
             (KernelError::ShuttingDown, ErrorCode::Unavailable),
+            (
+                KernelError::SecretsUnreadable(run()),
+                ErrorCode::Unavailable,
+            ),
             (
                 KernelError::Gap {
                     resume_from: Seq(3),

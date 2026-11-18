@@ -52,6 +52,8 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
 # Cron (T1.8): the one parser behind both validation and firing. It runs on jiff, so no second
 # time-zone database (chrono-tz) is linked.
 croner = { version = "4", default-features = false, features = ["jiff"] }
+# The PTY behind the Terminal tab (renod only, behind the `PtySpawner` port).
+portable-pty = "0.9"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 
 # SQLite: 0.41 because rusqlite_migration 2.7 requires rusqlite ^0.41 (links = "sqlite3").

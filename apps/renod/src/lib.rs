@@ -14,6 +14,8 @@
 //! - [`defs`]: the `Definitions` port over `~/.reno`: first-start files, reading, and the
 //!   debounced `notify` watch.
 //! - [`files`]: the Files tab's service: `fs.*`, `git.status` and `fs.watch`, read-only, person-only.
+//! - [`terminals`]: the Terminal tab's service: `term.*`, shells on PTYs behind a spawner port, the
+//!   D7 sandbox, person-only.
 //! - [`fswatch`]: the `Watch` port for `fs` triggers, over `notify`, debounced per definition.
 //! - [`watcher`]: how the platform watcher is started (a factory), and a count of live ones for tests.
 //! - [`secrets`]: the `Secrets` port over the macOS Keychain, behind a `Keychain` trait with an
@@ -42,6 +44,7 @@ pub mod logging;
 pub mod paths;
 pub mod power;
 pub mod secrets;
+pub mod terminals;
 pub mod watcher;
 pub mod worktrees;
 

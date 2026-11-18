@@ -139,6 +139,7 @@ pub(crate) async fn close_with(
         thread: get(shared, thread).await?,
         workspace: outcome,
         reason,
+        closed_terminals: Vec::new(),
     })
 }
 

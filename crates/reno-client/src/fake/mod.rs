@@ -43,6 +43,7 @@ mod extras;
 pub mod files;
 mod jobs;
 mod script;
+pub mod terminals;
 mod world;
 
 use std::collections::HashMap;
@@ -115,6 +116,10 @@ pub(crate) struct Shared {
     fs_tx: tokio::sync::broadcast::Sender<(RunId, reno_proto::FsChange)>,
     /// Open `fs.watch` subscriptions.
     fs_watches: AtomicUsize,
+    /// The terminals of the Terminal tab.
+    terms: Mutex<HashMap<reno_proto::TermId, terminals::FakeTerm>>,
+    /// Numbers the terminals.
+    term_counter: std::sync::atomic::AtomicU64,
     /// Errors a method answers with, until cleared.
     injected: Mutex<HashMap<String, ErrorObject>>,
     /// One token per open connection, so a test can cut them all.
@@ -236,6 +241,8 @@ impl FakeDaemon {
             defs_tx,
             fs_tx: tokio::sync::broadcast::channel(64).0,
             fs_watches: AtomicUsize::new(0),
+            terms: Mutex::new(HashMap::new()),
+            term_counter: std::sync::atomic::AtomicU64::new(0),
             injected: Mutex::new(HashMap::new()),
             connections: Mutex::new(Vec::new()),
             previews: Mutex::new(Vec::new()),
@@ -1227,7 +1234,7 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::DefValidate, _, _>(def_validate)
         .subscription::<reno_proto::DefsWatch, _, _, _>(defs_watch)
         .notification::<SubGap, _, _>(|_: SubGapParams, _| async {});
-    files::add(router, shared)
+    terminals::add(files::add(router, shared), shared)
 }
 
 /// A simplified `def.validate`: the body must be an object named like the file, and a bot needs

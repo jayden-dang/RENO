@@ -62,6 +62,11 @@ pub enum ErrorCode {
     /// -32014: the path is refused by the sandbox: it climbs out of the root (`..`), is absolute,
     /// leaves the root through a symlink, or reaches into `.git`.
     PathRejected,
+    /// -32015: the daemon holds as many terminals as it will; close one.
+    TerminalLimit,
+    /// -32016: the sandbox a terminal on a live run needs cannot start, so no terminal is
+    /// opened (never an unsandboxed one).
+    SandboxUnavailable,
     /// A code this version does not know. Never produced by this crate's own servers.
     Other(i32),
 }
@@ -89,6 +94,8 @@ impl ErrorCode {
             Self::NoUpdater => -32012,
             Self::WorkspaceUnavailable => -32013,
             Self::PathRejected => -32014,
+            Self::TerminalLimit => -32015,
+            Self::SandboxUnavailable => -32016,
             Self::Other(code) => code,
         }
     }
@@ -115,6 +122,8 @@ impl ErrorCode {
             -32012 => Self::NoUpdater,
             -32013 => Self::WorkspaceUnavailable,
             -32014 => Self::PathRejected,
+            -32015 => Self::TerminalLimit,
+            -32016 => Self::SandboxUnavailable,
             other => Self::Other(other),
         }
     }
@@ -191,6 +200,8 @@ mod tests {
         (ErrorCode::NoUpdater, -32012),
         (ErrorCode::WorkspaceUnavailable, -32013),
         (ErrorCode::PathRejected, -32014),
+        (ErrorCode::TerminalLimit, -32015),
+        (ErrorCode::SandboxUnavailable, -32016),
     ];
 
     #[test]

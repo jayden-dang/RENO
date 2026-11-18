@@ -35,6 +35,30 @@ then reads the wall clock and fires what came due. Nothing wakes it periodically
 `RENO_DATA_DIR` and `RENO_SOCKET` are read by `renod`, `reno` and the app alike, for tests and
 for running two daemons side by side.
 
+## Terminals
+
+`term.*` (feature `terminals`) holds shells on PTYs for a person: `term.open` starts the person's
+login shell (`$SHELL -l`, `TERM=xterm-256color`) in the run's worktree, `term.attach` replays and
+follows its output from a sequence number (a 1 MiB window; older is a `Gap`), `term.write` and
+`term.resize` are applied in order, `term.close` ends it. The daemon only moves bytes; the app owns
+the emulator. At most 16 terminals; a shell that exited is reaped after 30 minutes. Terminals die
+with the daemon. Their output is not redacted: it is the person's own shell. `RENO_*` variables are
+not passed to it. All of it is person-only: a run's token is refused.
+
+While the thread's latest run is live, the shell runs under `sandbox-exec` with a profile that
+denies writes to what the protected-path guard watches (`.claude`, `.codex`, `.reno`, `.mcp.json`
+at any depth, the worktree's `.git` link, and its private git directory under
+`<repo>/.git/worktrees/`), from `reno_proto::defs::PROTECTED_DIRS`, so the guard and the sandbox
+read one list. The limits outlive the run: `term.list` and `term.status` say `sandboxed`, and a
+viewer offers "reopen without limits" (a new `term.open` once the run is over). When
+`sandbox-exec` is missing or refuses the profile, `term.open` on a live run fails with
+`SandboxUnavailable`; it never opens an unlimited shell. A run with no worktree (`inPlace`) gets a
+shell in its own folder, not sandboxed.
+
+A daemon started without a PTY spawner (`DaemonConfig::pty`, set only by the binary, and not under
+`--no-harnesses`) does not offer the feature. Tests use `FakePty`; `RENO_LIVE_PTY=1 cargo test -p
+renod --test term_sandbox live_pty` runs the opt-in tests that start real shells.
+
 ## Definitions
 
 Bots, triggers and the policy are TOML files you own, in `~/.reno` (`--defs-dir` or

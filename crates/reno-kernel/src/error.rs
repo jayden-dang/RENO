@@ -141,6 +141,10 @@ pub enum KernelError {
     /// A CLI's own updater switch could not be moved.
     #[error("could not change the CLI's own updater: {0}")]
     SelfUpdate(String),
+    /// The run has secrets whose values cannot be read now, so nothing can be redacted and the
+    /// text that would need it is withheld.
+    #[error("the secrets of run {0} cannot be read now, so its text is withheld")]
+    SecretsUnreadable(RunId),
     /// A request value cannot be stored (a working directory that is not UTF-8, for example).
     #[error("invalid request: {0}")]
     Invalid(String),

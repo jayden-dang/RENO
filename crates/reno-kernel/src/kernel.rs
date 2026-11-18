@@ -60,6 +60,7 @@ use crate::registry::ExecutorRegistry;
 use crate::resume;
 use crate::router::{self, BotPreference, Candidate, RouteRequest};
 use crate::scheduler::{self, SchedCmd};
+use crate::secrets::RunRedactor;
 use crate::shared::{Shared, SupCmd};
 use crate::workspace::{Workspace, WorkspaceError};
 use crate::workspaces;
@@ -755,6 +756,26 @@ impl Kernel {
             Err(()) => result.patch = None,
         }
         Ok(result)
+    }
+
+    /// The redactor for the secrets of `run`'s bot, for text a person reads out of the run's
+    /// own files (the Files tab): the values it was given must not show there either, just as
+    /// they do not in its journal or `workspace_diff`. A run with no secrets gets a redactor
+    /// that changes nothing. [`SecretsUnreadable`] when it has some and they cannot be read
+    /// now: the caller must then withhold the text, never show it raw.
+    pub async fn run_redactor(&self, run: &RunId) -> Result<RunRedactor> {
+        let row = self.shared.run_record(run).await?;
+        match dispatcher::redactor_for(&self.shared, &row).await {
+            Ok(redactor) => Ok(RunRedactor(redactor)),
+            Err(()) => Err(KernelError::SecretsUnreadable(run.clone())),
+        }
+    }
+
+    /// `text` with the values of `run`'s secrets replaced: [`Kernel::run_redactor`] for one
+    /// string. Reading the secrets costs a call to the store, so a caller with many lines asks
+    /// for the redactor once.
+    pub async fn redact_for_run(&self, run: &RunId, text: &str) -> Result<String> {
+        Ok(self.run_redactor(run).await?.redact(text))
     }
 
     /// Workspaces in one of `status` (all when `None`), newest first.
