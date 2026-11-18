@@ -332,6 +332,9 @@ pub(crate) fn run_bounded(path: &Path, args: &[&str], timeout: std::time::Durati
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // A `#!/usr/bin/env node` CLI (Pi) needs its own directory, and the user's, on the PATH it
+    // runs with: a launchd daemon's is the bare system one.
+    crate::compose_path(&mut command, path.parent().filter(|d| !d.as_os_str().is_empty()));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -537,6 +540,31 @@ pub(crate) fn find_on_paths_matching_with(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Pi is a Node script (`#!/usr/bin/env node`): under launchd the daemon's own PATH is the
+    /// bare system one, which has no `node`, so `pi --version` died with 127 and the install
+    /// showed "version unknown" while the probes that compose a child PATH worked. The version
+    /// read runs the CLI with the directory it lives in on its PATH, as they do.
+    #[cfg(unix)]
+    #[test]
+    fn a_node_script_cli_reads_its_version_without_node_on_the_daemons_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exec = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // The "interpreter" sits beside the script, as a version manager's node sits beside pi.
+        exec("reno-fake-node-for-pi-test", "#!/bin/sh\necho 1.5.0\n");
+        let pi = exec(
+            "pi-script",
+            "#!/usr/bin/env reno-fake-node-for-pi-test\n",
+        );
+        let version = binary_version_with(&pi, std::time::Duration::from_secs(5));
+        assert_eq!(version, Some(semver::Version::new(1, 5, 0)));
+    }
 
     /// Resolution walks the PATHs in the child PATH's order: the login shell
     /// first only behind a bare system PATH.
