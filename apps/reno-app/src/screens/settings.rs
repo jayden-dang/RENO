@@ -8,8 +8,11 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use reno_client::ConnectionStatus;
+use reno_notify::Delivery;
 use reno_proto::defs::DefKind;
 
+use crate::lifecycle;
+use crate::prefs::{Pref, Prefs};
 use crate::store::Store;
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
@@ -25,16 +28,23 @@ pub(crate) enum Tab {
     Definitions,
     Policy,
     Daemon,
+    Notifications,
 }
 
 impl Tab {
-    pub(crate) const ALL: [Self; 3] = [Self::Definitions, Self::Policy, Self::Daemon];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Definitions,
+        Self::Policy,
+        Self::Daemon,
+        Self::Notifications,
+    ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Definitions => "Definitions",
             Self::Policy => "Policy",
             Self::Daemon => "Daemon",
+            Self::Notifications => "Notifications",
         }
     }
 }
@@ -577,6 +587,128 @@ impl SettingsScreen {
     }
 }
 
+/// The switches of the Notifications tab, with the help line under each.
+const NOTIFICATION_SWITCHES: [(Pref, &str, &str); 4] = [
+    (
+        Pref::Notifications,
+        "Banners",
+        "Show a banner when a run needs you, finishes or stops.",
+    ),
+    (
+        Pref::BackgroundOnly,
+        "Only when Reno is in the background",
+        "Hold banners while a Reno window is the active window. A held banner is not shown later.",
+    ),
+    (
+        Pref::Finished,
+        "Finished runs",
+        "Also show a banner when a run finishes. Actions that need you and runs that stop always do.",
+    ),
+    (
+        Pref::DockBadge,
+        "Dock badge",
+        "Show how many runs need you on Reno's Dock icon.",
+    ),
+];
+
+/// Whether banners can be shown here, and as whom.
+pub(crate) const fn delivery_line(delivery: Delivery) -> &'static str {
+    match delivery {
+        Delivery::Native => "Banners show as Reno.",
+        Delivery::Script => {
+            "Reno is not running from Reno.app, so banners show as Script Editor and clicking them does nothing. Run cargo xtask bundle."
+        }
+        Delivery::None => "Banners cannot be shown here.",
+    }
+}
+
+impl SettingsScreen {
+    /// Banners, the badge, and what can be said about whether they will show here.
+    fn notifications_tab(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let banners = lifecycle::banners(cx);
+        let (prefs, delivery) = banners.as_ref().map_or_else(
+            || (Prefs::default(), Delivery::None),
+            |b| {
+                let b = b.read(cx);
+                (b.prefs().clone(), b.delivery())
+            },
+        );
+        let rows = NOTIFICATION_SWITCHES.map(|(pref, label, help)| {
+            let on = prefs.get(pref);
+            let banners = banners.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(14.0))
+                .py(px(10.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(label))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .line_height(px(18.0))
+                                .text_color(theme.muted)
+                                .child(help),
+                        ),
+                )
+                .child(
+                    kit::switch(theme, format!("notify-{}", pref.key()), on).on_click(cx.listener(
+                        move |_, _, _, cx| {
+                            if let Some(banners) = &banners {
+                                banners.update(cx, |b, cx| b.set_pref(pref, !on, cx));
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element()
+        });
+        let delivery_line = delivery_line(delivery);
+        let mut out = vec![
+            page::lede(
+                theme,
+                "Notifications",
+                "Banners and the Dock badge for what needs you.",
+            )
+            .into_any_element(),
+            div()
+                .id("notification-switches")
+                .flex()
+                .flex_col()
+                .children(rows)
+                .into_any_element(),
+        ];
+        out.push(
+            div()
+                .id("notification-delivery")
+                .debug_selector(|| "notification-delivery".to_owned())
+                .text_size(px(13.0))
+                .line_height(px(19.0))
+                .text_color(theme.muted)
+                .child(delivery_line)
+                .into_any_element(),
+        );
+        out.push(
+            div()
+                .id("notification-quit-note")
+                .text_size(px(13.0))
+                .line_height(px(19.0))
+                .text_color(theme.muted)
+                .child(
+                    "After you quit Reno (\u{2318}Q) there are no banners until you open it again.",
+                )
+                .into_any_element(),
+        );
+        out
+    }
+}
+
 impl Render for SettingsScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
@@ -596,6 +728,7 @@ impl Render for SettingsScreen {
                 let view = self.daemon_view(cx);
                 self.daemon_tab(&view, &theme)
             }
+            Tab::Notifications => self.notifications_tab(&theme, cx),
         };
         let body = page::content(page::WIDE)
             .when_some(banner.as_ref(), |c, b| {
