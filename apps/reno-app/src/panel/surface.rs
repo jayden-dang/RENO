@@ -8,8 +8,6 @@ use crate::ui::icon::Icon;
 use crate::vm::panel_home::HomeKind;
 
 /// One thing the panel can show.
-// The kinds past Review are built by later phases; the model carries them already.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Surface {
     /// The New-tab page. Also what the panel shows with no tab.
@@ -114,8 +112,6 @@ impl Surface {
     }
 
     /// The form that is saved.
-    // Saved panel state arrives with its own task; until then nothing reads this.
-    #[allow(dead_code)]
     pub(crate) fn descriptor(&self) -> Descriptor {
         let (kind, key) = match self {
             Self::Home => (Kind::Home, String::new()),
@@ -133,8 +129,6 @@ impl Surface {
     }
 }
 
-// Saved panel state arrives with its own task; until then nothing builds this.
-#[allow(dead_code)]
 /// The kind of a saved tab. A kind this build does not know reads as `Unknown`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,8 +145,6 @@ pub(crate) enum Kind {
     Unknown,
 }
 
-// Saved panel state arrives with its own task; until then nothing builds this.
-#[allow(dead_code)]
 /// A tab as saved: a kind and the key that identifies it. Small and stable on purpose; the live
 /// entity behind it is rebuilt on demand.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,8 +156,6 @@ pub(crate) struct Descriptor {
 
 impl Descriptor {
     /// The tab this describes, or `None` for a kind or key this build cannot read.
-    // Saved panel state arrives with its own task; until then nothing reads this.
-    #[allow(dead_code)]
     pub(crate) fn surface(&self) -> Option<Surface> {
         let key = self.key.as_str();
         match self.kind {

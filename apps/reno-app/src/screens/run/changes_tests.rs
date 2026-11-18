@@ -292,7 +292,7 @@ fn an_older_daemon_has_no_review_tab_and_the_home_says_why(cx: &mut TestAppConte
     let home = screen.read_with(vcx, |s, cx| s.home(cx).unwrap());
     let row = home.row(crate::vm::panel_home::HomeKind::Changes).unwrap();
     assert!(!row.enabled);
-    // An old daemon cannot say whether the folder is a repository (no `workspace.get`), so the
-    // home reads it as none.
-    assert_eq!(row.detail, "no repository");
+    // An old daemon cannot say whether the folder is a repository (no `workspace.get`): that is
+    // unknown, not "no repository", so the row says the daemon is too old.
+    assert_eq!(row.detail, "daemon too old");
 }

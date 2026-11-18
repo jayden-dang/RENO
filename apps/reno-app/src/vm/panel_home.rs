@@ -314,6 +314,13 @@ fn pane_branch(pane: &Pane) -> Option<&str> {
     }
 }
 
+/// Whether the run's folder counts as inside a repository. `answered` is a `workspace.get`
+/// answer that says so. A daemon that cannot answer at all (`!supports_changes`, an old one) has
+/// not said "no repository", so it is not taken as that: Changes then says the daemon is too old.
+pub(crate) fn in_repository(supports_changes: bool, answered: bool) -> bool {
+    !supports_changes || answered
+}
+
 fn place(pane: &Pane, facts: &HomeFacts<'_>) -> Place {
     match pane {
         Pane::Removed { .. } => Place::Removed,
@@ -853,6 +860,24 @@ mod tests {
                 assert!(!r.enabled, "{kind:?} {pane:?}");
                 assert_eq!(r.reason.as_deref(), Some("no repository"));
             }
+        }
+    }
+
+    #[test]
+    fn an_old_daemon_is_unknown_not_no_repository() {
+        // A daemon without changes support never answers `workspace.get`.
+        assert!(in_repository(false, false));
+        assert!(in_repository(true, true));
+        assert!(!in_repository(true, false));
+
+        let mut f = facts(RunStatus::Succeeded);
+        f.in_repository = in_repository(false, false);
+        let h = home(&f, &Pane::Unsupported);
+        let changes = row(&h, HomeKind::Changes);
+        assert_eq!(changes.detail, "daemon too old");
+        assert!(!changes.enabled);
+        for kind in [HomeKind::Files, HomeKind::History, HomeKind::Terminal] {
+            assert!(row(&h, kind).enabled, "{kind:?}");
         }
     }
 

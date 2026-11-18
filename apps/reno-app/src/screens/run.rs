@@ -20,6 +20,7 @@ use reno_proto::{
 };
 
 use super::ScreenEvent;
+use crate::panel::saved::Saved;
 use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
@@ -63,8 +64,6 @@ pub(crate) struct RunScreen {
     outputs_open: HashSet<String>,
     outputs_full: HashSet<String>,
     /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
-    /// Read by the saved-state task, which stores a panel under it.
-    #[allow(dead_code)]
     panel_key: PanelKey,
     panel: PanelState,
     /// Whether the first tabs were chosen from what the run turned out to have, and whether the
@@ -102,6 +101,12 @@ impl RunScreen {
     pub(crate) fn new(store: Entity<Store>, run: RunId, cx: &mut Context<Self>) -> Self {
         store.update(cx, |store, cx| store.open_run(run.clone(), cx));
         let steer = cx.new(|cx| Composer::steer(store.clone(), run.clone(), cx));
+        let key = PanelKey(run.to_string());
+        let (panel, panel_seeded) = match Saved::get(&key, cx) {
+            // What the person left: the first-tabs choice must not undo it.
+            Some(saved) => (PanelState::restore(&saved), true),
+            None => (PanelState::default(), false),
+        };
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         let mut screen = Self {
@@ -118,9 +123,9 @@ impl RunScreen {
             open: HashSet::new(),
             outputs_open: HashSet::new(),
             outputs_full: HashSet::new(),
-            panel_key: PanelKey(run.to_string()),
-            panel: PanelState::default(),
-            panel_seeded: false,
+            panel_key: key,
+            panel,
+            panel_seeded,
             panel_touched: false,
             panel_focus: cx.focus_handle(),
             review_folded: HashSet::new(),
@@ -1291,3 +1296,5 @@ mod changes_tests;
 
 #[cfg(test)]
 mod panel_tests;
+#[cfg(test)]
+mod persist_tests;

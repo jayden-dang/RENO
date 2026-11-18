@@ -62,6 +62,21 @@ pub(crate) struct Options {
     /// `RENO_PANEL=home|session|review`: with `RENO_OPEN=run_<id>`, put that tab of the side
     /// panel in front (screenshots, reviews).
     pub(crate) panel: Option<Surface>,
+    /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
+    /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
+    /// data dir.
+    pub(crate) data_dir: Option<PathBuf>,
+}
+
+impl Options {
+    /// Where the panel state lives, or `None` when it is not kept.
+    pub(crate) fn panel_state_path(&self) -> Option<PathBuf> {
+        match (&self.data_dir, self.fake) {
+            (Some(dir), _) => Some(crate::panel::persist::path_in(dir)),
+            (None, false) => crate::panel::persist::default_path(),
+            (None, true) => None,
+        }
+    }
 }
 
 impl Options {
@@ -112,6 +127,9 @@ impl Options {
             None | Some("") => None,
             Some(other) => return Err(format!("unknown RENO_PANEL tab: {other}")),
         };
+        options.data_dir = env("RENO_DATA_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
         Ok(options)
     }
 }
@@ -148,6 +166,9 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
+        if let Some(path) = options.panel_state_path() {
+            crate::panel::saved::Saved::install(path, cx);
+        }
         let toasts = toast::install(cx);
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
@@ -227,6 +248,7 @@ pub(crate) fn run(options: Options) {
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
+                crate::panel::saved::Saved::flush(cx);
                 cx.quit();
             }
         })
@@ -877,6 +899,7 @@ mod tests {
                 open_run: None,
                 open_project: None,
                 panel: None,
+                data_dir: None,
             })
         );
         let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();
@@ -884,6 +907,17 @@ mod tests {
         assert_eq!(
             run.open_run.map(|r| r.to_string()).as_deref(),
             Some("run_keeper1")
+        );
+    }
+
+    #[test]
+    fn a_fake_run_keeps_the_panel_state_only_in_a_directory_it_was_given() {
+        let none = parse(&["--fake"], &[]).unwrap();
+        assert_eq!(none.panel_state_path(), None);
+        let given = parse(&["--fake"], &[("RENO_DATA_DIR", "/tmp/x")]).unwrap();
+        assert_eq!(
+            given.panel_state_path(),
+            Some(PathBuf::from("/tmp/x/app/panel-state.json"))
         );
     }
 
