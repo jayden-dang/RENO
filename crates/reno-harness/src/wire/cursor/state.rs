@@ -57,7 +57,7 @@ mod tests {
             "a\\b",
             "a b",
             "a\0b",
-            "é",
+            "\u{e9}",
             &"x".repeat(129),
         ] {
             assert!(!valid_agent_id(bad), "{bad:?}");

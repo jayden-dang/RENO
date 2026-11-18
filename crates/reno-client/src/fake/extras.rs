@@ -568,6 +568,37 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             }),
         )?,
         info(
+            "cursor",
+            "Cursor",
+            // The SDK runs its tools with approvals ignored: full access, unrestricted.
+            &[AccessMode::FullAccess],
+            &unrestricted,
+            ("1.0.32", "1.0.32"),
+            ExecutorHealth {
+                installed: installed(
+                    "/Users/ada/Library/Application Support/Reno/adapters/cursor__sdk/1.0.32/reno-cursor-shim.mjs",
+                    "1.0.32",
+                ),
+                version_gate: VersionGate::Ok,
+                // What a Cursor with no key says (the words are `wire::cursor::auth::sign_in_hint`'s).
+                signed_in: SignedIn::No {
+                    hint: "Needs CURSOR_API_KEY: create a key at cursor.com/settings and set it in the environment the Reno daemon starts with. (`cursor-agent login` does not sign in the SDK.)".to_owned(),
+                },
+                models: ModelCatalog::curated(models(&[("auto", "Auto")])),
+                checked_at_ms: at,
+                plan_usage: None,
+            },
+            // A managed install that moves with Reno: no updater, no sign-in command (the
+            // SDK's credential is an environment variable, and Reno never starts its login).
+            Some(Maintenance {
+                setup: None,
+                sign_in: None,
+                updater: None,
+                managed: true,
+                auto_update: auto,
+            }),
+        )?,
+        info(
             "acp.grok",
             "Grok",
             &all,

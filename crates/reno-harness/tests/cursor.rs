@@ -12,7 +12,12 @@
 
 #![cfg(unix)]
 // Tests unwrap freely, and probe a leaked pid with `kill(pid, 0)`.
-#![allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    unsafe_code
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

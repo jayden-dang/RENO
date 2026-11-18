@@ -275,6 +275,9 @@ mod tests {
         // Pi has no mark of its own here (none is bundled): it gets the generic glyph.
         assert_eq!(logo_path("pi", true), None);
         assert_eq!(logo_path("pi", false), None);
+        // Nor has Cursor.
+        assert_eq!(logo_path("cursor", true), None);
+        assert_eq!(logo_path("cursor", false), None);
         assert_eq!(logo_path("mock", false), None);
     }
 }

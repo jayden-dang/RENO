@@ -4,7 +4,7 @@
 //! anywhere Cursor runs it is); without it the tests say so and pass, since there is nothing
 //! to run.
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
 use std::process::Stdio;
 
@@ -57,7 +57,7 @@ async fn large_catalog_is_fully_flushed_before_exit() {
         r#"
         setInterval(() => {}, 1000);
         export const Cursor = { models: { list: async () => Array.from(
-          {length: 4096}, (_, i) => ({id: `model-${i}`, displayName: '模型 ' + i,
+          {length: 4096}, (_, i) => ({id: `model-${i}`, displayName: '\u6a21\u578b ' + i,
           description: 'x'.repeat(1024), parameters: [], variants: []})
         ) } };
         "#,

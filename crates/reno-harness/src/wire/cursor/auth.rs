@@ -84,18 +84,18 @@ pub(crate) fn credential(api_key_set: bool, file: Option<&[u8]>, now_ms: u64) ->
     }
 }
 
-/// What to tell a person whose Cursor is not signed in: the fix, naming the variable.
+/// What to tell a person whose Cursor is not signed in: the fix, naming the variable. It is the
+/// text of the Executors page's "Signed out" line, so it is short and says what to do first.
 pub(crate) fn sign_in_hint(credential: &Credential) -> String {
-    let why = match credential {
+    let expired = match credential {
         Credential::ExpiredLogin => {
-            "The Cursor SDK's stored login (~/.cursor/sdk/auth.json) has expired"
+            "The Cursor SDK's stored login (~/.cursor/sdk/auth.json) has expired. "
         }
-        _ => "Cursor has no API key for its SDK",
+        _ => "",
     };
     format!(
-        "{why}. Set CURSOR_API_KEY (create a key at cursor.com/settings) in the environment \
-         the Reno daemon starts with, or sign in with the SDK's own browser login yourself. \
-         `cursor-agent login` is a separate sign-in that the SDK does not use."
+        "{expired}Needs CURSOR_API_KEY: create a key at cursor.com/settings and set it in the \
+         environment the Reno daemon starts with. (`cursor-agent login` does not sign in the SDK.)"
     )
 }
 

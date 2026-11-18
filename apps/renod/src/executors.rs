@@ -4,8 +4,8 @@
 //!   default it plays a short canned run and finishes. With `hold` it stops after its first text
 //!   and waits to be steered or cancelled, which gives tests and demos a run that stays live
 //!   without any timer.
-//! - `claude-code` is the native [`ClaudeExecutor`], `codex` the native [`CodexExecutor`] and `pi`
-//!   the native [`PiExecutor`]; all are always registered, found or not: the kernel probes them (installed, version, signed in)
+//! - `claude-code` is the native [`ClaudeExecutor`], `codex` the native [`CodexExecutor`], `pi`
+//!   the native [`PiExecutor`] and `cursor` the native [`CursorExecutor`]; all are always registered, found or not: the kernel probes them (installed, version, signed in)
 //!   and refuses a run on one that cannot run. Nothing here starts them.
 //! - The agents built on ACP are native [`AcpExecutor`]s, one per agent, each under its own id:
 //!   `acp.grok`, `acp.devin`, `acp.hermes`, `acp.fx`, `acp.antigravity`, and `acp.<registry id>`
@@ -20,7 +20,7 @@ use reno_harness::RegistryAgent;
 use reno_harness::acp_registry::Record;
 use reno_harness::exec::{Executor, MockExecutor, MockStep};
 use reno_harness::usage::{ClaudeUsage, CodexUsage};
-use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, PiExecutor};
+use reno_harness::{AcpExecutor, ClaudeExecutor, CodexExecutor, CursorExecutor, PiExecutor};
 use reno_kernel::ExecutorRegistry;
 use reno_proto::{ActionClass, ExecEvent, ExecutorId, IdError, StopReason, ToolCall};
 use serde_json::json;
@@ -33,6 +33,8 @@ pub const CLAUDE_ID: &str = reno_harness::claude::EXECUTOR_ID;
 pub const CODEX_ID: &str = reno_harness::codex::EXECUTOR_ID;
 /// The id of the Pi executor.
 pub const PI_ID: &str = reno_harness::pi::EXECUTOR_ID;
+/// The id of the Cursor executor.
+pub const CURSOR_ID: &str = reno_harness::cursor::EXECUTOR_ID;
 
 /// The model the mock reports.
 pub const MOCK_MODEL: &str = "mock-1";
@@ -146,6 +148,7 @@ pub fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError
         Arc::new(claude()),
         Arc::new(codex()),
         Arc::new(PiExecutor::new()),
+        Arc::new(CursorExecutor::new()),
         Arc::new(AcpExecutor::grok()),
         Arc::new(AcpExecutor::devin()),
         Arc::new(AcpExecutor::hermes()),
@@ -213,7 +216,7 @@ mod tests {
 
     #[test]
     fn built_in_ids_are_valid() {
-        for name in [MOCK_ID, CLAUDE_ID, CODEX_ID, PI_ID] {
+        for name in [MOCK_ID, CLAUDE_ID, CODEX_ID, PI_ID, CURSOR_ID] {
             assert_eq!(name.parse::<ExecutorId>().expect("valid").as_str(), name);
         }
     }
