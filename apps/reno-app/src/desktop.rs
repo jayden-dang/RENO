@@ -24,7 +24,10 @@ const BUNDLE_ID: &str = "dev.reno.app";
 pub(crate) struct Native;
 
 impl Native {
+    #[allow(clippy::assertions_on_constants)]
     pub(crate) fn new() -> Self {
+        // A test that reaches the real desktop must fail, not post.
+        assert!(!cfg!(test), "tests never build the native desktop");
         reno_notify::adopt_bundle_id(BUNDLE_ID);
         Self
     }

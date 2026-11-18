@@ -310,6 +310,67 @@ fn opening_a_run_in_the_app_withdraws_its_banners(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_run_on_screen_when_the_window_closed_is_news_again_when_opened_in_a_new_window(
+    cx: &mut TestAppContext,
+) {
+    let store = empty_store(cx);
+    let (recorder, _) = shell(cx, &store, PrefStore::in_memory());
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    vcx.update(|window, _| window.activate_window());
+    vcx.deactivate_window();
+    hold_a_push(vcx, &store);
+    vcx.run_until_parked();
+    let approval = store.read_with(vcx, |s, _| s.state().approvals()[0].clone());
+    vcx.update(|window, _| window.activate_window());
+    vcx.dispatch_action(CloseWindow);
+    vcx.run_until_parked();
+    assert!(cx.update(|cx| cx.windows().is_empty()));
+    recorder.clear();
+
+    cx.update(lifecycle::reopen);
+    cx.run_until_parked();
+    let window = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<RootView>())
+        })
+        .unwrap();
+    let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
+    let root = window.root(vcx).unwrap();
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(approval.run_id.clone(), window, cx)
+    });
+    vcx.run_until_parked();
+    assert!(
+        recorder
+            .withdrawn()
+            .contains(&format!("approval:{}", approval.id)),
+        "{:?}",
+        recorder.calls()
+    );
+}
+
+#[gpui::test]
+fn the_settings_menu_item_opens_a_window_when_none_is_open(cx: &mut TestAppContext) {
+    let store = empty_store(cx);
+    let _ = shell(cx, &store, PrefStore::in_memory());
+    assert!(cx.update(|cx| cx.windows().is_empty()));
+    cx.update(|cx| cx.dispatch_action(&crate::actions::OpenSettings));
+    cx.run_until_parked();
+    let window = cx
+        .update(|cx| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<RootView>())
+        })
+        .expect("a window opened");
+    let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
+    let root = window.root(vcx).unwrap();
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
+}
+
+#[gpui::test]
 fn the_notifications_tab_toggles_persist_beside_the_socket(cx: &mut TestAppContext) {
     let store = empty_store(cx);
     let tmp = tempfile::tempdir().unwrap();

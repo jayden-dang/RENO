@@ -71,8 +71,17 @@ impl Banners {
         })
         .detach();
         let weak = banners.downgrade();
-        cx.on_window_closed(move |cx, id| Self::track(&weak, id, false, cx))
-            .detach();
+        cx.on_window_closed(move |cx, id| {
+            Self::track(&weak, id, false, cx);
+            // No window shows a run any more: opening it again later is news to withdraw for.
+            if cx.windows().is_empty() {
+                weak.update(cx, |this, cx| {
+                    this.store.update(cx, |store, cx| store.look_at(None, cx));
+                })
+                .ok();
+            }
+        })
+        .detach();
         banners.update(cx, |this, cx| this.pass(cx));
         banners
     }
