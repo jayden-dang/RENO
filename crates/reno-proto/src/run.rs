@@ -180,8 +180,8 @@ pub enum StopDetail {
     Crashed,
     /// The executor ended the run itself, as interrupted, without being asked to.
     ExecutorStopped,
-    /// The run changed a protected path (`.claude`, `.codex`, `.reno`, `.mcp.json`, git
-    /// internals) where no approval could stop it first, and Reno stopped it after the fact.
+    /// The run changed a protected path (`.reno`, git internals) where no approval could stop it
+    /// first, and Reno stopped it after the fact.
     ProtectedPathWrite {
         /// The protected paths the run wrote, relative to its worktree where it has one.
         paths: Vec<String>,

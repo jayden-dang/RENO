@@ -17,9 +17,11 @@
 //!   `command`/`exec` and system program paths, and only when what is inside is one simple
 //!   command; `sudo`, `env`, `VAR=val`, `xargs` and a line it cannot parse are not read through
 //!   and fall to the next rule, or ask.
-//! - **Some paths are protected before any rule is read**: `.git`, `.claude`, `.codex`,
-//!   `.reno`, `.mcp.json` and Reno's data directory cannot be edited, redirected into, `rm`ed,
-//!   `mv`ed and so on by a run, and no `allow` rule changes that. See `protect`.
+//! - **Some paths are protected before any rule is read**: `.git`, `.reno` and Reno's data
+//!   directory cannot be edited, redirected into, `rm`ed,
+//!   `mv`ed and so on by a run, and no `allow` rule changes that. A project's harness config
+//!   (`.claude`, `.codex`, `.mcp.json`, `.cursor`, ...) is not among them: the rules judge it
+//!   like any other file. See `protect`.
 //! - `/**` means "outside the run's worktree", judged lexically, with no symlink resolution and no
 //!   `~` expansion. See "Paths".
 //!
@@ -1434,13 +1436,11 @@ mod tests {
         for path in [
             ".git/config",
             ".git/hooks/pre-commit",
-            "./.claude/settings.json",
-            "sub/.claude/settings.local.json",
-            ".codex/config.toml",
-            ".mcp.json",
+            "./.reno/policy.toml",
+            "sub/.reno/defs/bot.toml",
             ".reno/policy.toml",
             "/Users/u/.reno/policy.toml",
-            "/Users/u/.claude/settings.json",
+            "/Users/u/repo/.git/hooks/post-merge",
             "/Users/u/Library/Application Support/Reno/reno.db",
             "src/../.GIT/config",
         ] {
@@ -1452,7 +1452,7 @@ mod tests {
             "src/lib.rs",
             ".gitignore",
             ".github/workflows/ci.yml",
-            "docs/.mcp.json.md",
+            "docs/.reno.md",
         ] {
             assert_eq!(named(&eval(&p, None, &edit(&[path]))).0, "allow", "{path}");
         }
@@ -1468,9 +1468,9 @@ mod tests {
             &p,
             &EvalContext {
                 bot: None,
-                cwd: Path::new("/Users/u/.claude/worktrees/a"),
+                cwd: Path::new("/Users/u/.reno/worktrees/a"),
             },
-            &edit(&["/Users/u/.claude/worktrees/a/src/lib.rs"]),
+            &edit(&["/Users/u/.reno/worktrees/a/src/lib.rs"]),
         );
         assert_eq!(named(&decision).0, "allow");
     }
@@ -1481,13 +1481,13 @@ mod tests {
         for line in [
             "rm -rf .git",
             "echo x > .git/hooks/pre-commit",
-            "echo x>>.claude/settings.json",
-            "tee .mcp.json",
-            "cp evil.json .codex/config.toml",
+            "echo x>>.reno/policy.toml",
+            "tee .git/config",
+            "cp evil.toml .reno/defs/bot.toml",
             "mv a .reno/policy.toml",
-            "sed -i s/a/b/ .claude/settings.json",
+            "sed -i s/a/b/ .reno/policy.toml",
             "zsh -lc 'rm -rf .git'",
-            "/usr/bin/zsh -lc 'echo x > .mcp.json'",
+            "/usr/bin/zsh -lc 'echo x > .reno/policy.toml'",
             "sudo rm .reno/policy.toml",
             "ls && dd if=x of=.git/HEAD",
         ] {
@@ -1500,8 +1500,8 @@ mod tests {
             "git config user.name x",
             "zsh -lc 'git commit -m x'",
             "cp .git/config /tmp/x",
-            "cat .claude/settings.json",
-            "sed -n p .claude/settings.json",
+            "cat .reno/policy.toml",
+            "sed -n p .reno/policy.toml",
             "echo hi > out.txt",
         ] {
             assert_eq!(named(&eval(&p, None, &command(line))).0, "allow", "{line}");
@@ -1513,5 +1513,65 @@ mod tests {
             named(&eval(&allow_git, None, &command("git commit -m x"))).0,
             "allow"
         );
+    }
+
+    /// Project config of every harness and provider.
+    const HARNESS_CONFIG: &[&str] = &[
+        ".claude/settings.json",
+        ".claude/skills/x/SKILL.md",
+        ".codex/config.toml",
+        ".mcp.json",
+        ".pi/extensions/e.ts",
+        "opencode.json",
+        ".cursor/rules/a.mdc",
+        ".grok/settings.json",
+    ];
+
+    #[test]
+    fn harness_config_edits_are_judged_by_the_policy_not_refused_by_the_built_in() {
+        let allow_all = policy("default = \"allow\"");
+        let ask = policy("default = \"ask\"");
+        let deny_edits = policy(
+            "default = \"allow\"\n[[rules]]\neffect = \"deny\"\nmatch = { action = \"edit\" }",
+        );
+        for path in HARNESS_CONFIG {
+            let abs = format!("/w/{path}");
+            for target in [path.to_string(), abs] {
+                let edit = edit(&[target.as_str()]);
+                assert_eq!(named(&eval(&allow_all, None, &edit)).0, "allow", "{target}");
+                assert_eq!(
+                    named(&eval(&ask, None, &edit)),
+                    ("ask", DEFAULT_RULE),
+                    "{target}"
+                );
+                // A policy deny still applies, as the policy's own rule.
+                let denied = eval(&deny_edits, None, &edit);
+                assert_eq!(named(&denied).0, "deny", "{target}");
+                assert_ne!(denied.rule_name(), "built-in protected paths", "{target}");
+            }
+        }
+    }
+
+    #[test]
+    fn harness_config_writes_by_command_are_judged_by_the_policy() {
+        let allow_all = policy("default = \"allow\"");
+        let ask = policy("default = \"ask\"");
+        for path in HARNESS_CONFIG {
+            for line in [
+                format!("echo x > {path}"),
+                format!("echo x>>{path}"),
+                format!("tee {path}"),
+                format!("cp a.txt {path}"),
+                format!("mv a.txt {path}"),
+                format!("sed -i s/a/b/ {path}"),
+                format!("rm {path}"),
+                format!("zsh -lc 'echo x > {path}'"),
+            ] {
+                let decision = eval(&allow_all, None, &command(&line));
+                assert_eq!(named(&decision).0, "allow", "{line}");
+                assert_ne!(decision.rule_name(), "built-in protected paths", "{line}");
+                assert_eq!(named(&eval(&ask, None, &command(&line))).0, "ask", "{line}");
+            }
+        }
     }
 }

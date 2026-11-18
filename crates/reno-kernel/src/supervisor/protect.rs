@@ -1,7 +1,9 @@
 //! Protected paths, enforced after the fact where the harness cannot be asked.
 //!
-//! The built-in protection (`reno_proto::defs::protect`) refuses a write to `.claude`, `.codex`,
-//! `.reno`, `.mcp.json` or git internals when the harness **asks** first. A harness that cannot
+//! The built-in protection (`reno_proto::defs::protect`) refuses a write to `.reno` (Reno's own
+//! policy and definitions) or git internals when the harness **asks** first. A project's harness
+//! config (`.claude`, `.codex`, `.mcp.json`, `.cursor`, ...) is not protected and is never
+//! reverted or flagged here. A harness that cannot
 //! ask (Grok, Devin and Hermes, answered in-driver), or a run whose edits are accepted without
 //! a question, would write them unseen. So the supervisor also looks at what the run did.
 //!
@@ -104,8 +106,7 @@ impl Supervisor {
                 {
                     return;
                 }
-                // A write the worktree cannot show: a path outside it (the owner's own
-                // `~/.claude`, a repository's git hooks, Reno's data directory).
+                // A write the worktree cannot show: a path outside it (a repository's git hooks, Reno's data directory).
                 if let Some(path) = named.filter(|path| outside(&workspace, path)) {
                     self.block(vec![path], false).await;
                 }

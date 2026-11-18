@@ -388,7 +388,7 @@ async fn a_follow_up_is_judged_against_where_it_started_not_the_threads_base() {
     let second = follow_up(&fx, &thread).await.unwrap();
     fx.wait_status(&second, RunStatus::Running).await;
     // The second run writes a protected path (the worktree is the thread's, owned by run one).
-    ws.plant_protected(&first, &[".claude/settings.json"]);
+    ws.plant_protected(&first, &[".reno/policy.toml"]);
     ended(&fx, &second, RunStatus::Interrupted).await;
 
     let journal = fx.journal_with_done(&second).await;
@@ -398,7 +398,7 @@ async fn a_follow_up_is_judged_against_where_it_started_not_the_threads_base() {
     assert_eq!(
         reason,
         Some(StopDetail::ProtectedPathWrite {
-            paths: vec![".claude/settings.json".into()],
+            paths: vec![".reno/policy.toml".into()],
             reverted: true
         })
     );
