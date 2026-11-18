@@ -126,6 +126,9 @@ pub struct AuthMethodInfo {
     /// Why Reno cannot use this method (an agent method with no `id` cannot be authenticated).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unusable: Option<String>,
+    /// For a terminal method: the exact command to run in a terminal (shell-quoted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// The methods `initialize` offers, each with its kind. (A method without a
@@ -203,6 +206,7 @@ pub(super) fn auth_methods(initialized: &Value) -> Vec<AuthMethodInfo> {
                     );
                     "the agent gave this sign-in method no id, so it cannot be used".to_owned()
                 }),
+                command: None,
             })
         })
         .collect()
@@ -330,6 +334,48 @@ fn choose_auth_method(initialized: &Value, wanted: Option<&str>) -> Option<AuthM
         .find(|m| matches!(m, AuthMethod::Agent(_)))
         .or_else(|| all.first())
         .cloned()
+}
+
+/// A terminal method's own `command` as it runs: absolute as given, the agent's own program when
+/// it names it, else found on the PATH.
+fn resolve_own_program(program: &str, exe: &Path) -> PathBuf {
+    let path = PathBuf::from(program);
+    if path.is_absolute() {
+        path
+    } else if exe.file_name().is_some_and(|n| n == path.as_os_str()) {
+        exe.to_path_buf()
+    } else {
+        find_on_paths(program, Vec::new()).unwrap_or(path)
+    }
+}
+
+/// The command line a terminal method runs, shell-quoted: its own program with its arguments, or
+/// the agent's launch with them after it.
+fn terminal_command(method: &AuthMethod, exe: &Path, args: &[String]) -> Option<String> {
+    let AuthMethod::Terminal {
+        command: own,
+        args: extra,
+        ..
+    } = method
+    else {
+        return None;
+    };
+    let words: Vec<String> = match own {
+        Some(program) => std::iter::once(resolve_own_program(program, exe).display().to_string())
+            .chain(extra.iter().cloned())
+            .collect(),
+        None => std::iter::once(exe.display().to_string())
+            .chain(args.iter().cloned())
+            .chain(extra.iter().cloned())
+            .collect(),
+    };
+    Some(
+        words
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// The system's openers (`open`, `xdg-open`) as a sign-in sees them: a web
@@ -796,7 +842,7 @@ impl AcpExecutor {
                     can_sign_out: initialized
                         .pointer("/agentCapabilities/auth/logout")
                         .is_some(),
-                    methods: auth_methods(&initialized),
+                    methods: self.methods_offered(&initialized),
                     needs_setup: needs_setup(&error),
                 });
             }
@@ -818,9 +864,21 @@ impl AcpExecutor {
             can_sign_out: initialized
                 .pointer("/agentCapabilities/auth/logout")
                 .is_some(),
-            methods: auth_methods(&initialized),
+            methods: self.methods_offered(&initialized),
             needs_setup: None,
         })
+    }
+
+    /// What `initialized` offers, each terminal method with the exact command to run.
+    fn methods_offered(&self, initialized: &Value) -> Vec<AuthMethodInfo> {
+        let mut methods = auth_methods(initialized);
+        if let Ok((exe, args)) = self.launcher().resolve_program() {
+            for method in methods.iter_mut().filter(|m| m.kind == "terminal") {
+                method.command = choose_auth_method(initialized, Some(&method.id))
+                    .and_then(|m| terminal_command(&m, &exe, &args));
+            }
+        }
+        methods
     }
 
     /// Signs a registry agent out (ACP's `logout`, where it offers one).
@@ -928,14 +986,7 @@ impl AcpExecutor {
         // PATH. Else the agent's launch with these arguments after it.
         let (mut cmd, line): (Command, Vec<String>) = match own {
             Some(program) => {
-                let path = PathBuf::from(&program);
-                let resolved = if path.is_absolute() {
-                    path
-                } else if exe.file_name().is_some_and(|n| n == path.as_os_str()) {
-                    exe.to_path_buf()
-                } else {
-                    find_on_paths(&program, Vec::new()).unwrap_or(path)
-                };
+                let resolved = resolve_own_program(&program, exe);
                 let mut cmd = command(&[], &extra_env);
                 let mut replaced = Command::new(&resolved);
                 replaced.args(&extra);

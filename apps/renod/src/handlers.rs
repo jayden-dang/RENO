@@ -40,6 +40,7 @@
 //! | `executor.list`, `executor.refresh` | `executors`, `refresh_executors` |
 //! | `executor.frames` | `executor_frames` |
 //! | `executor.install` | `install_executor` |
+//! | `executor.signin.start`, `executor.signin.cancel` | `start_signin`, `cancel_signin` |
 //! | `executor.job.start`, `.cancel`, `.dismiss`, `.log` | `start_job`, `cancel_job`, `dismiss_job`, `job_log` |
 //! | `executor.auto_update.set` | `set_auto_update` |
 //! | `executors.watch` | `watch_executors` |
@@ -104,8 +105,10 @@ use reno_proto::{
     ExecutorRegistryAddOwnParams, ExecutorRegistryEnvGet, ExecutorRegistryEnvResult,
     ExecutorRegistryEnvSet, ExecutorRegistryEnvSetParams, ExecutorRegistryList,
     ExecutorRegistryListParams, ExecutorRegistryListResult, ExecutorRegistryParams,
-    ExecutorRegistryRemove, ExecutorRegistryRemoveResult, FEATURE_EXECUTOR_MAINTAIN,
-    FEATURE_EXECUTOR_REGISTRY,
+    ExecutorRegistryRemove, ExecutorRegistryRemoveResult, ExecutorSigninCancel,
+    ExecutorSigninStart, FEATURE_EXECUTOR_MAINTAIN, FEATURE_EXECUTOR_REGISTRY,
+    FEATURE_EXECUTOR_SIGNIN, SigninCancelParams, SigninCancelResult, SigninEvent,
+    SigninStartParams,
 };
 use reno_proto::{
     ExecutorFrames, ExecutorFramesParams, ExecutorFramesResult, ExecutorInfo, ExecutorInstall,
@@ -250,6 +253,8 @@ pub(crate) fn router(ctx: &Arc<Ctx>) -> Router {
         .method::<ExecutorRegistryAddOwn, _, _>(bind(ctx, executor_registry_add_own))
         .method::<ExecutorRegistryEnvGet, _, _>(bind(ctx, executor_registry_env_get))
         .method::<ExecutorRegistryEnvSet, _, _>(bind(ctx, executor_registry_env_set))
+        .method::<ExecutorSigninCancel, _, _>(bind(ctx, executor_signin_cancel))
+        .subscription::<ExecutorSigninStart, _, _, _>(bind(ctx, executor_signin_start))
         .method::<ExecutorJobStart, _, _>(bind(ctx, executor_job_start))
         .method::<ExecutorJobCancel, _, _>(bind(ctx, executor_job_cancel))
         .method::<ExecutorJobDismiss, _, _>(bind(ctx, executor_job_dismiss))
@@ -441,6 +446,11 @@ async fn hello(ctx: Arc<Ctx>, p: HelloParams) -> Reply<HelloResult> {
             // Update and Install buttons.
             .filter(|feature| ctx.maintenance || **feature != FEATURE_EXECUTOR_MAINTAIN)
             .filter(|feature| ctx.registry.configured() || **feature != FEATURE_EXECUTOR_REGISTRY)
+            // Signing in an added agent needs the registry and the job registry its claim lives in.
+            .filter(|feature| {
+                (ctx.maintenance && ctx.registry.configured())
+                    || **feature != FEATURE_EXECUTOR_SIGNIN
+            })
             // The same for terminals: a daemon started without a PTY spawner has none.
             .filter(|feature| ctx.terminals.enabled() || **feature != FEATURE_TERMINALS)
             .map(|feature| (*feature).to_owned())
@@ -928,6 +938,31 @@ async fn executor_registry_env_set(
 // not agent actions. A person pressed Install or Update (or turned auto-update on), and the
 // commands are compiled into Reno per adapter; an RPC names an executor and a kind and never
 // carries a command string. They run as the user with no stdin and no sudo (see the runner).
+
+/// `executor.signin.start`: a person signs an added agent in. The stream is the sign-in's own
+/// events, numbered so a reader that falls behind is cut off (`sub.gap`) rather than skipped. The
+/// daemon opens nothing: the page and the command are for the client.
+async fn executor_signin_start(
+    ctx: Arc<Ctx>,
+    p: SigninStartParams,
+) -> Reply<impl Stream<Item = SubItem<SigninEvent>> + Send + use<>> {
+    tracing::info!(executor = %p.executor, method = ?p.method, "executor sign-in requested");
+    let events = ctx
+        .kernel
+        .start_signin(&p.executor, p.method)
+        .map_err(|e| kernel_error(&e))?;
+    Ok(events
+        .enumerate()
+        .map(|(n, event)| SubItem::seq(Seq(n as u64 + 1), event)))
+}
+
+/// `executor.signin.cancel`: ends the running sign-in of an executor.
+async fn executor_signin_cancel(ctx: Arc<Ctx>, p: SigninCancelParams) -> Reply<SigninCancelResult> {
+    tracing::info!(executor = %p.executor, "executor sign-in cancel requested");
+    Ok(SigninCancelResult {
+        cancelled: ctx.kernel.cancel_signin(&p.executor),
+    })
+}
 
 /// Starts or queues an install or update and answers once it is started or queued.
 async fn executor_job_start(ctx: Arc<Ctx>, p: ExecutorJobStartParams) -> Reply<ExecutorJobResult> {

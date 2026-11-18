@@ -20,6 +20,7 @@ use reno_proto::{
 };
 
 mod defs_live;
+mod signin_live;
 
 use super::{Fx, config, id, until};
 use crate::{ExecutorRegistry, InstallWork, KernelError, Limits, MaintenancePorts, RegistryPort};
@@ -139,6 +140,17 @@ struct Index {
     disk: Disk,
     installs: Arc<AtomicUsize>,
     fail: Arc<Mutex<Option<String>>>,
+    /// While set, an install waits for the permits it holds back.
+    hold: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+}
+
+/// Lets the held installs go when dropped.
+struct Held(Arc<tokio::sync::Semaphore>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.add_permits(1000);
+    }
 }
 
 impl Index {
@@ -148,7 +160,15 @@ impl Index {
             disk: disk.clone(),
             installs: Arc::default(),
             fail: Arc::default(),
+            hold: Arc::default(),
         }
+    }
+
+    /// Installs started from now on wait until the guard is dropped.
+    fn hold_installs(&self) -> Held {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self.hold.lock().unwrap() = Some(gate.clone());
+        Held(gate)
     }
 
     fn list(&self, rid: &str, version: &str) {
@@ -167,22 +187,28 @@ impl RegistryPort for Index {
     fn install_work<'a>(&'a self, rid: &'a str) -> BoxFuture<'a, Option<InstallWork>> {
         Box::pin(async move {
             let version = self.listed.lock().unwrap().get(rid).cloned()?;
-            let (disk, installs, fail, rid) = (
+            let (disk, installs, fail, hold, rid) = (
                 self.disk.clone(),
                 self.installs.clone(),
                 self.fail.clone(),
+                self.hold.clone(),
                 rid.to_owned(),
             );
             let work: InstallWork = Arc::new(move || {
-                let (disk, installs, fail, rid, version) = (
+                let (disk, installs, fail, hold, rid, version) = (
                     disk.clone(),
                     installs.clone(),
                     fail.clone(),
+                    hold.clone(),
                     rid.clone(),
                     version.clone(),
                 );
                 Box::pin(async move {
                     installs.fetch_add(1, Ordering::SeqCst);
+                    let gate = hold.lock().unwrap().clone();
+                    if let Some(gate) = gate {
+                        let _ = gate.acquire().await;
+                    }
                     if let Some(why) = fail.lock().unwrap().clone() {
                         return Err(HarnessError::Install(why));
                     }

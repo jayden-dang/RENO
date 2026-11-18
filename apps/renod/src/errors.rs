@@ -22,7 +22,9 @@ pub fn code_of(error: &KernelError) -> ErrorCode {
         KernelError::TriggerDisabled(_)
         | KernelError::ThreadBusy { .. }
         | KernelError::ThreadClosed(_) => ErrorCode::Conflict,
-        KernelError::ExecutorInUse { .. } => ErrorCode::Conflict,
+        KernelError::ExecutorInUse { .. } | KernelError::SignInRefused { .. } => {
+            ErrorCode::Conflict
+        }
         KernelError::JobRunning(_) => ErrorCode::JobRunning,
         KernelError::NothingToDo { .. } => ErrorCode::NothingToDo,
         KernelError::NoUpdater(_) => ErrorCode::NoUpdater,

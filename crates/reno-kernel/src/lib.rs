@@ -90,6 +90,7 @@ mod schedule;
 mod scheduler;
 mod secrets;
 mod shared;
+mod signin;
 mod supervisor;
 mod threads;
 mod wake;

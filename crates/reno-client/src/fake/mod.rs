@@ -45,6 +45,7 @@ mod history;
 mod jobs;
 mod registry;
 mod script;
+mod signin;
 pub mod terminals;
 mod world;
 
@@ -317,6 +318,37 @@ impl FakeDaemon {
         self.shared.with(|w| {
             w.jobs.fail_next = Some((failure, detail.to_owned()));
         });
+    }
+
+    /// The next sign-in of `executor` says `events`, in order, instead of the default flow. When
+    /// the last is a `done` it is the end; otherwise the sign-in stays open until
+    /// [`FakeDaemon::finish_signin`], a cancel, or the client dropping the subscription.
+    pub fn script_signin(
+        &self,
+        executor: &reno_proto::ExecutorId,
+        events: Vec<reno_proto::SigninEvent>,
+    ) {
+        self.shared.with(|w| w.signins.script(executor, events));
+    }
+
+    /// Ends the running sign-in of `executor` that has no scripted end: `done`, signed in or not,
+    /// with `message`. `false` when none is waiting. A signed-in end turns the executor's health
+    /// signed in.
+    pub fn finish_signin(
+        &self,
+        executor: &reno_proto::ExecutorId,
+        signed_in: bool,
+        message: Option<&str>,
+    ) -> bool {
+        self.shared.with(|w| {
+            w.signins
+                .finish(executor, signed_in, message.map(str::to_owned))
+        })
+    }
+
+    /// The sign-ins the daemon was asked to start, oldest first: the executor and the method.
+    pub fn signins_started(&self) -> Vec<(reno_proto::ExecutorId, Option<String>)> {
+        self.shared.read(|w| w.signins.started())
     }
 
     /// Serves the registry index from its cache, as when the device is offline.
@@ -1147,6 +1179,31 @@ fn router(shared: &Arc<Shared>) -> Router {
     };
 
     let s = Arc::clone(shared);
+    let signin_start = move |p: reno_proto::SigninStartParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.signin.start")?;
+            let plan = s.with(|w| w.signin_start(&p.executor, p.method, &s.cancel))?;
+            Ok(signin::serve(
+                &s,
+                plan,
+                s.config.step,
+                s.config.job_duration,
+            ))
+        }
+    };
+
+    let s = Arc::clone(shared);
+    let signin_cancel = move |p: reno_proto::SigninCancelParams, _| {
+        let s = Arc::clone(&s);
+        async move {
+            injected(&s, "executor.signin.cancel")?;
+            let cancelled = s.with(|w| w.signins.cancel(&p.executor));
+            Ok(reno_proto::SigninCancelResult { cancelled })
+        }
+    };
+
+    let s = Arc::clone(shared);
     let executors_watch = move |_: reno_proto::ExecutorsWatchParams, _| {
         let s = Arc::clone(&s);
         async move {
@@ -1316,6 +1373,8 @@ fn router(shared: &Arc<Shared>) -> Router {
         .method::<reno_proto::ExecutorRegistryEnvGet, _, _>(registry_env_get)
         .method::<reno_proto::ExecutorRegistryEnvSet, _, _>(registry_env_set)
         .subscription::<reno_proto::ExecutorsWatch, _, _, _>(executors_watch)
+        .subscription::<reno_proto::ExecutorSigninStart, _, _, _>(signin_start)
+        .method::<reno_proto::ExecutorSigninCancel, _, _>(signin_cancel)
         .method::<reno_proto::DefList, _, _>(def_list)
         .method::<reno_proto::DefGet, _, _>(def_get)
         .method::<reno_proto::DefValidate, _, _>(def_validate)

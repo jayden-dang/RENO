@@ -590,6 +590,59 @@ impl Client {
         Ok(())
     }
 
+    /// `executor.signin.start`: signs the added agent `executor` in (with `method`, an id from its
+    /// `auth_methods`; the agent's own first one when `None`) and streams what to show and do:
+    /// the page to open (the daemon opens nothing; the caller does), the lines the agent prints,
+    /// the command to run in a terminal when it needs one, and last a `Done`. The stream then
+    /// ends. Dropping it cancels the sign-in. If the daemon cuts the subscription off with
+    /// `sub.gap` the sign-in's events are lost and the stream ends with [`ClientError::Protocol`]
+    /// (the executor's health, from [`Client::watch_executors`], still says how it ended). Needs
+    /// feature `executor.signin`.
+    pub async fn signin_executor(
+        &self,
+        executor: reno_proto::ExecutorId,
+        method: Option<String>,
+    ) -> Result<BoxStream<'static, Result<reno_proto::SigninEvent, ClientError>>, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_SIGNIN)?;
+        let sub = self
+            .rpc
+            .subscribe::<reno_proto::ExecutorSigninStart>(reno_proto::SigninStartParams {
+                executor,
+                method,
+            })
+            .await?;
+        Ok(stream::unfold(Some(sub), |sub| async move {
+            let mut sub = sub?;
+            match sub.next().await {
+                Some(SubEvent::Item(event)) => Some((Ok(event), Some(sub))),
+                Some(SubEvent::Gap { .. }) => Some((
+                    Err(ClientError::Protocol(
+                        "the sign-in's progress was lost; check the agent's health".to_owned(),
+                    )),
+                    None,
+                )),
+                Some(SubEvent::Done) | None => None,
+            }
+        })
+        .boxed())
+    }
+
+    /// `executor.signin.cancel`: ends the executor's running sign-in. `false` when none was
+    /// running. Needs feature `executor.signin`.
+    pub async fn cancel_signin(
+        &self,
+        executor: &reno_proto::ExecutorId,
+    ) -> Result<bool, ClientError> {
+        self.require(reno_proto::FEATURE_EXECUTOR_SIGNIN)?;
+        Ok(self
+            .rpc
+            .call::<reno_proto::ExecutorSigninCancel>(reno_proto::SigninCancelParams {
+                executor: executor.clone(),
+            })
+            .await?
+            .cancelled)
+    }
+
     /// `executor.job.cancel`: stops the executor's job, which ends `cancelled`. Needs feature
     /// `executor.maintain`.
     pub async fn cancel_executor_job(

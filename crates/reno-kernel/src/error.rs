@@ -140,6 +140,14 @@ pub enum KernelError {
         /// Why, in words.
         why: String,
     },
+    /// A sign-in cannot start on the executor, for the reason given.
+    #[error("executor {executor} cannot be signed in: {why}")]
+    SignInRefused {
+        /// The executor.
+        executor: ExecutorId,
+        /// Why, in words.
+        why: String,
+    },
     /// The executor has no updater of its own.
     #[error("executor {0} has no updater")]
     NoUpdater(ExecutorId),

@@ -277,6 +277,7 @@ impl Shared {
                     maintenance: None,
                     job: None,
                     source: executor.source(),
+                    auth_methods: executor.auth_methods(),
                 };
                 if let Some(maintainer) = self.maint.get() {
                     maintainer.decorate(self, &mut info);

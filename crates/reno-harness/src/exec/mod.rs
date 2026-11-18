@@ -159,7 +159,35 @@ pub trait Executor: Send + Sync {
     fn source(&self) -> reno_proto::ExecutorSource {
         reno_proto::ExecutorSource::Builtin
     }
+
+    /// The sign-in methods the agent offered in its last full probe's handshake. Never starts
+    /// anything: it is what that probe saw, empty before a full probe and for an executor that
+    /// does not sign in this way.
+    fn auth_methods(&self) -> Vec<reno_proto::AuthMethod> {
+        Vec::new()
+    }
+
+    /// Signs the agent in, as a person asked: the agent's own `authenticate` or, for a terminal
+    /// method, its command run without a terminal. What the person needs to see goes to `events`
+    /// ([`SigninEvent::Page`], [`SigninEvent::Output`], [`SigninEvent::NeedsTerminal`]); a page is
+    /// never opened here, the client opens it. Ends `Ok` when the agent says it is signed in and
+    /// with words when it is not. Dropping the future stops it and the agent it started. The
+    /// default cannot sign in this way.
+    async fn sign_in(
+        &self,
+        method: Option<String>,
+        events: SignInEvents,
+    ) -> Result<(), crate::HarnessError> {
+        let _ = (method, events);
+        Err(crate::HarnessError::Protocol(
+            "this executor signs in with its own command, not through Reno".into(),
+        ))
+    }
 }
+
+/// Where [`Executor::sign_in`] reports what the person needs to see. Never blocks: a sink that is
+/// full drops output lines, not pages.
+pub type SignInEvents = std::sync::Arc<dyn Fn(reno_proto::SigninEvent) + Send + Sync>;
 
 /// Why [`Executor::start`] refused a run. Every variant means nothing was spawned.
 #[derive(Debug, thiserror::Error)]

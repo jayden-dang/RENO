@@ -368,6 +368,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
             maintenance,
             job: None,
             source: reno_proto::ExecutorSource::Builtin,
+            auth_methods: Vec::new(),
         })
     };
     // The efforts each demo model takes, as its CLI would report them: Claude's big models go to

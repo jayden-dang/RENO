@@ -203,6 +203,9 @@ struct State {
     /// Executors being removed: they take no run and no job from the moment the removal is
     /// decided.
     removing: std::collections::HashSet<ExecutorId>,
+    /// Executors a person is signing in (`executor.signin.start`), each with the token that ends
+    /// it. An executor with one takes no install, update or removal; runs are not held up.
+    signins: HashMap<ExecutorId, CancellationToken>,
     next_job: u64,
 }
 
@@ -244,6 +247,23 @@ impl Drop for RunClaim {
     }
 }
 
+/// A sign-in's place on an executor, held until its closing probe is done. Dropping it frees the
+/// executor for the next install, update, removal or sign-in.
+#[derive(Debug)]
+pub(crate) struct SignInClaim {
+    maintainer: Arc<Maintainer>,
+    executor: ExecutorId,
+    /// Cancelled to end the sign-in.
+    pub(crate) cancel: CancellationToken,
+}
+
+impl Drop for SignInClaim {
+    fn drop(&mut self) {
+        self.maintainer.state().signins.remove(&self.executor);
+        self.maintainer.changed.notify_one();
+    }
+}
+
 fn now_ms(shared: &Shared) -> u64 {
     u64::try_from(shared.db.now_ms()).unwrap_or(0)
 }
@@ -272,6 +292,51 @@ impl Shared {
             maintainer: Arc::clone(maintainer),
             executor: id.clone(),
         }))
+    }
+}
+
+impl Shared {
+    /// Takes the sign-in's place on `id`: refused while an install or update of it is running or
+    /// not yet dismissed, while it is being removed, and while a sign-in of it is running.
+    pub(crate) fn claim_signin(&self, id: &ExecutorId) -> Result<SignInClaim> {
+        let maintainer = attached(self)?;
+        let refused = |why: &str| KernelError::SignInRefused {
+            executor: id.clone(),
+            why: why.to_owned(),
+        };
+        let mut state = maintainer.state();
+        if state.removing.contains(id) {
+            return Err(refused("it is being removed"));
+        }
+        if state.jobs.get(id).is_some_and(JobState::live) {
+            return Err(refused("an install or update of it is running"));
+        }
+        if state.signins.contains_key(id) {
+            return Err(refused("a sign-in of it is already running"));
+        }
+        let cancel = self.root.child_token();
+        state.signins.insert(id.clone(), cancel.clone());
+        drop(state);
+        Ok(SignInClaim {
+            maintainer,
+            executor: id.clone(),
+            cancel,
+        })
+    }
+
+    /// Tells the sign-in running on `id` to stop. `false` when there is none.
+    pub(crate) fn cancel_signin(&self, id: &ExecutorId) -> bool {
+        let Some(maintainer) = self.maint.get() else {
+            return false;
+        };
+        let state = maintainer.state();
+        match state.signins.get(id) {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -688,6 +753,12 @@ fn begin(
     let mut state = maintainer.state();
     if state.jobs.get(id).is_some_and(JobState::live) {
         return Err(KernelError::JobRunning(id.clone()));
+    }
+    if state.signins.contains_key(id) {
+        return Err(KernelError::NothingToDo {
+            executor: id.clone(),
+            why: "a sign-in of it is running; try again when it ends".into(),
+        });
     }
     let runs = state.runs.get(id).copied().unwrap_or(0);
     if runs > 0 && idle_only {
@@ -1496,6 +1567,9 @@ impl crate::Kernel {
             }
             if state.jobs.get(id).is_some_and(JobState::live) {
                 return Err(in_use("an install or update of it is running"));
+            }
+            if state.signins.contains_key(id) {
+                return Err(in_use("a sign-in of it is running"));
             }
             if !state.removing.insert(id.clone()) {
                 return Err(in_use("it is already being removed"));

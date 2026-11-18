@@ -196,6 +196,7 @@ pub const FEATURES: &[&str] = &[
     FEATURE_RUN_CONFIGURE,
     FEATURE_EXECUTOR_MAINTAIN,
     crate::registry::FEATURE_EXECUTOR_REGISTRY,
+    crate::signin::FEATURE_EXECUTOR_SIGNIN,
     FEATURE_RUN_CHANGES,
     crate::usage::FEATURE_EXECUTOR_USAGE,
     FEATURE_THREADS,
@@ -1141,6 +1142,11 @@ method!(
     ExecutorRegistryEnvSet, "executor.registry.env_set", ExecutorRegistryEnvSetParams => ExecutorRegistryEnvResult
 );
 method!(
+    /// `executor.signin.cancel`: ends the executor's running sign-in; its `executor.signin.start`
+    /// subscription then ends with `done`. Person-only. Needs feature `executor.signin`.
+    ExecutorSigninCancel, "executor.signin.cancel", crate::signin::SigninCancelParams => crate::signin::SigninCancelResult
+);
+method!(
     /// `executor.frames`: the frames each executor's wire layer did not recognise, by kind, since
     /// the daemon started, and the CLI version they were first seen under. A rising number is
     /// the early sign that a harness CLI moved. Needs feature `executor.frames`.
@@ -1223,6 +1229,15 @@ subscription!(
     /// `executors.watch`: every executor and its last health, replaced on every change. Needs
     /// feature `executors`.
     ExecutorsWatch, "executors.watch", ExecutorsWatchParams => ExecutorsSnapshot
+);
+subscription!(
+    /// `executor.signin.start`: signs an added agent in, started by a person, and streams what the
+    /// client shows and does: the page to open (the daemon never opens one), the lines the sign-in
+    /// prints, the command to run in a terminal when it needs one, and the end. The sign-in ends
+    /// with a full probe, so health shows the result. Dropping the subscription cancels it. Fails
+    /// with `NotFound` (no such executor), `Conflict` (it is not an added agent, a sign-in or a job
+    /// is already running on it). Person-only. Needs feature `executor.signin`.
+    ExecutorSigninStart, "executor.signin.start", crate::signin::SigninStartParams => crate::signin::SigninEvent
 );
 subscription!(
     /// `approvals.watch`: the pending approvals, replaced on every change. Needs feature
@@ -1333,6 +1348,7 @@ pub fn protocol_schema() -> Value {
             method_entry::<ExecutorJobDismiss>(),
             method_entry::<ExecutorJobLog>(),
             method_entry::<ExecutorAutoUpdateSet>(),
+            method_entry::<ExecutorSigninCancel>(),
             method_entry::<ExecutorFrames>(),
             method_entry::<ExecutorRegistryList>(),
             method_entry::<ExecutorRegistryAdd>(),
@@ -1361,6 +1377,7 @@ pub fn protocol_schema() -> Value {
             subscription_entry::<DefsWatch>(),
             subscription_entry::<TriggersWatch>(),
             subscription_entry::<ExecutorsWatch>(),
+            subscription_entry::<ExecutorSigninStart>(),
             subscription_entry::<FsWatch>(),
             subscription_entry::<TermAttach>(),
         ],

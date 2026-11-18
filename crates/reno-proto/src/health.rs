@@ -343,6 +343,11 @@ pub struct ExecutorInfo {
         skip_serializing_if = "crate::registry::ExecutorSource::is_builtin"
     )]
     pub source: crate::registry::ExecutorSource,
+    /// How the agent offers to sign in, from its last full probe (feature `executor.signin`).
+    /// Empty until a full probe has seen the agent's handshake, and for a built-in executor. The
+    /// daemon never starts the agent to find out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_methods: Vec<crate::signin::AuthMethod>,
 }
 
 /// What a person and Reno can do to install, update and sign in to one executor (feature

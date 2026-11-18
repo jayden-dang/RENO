@@ -107,6 +107,7 @@ mod launch;
 pub(crate) use launch::find_on_paths;
 mod session;
 mod signin;
+mod signin_client;
 mod spec;
 
 pub(crate) use install::running_command_lines;
@@ -216,6 +217,8 @@ pub struct AcpExecutor {
     access_modes: Vec<AccessMode>,
     /// The agent's version `probe` last read, for the descriptor.
     cli_version: Arc<Mutex<Option<String>>>,
+    /// The sign-in methods the agent offered the last time a full probe saw its handshake.
+    auth_methods: Arc<Mutex<Vec<AuthMethodInfo>>>,
     tracker: TaskTracker,
     /// Notifications and `sessionUpdate` kinds the wire layer does not know, counted across runs.
     unknown: UnknownFrames,
@@ -246,6 +249,7 @@ impl AcpExecutor {
             prompt_stall: spec.prompt_stall,
             access_modes: spec.access_modes.to_vec(),
             cli_version: Arc::new(Mutex::new(None)),
+            auth_methods: Arc::new(Mutex::new(Vec::new())),
             tracker: TaskTracker::new(),
             unknown: UnknownFrames::new(),
             spec: Arc::new(spec),
@@ -477,7 +481,15 @@ impl AcpExecutor {
         if !matches!(self.spec.id, HarnessId::Registry(_)) {
             return SignedIn::Unknown;
         }
-        match tokio::time::timeout(probe::WIRE_BUDGET, self.registry_sign_in_state()).await {
+        let state = tokio::time::timeout(probe::WIRE_BUDGET, self.registry_sign_in_state()).await;
+        // What the handshake offered, kept for the executor's info (never fetched on its own).
+        if let Ok(Ok(state)) = &state {
+            *self
+                .auth_methods
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = state.methods.clone();
+        }
+        match state {
             Ok(Ok(state)) if state.signed_in => SignedIn::Yes {
                 account: state.account,
             },
@@ -563,6 +575,45 @@ impl Executor for AcpExecutor {
 
     fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
         crate::exec::maintenance::declaration(&self.spec.id)
+    }
+
+    fn auth_methods(&self) -> Vec<reno_proto::AuthMethod> {
+        self.auth_methods
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(|m| {
+                Some(reno_proto::AuthMethod {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    description: m.description.clone(),
+                    kind: match m.kind.as_str() {
+                        "agent" => reno_proto::AuthMethodKind::Agent,
+                        "terminal" => reno_proto::AuthMethodKind::Terminal,
+                        "env_var" => reno_proto::AuthMethodKind::EnvVar,
+                        _ => return None,
+                    },
+                    vars: m.vars.clone(),
+                    link: m.link.clone(),
+                    command: m.command.clone(),
+                    unusable: m.unusable.clone(),
+                })
+            })
+            .collect()
+    }
+
+    async fn sign_in(
+        &self,
+        method: Option<String>,
+        events: crate::exec::SignInEvents,
+    ) -> Result<(), crate::HarnessError> {
+        if !matches!(self.spec.id, HarnessId::Registry(_)) {
+            return Err(crate::HarnessError::Protocol(format!(
+                "{} signs in with its own command, not through Reno",
+                self.spec.display_name
+            )));
+        }
+        signin_client::run(self, method, events).await
     }
 
     fn descriptor(&self) -> ExecutorDescriptor {

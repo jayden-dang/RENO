@@ -36,7 +36,8 @@
           $BROWSER) and waits for its loopback callback; a request that
           isn't the callback ends the sign-in.
 
-Driven by tests/acp_registry_sign_in.rs."""
+Driven by tests/acp_registry_sign_in.rs, tests/acp_registry_signin_client.rs and the daemon's
+executor_signin tests (which set FAKE_PERSIST_SIGNIN=1 and give the agent a HOME of its own)."""
 import json
 import os
 import socket
@@ -77,8 +78,13 @@ if mode == "droid-hang":
     # The droid shape, in a record of its own for the test that abandons its sign-in.
     mode = "droid"
 signed_out_file = os.path.join(state, "signed-out") if state else None
+# FAKE_PERSIST_SIGNIN=1: a pairing is kept in $FAKE_STATE/signed-in, so the next start of the agent
+# (the daemon's full probe after a sign-in) finds it signed in, as a real agent's credentials do.
+persisted = bool(state) and os.environ.get("FAKE_PERSIST_SIGNIN") == "1"
+signed_in_file = os.path.join(state, "signed-in") if persisted else None
 signed_in = mode == "signed-in-email" or (
-    mode == "droid-signed-in" and not (signed_out_file and os.path.exists(signed_out_file)))
+    mode == "droid-signed-in" and not (signed_out_file and os.path.exists(signed_out_file))) or bool(
+    signed_in_file and os.path.exists(signed_in_file))
 stale = mode == "droid-stale"
 home = os.path.realpath(os.environ.get("HOME", "/nonexistent"))
 if mode == "home-averse" and os.path.realpath(os.getcwd()) == home:
@@ -130,6 +136,8 @@ for line in sys.stdin:
             while not os.path.exists(paired):
                 time.sleep(0.05)
             signed_in = True
+            if signed_in_file:
+                open(signed_in_file, "w").close()
             send({"jsonrpc": "2.0", "id": mid, "result": {}})
         elif mode == "elicit":
             if can_elicit:

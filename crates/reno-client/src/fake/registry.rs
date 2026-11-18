@@ -23,9 +23,9 @@
 use std::collections::BTreeMap;
 
 use reno_proto::{
-    AccessMode, AutoUpdate, ErrorCode, ErrorObject, ExecutorCaps, ExecutorDescriptor,
-    ExecutorHealth, ExecutorId, ExecutorInfo, ExecutorRegistryListResult, ExecutorSource,
-    InstallStatus, Maintenance, ModelCatalog, NotInstalledReason, RegistryAdded,
+    AccessMode, AuthMethod, AuthMethodKind, AutoUpdate, ErrorCode, ErrorObject, ExecutorCaps,
+    ExecutorDescriptor, ExecutorHealth, ExecutorId, ExecutorInfo, ExecutorRegistryListResult,
+    ExecutorSource, InstallStatus, Maintenance, ModelCatalog, NotInstalledReason, RegistryAdded,
     RegistryDistribution, RegistryEntry, RegistryReadiness, SandboxLevel, SignedIn, Steering,
     UpdaterInfo, VersionGate, VersionRange,
 };
@@ -280,7 +280,40 @@ fn added_executor(
         }),
         job: None,
         source: ExecutorSource::Registry,
+        auth_methods: methods_of(id),
     })
+}
+
+/// What the agents the fake starts with offered in their last full probe's handshake (see
+/// `signin`).
+fn methods_of(id: &str) -> Vec<AuthMethod> {
+    let method = |id: &str, name: &str, kind: AuthMethodKind| AuthMethod {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        description: None,
+        kind,
+        vars: Vec::new(),
+        link: None,
+        command: None,
+        unusable: None,
+    };
+    let key = |id: &str, var: &str| AuthMethod {
+        vars: vec![var.to_owned()],
+        link: Some("https://example.com/keys".to_owned()),
+        ..method(id, "API key", AuthMethodKind::EnvVar)
+    };
+    match id {
+        "acp.cline" => vec![
+            method("browser", "Sign in in the browser", AuthMethodKind::Agent),
+            key("key", "CLINE_API_KEY"),
+        ],
+        "acp.amp-acp" => vec![key("key", "AMP_API_KEY")],
+        "acp.old-agent" => vec![AuthMethod {
+            command: Some("/fake/agents/old-agent/bin login".to_owned()),
+            ..method("login", "Log in", AuthMethodKind::Terminal)
+        }],
+        _ => Vec::new(),
+    }
 }
 
 /// The agents the fake starts with that were added from the registry (or are the person's own).
