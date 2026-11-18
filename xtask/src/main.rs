@@ -62,6 +62,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ("reno-notify", &[]),
     ("reno-markdown", &[]),
     ("reno-syntax", &[]),
+    ("reno-term", &[]),
 ];
 
 /// Extra dev-dependency edges, as `(member, dependency)`.
