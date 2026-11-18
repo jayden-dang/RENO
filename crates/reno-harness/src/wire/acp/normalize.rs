@@ -605,6 +605,21 @@ mod tests {
     }
 
     #[test]
+    fn grok_usage_updates_carry_the_run_so_far_and_the_models_window() {
+        // grok 1.0.88's `usage_update`: `used` of `size`, plus a cost the gauge ignores.
+        assert_eq!(
+            events(&[json!({
+                "sessionUpdate": "usage_update", "used": 12_345, "size": 256_000,
+                "cost": { "amount": 0.01, "currency": "USD" }
+            })]),
+            vec![ExecEvent::ContextUsage {
+                tokens: Some(12_345),
+                window: Some(256_000)
+            }]
+        );
+    }
+
+    #[test]
     fn plans_commands_and_unknown_kinds_are_dropped() {
         assert!(
             events(&[

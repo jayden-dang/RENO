@@ -12,7 +12,7 @@ use reno_proto::{
 
 /// The 200K/1M context-window option. The 1M window is selected by a model-id suffix
 /// (`<model>[1m]`), exactly how the CLI does it. Default 200K: the plain id runs 200K.
-pub(super) fn context_window() -> ModelOption {
+pub(crate) fn context_window() -> ModelOption {
     ModelOption {
         settable: true,
         id: MODEL_OPTION_CONTEXT_WINDOW.into(),
