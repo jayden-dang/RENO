@@ -107,6 +107,12 @@ use reno_proto::{
     ExecutorsWatchParams,
 };
 use reno_proto::{
+    FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
+    FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
+    FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
+    GitStatusParams, GitStatusResult, RunId, Seq,
+};
+use reno_proto::{
     RuleAdd, RuleAddParams, RuleList, RuleListParams, RuleListResult, RuleRevoke, RuleRevokeParams,
     RuleRevokeResult, SECRET_VALUE_MAX, SecretDelete, SecretDeleteParams, SecretDeleteResult,
     SecretInfo, SecretList, SecretListResult, SecretSet, SecretSetParams, SecretSetResult,
@@ -116,12 +122,6 @@ use reno_proto::{
     ThreadList, ThreadListParams, ThreadListResult, WorkspaceClean, WorkspaceCleanParams,
     WorkspaceCleanResult, WorkspaceDiff, WorkspaceDiffParams, WorkspaceDiffResult, WorkspaceGet,
     WorkspaceGetParams, WorkspaceInfo, WorkspaceList, WorkspaceListParams, WorkspaceListResult,
-};
-use reno_proto::{
-    FsChange, FsList, FsListParams, FsListResult, FsRead, FsReadImage, FsReadImageParams,
-    FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams, FsSearchContentResult,
-    FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus,
-    GitStatusParams, GitStatusResult, RunId, Seq,
 };
 use reno_rpc::{Context, Router, SubItem};
 use tokio::sync::watch;
@@ -928,10 +928,9 @@ async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
                     in_place: false,
                 })
             }
-            WorkspaceStatus::Removed | WorkspaceStatus::Lost => Err(FsError::Unavailable(
-                "its worktree was removed".to_owned(),
-            )
-            .object()),
+            WorkspaceStatus::Removed | WorkspaceStatus::Lost => {
+                Err(FsError::Unavailable("its worktree was removed".to_owned()).object())
+            }
         },
         Err(KernelError::WorkspaceNotFound(_)) => {
             let thread = ctx
@@ -939,9 +938,16 @@ async fn served(ctx: &Ctx, run: &RunId) -> Reply<crate::files::Served> {
                 .run_thread(run)
                 .await
                 .map_err(|e| kernel_error(&e))?;
-            let info = ctx.kernel.thread(&thread).await.map_err(|e| kernel_error(&e))?;
+            let info = ctx
+                .kernel
+                .thread(&thread)
+                .await
+                .map_err(|e| kernel_error(&e))?;
             match info.cwd {
-                Some(dir) => Ok(Served { dir, in_place: true }),
+                Some(dir) => Ok(Served {
+                    dir,
+                    in_place: true,
+                }),
                 None => Err(FsError::Unavailable("the run has no folder".to_owned()).object()),
             }
         }

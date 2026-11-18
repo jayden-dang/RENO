@@ -8,11 +8,10 @@
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reno_proto::{
-    FEATURE_FILES, FsChange, FsImageChunk, FsList, FsListParams, FsListResult, FsRead,
-    FsReadImage, FsReadImageParams, FsReadParams, FsReadResult, FsSearchContent,
-    FsSearchContentParams, FsSearchContentResult, FsSearchFiles, FsSearchFilesParams,
-    FsSearchFilesResult, FsWatch, FsWatchParams, GitStatus, GitStatusParams, GitStatusResult,
-    RunId, image_hash,
+    FEATURE_FILES, FsChange, FsImageChunk, FsList, FsListParams, FsListResult, FsRead, FsReadImage,
+    FsReadImageParams, FsReadParams, FsReadResult, FsSearchContent, FsSearchContentParams,
+    FsSearchContentResult, FsSearchFiles, FsSearchFilesParams, FsSearchFilesResult, FsWatch,
+    FsWatchParams, GitStatus, GitStatusParams, GitStatusResult, RunId, image_hash,
 };
 use reno_rpc::{SubEvent, SubStream};
 

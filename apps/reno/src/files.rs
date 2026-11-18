@@ -330,7 +330,12 @@ mod tests {
             repo: true,
             files: vec![
                 file("a.rs", None, GitChange::Unmodified, GitChange::Modified),
-                file("b.rs", Some("c.rs"), GitChange::Renamed, GitChange::Unmodified),
+                file(
+                    "b.rs",
+                    Some("c.rs"),
+                    GitChange::Renamed,
+                    GitChange::Unmodified,
+                ),
                 file("d.rs", None, GitChange::Added, GitChange::Deleted),
                 file("u.txt", None, GitChange::Untracked, GitChange::Untracked),
             ],
@@ -377,8 +382,17 @@ mod tests {
             size,
             mtime_ms: None,
         };
-        assert_eq!(entry_line(&entry(FsEntryKind::Dir, None)), "d           -  x/");
-        assert_eq!(entry_line(&entry(FsEntryKind::File, Some(12))), "f          12  x");
-        assert_eq!(entry_line(&entry(FsEntryKind::Symlink, Some(3))), "l           3  x");
+        assert_eq!(
+            entry_line(&entry(FsEntryKind::Dir, None)),
+            "d           -  x/"
+        );
+        assert_eq!(
+            entry_line(&entry(FsEntryKind::File, Some(12))),
+            "f          12  x"
+        );
+        assert_eq!(
+            entry_line(&entry(FsEntryKind::Symlink, Some(3))),
+            "l           3  x"
+        );
     }
 }

@@ -18,8 +18,8 @@
 //! subscribes only while it is visible (ARCH-10).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use futures::stream;
 use reno_proto::{
@@ -60,10 +60,7 @@ fn tree() -> BTreeMap<String, Node> {
     file("notes.txt", "alpha\nbeta\nAlpha again\n");
     nodes.insert(
         "assets/logo.png".to_owned(),
-        Node::File(
-            [&b"\x89PNG\r\n\x1a\n"[..], &[0u8; 120][..]]
-                .concat(),
-        ),
+        Node::File([&b"\x89PNG\r\n\x1a\n"[..], &[0u8; 120][..]].concat()),
     );
     nodes.insert("assets/blob.bin".to_owned(), Node::File(vec![0, 1, 2, 3]));
     for n in 0..MANY {
@@ -94,11 +91,31 @@ fn status_files() -> Vec<GitFileStatus> {
         worktree,
     };
     vec![
-        row("Cargo.toml", None, GitChange::Unmodified, GitChange::Modified),
-        row("docs/guide.md", Some("docs/old-guide.md"), GitChange::Renamed, GitChange::Unmodified),
-        row("notes.txt", None, GitChange::Untracked, GitChange::Untracked),
+        row(
+            "Cargo.toml",
+            None,
+            GitChange::Unmodified,
+            GitChange::Modified,
+        ),
+        row(
+            "docs/guide.md",
+            Some("docs/old-guide.md"),
+            GitChange::Renamed,
+            GitChange::Unmodified,
+        ),
+        row(
+            "notes.txt",
+            None,
+            GitChange::Untracked,
+            GitChange::Untracked,
+        ),
         row("src/lib.rs", None, GitChange::Added, GitChange::Unmodified),
-        row("src/old.rs", None, GitChange::Unmodified, GitChange::Deleted),
+        row(
+            "src/old.rs",
+            None,
+            GitChange::Unmodified,
+            GitChange::Deleted,
+        ),
     ]
 }
 
@@ -162,7 +179,10 @@ fn invalid(message: &str) -> ErrorObject {
 }
 
 fn not_found(path: &str) -> ErrorObject {
-    ErrorObject::new(ErrorCode::NotFound, format!("no such file or directory: {path:?}"))
+    ErrorObject::new(
+        ErrorCode::NotFound,
+        format!("no such file or directory: {path:?}"),
+    )
 }
 
 fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
@@ -175,7 +195,11 @@ fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
             None => return Err(not_found(&p.dir)),
         }
     }
-    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
     let mut entries: Vec<FsEntry> = nodes
         .iter()
         .filter_map(|(path, node)| {
@@ -195,10 +219,18 @@ fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
             })
         })
         .collect();
-    let key = |kind: FsEntryKind, name: &str| (u8::from(kind != FsEntryKind::Dir), name.to_lowercase(), name.to_owned());
+    let key = |kind: FsEntryKind, name: &str| {
+        (
+            u8::from(kind != FsEntryKind::Dir),
+            name.to_lowercase(),
+            name.to_owned(),
+        )
+    };
     entries.sort_by_cached_key(|e| key(e.kind, &e.name));
     if let Some(cursor) = &p.cursor {
-        let (rank, name) = cursor.split_once(':').ok_or_else(|| invalid("invalid cursor"))?;
+        let (rank, name) = cursor
+            .split_once(':')
+            .ok_or_else(|| invalid("invalid cursor"))?;
         let rank: u8 = rank.parse().map_err(|_| invalid("invalid cursor"))?;
         let after = (rank, name.to_lowercase(), name.to_owned());
         entries.retain(|e| key(e.kind, &e.name) > after);
@@ -210,7 +242,11 @@ fn list(p: &FsListParams, place: &Place) -> Result<FsListResult, ErrorObject> {
     let more = entries.len() > limit;
     entries.truncate(limit);
     let next_cursor = more
-        .then(|| entries.last().map(|e| format!("{}:{}", u8::from(e.kind != FsEntryKind::Dir), e.name)))
+        .then(|| {
+            entries
+                .last()
+                .map(|e| format!("{}:{}", u8::from(e.kind != FsEntryKind::Dir), e.name))
+        })
         .flatten();
     Ok(FsListResult {
         entries,
@@ -265,7 +301,12 @@ fn read(p: &FsReadParams, place: &Place) -> Result<FsReadResult, ErrorObject> {
 
 fn read_image(p: &FsReadImageParams, place: &Place) -> Result<FsImageChunk, ErrorObject> {
     let (path, bytes) = file_of(&p.path)?;
-    let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+    let mime = match path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -276,7 +317,9 @@ fn read_image(p: &FsReadImageParams, place: &Place) -> Result<FsImageChunk, Erro
     if bytes.len() as u64 > FS_IMAGE_MAX_BYTES {
         return Err(invalid("too large"));
     }
-    let start = usize::try_from(p.offset).unwrap_or(usize::MAX).min(bytes.len());
+    let start = usize::try_from(p.offset)
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
     let end = (start + FS_IMAGE_CHUNK_BYTES).min(bytes.len());
     Ok(FsImageChunk {
         path,
@@ -328,7 +371,11 @@ fn search_content(
     if p.query.is_empty() {
         return Err(invalid("the query is empty"));
     }
-    let needle = if p.ignore_case { p.query.to_lowercase() } else { p.query.clone() };
+    let needle = if p.ignore_case {
+        p.query.to_lowercase()
+    } else {
+        p.query.clone()
+    };
     let limit = p
         .limit
         .unwrap_or(FS_SEARCH_DEFAULT_LIMIT)
@@ -341,7 +388,11 @@ fn search_content(
             continue;
         }
         for (n, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
-            let hay = if p.ignore_case { line.to_lowercase() } else { line.to_owned() };
+            let hay = if p.ignore_case {
+                line.to_lowercase()
+            } else {
+                line.to_owned()
+            };
             if hay.contains(&needle) {
                 if matches.len() >= limit {
                     truncated = true;
@@ -385,14 +436,26 @@ pub(super) fn add(router: Router, shared: &Arc<Shared>) -> Router {
             })
         }};
     }
-    let router = method!(router, FsList, "fs.list", FsListParams, |p, place| list(&p, &place));
-    let router = method!(router, FsRead, "fs.read", FsReadParams, |p, place| read(&p, &place));
-    let router = method!(router, FsReadImage, "fs.read_image", FsReadImageParams, |p, place| {
-        read_image(&p, &place)
-    });
-    let router = method!(router, FsSearchFiles, "fs.search_files", FsSearchFilesParams, |p, place| {
-        Ok(search_files(&p, &place))
-    });
+    let router = method!(router, FsList, "fs.list", FsListParams, |p, place| list(
+        &p, &place
+    ));
+    let router = method!(router, FsRead, "fs.read", FsReadParams, |p, place| read(
+        &p, &place
+    ));
+    let router = method!(
+        router,
+        FsReadImage,
+        "fs.read_image",
+        FsReadImageParams,
+        |p, place| read_image(&p, &place)
+    );
+    let router = method!(
+        router,
+        FsSearchFiles,
+        "fs.search_files",
+        FsSearchFilesParams,
+        |p, place| Ok(search_files(&p, &place))
+    );
     let router = method!(
         router,
         FsSearchContent,
@@ -400,14 +463,24 @@ pub(super) fn add(router: Router, shared: &Arc<Shared>) -> Router {
         FsSearchContentParams,
         |p, place| search_content(&p, &place)
     );
-    let router = method!(router, GitStatus, "git.status", GitStatusParams, |p, place| {
-        Ok(GitStatusResult {
-            branch: place.repo.then(|| place.branch.clone()),
-            repo: place.repo,
-            files: if place.repo { status_files() } else { Vec::new() },
-            in_place: place.in_place,
-        })
-    });
+    let router = method!(
+        router,
+        GitStatus,
+        "git.status",
+        GitStatusParams,
+        |p, place| {
+            Ok(GitStatusResult {
+                branch: place.repo.then(|| place.branch.clone()),
+                repo: place.repo,
+                files: if place.repo {
+                    status_files()
+                } else {
+                    Vec::new()
+                },
+                in_place: place.in_place,
+            })
+        }
+    );
     let s = Arc::clone(shared);
     router.subscription::<FsWatch, _, _, _>(move |p: FsWatchParams, _| {
         let s = Arc::clone(&s);
@@ -417,27 +490,36 @@ pub(super) fn add(router: Router, shared: &Arc<Shared>) -> Router {
             let rx = s.fs_tx.subscribe();
             s.fs_watches.fetch_add(1, Ordering::SeqCst);
             let state = (rx, p.run_id, 1u64, Watching(Arc::clone(&s)));
-            Ok(stream::unfold(state, |(mut rx, run, n, guard)| async move {
-                loop {
-                    match rx.recv().await {
-                        Ok((target, change)) if target == run => {
-                            return Some((SubItem::seq(Seq(n), change), (rx, run, n + 1, guard)));
+            Ok(stream::unfold(
+                state,
+                |(mut rx, run, n, guard)| async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok((target, change)) if target == run => {
+                                return Some((
+                                    SubItem::seq(Seq(n), change),
+                                    (rx, run, n + 1, guard),
+                                ));
+                            }
+                            Ok(_) => {}
+                            // The queue behind this subscriber overflowed: what was lost is
+                            // unknown, so the item says to rescan.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let rescan = FsChange {
+                                    overflow: true,
+                                    git: true,
+                                    ..FsChange::default()
+                                };
+                                return Some((
+                                    SubItem::seq(Seq(n), rescan),
+                                    (rx, run, n + 1, guard),
+                                ));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                         }
-                        Ok(_) => {}
-                        // The queue behind this subscriber overflowed: what was lost is
-                        // unknown, so the item says to rescan.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let rescan = FsChange {
-                                overflow: true,
-                                git: true,
-                                ..FsChange::default()
-                            };
-                            return Some((SubItem::seq(Seq(n), rescan), (rx, run, n + 1, guard)));
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                     }
-                }
-            }))
+                },
+            ))
         }
     })
 }

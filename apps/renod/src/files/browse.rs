@@ -32,7 +32,11 @@ fn sort_key(kind: FsEntryKind, name: &str) -> SortKey {
 }
 
 fn cursor_of(entry: &FsEntry) -> String {
-    format!("{}:{}", u8::from(entry.kind != FsEntryKind::Dir), entry.name)
+    format!(
+        "{}:{}",
+        u8::from(entry.kind != FsEntryKind::Dir),
+        entry.name
+    )
 }
 
 fn parse_cursor(cursor: &str) -> Result<SortKey, FsError> {
@@ -86,7 +90,7 @@ pub(crate) fn list(
         };
         entries.push(FsEntry {
             path: join(&target.rel, &name),
-            size: (kind != FsEntryKind::Dir).then(|| meta.len()),
+            size: (kind != FsEntryKind::Dir).then_some(meta.len()),
             mtime_ms: millis(meta.modified()),
             name,
             kind,
@@ -193,7 +197,8 @@ pub(crate) fn image_mime(path: &Path) -> Option<&'static str> {
 /// The chunk of the image at `path` that starts at `offset`.
 pub(crate) fn read_image(root: &Root, path: &str, offset: u64) -> Result<FsImageChunk, FsError> {
     let target = root.resolve(path)?;
-    let mime = image_mime(Path::new(&target.rel)).ok_or_else(|| FsError::NotAnImage(path.to_owned()))?;
+    let mime =
+        image_mime(Path::new(&target.rel)).ok_or_else(|| FsError::NotAnImage(path.to_owned()))?;
     let file = std::fs::File::open(&target.real)
         .map_err(|error| FsError::io(format!("opening {path:?}"), &error))?;
     let meta = file
@@ -277,7 +282,10 @@ mod tests {
         let link = page.entries.iter().find(|e| e.name == "link").unwrap();
         assert_eq!(link.kind, FsEntryKind::Symlink);
         let b = page.entries.iter().find(|e| e.name == "b.txt").unwrap();
-        assert_eq!((b.kind, b.size, b.path.as_str()), (FsEntryKind::File, Some(2), "b.txt"));
+        assert_eq!(
+            (b.kind, b.size, b.path.as_str()),
+            (FsEntryKind::File, Some(2), "b.txt")
+        );
         assert!(b.mtime_ms.is_some());
         let docs = &page.entries[0];
         assert_eq!((docs.kind, docs.size), (FsEntryKind::Dir, None));
@@ -344,11 +352,23 @@ mod tests {
         put(&root, "bin.dat", b"PK\0\0data");
         let unix = read(&root, "unix.txt").unwrap();
         assert_eq!(unix.text.as_deref(), Some("a\nb\n"));
-        assert_eq!((unix.line_ending, unix.size, unix.binary), (LineEnding::Lf, 4, false));
+        assert_eq!(
+            (unix.line_ending, unix.size, unix.binary),
+            (LineEnding::Lf, 4, false)
+        );
         assert_eq!(unix.encoding, "utf-8");
-        assert_eq!(read(&root, "dos.txt").unwrap().line_ending, LineEnding::Crlf);
-        assert_eq!(read(&root, "mixed.txt").unwrap().line_ending, LineEnding::Mixed);
-        assert_eq!(read(&root, "one.txt").unwrap().line_ending, LineEnding::None);
+        assert_eq!(
+            read(&root, "dos.txt").unwrap().line_ending,
+            LineEnding::Crlf
+        );
+        assert_eq!(
+            read(&root, "mixed.txt").unwrap().line_ending,
+            LineEnding::Mixed
+        );
+        assert_eq!(
+            read(&root, "one.txt").unwrap().line_ending,
+            LineEnding::None
+        );
         let bin = read(&root, "bin.dat").unwrap();
         assert!(bin.binary);
         assert_eq!((bin.text, bin.size), (None, 8));
@@ -397,7 +417,10 @@ mod tests {
         let mut hashes = std::collections::HashSet::new();
         loop {
             let chunk = read_image(&root, "pic.PNG", offset).unwrap();
-            assert_eq!((chunk.mime.as_str(), chunk.size), ("image/png", bytes.len() as u64));
+            assert_eq!(
+                (chunk.mime.as_str(), chunk.size),
+                ("image/png", bytes.len() as u64)
+            );
             assert_eq!(chunk.offset, offset);
             hashes.insert(chunk.hash.clone());
             let part = chunk.bytes().unwrap();
@@ -412,7 +435,10 @@ mod tests {
         assert_eq!(hashes, [image_hash(&bytes)].into());
 
         put(&root, "logo.svg", b"<svg/>");
-        assert_eq!(read_image(&root, "logo.svg", 0).unwrap().mime, "image/svg+xml");
+        assert_eq!(
+            read_image(&root, "logo.svg", 0).unwrap().mime,
+            "image/svg+xml"
+        );
         put(&root, "notes.txt", b"x");
         assert!(matches!(
             read_image(&root, "notes.txt", 0),

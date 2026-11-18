@@ -24,8 +24,8 @@ use reno_proto::{
     FsEntryKind, FsListParams, FsReadImageParams, FsReadParams, FsSearchContentParams,
     FsSearchFilesParams, GitChange, RunId, RunStatus, TaskRunParams,
 };
-use renod::watcher::{Handler, WatcherGuard};
 use renod::WatcherFactory;
+use renod::watcher::{Handler, WatcherGuard};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -136,7 +136,10 @@ fn read(run: &RunId, path: &str) -> FsReadParams {
 }
 
 fn code<T: std::fmt::Debug>(result: Result<T, ClientError>) -> ErrorCode {
-    result.expect_err("an error").code().expect("a daemon error")
+    result
+        .expect_err("an error")
+        .code()
+        .expect("a daemon error")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -157,7 +160,14 @@ async fn a_live_runs_worktree_is_listed_read_and_hides_git() {
     // Directories first, then files, case-folded; `.git` (a file in a worktree) is hidden.
     assert_eq!(
         names,
-        ["docs", "src", ".gitignore", "kept.log", "old.txt", "README.md"]
+        [
+            "docs",
+            "src",
+            ".gitignore",
+            "kept.log",
+            "old.txt",
+            "README.md"
+        ]
     );
     assert!(!root.in_place);
     assert_eq!(root.entries[0].kind, FsEntryKind::Dir);
@@ -365,23 +375,33 @@ async fn search_finds_files_by_name_and_lines_by_content_and_skips_ignored_files
         query: query.into(),
         limit: None,
     };
-    let found = within(fx.client.fs_search_files(files("lrs"))).await.unwrap();
+    let found = within(fx.client.fs_search_files(files("lrs")))
+        .await
+        .unwrap();
     assert_eq!(found.files[0].path, "src/lib.rs");
-    let all = within(fx.client.fs_search_files(files("rs"))).await.unwrap();
+    let all = within(fx.client.fs_search_files(files("rs")))
+        .await
+        .unwrap();
     let paths: Vec<&str> = all.files.iter().map(|f| f.path.as_str()).collect();
     assert!(paths.contains(&"src/extra.rs"), "{paths:?}");
     assert!(!paths.iter().any(|p| p.contains("ignored")), "{paths:?}");
     // Ignored, but tracked: found. Ignored and not tracked: not.
-    let logs = within(fx.client.fs_search_files(files("log"))).await.unwrap();
+    let logs = within(fx.client.fs_search_files(files("log")))
+        .await
+        .unwrap();
     let paths: Vec<&str> = logs.files.iter().map(|f| f.path.as_str()).collect();
     assert!(paths.contains(&"kept.log"), "{paths:?}");
     assert!(!paths.contains(&"debug.log"), "{paths:?}");
     // Nothing of .git ever.
-    let git_hits = within(fx.client.fs_search_files(files("config"))).await.unwrap();
+    let git_hits = within(fx.client.fs_search_files(files("config")))
+        .await
+        .unwrap();
     assert!(git_hits.files.iter().all(|f| !f.path.starts_with(".git/")));
     // A deleted tracked file is no result.
     std::fs::remove_file(tree.join("old.txt")).unwrap();
-    let old = within(fx.client.fs_search_files(files("old"))).await.unwrap();
+    let old = within(fx.client.fs_search_files(files("old")))
+        .await
+        .unwrap();
     assert!(old.files.is_empty(), "{old:?}");
     // The limit cuts and says so.
     let two = within(fx.client.fs_search_files(FsSearchFilesParams {
@@ -415,10 +435,16 @@ async fn search_finds_files_by_name_and_lines_by_content_and_skips_ignored_files
         .await
         .unwrap();
     let paths: Vec<&str> = folded.matches.iter().map(|m| m.path.as_str()).collect();
-    assert_eq!(paths, ["README.md", "src/extra.rs", "src/lib.rs", "src/main.rs"]);
-    let regex = within(fx.client.fs_search_content(content("fn (alpha|beta)", true, false)))
-        .await
-        .unwrap();
+    assert_eq!(
+        paths,
+        ["README.md", "src/extra.rs", "src/lib.rs", "src/main.rs"]
+    );
+    let regex = within(
+        fx.client
+            .fs_search_content(content("fn (alpha|beta)", true, false)),
+    )
+    .await
+    .unwrap();
     assert_eq!(regex.matches.len(), 2);
     // `.` is a plain character in a literal search.
     let dots = within(fx.client.fs_search_content(content("a.pha", false, false)))
@@ -452,8 +478,13 @@ async fn git_status_reports_added_modified_renamed_deleted_and_untracked() {
     let (run, tree) = live(&fx, &repo(&fx)).await;
     let clean = within(fx.client.git_status(run.clone())).await.unwrap();
     assert!(clean.repo && clean.files.is_empty());
-    let thread = fx.client.list_threads(None).await.unwrap()[0].thread_id.clone();
-    assert_eq!(clean.branch.as_deref(), Some(format!("reno/{thread}").as_str()));
+    let thread = fx.client.list_threads(None).await.unwrap()[0]
+        .thread_id
+        .clone();
+    assert_eq!(
+        clean.branch.as_deref(),
+        Some(format!("reno/{thread}").as_str())
+    );
 
     put(&tree, "README.md", "edited\n");
     put(&tree, "src/added.rs", "new\n");
@@ -468,13 +499,34 @@ async fn git_status_reports_added_modified_renamed_deleted_and_untracked() {
     let status = within(fx.client.git_status(run.clone())).await.unwrap();
     let of = |path: &str| status.files.iter().find(|f| f.path == path).unwrap();
     let sides = |path: &str| (of(path).index, of(path).worktree);
-    assert_eq!(sides("README.md"), (GitChange::Unmodified, GitChange::Modified));
-    assert_eq!(sides("src/added.rs"), (GitChange::Added, GitChange::Unmodified));
-    assert_eq!(sides("docs/manual.md"), (GitChange::Renamed, GitChange::Unmodified));
-    assert_eq!(of("docs/manual.md").old_path.as_deref(), Some("docs/guide.md"));
-    assert_eq!(sides("old.txt"), (GitChange::Unmodified, GitChange::Deleted));
-    assert_eq!(sides("untracked.txt"), (GitChange::Untracked, GitChange::Untracked));
-    assert_eq!(sides("src/lib.rs"), (GitChange::Modified, GitChange::Modified));
+    assert_eq!(
+        sides("README.md"),
+        (GitChange::Unmodified, GitChange::Modified)
+    );
+    assert_eq!(
+        sides("src/added.rs"),
+        (GitChange::Added, GitChange::Unmodified)
+    );
+    assert_eq!(
+        sides("docs/manual.md"),
+        (GitChange::Renamed, GitChange::Unmodified)
+    );
+    assert_eq!(
+        of("docs/manual.md").old_path.as_deref(),
+        Some("docs/guide.md")
+    );
+    assert_eq!(
+        sides("old.txt"),
+        (GitChange::Unmodified, GitChange::Deleted)
+    );
+    assert_eq!(
+        sides("untracked.txt"),
+        (GitChange::Untracked, GitChange::Untracked)
+    );
+    assert_eq!(
+        sides("src/lib.rs"),
+        (GitChange::Modified, GitChange::Modified)
+    );
     assert_eq!(status.files.len(), 6);
     // A status refresh takes no lock: the run can still `git add` right after.
     assert!(!tree.join(".git").is_dir());
@@ -497,7 +549,12 @@ async fn an_ended_run_whose_worktree_is_kept_is_served_and_a_removed_one_is_unav
         .await
         .unwrap();
     assert_eq!(after.text.as_deref(), Some("work\n"));
-    assert!(within(fx.client.git_status(run.clone())).await.unwrap().repo);
+    assert!(
+        within(fx.client.git_status(run.clone()))
+            .await
+            .unwrap()
+            .repo
+    );
 
     // Removed: a typed, stable error for every method.
     within(fx.client.clean_workspaces(
@@ -525,12 +582,18 @@ async fn an_ended_run_whose_worktree_is_kept_is_served_and_a_removed_one_is_unav
         ),
         gone
     );
-    assert_eq!(code(fx.client.watch_fs(run.clone()).await.map(|_| ())), gone);
+    assert_eq!(
+        code(fx.client.watch_fs(run.clone()).await.map(|_| ())),
+        gone
+    );
     assert_eq!(gone.code(), -32013);
 
     // An unknown run is not found.
     let nobody = RunId::from_suffix("nobody").unwrap();
-    assert_eq!(code(fx.client.fs_list(list(&nobody, "")).await), ErrorCode::NotFound);
+    assert_eq!(
+        code(fx.client.fs_list(list(&nobody, "")).await),
+        ErrorCode::NotFound
+    );
     fx.stop().await;
 }
 
@@ -550,7 +613,9 @@ async fn a_run_with_no_worktree_is_served_from_its_folder_and_says_so() {
     assert!(listed.in_place);
     let names: Vec<&str> = listed.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["sub", "notes.txt"]);
-    let text = within(fx.client.fs_read(read(&run, "notes.txt"))).await.unwrap();
+    let text = within(fx.client.fs_read(read(&run, "notes.txt")))
+        .await
+        .unwrap();
     assert!(text.in_place);
     assert_eq!(text.text.as_deref(), Some("hello\n"));
     // Not a repository: no status, said plainly. Search still works, over the folder.
@@ -638,7 +703,9 @@ impl Rig {
     }
 }
 
-async fn next(stream: &mut (impl futures::Stream<Item = Result<FsChange, ClientError>> + Unpin)) -> FsChange {
+async fn next(
+    stream: &mut (impl futures::Stream<Item = Result<FsChange, ClientError>> + Unpin),
+) -> FsChange {
     within(stream.next()).await.expect("an item").expect("ok")
 }
 
@@ -714,14 +781,19 @@ async fn a_disconnect_stops_its_watches_and_the_daemon_caps_how_many_it_opens() 
     let (run, _tree) = live(&fx, &repo(&fx)).await;
     let baseline = rig.live();
 
-    let other = within(Client::connect_unix(&fx.paths.socket)).await.unwrap();
+    let other = within(Client::connect_unix(&fx.paths.socket))
+        .await
+        .unwrap();
     let mut held = Vec::new();
     for _ in 0..renod::files::MAX_OPEN_WATCHES {
         held.push(within(other.watch_fs(run.clone())).await.unwrap());
     }
     assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
     // One more is refused, as a typed "unavailable", and costs no watcher.
-    assert_eq!(code(fx.client.watch_fs(run.clone()).await.map(|_| ())), ErrorCode::Unavailable);
+    assert_eq!(
+        code(fx.client.watch_fs(run.clone()).await.map(|_| ())),
+        ErrorCode::Unavailable
+    );
     assert_eq!(rig.live(), baseline + renod::files::MAX_OPEN_WATCHES);
 
     // The connection goes away without unsubscribing: every watch it held goes with it.

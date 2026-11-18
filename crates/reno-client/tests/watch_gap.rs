@@ -115,7 +115,10 @@ async fn a_file_watch_that_only_gaps_ends_with_a_protocol_error() {
     while let Some(item) = watch.next().await {
         last = Some(item);
     }
-    assert!(matches!(last, Some(Err(reno_client::ClientError::Protocol(_)))));
+    assert!(matches!(
+        last,
+        Some(Err(reno_client::ClientError::Protocol(_)))
+    ));
     cancel.cancel();
     server.abort();
 }

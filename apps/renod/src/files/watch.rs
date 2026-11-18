@@ -218,8 +218,10 @@ pub(crate) struct Slot(Arc<AtomicUsize>);
 impl Slot {
     /// Takes a place, if fewer than `cap` are taken.
     pub(crate) fn take(open: &Arc<AtomicUsize>, cap: usize) -> Option<Self> {
-        open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < cap).then_some(n + 1))
-            .ok()?;
+        open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            (n < cap).then_some(n + 1)
+        })
+        .ok()?;
         Some(Self(Arc::clone(open)))
     }
 }
@@ -422,11 +424,12 @@ mod tests {
                 "{moves}"
             );
         }
-        let read = Ok(Event::new(EventKind::Access(AccessKind::Any))
-            .add_path(PathBuf::from("/w/tree/a")));
+        let read =
+            Ok(Event::new(EventKind::Access(AccessKind::Any)).add_path(PathBuf::from("/w/tree/a")));
         assert_eq!(classify(&plan, &read), Verdict::Ignore);
-        let lost = Ok(Event::new(EventKind::Modify(ModifyKind::Any))
-            .set_flag(notify::event::Flag::Rescan));
+        let lost =
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                .set_flag(notify::event::Flag::Rescan));
         assert_eq!(classify(&plan, &lost), Verdict::Rescan);
         assert_eq!(
             classify(&plan, &Err(notify::Error::generic("boom"))),

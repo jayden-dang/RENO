@@ -227,7 +227,13 @@ fn entry(path: String, old_path: Option<String>, xy: &str) -> GitFileStatus {
 pub(crate) async fn list_files(dir: &Path) -> Result<Option<Vec<String>>, FsError> {
     let out = run(
         dir,
-        &["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
     )
     .await?;
     if out.code != Some(0) {
@@ -344,7 +350,11 @@ async fn grep_in(
         // Git words a bad pattern differently from one version to the next, so a regular
         // expression that fails to compile is told by elimination: it was a pattern search and
         // the failure was not about the repository.
-        Some(128) if wanted.regex && !message.contains("repository") && !message.contains("ownership") => {
+        Some(128)
+            if wanted.regex
+                && !message.contains("repository")
+                && !message.contains("ownership") =>
+        {
             Err(FsError::BadPattern(message.trim().to_owned()))
         }
         _ => Err(FsError::Git(format!("git grep: {}", message.trim()))),

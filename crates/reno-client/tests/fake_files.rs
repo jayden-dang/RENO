@@ -7,8 +7,8 @@
 use futures::StreamExt;
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_proto::{
-    ErrorCode, FEATURE_FILES, FsChange, FsEntryKind, FsListParams, FsReadImageParams,
-    FsReadParams, FsSearchContentParams, FsSearchFilesParams, GitChange, LineEnding, RunId,
+    ErrorCode, FEATURE_FILES, FsChange, FsEntryKind, FsListParams, FsReadImageParams, FsReadParams,
+    FsSearchContentParams, FsSearchFilesParams, GitChange, LineEnding, RunId,
 };
 
 fn run(name: &str) -> RunId {
@@ -40,7 +40,15 @@ async fn the_fake_lists_reads_and_pages_its_tree() {
     let names: Vec<&str> = root.entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
         names,
-        ["assets", "docs", "many", "src", "Cargo.toml", "notes.txt", "README.md"]
+        [
+            "assets",
+            "docs",
+            "many",
+            "src",
+            "Cargo.toml",
+            "notes.txt",
+            "README.md"
+        ]
     );
     assert!(!root.in_place);
     assert_eq!(root.entries[0].kind, FsEntryKind::Dir);
