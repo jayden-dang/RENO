@@ -17,7 +17,7 @@
 //!   `command`/`exec` and system program paths, and only when what is inside is one simple
 //!   command; `sudo`, `env`, `VAR=val`, `xargs` and a line it cannot parse are not read through
 //!   and fall to the next rule, or ask.
-//! - **Some paths are protected before any rule is read**: `.git`, `.claude`, `.codex`, `.pi`,
+//! - **Some paths are protected before any rule is read**: `.git`, `.claude`, `.codex`,
 //!   `.reno`, `.mcp.json` and Reno's data directory cannot be edited, redirected into, `rm`ed,
 //!   `mv`ed and so on by a run, and no `allow` rule changes that. See `protect`.
 //! - `/**` means "outside the run's worktree", judged lexically, with no symlink resolution and no
