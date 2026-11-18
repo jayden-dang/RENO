@@ -390,13 +390,17 @@ fn version_fact(health: &ExecutorHealth) -> Option<Fact> {
     })
 }
 
-fn signed_in_fact(health: &ExecutorHealth) -> Option<Fact> {
+fn signed_in_fact(health: &ExecutorHealth, source: reno_proto::ExecutorSource) -> Option<Fact> {
     let InstallStatus::Installed { .. } = &health.installed else {
         return None;
     };
     Some(match &health.signed_in {
         SignedIn::Yes { account } => Fact::new(Level::Good, "Signed in", account.clone()),
         SignedIn::No { hint } => Fact::new(Level::Bad, "Signed out", Some(hint.clone())),
+        // A registry agent is never started in the background to ask: Check does it.
+        SignedIn::Unknown if source == reno_proto::ExecutorSource::Registry => {
+            Fact::new(Level::Quiet, "Not checked yet", Some("Check".to_owned()))
+        }
         SignedIn::Unknown => Fact::new(
             Level::Quiet,
             "Sign-in not checkable",
@@ -646,7 +650,7 @@ fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
     };
     let installed = installed_fact(health);
     let version = health.and_then(version_fact);
-    let signed_in = health.and_then(signed_in_fact);
+    let signed_in = health.and_then(|h| signed_in_fact(h, info.source));
     let group = group_of(info, need, ctx, recipe.is_some(), managed);
     let job = info
         .job
@@ -1136,6 +1140,26 @@ mod tests {
             (Level::Quiet, "Sign-in not checkable")
         );
         assert_eq!(only(&view).need, None);
+    }
+
+    /// A registry agent is never started to find out: its sign-in reads "Not checked yet" and
+    /// points at Check, where a built-in executor's reads as not checkable.
+    #[test]
+    fn a_registry_agents_unknown_sign_in_says_it_is_not_checked_yet() {
+        let unknown = with(|h| h.signed_in = SignedIn::Unknown);
+        let mut registry = info("acp.cline", Some(unknown.clone()));
+        registry.source = reno_proto::ExecutorSource::Registry;
+        let state = state_of(vec![registry]);
+        let view = build(&state, NOW);
+        let fact = only(&view).signed_in.clone().unwrap();
+        assert_eq!(
+            (fact.level, fact.text, fact.detail.as_deref()),
+            (Level::Quiet, "Not checked yet", Some("Check"))
+        );
+        // A built-in executor keeps its own wording.
+        let state = state_of(vec![info("acp.grok", Some(unknown))]);
+        let fact = only(&build(&state, NOW)).signed_in.clone().unwrap();
+        assert_eq!(fact.text, "Sign-in not checkable");
     }
 
     #[test]
