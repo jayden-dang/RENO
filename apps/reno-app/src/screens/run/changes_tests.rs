@@ -15,6 +15,7 @@ use crate::tests::{click, draw, fake_store, painted, run_id, wait_drawn, wait_un
 use crate::transcript::Row;
 use crate::ui::theme::Appearance;
 use crate::vm::changes::{PatchPane, RowKind};
+use gpui::px;
 
 fn store_with(cx: &mut TestAppContext, mut config: FakeConfig) -> Entity<Store> {
     crate::tests::one_window_test_at_a_time();
@@ -364,14 +365,27 @@ fn a_five_thousand_line_patch_draws_only_the_rows_in_view(cx: &mut TestAppContex
     );
     assert!(painted(vcx, &format!("change-patch-{path}")));
     assert!(!painted(vcx, "patch-cut"), "the end is far below");
-    // The cap's message is the last row of that file.
+    // The file's bar is in view where it starts, so no copy of it sticks to the top.
+    assert!(!painted(vcx, &format!("sticky-change-file-{path}")));
+    // Scrolled into the file, its bar sticks to the top.
+    screen.read_with(vcx, |s, _| s.review_scroll_by(px(2_000.0)));
+    draw(vcx);
+    draw(vcx);
+    let top = screen.read_with(vcx, |s, _| s.review_top());
+    assert!(
+        (50..300).contains(&top),
+        "2,000 px of 18 px lines is about a hundred rows, not {top}"
+    );
+    assert!(
+        painted(vcx, &format!("sticky-change-file-{path}")),
+        "the bar of the file being read stays at the top"
+    );
+    // With the others folded, the cap's message is the last row of the list.
+    screen.update(vcx, |s, cx| s.fold_all_but(path, cx));
     screen.read_with(vcx, |s, _| s.review_scroll_to_end());
     draw(vcx);
     draw(vcx);
-    assert!(
-        painted(vcx, "patch-cut") || painted(vcx, "change-file-docs/old-notes.md"),
-        "the end of the list is in view"
-    );
+    assert!(painted(vcx, "patch-cut"), "the cut message ends the file");
 }
 
 #[gpui::test]

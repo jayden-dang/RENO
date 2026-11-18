@@ -76,6 +76,9 @@ impl Flat {
                 .count();
             self.list
                 .splice(same..self.rows.len(), rows.len().saturating_sub(same));
+            // New rows have no height yet; a line is the best guess, so scrolling and the
+            // scrollbar are not thrown off by rows that were never measured.
+            self.list.clone().with_uniform_item_height(px(LINE));
         }
         self.rows = rows;
     }
@@ -245,6 +248,27 @@ impl RunScreen {
     #[cfg(test)]
     pub(crate) fn review_scroll_to_end(&self) {
         self.review.list.scroll_to_end();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_top(&self) -> usize {
+        self.review.list.logical_scroll_top().item_ix
+    }
+
+    #[cfg(test)]
+    pub(crate) fn review_scroll_by(&self, distance: gpui::Pixels) {
+        self.review.list.scroll_by(distance);
+    }
+
+    /// Folds every file but `keep` (a person clicking their bars).
+    #[cfg(test)]
+    pub(crate) fn fold_all_but(&mut self, keep: &str, cx: &mut Context<Self>) {
+        let paths: Vec<String> = self.review.files.iter().map(|f| f.path.clone()).collect();
+        for path in paths.into_iter().filter(|p| p != keep) {
+            if !self.review_folded.contains(&path) {
+                self.toggle_file(path, cx);
+            }
+        }
     }
 
     #[cfg(test)]
