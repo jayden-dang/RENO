@@ -217,6 +217,7 @@ impl Target {
         }
         let run_id = RunId::from_suffix("01HZXC").map_err(|e| format!("run id: {e}"))?;
         Ok(ExecSpec {
+            model_options: Default::default(),
             run_id,
             prompt: scenario.prompt.clone(),
             cwd: self.cwd.clone(),

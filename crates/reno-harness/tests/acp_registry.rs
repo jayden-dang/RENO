@@ -167,6 +167,7 @@ async fn a_registry_agent_installs_launches_and_is_removed() {
     assert!(executor.descriptor().adapter_version.contains("CLI 1.2.3"));
     let (controls, _handle) = ExecControls::new(8);
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "scenario:happy".into(),

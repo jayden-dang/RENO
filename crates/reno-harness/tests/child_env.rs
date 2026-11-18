@@ -46,6 +46,7 @@ async fn the_child_gets_the_allowlist_the_run_env_and_nothing_else() {
     ]
     .into();
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("01HZX9").unwrap(),
         inherit_user_config: false,
         prompt: "scenario:env".into(),

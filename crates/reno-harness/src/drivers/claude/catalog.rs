@@ -83,6 +83,7 @@ pub(super) fn supported_models(cli: Option<&str>) -> Vec<ModelInfo> {
         .iter()
         .filter(|(id, _)| !too_old_for(id, cli))
         .map(|(id, label)| ModelInfo {
+            options: Vec::new(),
             default_effort: None,
             efforts: vec![],
             id: (*id).into(),

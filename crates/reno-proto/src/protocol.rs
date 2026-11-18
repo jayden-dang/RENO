@@ -100,6 +100,10 @@ pub const FEATURE_RUN_MODEL: &str = "run.model";
 /// Feature: `task.run` takes `effort`, bots may name one, `RunSummary::effort` says which, and
 /// `ModelInfo::efforts` lists what each model takes.
 pub const FEATURE_RUN_EFFORT: &str = "run.effort";
+/// Feature: `task.run` takes `modelOptions` (option id to choice id), `ModelInfo::options` lists
+/// what each model offers, `RunSummary::model_options` says what the run launched with, and
+/// journals may carry `ExecEvent::ContextUsage`.
+pub const FEATURE_RUN_CONTEXT: &str = "run.context";
 /// Feature: `executor.list`, `executor.refresh` and the `executors.watch` subscription exist.
 pub const FEATURE_EXECUTORS: &str = "executors";
 /// Feature: `executor.install` exists.
@@ -163,6 +167,7 @@ pub const FEATURES: &[&str] = &[
     crate::rules::FEATURE_PROJECT_RULES,
     FEATURE_RUN_MODEL,
     FEATURE_RUN_EFFORT,
+    FEATURE_RUN_CONTEXT,
     FEATURE_EXECUTOR_MAINTAIN,
     FEATURE_RUN_CHANGES,
 ];
@@ -240,6 +245,11 @@ pub struct RunSummary {
     /// none was asked for and the model uses its own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<crate::Effort>,
+    /// The per-model option choices the run was launched with (`task.run`'s `modelOptions`);
+    /// empty when none were asked for. A resumed attempt keeps them. Needs feature
+    /// `run.context`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_options: std::collections::BTreeMap<String, String>,
     /// Why it stopped, once it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
@@ -353,6 +363,11 @@ pub struct TaskRunParams {
     /// Absent: the bot's, else the model's own default. Needs feature `run.effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<crate::Effort>,
+    /// Per-model option choices (option id to choice id), each one the run's model lists
+    /// (`ModelInfo::options`); an unknown option or choice is refused. Absent: the model's
+    /// defaults. Needs feature `run.context`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_options: std::collections::BTreeMap<String, String>,
     /// Let a write run work directly in `cwd` when it is not a git repository, as a bot's
     /// `inPlaceWrites` does. Without it such a run is refused, because there is no worktree to
     /// isolate it in. A git repository is never written in place, whatever this says. Needs

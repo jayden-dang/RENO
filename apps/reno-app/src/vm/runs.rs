@@ -220,6 +220,7 @@ mod tests {
 
     fn run(name: &str, status: RunStatus, age_min: u64) -> RunSummary {
         RunSummary {
+            model_options: Default::default(),
             effort: None,
             run_id: RunId::from_suffix(name).unwrap(),
             task_id: TaskId::from_suffix(name).unwrap(),

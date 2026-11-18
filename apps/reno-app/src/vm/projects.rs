@@ -245,6 +245,7 @@ mod tests {
 
     fn run(id: &str, status: RunStatus, cwd: Option<&str>, created: u64) -> RunSummary {
         RunSummary {
+            model_options: Default::default(),
             effort: None,
             run_id: RunId::from_suffix(id).unwrap(),
             task_id: TaskId::from_suffix(id).unwrap(),

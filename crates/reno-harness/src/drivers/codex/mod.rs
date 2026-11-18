@@ -2190,6 +2190,7 @@ mod tests {
 
     fn spec(access: AccessMode, sandbox: SandboxLevel) -> ExecSpec {
         ExecSpec {
+            model_options: Default::default(),
             run_id: RunId::from_suffix("01HZX9").unwrap(),
             inherit_user_config: false,
             prompt: "do it".into(),

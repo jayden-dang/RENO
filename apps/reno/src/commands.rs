@@ -111,6 +111,7 @@ async fn task_run(env: &Env, args: TaskRun) -> anyhow::Result<ExitCode> {
     }
     let submitted = client
         .submit_task(TaskRunParams {
+            model_options: Default::default(),
             effort: args.effort,
             prompt: args.prompt,
             executor,

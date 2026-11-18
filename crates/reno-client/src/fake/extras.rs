@@ -377,6 +377,7 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
     let models = |ids: &[(&str, &str)]| {
         ids.iter()
             .map(|(id, name)| ModelInfo {
+                options: Vec::new(),
                 default_effort: efforts(id).1,
                 efforts: efforts(id).0,
                 id: (*id).to_owned(),

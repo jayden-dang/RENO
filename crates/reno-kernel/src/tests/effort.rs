@@ -15,6 +15,7 @@ use crate::{KernelError, TaskRequest};
 
 fn model(id: &str, efforts: &[Effort]) -> ModelInfo {
     ModelInfo {
+        options: Vec::new(),
         id: id.into(),
         display_name: None,
         description: None,

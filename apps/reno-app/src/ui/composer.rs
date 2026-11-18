@@ -214,6 +214,7 @@ fn ended(how: &str) -> SteerState {
 pub(crate) fn follow_up(run: &reno_proto::RunSummary, prompt: &str) -> TaskRunParams {
     let bot = run.bot.as_ref().map(|pin| pin.name.clone());
     TaskRunParams {
+        model_options: Default::default(),
         effort: run.effort,
         prompt: prompt.to_owned(),
         // The harness and model the run ended on (a model switched mid-run included), unless the
@@ -2469,6 +2470,7 @@ mod tests {
 
     fn run_in(status: RunStatus, stop: Option<reno_proto::StopDetail>) -> reno_proto::RunSummary {
         reno_proto::RunSummary {
+            model_options: Default::default(),
             effort: None,
             run_id: reno_proto::RunId::from_suffix("a").unwrap(),
             task_id: reno_proto::TaskId::from_suffix("a").unwrap(),

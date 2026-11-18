@@ -524,6 +524,7 @@ pub(crate) fn summarize_full(row: &RunRecord) -> RunSummary {
         _ => None,
     };
     RunSummary {
+        model_options: Default::default(),
         effort: requested_effort(&row.spec),
         run_id: row.id.clone(),
         task_id: row.task_id.clone(),

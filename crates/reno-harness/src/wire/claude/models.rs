@@ -78,6 +78,7 @@ pub(crate) fn parse_initialize(payload: &Value) -> Option<LiveModels> {
             .all(|known| known.id != row.resolved_model)
         {
             live.models.push(ModelInfo {
+                options: Vec::new(),
                 default_effort: None,
                 efforts: efforts(&row),
                 id: row.resolved_model,

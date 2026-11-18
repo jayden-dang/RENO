@@ -399,6 +399,7 @@ fn exec_spec(row: &RunRecord, settings: &LaunchSettings) -> Result<ExecSpec, Str
         None => row.goal.clone(),
     };
     Ok(ExecSpec {
+        model_options: Default::default(),
         run_id: row.id.clone(),
         prompt,
         cwd: PathBuf::from(cwd),

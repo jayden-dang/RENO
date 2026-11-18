@@ -821,6 +821,7 @@ async fn a_resumed_attempt_keeps_the_model_the_run_was_switched_to() {
     ]);
     let mut descriptor = reno_harness::exec::Executor::descriptor(&first);
     descriptor.caps.models.push(reno_proto::ModelInfo {
+        options: Vec::new(),
         default_effort: None,
         efforts: vec![],
         id: "mock-2".into(),

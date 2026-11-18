@@ -26,6 +26,7 @@ pub(super) async fn live_models(
     kill_grace: Duration,
 ) -> Option<LiveModels> {
     let spec = ExecSpec {
+        model_options: Default::default(),
         run_id: RunId::from_suffix("probe").ok()?,
         inherit_user_config: false,
         prompt: String::new(),
