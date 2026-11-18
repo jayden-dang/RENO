@@ -10,12 +10,23 @@
 //!   pipeline* such as `cargo test 2>&1 | tail -40`, matched as `cargo test`. See "Commands".
 //! - A `deny` or `ask` rule with a `command` glob also matches when any one simple command inside
 //!   a chain matches, so a chain cannot hide a denied command.
+//! - **Wrappers are read through** (`normalize` module): `zsh -lc 'git push'`, `bash -c`,
+//!   `env X=1 git push`, `sudo`, `timeout 5`, `nohup`, `xargs`, `find -exec` and `/bin/rm`. A
+//!   `deny` or `ask` glob sees the command inside every one of them. An `allow` glob sees inside
+//!   only the shell `-c` wrappers, `timeout`, `nohup`, `time`, `nice`, `stdbuf`, bare
+//!   `command`/`exec` and system program paths, and only when what is inside is one simple
+//!   command; `sudo`, `env`, `VAR=val`, `xargs` and a line it cannot parse are not read through
+//!   and fall to the next rule, or ask.
+//! - **Some paths are protected before any rule is read**: `.git`, `.claude`, `.codex`,
+//!   `.reno`, `.mcp.json` and Reno's data directory cannot be edited, redirected into, `rm`ed,
+//!   `mv`ed and so on by a run, and no `allow` rule changes that. See `protect`.
 //! - `/**` means "outside the run's worktree", judged lexically, with no symlink resolution and no
 //!   `~` expansion. See "Paths".
 //!
 //! # Evaluation
 //!
-//! The rules are tried in order and **the first rule that matches decides**. When none matches,
+//! The built-in protected paths are checked first and their denial is final (`protect`). Then
+//! the rules are tried in order and **the first rule that matches decides**. When none matches,
 //! the policy's `default` effect applies and the decision names no rule. A rule matches when
 //! every condition it states holds; a condition it leaves out holds for every action. The
 //! conditions, in the order they are tested:
@@ -112,7 +123,9 @@ use std::path::{Component, Path, PathBuf};
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::Serialize;
 
+use super::normalize::{allow_form, deny_forms};
 use super::pipeline::pure_pipeline_head;
+use super::protect;
 use super::{PolicyDef, PolicyEffect, PolicyRule, RuleScope};
 use crate::exec::ApprovalSubject;
 
@@ -179,6 +192,16 @@ pub fn evaluate(
     subject: &ApprovalSubject,
 ) -> PolicyDecision {
     let cwd = lexical(cx.cwd);
+    // Built-in protection comes before every rule and cannot be allowed away.
+    if let Some(message) = protect::violation(&cwd, subject) {
+        return PolicyDecision::Deny {
+            rule: Some(RuleRef {
+                index: policy.rules.len(),
+                name: protect::PROTECTED_RULE.to_owned(),
+            }),
+            message,
+        };
+    }
     for (index, rule) in policy.rules.iter().enumerate() {
         if matches(rule, cx.bot, &cwd, subject) {
             let name = rule
@@ -301,16 +324,21 @@ pub(crate) fn command_holds(effect: PolicyEffect, glob: &str, line: &str) -> boo
                     .map(str::trim)
                     .filter(|part| !part.is_empty())
                     .any(|part| glob.is_match(part))
+                || deny_forms(line).iter().any(|form| glob.is_match(form))
         }
     }
 }
 
 /// An `allow` glob holds a simple command, or a pure pipeline whose first command it holds.
 fn allow_matches(glob: &GlobMatcher, line: &str) -> bool {
-    if !chains_or_redirects(line) {
-        return glob.is_match(line);
-    }
-    pure_pipeline_head(line).is_some_and(|command| glob.is_match(command))
+    let as_written = if chains_or_redirects(line) {
+        pure_pipeline_head(line).is_some_and(|command| glob.is_match(command))
+    } else {
+        glob.is_match(line)
+    };
+    // Read through shell wrappers, `timeout`, system paths; `None` when not confidently one
+    // command, so this only ever adds a match for a line that really is the allowed command.
+    as_written || allow_form(line).is_some_and(|form| glob.is_match(&form))
 }
 
 /// Whether an `allow` glob must treat `line` as compound: it chains, substitutes or redirects
@@ -1260,5 +1288,195 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(lexical(Path::new(input)), Path::new(want), "{input}");
         }
+    }
+
+    // ---- the normalizer, through the policy ----------------------------------------------
+
+    const CODEX_ZSH: &str = "/usr/bin/zsh -lc ";
+
+    #[test]
+    fn a_deny_blocks_a_wrapped_command_however_it_is_wrapped() {
+        let p = policy(
+            r#"
+            [[rules]]
+            note = "no push"
+            effect = "deny"
+            match = { action = "command", command = "git push*" }
+            [[rules]]
+            note = "no reset"
+            effect = "deny"
+            match = { action = "command", command = "git reset --hard*" }
+            [[rules]]
+            note = "no rm"
+            effect = "deny"
+            match = { action = "command", command = "rm -rf *" }
+            "#,
+        );
+        let cases = [
+            ("/usr/bin/zsh -lc 'git push origin main'", "no push"),
+            ("bash -c \"sh -c 'git push'\"", "no push"),
+            ("env A=1 B=2 git push", "no push"),
+            ("sudo -n rm -rf /", "no rm"),
+            ("timeout 5 git reset --hard", "no reset"),
+            ("nohup git push &", "no push"),
+            ("/bin/rm -rf /tmp/x", "no rm"),
+            ("a && zsh -lc 'git push'", "no push"),
+            ("echo x | xargs rm -rf", "no rm"),
+            ("find . -exec rm -rf {} \\;", "no rm"),
+            ("zsh -lc 'git push", "no push"),
+        ];
+        for (line, note) in cases {
+            assert_eq!(
+                named(&eval(&p, None, &command(line))),
+                ("deny", note),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            named(&eval(&p, None, &command("zsh -lc 'git status'"))),
+            ("ask", DEFAULT_RULE)
+        );
+    }
+
+    #[test]
+    fn an_allow_reads_a_wrapped_command_but_never_a_chain() {
+        let p = policy(
+            r#"
+            [[rules]]
+            effect = "allow"
+            match = { action = "command", command = "echo *" }
+            "#,
+        );
+        let allowed =
+            |line: &str| matches!(eval(&p, None, &command(line)), PolicyDecision::Allow { .. });
+        assert!(allowed("echo hi"));
+        assert!(allowed(&format!("{CODEX_ZSH}'echo hi'")));
+        assert!(allowed("bash -c \"sh -c 'echo hi'\""));
+        assert!(allowed("timeout 5 echo hi"));
+        assert!(allowed("/bin/echo hi"));
+        for line in [
+            "echo hi; rm x",
+            "zsh -lc 'echo hi; rm x'",
+            "zsh -lc 'echo hi && rm x'",
+            "zsh -lc 'echo $(rm x)'",
+            "zsh -lc 'echo hi' extra",
+            "zsh -lc \"echo hi",
+            "zsh -lc 'eval \"echo hi\"'",
+            "sudo echo hi",
+            "env A=1 echo hi",
+            "./echo hi",
+            "/tmp/x/echo hi",
+            "xargs echo hi",
+        ] {
+            assert!(!allowed(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_wrapped_line_falls_to_ask_not_allow() {
+        let p = policy(
+            "default = \"ask\"\n[[rules]]\neffect = \"allow\"\nmatch = { action = \"command\", command = \"cargo *\" }",
+        );
+        for line in [
+            "bash -c 'cargo test",
+            "bash -c 'cat <<EOF\ncargo'",
+            "bash -c 'cargo test `id`'",
+            "bash -c \"cargo $X\"",
+        ] {
+            assert_eq!(
+                named(&eval(&p, None, &command(line))),
+                ("ask", DEFAULT_RULE),
+                "{line}"
+            );
+        }
+    }
+
+    // ---- protected paths ------------------------------------------------------------------
+
+    #[test]
+    fn protected_paths_are_denied_even_when_the_policy_allows_everything() {
+        let p = policy("default = \"allow\"\n[[rules]]\neffect = \"allow\"\nmatch = {}");
+        for path in [
+            ".git/config",
+            ".git/hooks/pre-commit",
+            "./.claude/settings.json",
+            "sub/.claude/settings.local.json",
+            ".codex/config.toml",
+            ".mcp.json",
+            ".reno/policy.toml",
+            "/Users/u/.reno/policy.toml",
+            "/Users/u/.claude/settings.json",
+            "/Users/u/Library/Application Support/Reno/reno.db",
+            "src/../.GIT/config",
+        ] {
+            let decision = eval(&p, None, &edit(&[path]));
+            assert_eq!(named(&decision).0, "deny", "{path}");
+            assert_eq!(decision.rule_name(), "built-in protected paths");
+        }
+        for path in [
+            "src/lib.rs",
+            ".gitignore",
+            ".github/workflows/ci.yml",
+            "docs/.mcp.json.md",
+        ] {
+            assert_eq!(named(&eval(&p, None, &edit(&[path]))).0, "allow", "{path}");
+        }
+        // Reading is not refused.
+        let read = subject(ActionClass::Read, "read", None, &[".git/config"]);
+        assert_eq!(named(&eval(&p, None, &read)).0, "allow");
+    }
+
+    #[test]
+    fn a_worktree_that_lives_under_a_protected_name_is_not_locked() {
+        let p = policy("default = \"allow\"");
+        let decision = evaluate(
+            &p,
+            &EvalContext {
+                bot: None,
+                cwd: Path::new("/Users/u/.claude/worktrees/a"),
+            },
+            &edit(&["/Users/u/.claude/worktrees/a/src/lib.rs"]),
+        );
+        assert_eq!(named(&decision).0, "allow");
+    }
+
+    #[test]
+    fn shell_writes_to_protected_paths_are_denied_but_git_is_not() {
+        let p = policy("default = \"allow\"");
+        for line in [
+            "rm -rf .git",
+            "echo x > .git/hooks/pre-commit",
+            "echo x>>.claude/settings.json",
+            "tee .mcp.json",
+            "cp evil.json .codex/config.toml",
+            "mv a .reno/policy.toml",
+            "sed -i s/a/b/ .claude/settings.json",
+            "zsh -lc 'rm -rf .git'",
+            "/usr/bin/zsh -lc 'echo x > .mcp.json'",
+            "sudo rm .reno/policy.toml",
+            "ls && dd if=x of=.git/HEAD",
+        ] {
+            let decision = eval(&p, None, &command(line));
+            assert_eq!(decision.rule_name(), "built-in protected paths", "{line}");
+        }
+        for line in [
+            "git commit -m x",
+            "git checkout -b x",
+            "git config user.name x",
+            "zsh -lc 'git commit -m x'",
+            "cp .git/config /tmp/x",
+            "cat .claude/settings.json",
+            "sed -n p .claude/settings.json",
+            "echo hi > out.txt",
+        ] {
+            assert_eq!(named(&eval(&p, None, &command(line))).0, "allow", "{line}");
+        }
+        let allow_git = policy(
+            "[[rules]]\neffect = \"allow\"\nmatch = { action = \"command\", command = \"git *\" }",
+        );
+        assert_eq!(
+            named(&eval(&allow_git, None, &command("git commit -m x"))).0,
+            "allow"
+        );
     }
 }

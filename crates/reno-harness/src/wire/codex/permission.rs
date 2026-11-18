@@ -194,17 +194,18 @@ fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// The subject of `item/commandExecution/requestApproval`. The command is a string in the
-/// schema; an argv array (older builds) is joined by spaces.
+/// schema; an argv array (older builds) is joined as a shell line. The line is kept as the
+/// harness reported it, wrapper and all (Codex says `/usr/bin/zsh -lc '<cmd>'`), for display and
+/// the audit record: the policy and standing rules normalise it when they match
+/// (`reno_proto::defs::evaluate`, "Commands").
 pub(crate) fn command_subject(params: &Value) -> ApprovalSubject {
     let command = match params.get("command") {
         Some(Value::String(command)) => Some(command.clone()),
-        Some(Value::Array(parts)) => Some(
-            parts
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
+        // Quoted so a shell reads the words back unchanged: `["zsh","-lc","git push"]` is one
+        // script, and the policy reads through it (`reno_proto::defs`, "normalizer").
+        Some(Value::Array(parts)) => Some(reno_proto::defs::shell_join(
+            parts.iter().filter_map(Value::as_str),
+        )),
         _ => None,
     };
     ApprovalSubject {
@@ -512,6 +513,49 @@ mod tests {
         let stdin = command_subject(&json!({"kind": "writeStdin", "itemId": "c2"}));
         assert_eq!(stdin.action, ActionClass::Command);
         assert_eq!(stdin.command, None);
+    }
+
+    #[test]
+    fn a_wrapped_codex_command_is_judged_by_the_command_inside() {
+        use reno_proto::defs::{EvalContext, PolicyDecision, PolicyDef, evaluate};
+        // The line the live fixture (live-0.146.1-multi-agent.jsonl) reports.
+        let wrapped = "/usr/bin/zsh -lc 'git push origin main'";
+        let subject = command_subject(&json!({"command": wrapped, "cwd": "/repo"}));
+        assert_eq!(
+            subject.command.as_deref(),
+            Some(wrapped),
+            "kept raw for display"
+        );
+        let policy: PolicyDef = serde_json::from_value(json!({"rules": [
+            {"effect": "deny", "match": {"action": "command", "command": "git push*"}},
+            {"effect": "allow", "match": {"action": "command", "command": "echo *"}},
+        ]}))
+        .expect("a policy");
+        let cx = EvalContext {
+            bot: None,
+            cwd: Path::new("/repo"),
+        };
+        assert!(matches!(
+            evaluate(&policy, &cx, &subject),
+            PolicyDecision::Deny { .. }
+        ));
+        let echo = command_subject(&json!({"command": "/usr/bin/zsh -lc 'echo hi'"}));
+        assert!(matches!(
+            evaluate(&policy, &cx, &echo),
+            PolicyDecision::Allow { .. }
+        ));
+        let chain = command_subject(&json!({"command": "/usr/bin/zsh -lc 'echo hi; rm x'"}));
+        assert!(matches!(
+            evaluate(&policy, &cx, &chain),
+            PolicyDecision::Ask { .. }
+        ));
+        // The argv form of the same wrapper keeps its script as one word.
+        let argv =
+            command_subject(&json!({"command": ["/usr/bin/zsh", "-lc", "git push origin main"]}));
+        assert!(matches!(
+            evaluate(&policy, &cx, &argv),
+            PolicyDecision::Deny { .. }
+        ));
     }
 
     #[test]
