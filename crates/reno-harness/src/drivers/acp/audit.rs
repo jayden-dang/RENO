@@ -114,6 +114,12 @@ fn worker_command(
     .env("LANG", "en_US.UTF-8")
     .env("SHELL", "/bin/sh")
     .env("TERM", "dumb")
+    // A JVM agent (Junie) takes the home from the passwd entry, not $HOME, and wrote the real
+    // ~/.junie on the first run of this audit.
+    .env(
+        "JAVA_TOOL_OPTIONS",
+        format!("-Duser.home={}", dir.join("home").display()),
+    )
     .env("RENO_AGENTS_DIR", work.join("agents"))
     .env("RENO_ACP_AUDIT_WORKER", agent_id)
     .env("RENO_ACP_AUDIT_INDEX", index)
@@ -551,7 +557,7 @@ async fn audit_one(id: &str, index: &Path, dir: &Path) -> Value {
     row["launch"] = match &launch {
         Ok((program, args, env)) => json!({
             "ok": true, "program": program.file_name().map(|n| n.to_string_lossy().into_owned()),
-            "args": args.iter().skip(0).map(|a| a.replace(&dir.display().to_string(), "<scratch>")).collect::<Vec<_>>(),
+            "args": args.iter().map(|a| a.replace(&dir.display().to_string(), "<scratch>")).collect::<Vec<_>>(),
             "env_names": env.iter().map(|(k, _)| k).collect::<Vec<_>>(),
         }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
