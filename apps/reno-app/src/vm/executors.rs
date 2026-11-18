@@ -1,17 +1,27 @@
-//! The Executors list: one row per executor with what the daemon's last probe found, leading with
-//! the ones that need the human (signed out, too old, needs an install). From `executors.watch`.
+//! The Executors list: one row per executor with what the daemon's last probe found, grouped by
+//! what a person can do about it (needs you, ready, unknown, not installed, test executors). From
+//! `executors.watch`.
 //!
 //! Every fact the probe could not establish stays unknown on screen: "Sign-in not checkable" is
-//! never shown as signed in, an untested version is never shown as fine.
+//! never shown as signed in, an untested version is never shown as fine. Those facts live in the
+//! expanded line only; the one-line row says only what a person acts on.
+//!
+//! Pure: callers pass `now_ms`, so the job clock and the "still running" notes are plain tests.
 
 use reno_client::{Feed, State};
 use reno_proto::{
-    AccessMode, ExecutorHealth, ExecutorInfo, InstallStatus, ModelSource, NotInstalledReason,
-    RunId, RunStatus, SandboxLevel, SignedIn, StartRefusal, StopDetail, VersionGate,
+    ExecutorHealth, ExecutorInfo, ExecutorJob, InstallStatus, JobFailure, JobKind, JobPhase,
+    Maintenance, NotInstalledReason, RunId, RunStatus, SignedIn, StartRefusal, StepRunner,
+    StopDetail, VersionGate, VersionRange, version_gate,
 };
 
 use super::{Banner, Section, banner};
 use crate::summary;
+
+/// A job that has run this long gets its clock (a spinner alone reads as stuck).
+const CLOCK_AFTER_MS: u64 = 1_000;
+/// A job that has run this long says it is still running and that installers take a while.
+const STILL_RUNNING_AFTER_MS: u64 = 30_000;
 
 /// How a fact reads: the colour of its dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,12 +65,186 @@ pub(crate) enum Need {
 }
 
 impl Need {
+    /// What is wrong, for the headline's sub-line: "Codex is signed out".
+    const fn phrase(self) -> &'static str {
+        match self {
+            Self::SignIn => "is signed out",
+            Self::Update => "is too old",
+            Self::Install => "needs an install",
+            Self::Setup => "cannot be used",
+        }
+    }
+}
+
+/// Where an executor is listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Group {
+    /// Installed or managed, but blocked.
+    NeedsYou,
+    Ready,
+    /// The probe failed or nothing has been checked yet.
+    Unknown,
+    NotInstalled,
+    /// `mock`: collapsed.
+    Test,
+}
+
+impl Group {
+    pub(crate) const ALL: [Group; 5] = [
+        Group::NeedsYou,
+        Group::Ready,
+        Group::Unknown,
+        Group::NotInstalled,
+        Group::Test,
+    ];
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::SignIn => "signed out",
-            Self::Update => "too old",
-            Self::Install => "needs install",
-            Self::Setup => "not installed",
+            Self::NeedsYou => "Needs you",
+            Self::Ready => "Ready",
+            Self::Unknown => "Unknown",
+            Self::NotInstalled => "Not installed",
+            Self::Test => "Test executors",
+        }
+    }
+
+    /// The small note after the label.
+    pub(crate) const fn note(self) -> Option<&'static str> {
+        match self {
+            Self::NotInstalled => Some("optional"),
+            _ => None,
+        }
+    }
+}
+
+/// What the row's dot means: only this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Dot {
+    /// Can take runs.
+    Ready,
+    /// Blocked.
+    Blocked,
+    /// Not installed.
+    NotInstalled,
+    /// A job is running.
+    Running,
+    /// Not known.
+    Unknown,
+}
+
+/// How a first install is offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstallOffer {
+    /// [Install…]: the review panel first, because it runs a vendor script as you.
+    Review,
+    /// [Install]: at once (a managed adapter, or the daemon's own fetch).
+    Now,
+    /// `executor.install`, from a daemon without `executor.maintain`.
+    Legacy,
+}
+
+/// One step of an install recipe, for the review panel and the expanded line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StepView {
+    pub(crate) label: String,
+    pub(crate) command: String,
+    /// Reno runs it; otherwise it needs the person, in Terminal.
+    pub(crate) reno: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecipeView {
+    pub(crate) source: String,
+    pub(crate) steps: Vec<StepView>,
+}
+
+impl RecipeView {
+    /// How many commands Reno runs.
+    pub(crate) fn reno_steps(&self) -> usize {
+        self.steps.iter().filter(|s| s.reno).count()
+    }
+}
+
+/// The Auto-update switch of a line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SwitchView {
+    pub(crate) on: bool,
+    /// The accessible label: "Auto-update Codex".
+    pub(crate) label: String,
+}
+
+/// The Auto-update part of an expanded line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AutoView {
+    pub(crate) on: bool,
+    pub(crate) verified_only: bool,
+    /// The updater can install a given version: offer "Only versions Reno has verified".
+    pub(crate) can_pin: bool,
+    /// What on or off means for this executor.
+    pub(crate) text: String,
+    /// Said before it happens: what the setting does to the version now installed.
+    pub(crate) warning: Option<String>,
+}
+
+/// Where a job is, in the words a person reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JobState {
+    Queued {
+        waiting_runs: u32,
+    },
+    Running {
+        step: u32,
+        steps: u32,
+        /// "0:07", once past a second.
+        clock: Option<String>,
+        last_line: Option<String>,
+        /// "still running — installers can take a few minutes", after 30 s.
+        long: bool,
+        /// "no output for 5 min": how long it has been quiet, in minutes.
+        quiet_minutes: Option<u64>,
+    },
+    Failed {
+        /// "Install failed", "Update failed" or "Stopped".
+        title: &'static str,
+        detail: String,
+        /// A person stopped it: not an error.
+        stopped: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct JobView {
+    pub(crate) kind: JobKind,
+    pub(crate) state: JobState,
+    /// What [Run in Terminal] runs. `None` for a managed adapter, which has no commands.
+    pub(crate) terminal_command: Option<String>,
+}
+
+impl JobView {
+    pub(crate) fn running(&self) -> bool {
+        matches!(self.state, JobState::Running { .. })
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        matches!(self.state, JobState::Failed { .. })
+    }
+
+    /// The status line: announced, so the state is never colour alone.
+    pub(crate) fn words(&self, name: &str) -> String {
+        let verb = match self.kind {
+            JobKind::Install => "Installing",
+            JobKind::Update => "Updating",
+        };
+        match &self.state {
+            JobState::Queued { waiting_runs } => format!(
+                "Update queued \u{2014} waits for {waiting_runs} running {} on {name}",
+                if *waiting_runs == 1 { "task" } else { "tasks" }
+            ),
+            JobState::Running { step, steps, .. } if *steps > 1 => {
+                format!("{verb} \u{b7} step {step} of {steps}")
+            }
+            JobState::Running { .. } => verb.to_owned(),
+            JobState::Failed { title, .. } => (*title).to_owned(),
         }
     }
 }
@@ -70,47 +254,75 @@ pub(crate) struct ExecutorRow {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) need: Option<Need>,
+    pub(crate) group: Group,
+    pub(crate) dot: Dot,
     /// `None` until the first probe has finished.
     pub(crate) installed: Fact,
     /// `None` when there is nothing installed to have a version.
     pub(crate) version: Option<Fact>,
     /// `None` when there is nothing installed to sign in to.
     pub(crate) signed_in: Option<Fact>,
-    pub(crate) access: Vec<&'static str>,
-    pub(crate) sandbox: Vec<&'static str>,
-    /// "2 models, from the CLI" / "1 model, built-in list" / "no models listed".
-    pub(crate) models: String,
     /// "checked 3m ago" / "not checked yet".
     pub(crate) checked: String,
-    /// The Install button: the probe says `needs_install`.
+    /// The Install button of a daemon with `executor.install` but not `executor.maintain`.
     pub(crate) can_install: bool,
+    /// The daemon runs installs, updates and the switch (`executor.maintain` and a record).
+    pub(crate) maintain: bool,
+    /// A Reno-managed adapter: it updates with Reno.
+    pub(crate) managed: bool,
+    /// The installed version, as the probe read it.
+    pub(crate) version_text: Option<String>,
+    /// A newer version than the installed one, when a check found one.
+    pub(crate) available: Option<String>,
+    /// The account of a signed-in executor; only when the probe says signed in.
+    pub(crate) account: Option<String>,
+    /// What is wrong or not known, for the middle of a line that is not ready.
+    pub(crate) middle: Option<Fact>,
+    /// Where a not-installed executor comes from: "Homebrew cask devin-cli".
+    pub(crate) source: Option<String>,
+    pub(crate) recipe: Option<RecipeView>,
+    /// How a first install is offered.
+    pub(crate) install: Option<InstallOffer>,
+    /// The sign-in command, offered while signed out.
+    pub(crate) sign_in: Option<String>,
+    /// [Update] is on the line.
+    pub(crate) update: bool,
+    /// [Update] is the primary button: the executor is blocked as too old.
+    pub(crate) update_primary: bool,
+    pub(crate) switch: Option<SwitchView>,
+    /// Lock icon and "Updates with Reno".
+    pub(crate) lock: bool,
+    pub(crate) auto: Option<AutoView>,
+    pub(crate) job: Option<JobView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExecutorsView {
     pub(crate) banner: Option<Banner>,
+    /// In group order, then by name.
     pub(crate) rows: Section<ExecutorRow>,
     pub(crate) lede: String,
     pub(crate) detail: String,
     /// How many need the human.
     pub(crate) needing: usize,
+    /// How many can take runs.
+    pub(crate) ready: usize,
     /// Whether the daemon has `executor.install`.
     pub(crate) installs: bool,
+    /// Whether the daemon runs installs and updates (`executor.maintain`).
+    pub(crate) maintain: bool,
+    /// "checked 12m ago": the oldest probe.
+    pub(crate) checked: Option<String>,
+    /// How many jobs are running.
+    pub(crate) jobs_running: usize,
+    /// Executors with a known update, auto-update off and no job: "Update N" when more than one.
+    pub(crate) updates_waiting: Vec<String>,
 }
 
-pub(crate) const fn access_label(mode: AccessMode) -> &'static str {
-    match mode {
-        AccessMode::Supervised => "Supervised",
-        AccessMode::AutoAcceptEdits => "Auto-accept edits",
-        AccessMode::FullAccess => "Full access",
-    }
-}
-
-pub(crate) const fn sandbox_label(level: SandboxLevel) -> &'static str {
-    match level {
-        SandboxLevel::ReadOnly => "Read-only",
-        SandboxLevel::WorkspaceWrite => "Workspace write",
-        SandboxLevel::Unrestricted => "Unrestricted",
+impl ExecutorsView {
+    /// The rows of one group, in order.
+    pub(crate) fn group(&self, group: Group) -> Vec<&ExecutorRow> {
+        self.rows.rows().iter().filter(|r| r.group == group).collect()
     }
 }
 
@@ -215,91 +427,429 @@ fn need_of(health: Option<&ExecutorHealth>) -> Option<Need> {
     }
 }
 
-fn models_text(info: &ExecutorInfo) -> String {
-    let count = info.descriptor.caps.models.len();
-    if count == 0 {
-        return "no models listed".to_owned();
+/// Whether `latest` is a newer version than `installed`. Versions that do not parse are never
+/// newer: "an update is available" is said only when it is known.
+fn is_newer(latest: &str, installed: &str) -> bool {
+    let range = VersionRange {
+        min: latest.to_owned(),
+        verified: latest.to_owned(),
+    };
+    matches!(
+        version_gate(Some(installed), &range),
+        VersionGate::TooOld { .. }
+    )
+}
+
+/// What the daemon and the list know, passed to every row.
+#[derive(Clone, Copy)]
+struct Ctx {
+    installs: bool,
+    maintain: bool,
+    now_ms: u64,
+}
+
+fn group_of(info: &ExecutorInfo, need: Option<Need>, ctx: Ctx, has_recipe: bool, managed: bool) -> Group {
+    if info.descriptor.id.as_str() == "mock" {
+        return Group::Test;
     }
-    let noun = if count == 1 { "model" } else { "models" };
-    match info.health.as_ref().map(|h| h.models.source) {
-        Some(ModelSource::Live) => format!("{count} {noun}, from the CLI"),
-        Some(ModelSource::Curated) | None => format!("{count} {noun}, built-in list"),
+    let Some(health) = info.health.as_ref() else {
+        return Group::Unknown;
+    };
+    match &health.installed {
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::ProbeFailed { .. },
+        } => Group::Unknown,
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::NotFound { .. },
+        } => Group::NotInstalled,
+        // The daemon's own fetch of a managed adapter is a need; a recipe is optional.
+        InstallStatus::NotInstalled {
+            why: NotInstalledReason::NeedsInstall { .. },
+        } if ctx.maintain && has_recipe && !managed => Group::NotInstalled,
+        _ if need.is_some() => Group::NeedsYou,
+        _ => Group::Ready,
     }
 }
 
-fn row(info: &ExecutorInfo, installs: bool, now_ms: u64) -> ExecutorRow {
+fn recipe_of(maintenance: Option<&Maintenance>) -> Option<RecipeView> {
+    let recipe = maintenance?.setup.as_ref()?;
+    Some(RecipeView {
+        source: recipe.source.clone(),
+        steps: recipe
+            .steps
+            .iter()
+            .map(|s| StepView {
+                label: s.label.clone(),
+                command: s.command.clone(),
+                reno: s.runner == StepRunner::Reno,
+            })
+            .collect(),
+    })
+}
+
+fn auto_view(
+    name: &str,
+    maintenance: &Maintenance,
+    version: Option<&str>,
+    gate: Option<&VersionGate>,
+) -> Option<AutoView> {
+    let updater = maintenance.updater.as_ref()?;
+    let auto = maintenance.auto_update;
+    let stays = match version {
+        Some(v) => format!("it stays on {v}"),
+        None => "it stays on its current version".to_owned(),
+    };
+    let mut text = match (auto.on, updater.self_updating) {
+        (true, true) => format!("{name} updates itself; Reno leaves that on."),
+        (true, false) => format!(
+            "Reno runs `{}` once a day, only when {name} has no runs.",
+            updater.command
+        ),
+        (false, true) => format!(
+            "Reno turns off {name}'s own updater; {stays} until you press Update."
+        ),
+        (false, false) => match version {
+            Some(v) => format!("{name} stays on {v}."),
+            None => format!("{name} stays on its current version."),
+        },
+    };
+    if !auto.on && !updater.self_updating && updater.checked_at_ms.is_some() {
+        text.push_str(" Reno still checks daily.");
+    }
+    // Said before it happens: with "verified only" set, a CLI past the verified version goes
+    // back to it.
+    let warning = match gate {
+        Some(VersionGate::Untested { verified })
+            if auto.verified_only && updater.can_pin && verified != "unverified" =>
+        {
+            Some(format!("{name} is past the verified version and goes back to {verified}."))
+        }
+        _ => None,
+    };
+    Some(AutoView {
+        on: auto.on,
+        verified_only: auto.verified_only,
+        can_pin: updater.can_pin,
+        text,
+        warning,
+    })
+}
+
+fn clock(ms: u64) -> String {
+    let secs = ms / 1_000;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+fn job_view(
+    job: &ExecutorJob,
+    now_ms: u64,
+    maintenance: Option<&Maintenance>,
+) -> JobView {
+    let managed = maintenance.is_some_and(|m| m.managed);
+    let terminal_command = if managed {
+        None
+    } else {
+        match job.kind {
+            JobKind::Install => recipe_of(maintenance).map(|r| {
+                r.steps
+                    .iter()
+                    .filter(|s| s.reno)
+                    .map(|s| s.command.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" && ")
+            }),
+            JobKind::Update => maintenance
+                .and_then(|m| m.updater.as_ref())
+                .map(|u| u.command.clone()),
+        }
+        .filter(|c| !c.is_empty())
+    };
+    let state = match &job.phase {
+        JobPhase::Queued { waiting_runs } => JobState::Queued {
+            waiting_runs: *waiting_runs,
+        },
+        JobPhase::Running {
+            step,
+            steps,
+            last_line,
+            quiet_since_ms,
+        } => {
+            let elapsed = now_ms.saturating_sub(job.started_at_ms);
+            JobState::Running {
+                step: *step,
+                steps: *steps,
+                clock: (elapsed >= CLOCK_AFTER_MS).then(|| clock(elapsed)),
+                last_line: last_line.clone(),
+                long: elapsed >= STILL_RUNNING_AFTER_MS,
+                quiet_minutes: quiet_since_ms.map(|since| (now_ms.saturating_sub(since) / 60_000).max(1)),
+            }
+        }
+        JobPhase::Failed {
+            failure, detail, ..
+        } => {
+            let stopped = *failure == JobFailure::Cancelled;
+            JobState::Failed {
+                title: if stopped {
+                    "Stopped"
+                } else {
+                    match job.kind {
+                        JobKind::Install => "Install failed",
+                        JobKind::Update => "Update failed",
+                    }
+                },
+                detail: detail.clone(),
+                stopped,
+            }
+        }
+    };
+    JobView {
+        kind: job.kind,
+        state,
+        terminal_command,
+    }
+}
+
+fn row(info: &ExecutorInfo, ctx: Ctx) -> ExecutorRow {
     let health = info.health.as_ref();
-    let caps = &info.descriptor.caps;
     let id = info.descriptor.id.as_str();
+    let name = summary::executor_name(id);
+    let need = need_of(health);
+    let maintenance = info.maintenance.as_ref().filter(|_| ctx.maintain);
+    let maintain = maintenance.is_some();
+    let managed = maintenance.is_some_and(|m| m.managed);
+    let recipe = recipe_of(maintenance);
+    let installed_ok = matches!(
+        health.map(|h| &h.installed),
+        Some(InstallStatus::Installed { .. })
+    );
+    let version_text = health.and_then(|h| h.installed.version().map(str::to_owned));
+    let updater = maintenance.and_then(|m| m.updater.as_ref());
+    let available = updater
+        .and_then(|u| u.latest.as_deref())
+        .zip(version_text.as_deref())
+        .filter(|(latest, installed)| installed_ok && is_newer(latest, installed))
+        .map(|(latest, _)| latest.to_owned());
+    let account = match health.map(|h| &h.signed_in) {
+        Some(SignedIn::Yes { account }) if installed_ok => {
+            Some(account.clone().unwrap_or_else(|| "signed in".to_owned()))
+        }
+        _ => None,
+    };
+    let installed = installed_fact(health);
+    let version = health.and_then(version_fact);
+    let signed_in = health.and_then(signed_in_fact);
+    let group = group_of(info, need, ctx, recipe.is_some(), managed);
+    let job = info
+        .job
+        .as_ref()
+        .map(|j| job_view(j, ctx.now_ms, maintenance));
+    let busy = job.as_ref().is_some_and(|j| !j.failed());
+    let auto_on = maintenance.is_some_and(|m| m.auto_update.on);
+
+    let middle = match (group, need) {
+        (Group::Unknown, _) => Some(installed.clone()),
+        (Group::NotInstalled | Group::Ready | Group::Test, None) => None,
+        (_, Some(Need::SignIn)) => signed_in.clone(),
+        (_, Some(Need::Update)) => version.clone(),
+        (_, Some(Need::Install | Need::Setup)) => Some(installed.clone()),
+        _ => None,
+    };
+    let source = match (group, &recipe) {
+        (Group::NotInstalled, Some(r)) => {
+            let tail = r.steps.iter().find(|s| !s.reno).map(|s| {
+                if s.label.eq_ignore_ascii_case("sign in") {
+                    "then sign in".to_owned()
+                } else {
+                    format!("then {}", s.label.to_lowercase())
+                }
+            });
+            Some(match tail {
+                Some(tail) => format!("{} \u{b7} {tail}", r.source),
+                None => r.source.clone(),
+            })
+        }
+        (Group::NotInstalled, None) => installed.detail.clone(),
+        _ => None,
+    };
+    let not_found = matches!(
+        health.map(|h| &h.installed),
+        Some(InstallStatus::NotInstalled {
+            why: NotInstalledReason::NotFound { .. } | NotInstalledReason::NeedsInstall { .. }
+        })
+    );
+    let install = if busy || !not_found {
+        None
+    } else if maintain {
+        if recipe.is_some() && !managed {
+            Some(InstallOffer::Review)
+        } else if managed || need == Some(Need::Install) {
+            Some(InstallOffer::Now)
+        } else {
+            None
+        }
+    } else if ctx.installs && need == Some(Need::Install) {
+        Some(InstallOffer::Legacy)
+    } else {
+        None
+    };
+    let update_known = available.is_some() || need == Some(Need::Update);
+    let update = maintain
+        && installed_ok
+        && !busy
+        && updater.is_some()
+        && ((update_known && !auto_on) || need == Some(Need::Update));
+    let sign_in = (need == Some(Need::SignIn) && !busy)
+        .then(|| maintenance.and_then(|m| m.sign_in.as_ref()).map(|s| s.command.clone()))
+        .flatten();
+    let dot = if job.as_ref().is_some_and(JobView::running) {
+        Dot::Running
+    } else {
+        match group {
+            Group::Ready | Group::Test => Dot::Ready,
+            Group::NeedsYou => Dot::Blocked,
+            Group::NotInstalled => Dot::NotInstalled,
+            Group::Unknown => Dot::Unknown,
+        }
+    };
     ExecutorRow {
         id: id.to_owned(),
-        name: summary::executor_name(id).to_owned(),
-        need: need_of(health),
-        installed: installed_fact(health),
-        version: health.and_then(version_fact),
-        signed_in: health.and_then(signed_in_fact),
-        access: caps.access_modes.iter().map(|m| access_label(*m)).collect(),
-        sandbox: caps
-            .sandbox_levels
-            .iter()
-            .map(|l| sandbox_label(*l))
-            .collect(),
-        models: models_text(info),
+        name: name.clone(),
+        need,
+        group,
+        dot,
+        installed,
+        version,
+        signed_in,
         checked: health.map_or_else(
             || "not checked yet".to_owned(),
             |h| {
                 format!(
                     "checked {}",
-                    summary::ago_label(now_ms.saturating_sub(h.checked_at_ms))
+                    summary::ago_label(ctx.now_ms.saturating_sub(h.checked_at_ms))
                 )
             },
         ),
-        can_install: installs && need_of(health) == Some(Need::Install),
+        can_install: !maintain && ctx.installs && need == Some(Need::Install),
+        maintain,
+        managed,
+        version_text,
+        available,
+        account,
+        middle,
+        source,
+        recipe,
+        install,
+        sign_in,
+        update,
+        update_primary: update && need == Some(Need::Update),
+        switch: maintenance
+            .filter(|m| updater.is_some() && !m.managed && installed_ok)
+            .map(|m| SwitchView {
+                on: m.auto_update.on,
+                label: format!("Auto-update {name}"),
+            }),
+        lock: maintenance.is_some_and(|m| m.managed) && installed_ok,
+        auto: maintenance
+            .filter(|_| installed_ok)
+            .and_then(|m| auto_view(&name, m, health.and_then(|h| h.installed.version()), health.map(|h| &h.version_gate))),
+        job,
+    }
+}
+
+/// "Claude Code is signed out · Codex is too old".
+fn blockers(rows: &[ExecutorRow]) -> String {
+    rows.iter()
+        .filter(|r| r.group == Group::NeedsYou)
+        .filter_map(|r| r.need.map(|n| format!("{} {}", r.name, n.phrase())))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+}
+
+/// "Devin, Fx, Hermes can be installed from here."
+fn installable(rows: &[ExecutorRow]) -> Option<String> {
+    let names: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.group == Group::NotInstalled && r.install.is_some())
+        .map(|r| r.name.as_str())
+        .collect();
+    match names.len() {
+        0 => None,
+        1 => Some(format!("{} can be installed from here.", names[0])),
+        _ => Some(format!("{} can be installed from here.", names.join(", "))),
     }
 }
 
 /// What the Executors screen shows.
 pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
     let installs = state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL);
+    let maintain = state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN);
+    let ctx = Ctx {
+        installs,
+        maintain,
+        now_ms,
+    };
     let mut rows: Vec<ExecutorRow> = state
         .executors()
         .iter()
-        .map(|info| row(info, installs, now_ms))
+        .map(|info| row(info, ctx))
         .collect();
-    // Who needs the human first, in the order of how pressing it is; the rest by name.
+    // Groups in order; what needs the human first within Needs you, the rest by name.
     rows.sort_by(|a, b| {
-        let rank = |r: &ExecutorRow| r.need.map_or((1, None), |n| (0, Some(n)));
-        rank(a).cmp(&rank(b)).then_with(|| a.id.cmp(&b.id))
+        a.group
+            .cmp(&b.group)
+            .then_with(|| a.need.cmp(&b.need))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.id.cmp(&b.id))
     });
-    let needing = rows.iter().filter(|r| r.need.is_some()).count();
-    let (lede, detail) = match (needing, rows.len()) {
-        (0, 0) => (
+    let needing = rows.iter().filter(|r| r.group == Group::NeedsYou).count();
+    let ready = rows.iter().filter(|r| r.group == Group::Ready).count();
+    let updates: Vec<String> = rows
+        .iter()
+        .filter(|r| r.update && r.job.is_none())
+        .map(|r| r.id.clone())
+        .collect();
+    let installable = installable(&rows);
+    let (lede, detail) = match (needing, ready, rows.len()) {
+        (0, _, 0) => (
             "No executors".to_owned(),
             "Reno drives agent CLIs; the daemon lists the ones it can drive here.".to_owned(),
         ),
-        (0, _) => (
-            "Every executor is ready".to_owned(),
-            "Reno does not run models, it drives harnesses. A run goes only to one that is installed, supported and signed in."
-                .to_owned(),
+        (0, 0, _) => (
+            "No executor is ready to run".to_owned(),
+            installable.unwrap_or_else(|| {
+                "A run goes only to one that is installed, supported and signed in.".to_owned()
+            }),
         ),
-        (1, _) => (
-            "1 executor needs you".to_owned(),
-            "Runs are not sent to an executor that is missing, too old or signed out. Fix it, then check again."
-                .to_owned(),
+        (0, n, _) => (
+            format!("{n} ready to run"),
+            installable
+                .unwrap_or_else(|| "A run goes only to one that is installed, supported and signed in.".to_owned()),
         ),
-        (n, _) => (
-            format!("{n} executors need you"),
-            "Runs are not sent to an executor that is missing, too old or signed out. Fix them, then check again."
-                .to_owned(),
-        ),
+        (1, _, _) => ("1 executor can't take runs".to_owned(), blockers(&rows)),
+        (n, _, _) => (format!("{n} executors can't take runs"), blockers(&rows)),
     };
+    let jobs_running = rows
+        .iter()
+        .filter(|r| r.job.as_ref().is_some_and(|j| !j.failed()))
+        .count();
+    let checked = state
+        .executors()
+        .iter()
+        .filter_map(|e| e.health.as_ref().map(|h| h.checked_at_ms))
+        .max()
+        .map(|at| format!("checked {}", summary::ago_label(now_ms.saturating_sub(at))));
     ExecutorsView {
         banner: banner(state),
         rows: Section::of_state(state, state.feed(Feed::Executors), rows),
         lede,
         detail,
         needing,
+        ready,
         installs,
+        maintain,
+        checked,
+        jobs_running,
+        updates_waiting: updates,
     }
 }
 
@@ -338,9 +888,13 @@ pub(crate) fn failed_executor(state: &State, run: &RunId, now_ms: u64) -> Option
         .executors()
         .iter()
         .find(|e| e.descriptor.id == summary.executor)?;
-    let installs = state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL);
+    let ctx = Ctx {
+        installs: state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL),
+        maintain: state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN),
+        now_ms,
+    };
     Some(FailedExecutor {
-        row: row(info, installs, now_ms),
+        row: row(info, ctx),
     })
 }
 
@@ -349,7 +903,8 @@ pub(crate) fn failed_executor(state: &State, run: &RunId, now_ms: u64) -> Option
 mod tests {
     use reno_client::{FeedState, Update};
     use reno_proto::{
-        ExecutorCaps, ExecutorDescriptor, ModelCatalog, ModelInfo, Steering, VersionRange,
+        AccessMode, ExecutorCaps, ExecutorDescriptor, ModelCatalog, ModelInfo, SandboxLevel,
+        Steering,
     };
 
     use super::*;
@@ -458,7 +1013,7 @@ mod tests {
     fn a_healthy_executor_shows_everything_it_found() {
         let state = state_of(vec![info("claude-code", Some(healthy()))]);
         let view = build(&state, NOW);
-        assert_eq!(view.lede, "Every executor is ready");
+        assert_eq!(view.lede, "1 ready to run");
         assert_eq!(view.needing, 0);
         let row = only(&view);
         assert_eq!(row.name, "Claude Code");
@@ -480,8 +1035,6 @@ mod tests {
                 Some("ada@example.com".to_owned())
             ))
         );
-        assert_eq!(row.access, ["Supervised", "Auto-accept edits"]);
-        assert_eq!(row.sandbox, ["Read-only", "Unrestricted"]);
         assert_eq!(row.checked, "checked 3m ago");
         assert!(!row.can_install);
     }
@@ -495,7 +1048,8 @@ mod tests {
         });
         let state = state_of(vec![info("codex", Some(signed_out))]);
         let view = build(&state, NOW);
-        assert_eq!(view.lede, "1 executor needs you");
+        assert_eq!(view.lede, "1 executor can't take runs");
+        assert_eq!(view.detail, "Codex is signed out");
         let row = only(&view);
         assert_eq!(row.need, Some(Need::SignIn));
         assert_eq!(
@@ -602,7 +1156,8 @@ mod tests {
         let row = only(&view);
         assert_eq!(row.need, None);
         assert_eq!(row.installed.level, Level::Quiet);
-        assert_eq!(view.lede, "Every executor is ready");
+        assert_eq!(row.group, Group::Unknown);
+        assert_eq!(view.lede, "No executor is ready to run");
     }
 
     #[test]
@@ -614,32 +1169,6 @@ mod tests {
         assert_eq!(row.checked, "not checked yet");
         assert_eq!(row.need, None);
         assert!(row.version.is_none() && row.signed_in.is_none());
-        assert_eq!(row.models, "no models listed");
-    }
-
-    #[test]
-    fn the_model_catalog_says_where_it_came_from() {
-        let models = |source_live: bool, n: usize| {
-            let list: Vec<ModelInfo> = (0..n)
-                .map(|i| ModelInfo {
-                    default_effort: None,
-                    efforts: vec![],
-                    id: format!("m{i}"),
-                    display_name: None,
-                    description: None,
-                })
-                .collect();
-            let catalog = if source_live {
-                ModelCatalog::live(list)
-            } else {
-                ModelCatalog::curated(list)
-            };
-            let state = state_of(vec![info("codex", Some(with(|h| h.models = catalog)))]);
-            only(&build(&state, NOW)).models.clone()
-        };
-        assert_eq!(models(true, 3), "3 models, from the CLI");
-        assert_eq!(models(false, 1), "1 model, built-in list");
-        assert_eq!(models(false, 0), "no models listed");
     }
 
     #[test]
@@ -677,7 +1206,8 @@ mod tests {
             ["codex", "acp.grok", "acp.hermes", "claude-code", "mock"]
         );
         assert_eq!(view.needing, 3);
-        assert_eq!(view.lede, "3 executors need you");
+        assert_eq!(view.lede, "3 executors can't take runs");
+        assert_eq!(view.detail, "Codex is signed out \u{b7} Grok is too old \u{b7} Hermes needs an install");
     }
 
     #[test]

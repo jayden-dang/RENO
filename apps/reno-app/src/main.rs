@@ -14,6 +14,7 @@ mod nav;
 mod screens;
 mod store;
 mod summary;
+mod terminal;
 mod transcript;
 mod ui;
 mod vm;

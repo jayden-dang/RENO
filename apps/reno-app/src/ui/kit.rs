@@ -2,10 +2,15 @@
 //!
 //! Icons are the bundled SVGs from [`super::icon`], coloured with `text_color`.
 
-use gpui::{Div, FontWeight, Hsla, SharedString, Stateful, div, hsla, prelude::*, px};
+use std::time::Duration;
+
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString,
+    Stateful, Transformation, div, hsla, percentage, prelude::*, px,
+};
 use reno_proto::RunStatus;
 
-use super::icon::{Icon, icon};
+use super::icon::{Icon, icon, logo_path};
 use super::theme::Theme;
 use crate::summary::Problem;
 
@@ -192,21 +197,53 @@ pub(crate) fn pill_button_enabled(
     tone: Tone,
     enabled: bool,
 ) -> Stateful<Div> {
+    pill(theme, id, None, label, tone, enabled, (30.0, 14.0, 13.5))
+}
+
+/// A [`pill_button`] for a 40 px list line: 26 px tall, an optional Phosphor icon before the
+/// label. The id is the accessible label and the test selector. The caller adds `on_click`.
+pub(crate) fn line_button(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    glyph: Option<Icon>,
+    label: impl Into<SharedString>,
+    tone: Tone,
+    enabled: bool,
+) -> Stateful<Div> {
+    pill(theme, id, glyph, label, tone, enabled, (26.0, 10.0, 12.5))
+}
+
+/// The pill: `(height, horizontal padding, text size)` in px.
+fn pill(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    glyph: Option<Icon>,
+    label: impl Into<SharedString>,
+    tone: Tone,
+    enabled: bool,
+    (height, pad, text): (f32, f32, f32),
+) -> Stateful<Div> {
     let label: SharedString = label.into();
     let id: SharedString = id.into();
     let selector = id.clone();
+    let ink = match tone {
+        Tone::Primary => gpui::white(),
+        Tone::Danger => theme.danger,
+        Tone::Quiet => theme.text,
+    };
     let base = div()
         .id(id)
         .debug_selector(move || selector.to_string())
         .flex_none()
-        .h(px(30.0))
-        .px(px(14.0))
+        .h(px(height))
+        .px(px(pad))
         .flex()
         .items_center()
-        .gap(px(7.0))
+        .gap(px(6.0))
         .rounded(px(999.0))
-        .text_size(px(13.5))
+        .text_size(px(text))
         .font_weight(FontWeight::MEDIUM)
+        .children(glyph.map(|g| icon(g, 13.0, ink)))
         .child(label)
         .when(enabled, |b| b.cursor_pointer())
         .when(!enabled, |b| b.cursor_default().opacity(0.4));
@@ -226,6 +263,103 @@ pub(crate) fn pill_button_enabled(
         Some(fill) => base.hover(move |s| s.bg(fill)),
         None => base,
     }
+}
+
+/// The Auto-update switch: a 30x18 track with a 14 px knob, success green when on. A button with
+/// the switch role as GPUI allows: the id is its accessible label and its test selector, and the
+/// caller adds `on_click`.
+pub(crate) fn switch(theme: &Theme, id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    let track = if on {
+        theme.success
+    } else {
+        theme.faint.opacity(0.4)
+    };
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex_none()
+        .w(px(30.0))
+        .h(px(18.0))
+        .px(px(2.0))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .rounded(px(9.0))
+        .bg(track)
+        .cursor_pointer()
+        .child(div().size(px(14.0)).rounded(px(7.0)).bg(gpui::white()))
+}
+
+/// A check box with its label: "Only versions Reno has verified". The caller adds `on_click`.
+pub(crate) fn checkbox(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    checked: bool,
+    label: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .text_color(theme.muted)
+        .child(
+            div()
+                .flex_none()
+                .size(px(15.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(if checked { theme.accent } else { theme.faint })
+                .when(checked, |d| d.bg(theme.accent))
+                .when(checked, |d| {
+                    d.child(icon(Icon::PhCheck, 11.0, gpui::white()))
+                }),
+        )
+        .child(label.into())
+}
+
+/// A turning ring: a job is running. Reduced motion stops it (GPUI snaps a repeating animation
+/// to its first frame).
+pub(crate) fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
+    icon(Icon::PhSpinner, size, color).with_animation(
+        id,
+        Animation::new(Duration::from_millis(900)).repeat(),
+        |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+    )
+}
+
+/// The mark of an executor on the Executors screen: its own coloured logo (a light twin on dark
+/// themes for the dark-ink marks), Lightning for Fx and Flask for the mock, else a Phosphor Cpu.
+pub(crate) fn logo(theme: &Theme, executor_id: &str, size: f32) -> AnyElement {
+    let frame = div()
+        .flex_none()
+        .size(px(size))
+        .flex()
+        .items_center()
+        .justify_center();
+    if let Some(path) = logo_path(executor_id, theme.appearance.is_dark()) {
+        return frame
+            .child(gpui::img(path).size(px(size)).flex_none())
+            .into_any_element();
+    }
+    let glyph = match executor_id {
+        "acp.fx" => Icon::PhLightning,
+        "mock" => Icon::PhFlask,
+        _ => Icon::PhCpu,
+    };
+    frame
+        .child(icon(glyph, size - 1.0, theme.muted))
+        .into_any_element()
 }
 
 /// The status mark of a run: a dot and the state's words, in the state's colour.

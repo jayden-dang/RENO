@@ -297,6 +297,13 @@ impl RootView {
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            // Back from a sign-in in Terminal: look at the executor again.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.executors
+                        .update(cx, |screen, cx| screen.on_window_activated(cx));
+                }
+            }),
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, window, cx| {
                 match event {
                     StoreEvent::Failed(message) => {
@@ -321,6 +328,47 @@ impl RootView {
                                 "{} is installed. Check its sign-in on the Executors screen.",
                                 crate::summary::executor_name(id)
                             ),
+                        );
+                    }
+                    StoreEvent::ExecutorJobDone {
+                        name,
+                        kind,
+                        version,
+                        sign_in,
+                    } => {
+                        let (label, message) = match kind {
+                            reno_proto::JobKind::Install => (
+                                "Executor installed",
+                                if *sign_in {
+                                    format!("{name} installed. One step needs you: sign in.")
+                                } else {
+                                    format!("{name} installed.")
+                                },
+                            ),
+                            reno_proto::JobKind::Update => (
+                                "Executor updated",
+                                match version {
+                                    Some(v) => format!("{name} updated to {v}."),
+                                    None => format!("{name} updated."),
+                                },
+                            ),
+                        };
+                        toast::push(cx, toast::Tone::Info, label, message);
+                    }
+                    StoreEvent::ExecutorJobStopped(name) => {
+                        toast::push(
+                            cx,
+                            toast::Tone::Info,
+                            "Stopped",
+                            format!("{name}: the job was stopped."),
+                        );
+                    }
+                    StoreEvent::StillSignedOut(name) => {
+                        toast::push(
+                            cx,
+                            toast::Tone::NotYet,
+                            "Still signed out",
+                            format!("{name} is still signed out."),
                         );
                     }
                     StoreEvent::TriggerFired { name, outcome, run } => {

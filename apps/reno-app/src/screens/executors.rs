@@ -1,29 +1,51 @@
-//! Executors: each agent CLI Reno drives, with what the daemon's last probe found out about it:
-//! installed (where, which version), whether that version is one the adapter was verified on,
-//! whether it is signed in, what it can do and how fresh all of this is. What needs the human
-//! (signed out, too old, needs an install) is listed first. Live through `executors.watch`.
+//! Executors: each agent CLI Reno drives, one 40 px line apiece, grouped by what a person can do
+//! about it (UI brief 2026-11-18). The headline says how many can take runs; a line that blocks
+//! has one control that fixes it: Sign in…, Update, Install / Install…, or Retry. Live through
+//! `executors.watch`.
 //!
-//! "Check again" is `executor.refresh` and "Install" is `executor.install`, which fetches the
-//! managed adapter; nothing probes on a timer and a run never installs.
+//! Reno runs installs and updates as jobs (`executor.job.*`): the line shows them queued, running
+//! and failed, and the view-model turns the daemon's job into words. An interactive step (a
+//! sign-in) goes to Terminal through the injected [`crate::terminal`] opener. A daemon without
+//! `executor.maintain` keeps today's Check again and managed Install and nothing else.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, Hsla, IntoElement, Render,
+    SharedString, Stateful, Subscription, Window, div, hsla, prelude::*, px,
 };
-use reno_proto::ExecutorId;
+use reno_proto::{ExecutorId, JobKind};
 
 use super::ScreenEvent;
 use crate::store::Store;
+use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
-use crate::vm::executors::{self, ExecutorRow, ExecutorsView, Fact, Level, Need};
+use crate::ui::toast;
+use crate::vm::executors::{
+    self, AutoView, Dot, ExecutorRow, ExecutorsView, Fact, Group, InstallOffer, JobState, Level,
+    Need, RecipeView,
+};
+
+/// The column of the page.
+const COLUMN: f32 = 980.0;
 
 pub(crate) struct ExecutorsScreen {
     store: Entity<Store>,
     _store: Subscription,
+    /// Lines opened in place.
+    expanded: BTreeSet<String>,
+    /// First installs whose review panel is open.
+    reviewing: BTreeSet<String>,
+    /// Whether the Test executors group is open.
+    test_open: bool,
+    /// Executors with a command running in Terminal that Reno looks at again afterwards.
+    terminal: BTreeSet<String>,
+    /// Whether the once-a-second redraw for running jobs' clocks is going.
+    ticking: bool,
 }
 
 impl EventEmitter<ScreenEvent> for ExecutorsScreen {}
@@ -34,6 +56,15 @@ fn level_color(theme: &Theme, level: Level) -> gpui::Hsla {
         Level::Warn => theme.warning,
         Level::Bad => theme.danger,
         Level::Quiet => theme.faint,
+    }
+}
+
+/// The info colour: "0.171.0 available", and a running job.
+fn info_color(theme: &Theme) -> Hsla {
+    if theme.appearance.is_dark() {
+        hsla(0.58, 0.85, 0.68, 1.0)
+    } else {
+        hsla(0.59, 0.80, 0.40, 1.0)
     }
 }
 
@@ -85,11 +116,19 @@ pub(crate) fn health_lines(theme: &Theme, row: &ExecutorRow) -> Div {
         .children(row.signed_in.as_ref().map(|f| fact_line(theme, f)))
 }
 
-fn need_tone(theme: &Theme, need: Need) -> gpui::Hsla {
+fn need_tone(theme: &Theme, need: Option<Need>) -> Hsla {
     match need {
-        Need::SignIn | Need::Update => theme.warning,
-        Need::Install | Need::Setup => theme.danger,
+        Some(Need::SignIn | Need::Update) => theme.warning,
+        Some(Need::Install | Need::Setup) => theme.danger,
+        None => theme.faint,
     }
+}
+
+fn mono(text: impl Into<SharedString>) -> Div {
+    div()
+        .font_family(MONO)
+        .text_size(px(12.0))
+        .child(text.into())
 }
 
 impl ExecutorsScreen {
@@ -97,6 +136,11 @@ impl ExecutorsScreen {
         Self {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
+            expanded: BTreeSet::new(),
+            reviewing: BTreeSet::new(),
+            test_open: false,
+            terminal: BTreeSet::new(),
+            ticking: false,
         }
     }
 
@@ -116,165 +160,965 @@ impl ExecutorsScreen {
             .update(cx, |store, cx| store.install_executor(id, cx));
     }
 
-    fn actions(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn toggle(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(id) {
+            self.expanded.insert(id.to_owned());
+        }
+        cx.notify();
+    }
+
+    fn start(&mut self, id: &str, kind: JobKind, force: bool, cx: &mut Context<Self>) {
+        let Ok(id) = id.parse::<ExecutorId>() else {
+            return;
+        };
+        self.store
+            .update(cx, |store, cx| store.start_executor_job(id, kind, force, cx));
+    }
+
+    fn cancel_job(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Ok(id) = id.parse::<ExecutorId>() {
+            self.store
+                .update(cx, |store, cx| store.cancel_executor_job(id, cx));
+        }
+    }
+
+    fn set_auto(&mut self, id: &str, on: bool, verified_only: bool, cx: &mut Context<Self>) {
+        if let Ok(id) = id.parse::<ExecutorId>() {
+            self.store.update(cx, |store, cx| {
+                store.set_executor_auto_update(id, on, verified_only, cx);
+            });
+        }
+    }
+
+    fn toggle_log(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Ok(id) = id.parse::<ExecutorId>() else {
+            return;
+        };
+        self.store.update(cx, |store, cx| {
+            let show = !store.is_log_open(&id);
+            store.show_job_log(id, show, cx);
+        });
+    }
+
+    /// Opens `command` in Terminal and waits for the person to come back.
+    pub(crate) fn open_terminal(
+        &mut self,
+        id: &str,
+        label: &str,
+        command: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::terminal::open(cx, label, command) {
+            Ok(()) => {
+                self.terminal.insert(id.to_owned());
+            }
+            Err(reason) => toast::push(cx, toast::Tone::Error, "Terminal", reason),
+        }
+        cx.notify();
+    }
+
+    /// Probes the executors that had a command in Terminal, and stops waiting for them.
+    pub(crate) fn check_back(&mut self, cx: &mut Context<Self>) {
+        for id in std::mem::take(&mut self.terminal) {
+            if let Ok(id) = id.parse::<ExecutorId>() {
+                self.store
+                    .update(cx, |store, cx| store.recheck_after_sign_in(id, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The window came back to the front: look again at what the person did in Terminal.
+    pub(crate) fn on_window_activated(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal.is_empty() {
+            self.check_back(cx);
+        }
+    }
+
+    /// Redraws once a second while a job runs, so its clock counts. Only a daemon on the
+    /// system clock has a clock to count (the fake's moves with its events).
+    fn keep_ticking(&mut self, running: bool, cx: &mut Context<Self>) {
+        if !running || self.ticking || !self.store.read(cx).clock_is_live() {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let go = this
+                    .update(cx, |screen, cx| {
+                        let running = screen.view(cx).jobs_running > 0;
+                        if running {
+                            cx.notify();
+                        } else {
+                            screen.ticking = false;
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    // --- Elements ----------------------------------------------------------------------------
+
+    fn check_button(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Ok(id) = row.id.parse::<ExecutorId>() else {
             return div().into_any_element();
         };
         let store = self.store.read(cx);
-        let installing = store.is_installing(&id);
-        let checking = store.is_checking(Some(&id)) || store.is_checking(None);
-
-        let check = {
-            let id = id.clone();
-            cx.listener(move |this, _, _, cx| this.check(Some(id.clone()), cx))
-        };
-        let check_button = kit::pill_button(
+        let busy = store.is_checking(Some(&id)) || store.is_checking(None);
+        let button = kit::line_button(
             theme,
             format!("check-{}", row.id),
-            if checking {
-                "Checking\u{2026}"
-            } else {
-                "Check again"
-            },
+            Some(Icon::PhRefresh),
+            if busy { "Checking\u{2026}" } else { "Check again" },
             Tone::Quiet,
+            !busy,
         );
-        let check_button = if checking || installing {
-            check_button.opacity(0.4).cursor_default()
+        if busy {
+            button
         } else {
-            check_button.on_click(check)
-        };
-
-        let install_button = row.can_install.then(|| {
-            let install = {
-                let id = id.clone();
-                cx.listener(move |this, _, _, cx| this.install(id.clone(), cx))
-            };
-            let button = kit::pill_button(
-                theme,
-                format!("install-{}", row.id),
-                if installing {
-                    "Installing\u{2026}"
-                } else {
-                    "Install"
-                },
-                Tone::Primary,
-            );
-            if installing {
-                button.opacity(0.6).cursor_default()
-            } else {
-                button.on_click(install)
-            }
-        });
-
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(8.0))
-            .children(install_button)
-            .child(check_button)
-            .into_any_element()
+            button.on_click(cx.listener(move |this, _, _, cx| this.check(Some(id.clone()), cx)))
+        }
+        .into_any_element()
     }
 
-    fn row(
+    /// The buttons at the right of a line.
+    fn controls(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let id = row.id.clone();
+        let starting = row
+            .id
+            .parse::<ExecutorId>()
+            .is_ok_and(|e| self.store.read(cx).is_starting(&e));
+        let line = div().flex_none().flex().items_center().gap(px(8.0));
+
+        // A job in flight or failed owns the right side.
+        if let Some(job) = &row.job {
+            let log_open = row
+                .id
+                .parse::<ExecutorId>()
+                .is_ok_and(|e| self.store.read(cx).is_log_open(&e));
+            let show_log = {
+                let id = id.clone();
+                kit::line_button(
+                    theme,
+                    format!("log-{id}"),
+                    Some(Icon::PhTerminal),
+                    if log_open { "Hide log" } else { "Show log" },
+                    Tone::Quiet,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_log(&id, cx)))
+            };
+            let cancel = {
+                let id = id.clone();
+                kit::line_button(theme, format!("cancel-{id}"), None, "Cancel", Tone::Quiet, !starting)
+                    .on_click(cx.listener(move |this, _, _, cx| this.cancel_job(&id, cx)))
+            };
+            return match &job.state {
+                JobState::Queued { .. } => {
+                    let now = {
+                        let id = id.clone();
+                        kit::line_button(
+                            theme,
+                            format!("force-{id}"),
+                            None,
+                            "Update now anyway",
+                            Tone::Quiet,
+                            !starting,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_forced(&id, cx);
+                        }))
+                    };
+                    line.child(now).child(cancel)
+                }
+                JobState::Running { .. } => line.child(show_log).child(cancel),
+                JobState::Failed { stopped, .. } => {
+                    let terminal = job.terminal_command.clone().filter(|_| !stopped).map(|command| {
+                        let id = id.clone();
+                        let label = format!("Run in Terminal: {}", row.name);
+                        kit::line_button(
+                            theme,
+                            format!("terminal-{id}"),
+                            Some(Icon::PhTerminal),
+                            "Run in Terminal",
+                            Tone::Quiet,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_terminal(&id, &label, &command, cx);
+                        }))
+                    });
+                    let kind = job.kind;
+                    let retry = {
+                        let id = id.clone();
+                        kit::line_button(
+                            theme,
+                            format!("retry-{id}"),
+                            Some(Icon::PhRefresh),
+                            "Retry",
+                            Tone::Primary,
+                            !starting,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start(&id, kind, false, cx);
+                        }))
+                    };
+                    let dismiss = {
+                        let id = id.clone();
+                        kit::icon_button(theme, format!("dismiss-{id}"), Icon::PhX, 26.0).on_click(
+                            cx.listener(move |this, _, _, cx| this.dismiss(&id, cx)),
+                        )
+                    };
+                    line.child(show_log)
+                        .children(terminal)
+                        .child(retry)
+                        .child(dismiss)
+                }
+            };
+        }
+
+        // A command is running in Terminal.
+        if self.terminal.contains(&row.id) {
+            let now = {
+                kit::line_button(theme, format!("check-now-{id}"), None, "Check now", Tone::Quiet, true)
+                    .on_click(cx.listener(move |this, _, _, cx| this.check_back(cx)))
+            };
+            let stop = {
+                let id = id.clone();
+                kit::line_button(theme, format!("wait-cancel-{id}"), None, "Cancel", Tone::Quiet, true)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.terminal.remove(&id);
+                        cx.notify();
+                    }))
+            };
+            return line.child(now).child(stop);
+        }
+
+        // A daemon without `executor.maintain`: today's Check again, and a managed Install.
+        if !row.maintain {
+            let install = (row.install == Some(InstallOffer::Legacy)).then(|| {
+                let installing = row
+                    .id
+                    .parse::<ExecutorId>()
+                    .is_ok_and(|e| self.store.read(cx).is_installing(&e));
+                let button = kit::line_button(
+                    theme,
+                    format!("install-{id}"),
+                    Some(Icon::PhDownload),
+                    if installing { "Installing\u{2026}" } else { "Install" },
+                    Tone::Primary,
+                    !installing,
+                );
+                let id = id.clone();
+                if installing {
+                    button
+                } else {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        if let Ok(id) = id.parse::<ExecutorId>() {
+                            this.install(id, cx);
+                        }
+                    }))
+                }
+            });
+            return line.children(install).child(self.check_button(row, theme, cx));
+        }
+
+        let mut line = line;
+        if let Some(offer) = row.install {
+            let (label, glyph) = match offer {
+                InstallOffer::Review => ("Install\u{2026}", Icon::PhDownload),
+                _ => ("Install", Icon::PhDownload),
+            };
+            let button = {
+                let id = id.clone();
+                kit::line_button(theme, format!("install-{id}"), Some(glyph), label, Tone::Primary, !starting)
+                    .on_click(cx.listener(move |this, _, _, cx| match offer {
+                        InstallOffer::Review => {
+                            this.expanded.insert(id.clone());
+                            if !this.reviewing.remove(&id) {
+                                this.reviewing.insert(id.clone());
+                            }
+                            cx.notify();
+                        }
+                        _ => this.start(&id, JobKind::Install, false, cx),
+                    }))
+            };
+            line = line.child(button);
+        }
+        if let Some(command) = &row.sign_in {
+            let command = command.clone();
+            let label = format!("Sign in to {}", row.name);
+            let id = id.clone();
+            line = line.child(
+                kit::line_button(theme, format!("sign-in-{id}"), Some(Icon::PhTerminal), "Sign in\u{2026}", Tone::Primary, true)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_terminal(&id, &label, &command, cx);
+                    })),
+            );
+        }
+        if row.update {
+            let id = id.clone();
+            line = line.child(
+                kit::line_button(
+                    theme,
+                    format!("update-{id}"),
+                    Some(Icon::PhDownload),
+                    "Update",
+                    if row.update_primary { Tone::Primary } else { Tone::Quiet },
+                    !starting,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.start(&id, JobKind::Update, false, cx);
+                })),
+            );
+        }
+        if let Some(switch) = &row.switch {
+            let (id, on) = (id.clone(), switch.on);
+            let verified = row.auto.as_ref().is_some_and(|a| a.verified_only);
+            line = line.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted)
+                            .child("Auto-update"),
+                    )
+                    .child(
+                        kit::switch(theme, format!("auto-{id}"), on).on_click(cx.listener(
+                            move |this, _, _, cx| this.set_auto(&id, !on, verified, cx),
+                        )),
+                    ),
+            );
+        }
+        if row.lock {
+            line = line.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.faint)
+                    .child(icon(Icon::PhLock, 13.0, theme.faint))
+                    .child("Updates with Reno"),
+            );
+        }
+        line
+    }
+
+    fn dismiss(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Ok(id) = id.parse::<ExecutorId>() {
+            self.store
+                .update(cx, |store, cx| store.dismiss_executor_job(id, cx));
+        }
+    }
+
+    fn start_forced(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Ok(id) = id.parse::<ExecutorId>() {
+            self.store
+                .update(cx, |store, cx| store.start_update_now(id, cx));
+        }
+    }
+
+    /// The middle of a line.
+    fn middle(&self, row: &ExecutorRow, theme: &Theme) -> Div {
+        let info = info_color(theme);
+        let cell = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .overflow_hidden()
+            .text_size(px(13.0));
+
+        if let Some(job) = &row.job {
+            let words = job.words(&row.name);
+            return match &job.state {
+                JobState::Queued { .. } => cell
+                    .child(icon(Icon::PhClock, 14.0, theme.muted))
+                    .child(div().text_color(theme.muted).child(words)),
+                JobState::Running {
+                    clock,
+                    last_line,
+                    long,
+                    quiet_minutes,
+                    ..
+                } => cell
+                    .child(kit::spinner(
+                        SharedString::from(format!("spin-{}", row.id)),
+                        14.0,
+                        info,
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(info)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(words),
+                    )
+                    .children(clock.clone().map(|c| {
+                        mono(c).flex_none().text_color(theme.muted)
+                    }))
+                    .when_some(last_line.clone(), |d, line| {
+                        d.child(mono(line).min_w_0().truncate().text_color(theme.faint))
+                    })
+                    .when(*long && quiet_minutes.is_none(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(theme.muted)
+                                .child("still running \u{2014} installers can take a few minutes"),
+                        )
+                    })
+                    .when_some(*quiet_minutes, |d, minutes| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.0))
+                                .text_color(theme.warning)
+                                .child(format!("no output for {minutes} min")),
+                        )
+                    }),
+                JobState::Failed {
+                    detail, stopped, ..
+                } => cell
+                    .child(icon(
+                        if *stopped { Icon::PhClock } else { Icon::PhX },
+                        14.0,
+                        if *stopped { theme.muted } else { theme.danger },
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(if *stopped { theme.muted } else { theme.danger })
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(words),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .text_color(if *stopped { theme.faint } else { theme.danger })
+                            .child(SharedString::from(detail.clone())),
+                    ),
+            };
+        }
+
+        if self.terminal.contains(&row.id) {
+            return cell
+                .child(icon(Icon::PhTerminal, 14.0, theme.muted))
+                .child(div().text_color(theme.muted).child(
+                    "Running in Terminal \u{2014} Reno checks again when you're back",
+                ));
+        }
+
+        match row.group {
+            Group::Ready | Group::Test => {
+                let cell = cell.child(
+                    mono(row.version_text.clone().unwrap_or_else(|| "version unknown".into()))
+                        .flex_none()
+                        .text_color(if row.version_text.is_some() { theme.text } else { theme.faint }),
+                );
+                let cell = match &row.available {
+                    Some(latest) => cell.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(info)
+                            .child(format!("{latest} available")),
+                    ),
+                    None => cell,
+                };
+                match &row.account {
+                    Some(account) => cell.child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .text_color(theme.muted)
+                            .child(icon(Icon::PhCheck, 13.0, theme.success))
+                            .child(div().truncate().child(SharedString::from(account.clone()))),
+                    ),
+                    None => cell,
+                }
+            }
+            Group::NeedsYou | Group::Unknown => match &row.middle {
+                Some(fact) => {
+                    let tone = if row.group == Group::Unknown {
+                        theme.faint
+                    } else {
+                        need_tone(theme, row.need)
+                    };
+                    cell.child(icon(
+                        if row.group == Group::Unknown { Icon::PhQuestion } else { Icon::PhWarning },
+                        14.0,
+                        tone,
+                    ))
+                    .child(div().flex_none().text_color(tone).child(fact.text))
+                    .when_some(fact.detail.clone(), |d, detail| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(theme.muted)
+                                .child(SharedString::from(detail)),
+                        )
+                    })
+                }
+                None => cell,
+            },
+            Group::NotInstalled => {
+                if self.reviewing.contains(&row.id) && row.recipe.is_some() {
+                    cell.child(icon(Icon::PhEye, 14.0, theme.muted))
+                        .child(div().text_color(theme.muted).child("Review what runs below"))
+                } else {
+                    cell.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.muted)
+                            .child(SharedString::from(row.source.clone().unwrap_or_default())),
+                    )
+                }
+            }
+        }
+    }
+
+    fn review_panel(
         &self,
         row: &ExecutorRow,
-        last: bool,
+        recipe: &RecipeView,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Label over value: the column is narrow at the window's minimum width, and a value
-        // such as "Unrestricted" must never break inside a word.
-        let kv = |label: &'static str, value: String| {
+    ) -> Div {
+        let n = recipe.reno_steps();
+        let starting = row
+            .id
+            .parse::<ExecutorId>()
+            .is_ok_and(|e| self.store.read(cx).is_starting(&e));
+        let steps = recipe.steps.iter().enumerate().map(|(i, step)| {
             div()
                 .flex()
-                .flex_col()
+                .items_center()
+                .gap(px(10.0))
                 .child(
                     div()
+                        .flex_none()
+                        .w(px(18.0))
                         .text_size(px(11.5))
                         .text_color(theme.faint)
-                        .child(label),
+                        .child(format!("{}", i + 1)),
                 )
                 .child(
                     div()
-                        .min_w_0()
+                        .flex_none()
+                        .w(px(150.0))
                         .text_size(px(12.5))
-                        .line_height(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.muted)
-                        .child(SharedString::from(value)),
+                        .child(SharedString::from(step.label.clone())),
                 )
+                .child(
+                    mono(step.command.clone())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(5.0))
+                        .bg(theme.raised)
+                        .text_color(theme.text),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(theme.faint)
+                        .child(if step.reno {
+                            "Reno runs it"
+                        } else {
+                            "you, in Terminal, after"
+                        }),
+                )
+        });
+        let run = {
+            let id = row.id.clone();
+            kit::line_button(
+                theme,
+                format!("run-{id}"),
+                Some(Icon::PhPlay),
+                if n == 1 { "Run 1 command".to_owned() } else { format!("Run {n} commands") },
+                Tone::Primary,
+                !starting && n > 0,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.reviewing.remove(&id);
+                this.start(&id, JobKind::Install, false, cx);
+            }))
         };
-        let list = |items: &[&'static str]| {
-            if items.is_empty() {
-                "\u{2014}".to_owned()
-            } else {
-                items.join(", ")
-            }
+        let cancel = {
+            let id = row.id.clone();
+            kit::line_button(theme, format!("review-cancel-{id}"), None, "Cancel", Tone::Quiet, true)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.reviewing.remove(&id);
+                    cx.notify();
+                }))
         };
-
-        page::table_row(theme, last)
-            .id(SharedString::from(format!("executor-{}", row.id)))
-            .items_start()
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .p(px(12.0))
+            .rounded(px(10.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
             .child(
                 div()
-                    .map(|d| page::cell(d, Some(150.0)))
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(if n == 1 {
+                        "Reno will run 1 command as you, in your login shell. No sudo.".to_owned()
+                    } else {
+                        format!("Reno will run {n} commands as you, in your login shell. No sudo.")
+                    }),
+            )
+            .child(div().flex().flex_col().gap(px(5.0)).children(steps))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .child(format!("Source: {} \u{b7} Output is kept in", recipe.source))
+                    .child(
+                        mono(format!("~/.reno/logs/install-{}.log", row.id))
+                            .px(px(6.0))
+                            .rounded(px(4.0))
+                            .bg(theme.raised),
+                    ),
+            )
+            .child(div().flex().gap(px(8.0)).child(run).child(cancel))
+    }
+
+    fn log_block(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let id = row.id.parse::<ExecutorId>().ok()?;
+        let store = self.store.read(cx);
+        if !store.is_log_open(&id) {
+            return None;
+        }
+        let log = store.job_log(&id).cloned().unwrap_or_default();
+        let lines: Vec<AnyElement> = if log.lines.is_empty() {
+            vec![div()
+                .text_color(theme.faint)
+                .child("No output yet")
+                .into_any_element()]
+        } else {
+            log.lines
+                .iter()
+                .map(|l| div().child(SharedString::from(l.clone())).into_any_element())
+                .collect()
+        };
+        Some(
+            div()
+                .id(SharedString::from(format!("job-log-{}", row.id)))
+                .max_h(px(140.0))
+                .overflow_y_scroll()
+                .p(px(10.0))
+                .rounded(px(8.0))
+                .bg(theme.raised)
+                .font_family(MONO)
+                .text_size(px(12.0))
+                .line_height(px(17.0))
+                .text_color(theme.muted)
+                .when(log.truncated, |d| {
+                    d.child(div().text_color(theme.faint).child("\u{2026} older output was dropped"))
+                })
+                .children(lines),
+        )
+    }
+
+    fn auto_block(
+        &self,
+        row: &ExecutorRow,
+        auto: &AutoView,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = row.id.clone();
+        let on = auto.on;
+        let verified = auto.verified_only;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .text_size(px(12.5))
+                    .line_height(px(18.0))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Auto-update"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(theme.muted)
+                            .child(SharedString::from(auto.text.clone())),
+                    ),
+            )
+            .when(auto.can_pin, |d| {
+                let id = id.clone();
+                d.child(
+                    kit::checkbox(
+                        theme,
+                        format!("verified-{id}"),
+                        verified,
+                        "Only versions Reno has verified",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_auto(&id, on, !verified, cx);
+                    })),
+                )
+            })
+            .when_some(auto.warning.clone(), |d, warning| {
+                d.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.warning)
+                        .child(SharedString::from(warning)),
+                )
+            })
+    }
+
+    /// What opens under a line.
+    fn expanded(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .pl(px(62.0))
+            .pr(px(14.0))
+            .pb(px(14.0));
+        if self.reviewing.contains(&row.id)
+            && let Some(recipe) = &row.recipe
+        {
+            body = body.child(self.review_panel(row, recipe, theme, cx));
+        }
+        if let Some(log) = self.log_block(row, theme, cx) {
+            body = body.child(log);
+        }
+        body = body.child(health_lines(theme, row));
+        if row.group == Group::NotInstalled
+            && !self.reviewing.contains(&row.id)
+            && let Some(recipe) = &row.recipe
+        {
+            body = body.child(
+                div()
                     .flex()
                     .flex_col()
-                    .gap(px(5.0))
+                    .gap(px(4.0))
+                    .text_size(px(12.5))
                     .child(
+                        div()
+                            .text_color(theme.muted)
+                            .child(SharedString::from(format!("Install: {}", recipe.source))),
+                    )
+                    .children(recipe.steps.iter().map(|s| {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
-                            .child(kit::exec_glyph(theme, &row.id, 16.0))
+                            .gap(px(10.0))
                             .child(
                                 div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .truncate()
-                                    .child(SharedString::from(row.name.clone())),
-                            ),
-                    )
-                    .when(row.name != row.id, |d| {
-                        d.child(
-                            div()
-                                .font_family(MONO)
-                                .text_size(px(11.5))
-                                .text_color(theme.faint)
-                                .truncate()
-                                .child(SharedString::from(row.id.clone())),
-                        )
-                    })
-                    .when_some(row.need, |d, need| {
-                        d.child(
-                            div()
-                                .flex()
-                                .child(kit::tag(need_tone(theme, need), need.label())),
-                        )
-                    })
+                                    .flex_none()
+                                    .w(px(150.0))
+                                    .text_color(theme.muted)
+                                    .child(SharedString::from(s.label.clone())),
+                            )
+                            .child(mono(s.command.clone()).flex_1().min_w_0().truncate().text_color(theme.text))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.faint)
+                                    .child(if s.reno { "Reno can run it" } else { "needs you" }),
+                            )
+                    })),
+            );
+        }
+        if let Some(auto) = &row.auto {
+            body = body.child(self.auto_block(row, auto, theme, cx));
+        }
+        if row.maintain {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(self.check_button(row, theme, cx))
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.faint)
                             .child(SharedString::from(row.checked.clone())),
                     ),
-            )
+            );
+        }
+        body
+    }
+
+    fn line(&self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.expanded.contains(&row.id)
+            || (self.reviewing.contains(&row.id) && row.recipe.is_some());
+        let running = row.job.as_ref().is_some_and(|j| j.running());
+        let dot = match row.dot {
+            Dot::Ready => kit::dot(theme.success, 8.0),
+            Dot::Blocked => kit::dot(theme.danger, 8.0),
+            Dot::Unknown => kit::dot(theme.faint, 8.0),
+            Dot::NotInstalled => div()
+                .flex_none()
+                .size(px(8.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(theme.faint)
+                .border_dashed(),
+            Dot::Running => div()
+                .flex_none()
+                .size(px(8.0))
+                .rounded(px(4.0))
+                .border_2()
+                .border_color(info_color(theme)),
+        };
+        let toggle = {
+            let id = row.id.clone();
+            div()
+                .id(SharedString::from(format!("line-{}", row.id)))
+                .debug_selector({
+                    let id = row.id.clone();
+                    move || format!("line-{id}")
+                })
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .cursor_pointer()
+                .child(icon(
+                    if open { Icon::PhCaretDown } else { Icon::PhCaretRight },
+                    13.0,
+                    theme.faint,
+                ))
+                .child(dot)
+                .child(kit::logo(theme, &row.id, 18.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(108.0))
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(SharedString::from(row.name.clone())),
+                )
+                .child(self.middle(row, theme))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
+        };
+        div()
+            .id(SharedString::from(format!("executor-{}", row.id)))
+            .w_full()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(theme.hairline)
+            .when(open, |d| d.bg(theme.row_selected()))
+            .when(running && !open, |d| d.bg(info_color(theme).opacity(0.06)))
             .child(
                 div()
-                    .map(|d| page::cell(d, None))
-                    .child(health_lines(theme, row)),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(200.0)))
+                    .h(px(40.0))
+                    .px(px(8.0))
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(kv("Access", list(&row.access)))
-                    .child(kv("Sandbox", list(&row.sandbox)))
-                    .child(kv("Models", row.models.clone())),
+                    .items_center()
+                    .gap(px(12.0))
+                    .text_size(px(13.0))
+                    .child(toggle)
+                    .child(self.controls(row, theme, cx)),
             )
-            .child(self.actions(row, theme, cx))
+            .when(open, |d| d.child(self.expanded(row, theme, cx)))
+            .into_any_element()
+    }
+
+    fn group(
+        &mut self,
+        group: Group,
+        rows: &[&ExecutorRow],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let collapsed = group == Group::Test && !self.test_open;
+        let label = div()
+            .id(SharedString::from(format!("group-{}", group.label())))
+            .debug_selector({
+                let label = group.label();
+                move || format!("group-{label}")
+            })
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .py(px(6.0))
+            .px(px(8.0))
+            .text_size(px(12.0))
+            .text_color(theme.muted)
+            .when(group == Group::Test, |d| {
+                d.cursor_pointer()
+                    .child(icon(
+                        if collapsed { Icon::PhCaretRight } else { Icon::PhCaretDown },
+                        12.0,
+                        theme.faint,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.test_open = !this.test_open;
+                        cx.notify();
+                    }))
+            })
+            .child(div().font_weight(FontWeight::MEDIUM).child(group.label()))
+            .child(div().text_color(theme.faint).child(format!("{}", rows.len())))
+            .child(div().flex_1())
+            .children(
+                group
+                    .note()
+                    .map(|n| div().text_color(theme.faint).child(n)),
+            );
+        let lines: Vec<AnyElement> = if collapsed {
+            vec![]
+        } else {
+            rows.iter().map(|r| self.line(r, theme, cx)).collect()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .child(label)
+            .children(lines)
             .into_any_element()
     }
 }
@@ -283,41 +1127,98 @@ impl Render for ExecutorsScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
         let view = self.view(cx);
+        self.keep_ticking(view.jobs_running > 0, cx);
         let retry: page::Action = {
             let store = self.store.clone();
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
         let rows = view.rows.rows();
-        let table_rows: Vec<AnyElement> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| self.row(r, i + 1 == rows.len(), &theme, cx))
-            .collect();
 
         let checking_all = self.store.read(cx).is_checking(None);
-        let check_all = {
-            let button = kit::pill_button(
-                &theme,
-                "check-all",
-                if checking_all {
-                    "Checking\u{2026}"
-                } else {
-                    "Check all again"
-                },
-                Tone::Quiet,
-            );
-            if checking_all || rows.is_empty() {
-                button.opacity(0.4).cursor_default()
-            } else {
-                button.on_click(cx.listener(|this, _, _, cx| this.check(None, cx)))
-            }
+        let check_all = kit::pill_button_enabled(
+            &theme,
+            "check-all",
+            if checking_all { "Checking\u{2026}" } else { "Check all" },
+            Tone::Quiet,
+            !(checking_all || rows.is_empty()),
+        );
+        let check_all = if checking_all || rows.is_empty() {
+            check_all
+        } else {
+            check_all.on_click(cx.listener(|this, _, _, cx| this.check(None, cx)))
         };
+        let status = if view.jobs_running > 0 {
+            Some(if view.jobs_running == 1 {
+                "1 job running".to_owned()
+            } else {
+                format!("{} jobs running", view.jobs_running)
+            })
+        } else {
+            view.checked.clone()
+        };
+        let update_all = (view.maintain && view.updates_waiting.len() > 1).then(|| {
+            let ids = view.updates_waiting.clone();
+            kit::pill_button(
+                &theme,
+                "update-all",
+                format!("Update {}", ids.len()),
+                Tone::Primary,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                for id in &ids {
+                    this.start(id, JobKind::Update, false, cx);
+                }
+            }))
+        });
+        let trailing = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .children(status.map(|s| {
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.faint)
+                    .child(SharedString::from(s))
+            }))
+            .children(update_all)
+            .child(check_all);
 
-        let body = page::content(page::WIDE)
+        let blocked = view.needing > 0;
+        let headline = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if blocked { theme.danger } else { theme.text })
+                    .child(SharedString::from(view.lede.clone())),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(theme.muted)
+                    .child(SharedString::from(view.detail.clone())),
+            );
+
+        let groups: Vec<AnyElement> = Group::ALL
+            .iter()
+            .filter_map(|g| {
+                let in_group = view.group(*g);
+                (!in_group.is_empty()).then_some((*g, in_group))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(g, in_group)| self.group(g, &in_group, &theme, cx))
+            .collect();
+
+        let body = page::content(COLUMN)
+            .gap(px(18.0))
             .when_some(view.banner.as_ref(), |c, b| {
                 c.child(page::banner(&theme, b, Some(retry)))
             })
-            .child(page::lede(&theme, view.lede.clone(), view.detail.clone()))
+            .child(headline)
             .when_some(
                 page::note(
                     &theme,
@@ -326,28 +1227,14 @@ impl Render for ExecutorsScreen {
                 ),
                 ParentElement::child,
             )
-            .when(!table_rows.is_empty(), |c| {
-                c.child(
-                    page::table_frame(&theme, page::table())
-                        .child(page::table_head(
-                            &theme,
-                            &[
-                                ("Executor", Some(150.0)),
-                                ("Health", None),
-                                ("Can do", Some(230.0)),
-                                ("", Some(110.0)),
-                            ],
-                        ))
-                        .children(table_rows),
-                )
-            });
+            .children(groups);
 
         div()
             .id("executors")
             .size_full()
             .flex()
             .flex_col()
-            .child(page::header(&theme, "Executors", check_all))
+            .child(page::header(&theme, "Executors", trailing))
             .child(page::column("executors-scroll").child(body))
     }
 }

@@ -39,8 +39,8 @@ use reno_client::{
 };
 use reno_proto::defs::DefKind;
 use reno_proto::{
-    ApprovalDecision, ApprovalId, ExecutorId, FiringOutcome, RoutingDecision, RunId, RunListParams,
-    RunStatus, TaskRunParams,
+    ApprovalDecision, ApprovalId, ExecutorId, ExecutorInfo, FiringOutcome, JobFailure, JobKind,
+    JobPhase, RoutingDecision, RunId, RunListParams, RunStatus, SignedIn, TaskRunParams,
 };
 
 use crate::summary;
@@ -63,6 +63,18 @@ pub(crate) enum StoreEvent {
     },
     /// An executor's adapter was installed and probed again.
     ExecutorInstalled(String),
+    /// An install or update ended well: the executor's own name, what it did, the version it is
+    /// on now, and whether a sign-in is the one step left.
+    ExecutorJobDone {
+        name: String,
+        kind: JobKind,
+        version: Option<String>,
+        sign_in: bool,
+    },
+    /// A person stopped an install or update.
+    ExecutorJobStopped(String),
+    /// Reno looked again after a sign-in in Terminal and the executor is still signed out.
+    StillSignedOut(String),
     Failed(String),
     /// A task or steer sent with this ticket did not go through (`Failed` says why): the
     /// composer that sent it gets its draft back.
@@ -77,6 +89,62 @@ pub(crate) enum RunRouting {
     /// The decision; `None` for a run made before routing existed.
     Ready(Option<RoutingDecision>),
     Failed(String),
+}
+
+/// The last lines of output of an executor's job, as `executor.job.log` answered.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct JobLog {
+    pub(crate) lines: Vec<String>,
+    /// Older lines were dropped.
+    pub(crate) truncated: bool,
+}
+
+/// What a new executor list says about jobs that ended since `before`: done (the job is gone and
+/// the health shows the result) or stopped by a person. A failure is shown on the line.
+fn job_events(before: &[ExecutorInfo], after: &[ExecutorInfo]) -> Vec<StoreEvent> {
+    let live = |info: &ExecutorInfo| {
+        info.job
+            .as_ref()
+            .filter(|j| !matches!(j.phase, JobPhase::Failed { .. }))
+            .map(|j| (j.kind, matches!(j.phase, JobPhase::Queued { .. })))
+    };
+    let mut events = Vec::new();
+    for new in after {
+        let Some(old) = before.iter().find(|o| o.descriptor.id == new.descriptor.id) else {
+            continue;
+        };
+        let Some((kind, was_queued)) = live(old) else {
+            continue;
+        };
+        let name = summary::executor_name(new.descriptor.id.as_str());
+        match &new.job {
+            None => {
+                let health = new.health.as_ref();
+                events.push(StoreEvent::ExecutorJobDone {
+                    name,
+                    kind,
+                    version: health.and_then(|h| h.installed.version().map(str::to_owned)),
+                    sign_in: kind == JobKind::Install
+                        && health.is_some_and(|h| matches!(h.signed_in, SignedIn::No { .. })),
+                });
+            }
+            // Cancelling an update that only waited is not worth a toast: the line says so.
+            Some(job)
+                if !was_queued
+                    && matches!(
+                        job.phase,
+                        JobPhase::Failed {
+                            failure: JobFailure::Cancelled,
+                            ..
+                        }
+                    ) =>
+            {
+                events.push(StoreEvent::ExecutorJobStopped(name));
+            }
+            Some(_) => {}
+        }
+    }
+    events
 }
 
 /// A run's routing, and what it was fetched for: the decision changes while the run starts (a
@@ -102,6 +170,14 @@ pub(crate) struct Store {
     checking: BTreeSet<Option<ExecutorId>>,
     /// Executors being installed.
     installing: BTreeSet<ExecutorId>,
+    /// Executors with a job request in flight (their buttons are disabled).
+    starting: BTreeSet<ExecutorId>,
+    /// Output of each executor's current or last job, fetched on demand.
+    job_logs: BTreeMap<ExecutorId, JobLog>,
+    /// Executors whose log is shown: it is fetched again when their job changes (ARCH-12).
+    log_open: BTreeSet<ExecutorId>,
+    /// Log fetches in flight.
+    log_fetching: BTreeSet<ExecutorId>,
     /// Filters whose page request is in flight.
     paging: BTreeSet<Vec<RunStatus>>,
     /// Runs being fetched with `run.get`.
@@ -150,6 +226,10 @@ impl Store {
             firing: BTreeSet::new(),
             checking: BTreeSet::new(),
             installing: BTreeSet::new(),
+            starting: BTreeSet::new(),
+            job_logs: BTreeMap::new(),
+            log_open: BTreeSet::new(),
+            log_fetching: BTreeSet::new(),
             paging: BTreeSet::new(),
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
@@ -244,6 +324,26 @@ impl Store {
         self.installing.contains(id)
     }
 
+    /// Whether ages and job clocks follow the system clock (a real daemon) rather than the
+    /// state's newest timestamp (the fake).
+    pub(crate) fn clock_is_live(&self) -> bool {
+        self.system_clock
+    }
+
+    /// Whether a job request for this executor was sent and has not answered.
+    pub(crate) fn is_starting(&self, id: &ExecutorId) -> bool {
+        self.starting.contains(id)
+    }
+
+    /// The output of this executor's current or last job, once fetched.
+    pub(crate) fn job_log(&self, id: &ExecutorId) -> Option<&JobLog> {
+        self.job_logs.get(id)
+    }
+
+    pub(crate) fn is_log_open(&self, id: &ExecutorId) -> bool {
+        self.log_open.contains(id)
+    }
+
     pub(crate) fn is_paging(&self, statuses: &[RunStatus]) -> bool {
         self.paging.contains(&filter_key(statuses))
     }
@@ -264,7 +364,19 @@ impl Store {
 
     /// Applies one update and notifies only for what changed on screen.
     pub(crate) fn apply(&mut self, update: Update, cx: &mut Context<Self>) -> Changed {
+        let before =
+            matches!(update, Update::Executors(_)).then(|| self.state.executors().to_vec());
         let changed = self.state.apply(update);
+        if let Some(before) = before {
+            for event in job_events(&before, self.state.executors()) {
+                cx.emit(event);
+            }
+            if changed.executors {
+                for id in self.log_open.clone() {
+                    self.fetch_job_log(id, cx);
+                }
+            }
+        }
         if changed.daemon {
             self.status_seen_at_ms = self.now_ms();
         }
@@ -774,6 +886,221 @@ impl Store {
                 }),
                 err: Box::new(move |store, cx| {
                     store.installing.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+    }
+
+    /// Runs one executor job request. The answer is not applied: `executors.watch` carries every
+    /// change in order, and an older answer must never overwrite a newer snapshot.
+    fn job_call<Fut>(
+        &mut self,
+        id: ExecutorId,
+        what: &'static str,
+        request: impl FnOnce(Client) -> Fut,
+        cx: &mut Context<Self>,
+    ) where
+        Fut: Future<Output = Result<ExecutorInfo, ClientError>> + Send + 'static,
+    {
+        if self.client().is_none() || !self.starting.insert(id.clone()) {
+            return;
+        }
+        cx.notify();
+        let (ok_id, err_id) = (id.clone(), id);
+        self.call(
+            what,
+            request,
+            cx,
+            D {
+                ok: Box::new(move |store, _, cx| {
+                    store.starting.remove(&ok_id);
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.starting.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+    }
+
+    /// `executor.job.start`: installs or updates `id` as a job. An update of an executor with
+    /// runs in flight is queued unless `force`.
+    pub(crate) fn start_executor_job(
+        &mut self,
+        id: ExecutorId,
+        kind: JobKind,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let request = id.clone();
+        self.job_call(
+            id,
+            match kind {
+                JobKind::Install => "Could not start the install",
+                JobKind::Update => "Could not start the update",
+            },
+            move |client| async move { client.start_executor_job(&request, kind, force).await },
+            cx,
+        );
+    }
+
+    /// "Update now anyway": the queued update is stopped and the update starts at once, as one
+    /// request, because the daemon allows one job per executor.
+    pub(crate) fn start_update_now(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        let request = id.clone();
+        self.job_call(
+            id,
+            "Could not start the update",
+            move |client| async move {
+                client.cancel_executor_job(&request).await?;
+                client
+                    .start_executor_job(&request, JobKind::Update, true)
+                    .await
+            },
+            cx,
+        );
+    }
+
+    /// `executor.job.cancel`.
+    pub(crate) fn cancel_executor_job(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        let request = id.clone();
+        self.job_call(
+            id,
+            "Could not stop the job",
+            move |client| async move { client.cancel_executor_job(&request).await },
+            cx,
+        );
+    }
+
+    /// `executor.job.dismiss`: clears a failed job.
+    pub(crate) fn dismiss_executor_job(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        self.job_logs.remove(&id);
+        let request = id.clone();
+        self.job_call(
+            id,
+            "Could not clear the failed job",
+            move |client| async move { client.dismiss_executor_job(&request).await },
+            cx,
+        );
+    }
+
+    /// `executor.auto_update.set`.
+    pub(crate) fn set_executor_auto_update(
+        &mut self,
+        id: ExecutorId,
+        on: bool,
+        verified_only: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let request = id.clone();
+        self.job_call(
+            id,
+            "Could not change auto-update",
+            move |client| async move {
+                client
+                    .set_executor_auto_update(&request, on, verified_only)
+                    .await
+            },
+            cx,
+        );
+    }
+
+    /// Shows or hides the output of this executor's job. Shown, it is fetched now and again
+    /// whenever the job changes; hidden, nothing is kept up to date.
+    pub(crate) fn show_job_log(&mut self, id: ExecutorId, show: bool, cx: &mut Context<Self>) {
+        if show {
+            self.log_open.insert(id.clone());
+            self.fetch_job_log(id, cx);
+        } else {
+            self.log_open.remove(&id);
+            self.job_logs.remove(&id);
+            cx.notify();
+        }
+    }
+
+    /// `executor.job.log`, at most one at a time per executor.
+    fn fetch_job_log(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.log_fetching.insert(id.clone()) {
+            return;
+        }
+        let (ok_id, err_id, request) = (id.clone(), id.clone(), id);
+        self.call(
+            "Could not read the log",
+            move |client| async move { client.executor_job_log(&request).await },
+            cx,
+            D {
+                ok: Box::new(move |store, log: reno_proto::ExecutorJobLogResult, cx| {
+                    store.log_fetching.remove(&ok_id);
+                    if store.log_open.contains(&ok_id) {
+                        store.job_logs.insert(
+                            ok_id,
+                            JobLog {
+                                lines: log.lines,
+                                truncated: log.truncated,
+                            },
+                        );
+                    }
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.log_fetching.remove(&err_id);
+                    cx.notify();
+                }),
+                quiet: true,
+            },
+        );
+    }
+
+    /// Probes `id` again after the person came back from a sign-in in Terminal, and says so when
+    /// it is still signed out.
+    pub(crate) fn recheck_after_sign_in(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
+        if self.client().is_none() || !self.checking.insert(Some(id.clone())) {
+            return;
+        }
+        cx.notify();
+        let (ok_id, err_id, request) = (id.clone(), id.clone(), Some(id));
+        self.call(
+            "Could not check the executor",
+            move |client| async move { client.refresh_executors(request).await },
+            cx,
+            D {
+                ok: Box::new(move |store, list: Vec<ExecutorInfo>, cx| {
+                    store.checking.remove(&Some(ok_id.clone()));
+                    let still_out = list.iter().any(|e| {
+                        e.descriptor.id == ok_id
+                            && e.health
+                                .as_ref()
+                                .is_some_and(|h| matches!(h.signed_in, SignedIn::No { .. }))
+                    });
+                    // A first install that failed, run in Terminal, and now found: the failed
+                    // job is stale. Clear it.
+                    let healed = list.iter().any(|e| {
+                        e.descriptor.id == ok_id
+                            && e.job.as_ref().is_some_and(|j| {
+                                j.kind == JobKind::Install
+                                    && matches!(j.phase, JobPhase::Failed { .. })
+                            })
+                            && e.health.as_ref().is_some_and(|h| {
+                                matches!(h.installed, reno_proto::InstallStatus::Installed { .. })
+                            })
+                    });
+                    store.apply(Update::Executors(list), cx);
+                    if healed {
+                        store.dismiss_executor_job(ok_id.clone(), cx);
+                    }
+                    if still_out {
+                        cx.emit(StoreEvent::StillSignedOut(summary::executor_name(
+                            ok_id.as_str(),
+                        )));
+                    }
+                    cx.notify();
+                }),
+                err: Box::new(move |store, cx| {
+                    store.checking.remove(&Some(err_id));
                     cx.notify();
                 }),
                 quiet: false,
