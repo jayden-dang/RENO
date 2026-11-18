@@ -1038,6 +1038,65 @@ fn enclosed(dest: &Path, name: &Path) -> Result<PathBuf, HarnessError> {
     Ok(dest.join(out))
 }
 
+/// Whether `path`'s folder really is under `dest`, however links on the way resolve: a file or
+/// folder never lands outside it through a link an archive made earlier.
+fn inside(dest: &Path, path: &Path) -> Result<(), HarnessError> {
+    let root = dest.canonicalize()?;
+    let folder = path.parent().unwrap_or(path).canonicalize()?;
+    if folder.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(HarnessError::Install(format!(
+            "the archive writes outside its folder ({})",
+            path.display()
+        )))
+    }
+}
+
+/// A link at `output` to `target`, a relative path that goes up (`..`) only before it goes
+/// down, and never above `dest`, counted from where the link really sits.
+#[cfg(unix)]
+fn symlink_inside(dest: &Path, output: &Path, target: &Path) -> Result<(), HarnessError> {
+    use std::path::Component;
+    let refused = || {
+        HarnessError::Install(format!(
+            "the archive has a link that points out ({} -> {})",
+            output.display(),
+            target.display()
+        ))
+    };
+    inside(dest, output)?;
+    let root = dest.canonicalize()?;
+    let folder = output.parent().unwrap_or(output).canonicalize()?;
+    let depth = folder
+        .strip_prefix(&root)
+        .map_err(|_| refused())?
+        .components()
+        .count();
+    let (mut up, mut seen_name) = (0_usize, false);
+    for part in target.components() {
+        match part {
+            Component::ParentDir if !seen_name => up += 1,
+            Component::Normal(_) => seen_name = true,
+            Component::CurDir => {}
+            _ => return Err(refused()),
+        }
+    }
+    if up > depth {
+        return Err(refused());
+    }
+    std::os::unix::fs::symlink(target, output)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn symlink_inside(_: &Path, output: &Path, _: &Path) -> Result<(), HarnessError> {
+    Err(HarnessError::Install(format!(
+        "the archive has a link or special file ({})",
+        output.display()
+    )))
+}
+
 fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessError> {
     let bad = |e: std::io::Error| HarnessError::Install(format!("the archive is damaged: {e}"));
     let mut archive = tar::Archive::new(reader);
@@ -1054,6 +1113,7 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         let kind = entry.header().entry_type();
         if kind.is_dir() {
             std::fs::create_dir_all(&output)?;
+            inside(dest, &output)?;
             continue;
         }
         if kind.is_pax_global_extensions()
@@ -1062,8 +1122,22 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         {
             continue;
         }
+        if kind.is_symlink() {
+            // Builds link among their own files; a link that points out never lands.
+            let target = entry
+                .link_name()
+                .map_err(bad)?
+                .map(std::borrow::Cow::into_owned);
+            if let Some(target) = target
+                && let Some(parent) = output.parent()
+            {
+                std::fs::create_dir_all(parent)?;
+                symlink_inside(dest, &output, &target)?;
+                continue;
+            }
+        }
         if !kind.is_file() {
-            // Links and special files never land (a link could point out).
+            // Hard links and special files never land.
             return Err(HarnessError::Install(format!(
                 "the archive has a link or special file ({})",
                 path.display()
@@ -1078,6 +1152,7 @@ fn extract_tar(reader: impl std::io::Read, dest: &Path) -> Result<(), HarnessErr
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        inside(dest, &output)?;
         let mut out = std::fs::File::create(&output)?;
         std::io::copy(&mut entry, &mut out)?;
         #[cfg(unix)]
@@ -1443,6 +1518,69 @@ mod tests {
         // Too big to be an icon.
         let big = format!("<svg>{}</svg>", " ".repeat(MAX_ICON_BYTES));
         assert!(clean_svg(&big).is_none());
+    }
+
+    fn tar_of(entries: &[(&str, Option<&str>)]) -> Vec<u8> {
+        let mut built = tar::Builder::new(Vec::new());
+        for (name, link) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o755);
+            match link {
+                Some(target) => {
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_size(0);
+                    header.set_cksum();
+                    built.append_link(&mut header, name, target).unwrap();
+                }
+                None => {
+                    header.set_size(4);
+                    header.set_cksum();
+                    built.append_data(&mut header, name, &b"#!/x"[..]).unwrap();
+                }
+            }
+        }
+        built.into_inner().unwrap()
+    }
+
+    /// Real builds ship links among their own files (harn's `harn-dap -> harn`, a Python
+    /// framework's `Versions/Current -> 3.12`): those land; one that points out never does.
+    #[test]
+    fn tar_links_that_stay_inside_the_archive_unpack_and_the_rest_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = tar_of(&[
+            ("harn", None),
+            ("harn-dap", Some("harn")),
+            ("fw/Versions/3.12/Py", None),
+            ("fw/Versions/Current", Some("3.12")),
+            ("fw/Py", Some("Versions/Current/Py")),
+            ("fw/Versions/3.12/up", Some("../../Versions/Current/Py")),
+        ]);
+        extract_tar(&ok[..], dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("harn-dap")).unwrap(), b"#!/x");
+        assert_eq!(std::fs::read(dir.path().join("fw/Py")).unwrap(), b"#!/x");
+        assert!(dir.path().join("fw/Versions/3.12/up").is_file());
+
+        for (what, bad) in [
+            ("absolute", tar_of(&[("l", Some("/etc/passwd"))])),
+            ("above the root", tar_of(&[("l", Some("../x"))])),
+            ("above the root, deep", tar_of(&[("a/l", Some("../../x"))])),
+            ("a .. after a name", tar_of(&[("l", Some("a/../../x"))])),
+            // `a` is the root itself, so `a/b/l` really sits one level down.
+            (
+                "through a link",
+                tar_of(&[("a", Some(".")), ("a/b/l", Some("../../x"))]),
+            ),
+            (
+                "a file through a link out",
+                tar_of(&[("a", Some("..")), ("a/x", None)]),
+            ),
+        ] {
+            let out = tempfile::tempdir().unwrap();
+            let dest = out.path().join("dest");
+            std::fs::create_dir(&dest).unwrap();
+            assert!(extract_tar(&bad[..], &dest).is_err(), "{what} was accepted");
+            assert!(!out.path().join("x").exists(), "{what} wrote outside");
+        }
     }
 
     #[test]
