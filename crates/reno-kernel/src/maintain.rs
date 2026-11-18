@@ -287,9 +287,7 @@ impl Maintainer {
         let setting = Self::setting(&state, &id);
         let latest = state.latest.get(&id);
         info.maintenance = Some(Maintenance {
-            setup: (!installed)
-                .then(|| resolved.decl.setup.clone())
-                .flatten(),
+            setup: (!installed).then(|| resolved.decl.setup.clone()).flatten(),
             sign_in: resolved.decl.sign_in.clone(),
             updater: installed
                 .then(|| resolved.updater())
@@ -324,7 +322,10 @@ pub(crate) async fn attach(shared: &Arc<Shared>, ports: MaintenancePorts) -> Res
     let maintainer = Arc::new(Maintainer {
         ports,
         state: Mutex::new(State {
-            settings: stored.into_iter().map(|s| (s.executor.clone(), s)).collect(),
+            settings: stored
+                .into_iter()
+                .map(|s| (s.executor.clone(), s))
+                .collect(),
             ..State::default()
         }),
         changed: Notify::new(),
@@ -479,7 +480,9 @@ fn plan(
             if !matches!(health.installed, InstallStatus::Installed { .. }) {
                 return Err(Refused::NothingToDo("it is not installed".into()));
             }
-            let updater = resolved.and_then(Resolved::updater).ok_or(Refused::NoUpdater)?;
+            let updater = resolved
+                .and_then(Resolved::updater)
+                .ok_or(Refused::NoUpdater)?;
             let pin = if pin_wanted && setting.verified_only && updater.pinned.is_some() {
                 // Verified only, and the updater can: go to the version the adapter was verified
                 // on, and never past it (or back to it from a newer one).
@@ -488,10 +491,7 @@ fn plan(
                         "Reno has no verified version of it to pin to".into(),
                     ));
                 }
-                if version
-                    .as_deref()
-                    .is_some_and(|v| !is_newer(verified, v))
-                {
+                if version.as_deref().is_some_and(|v| !is_newer(verified, v)) {
                     return Err(Refused::NothingToDo(format!(
                         "it is already at or past {verified}, the newest version Reno has verified"
                     )));
@@ -505,9 +505,9 @@ fn plan(
                 }
                 None
             };
-            let steps = updater
-                .update_steps(pin)
-                .ok_or_else(|| Refused::NothingToDo("its updater cannot pin that version".into()))?;
+            let steps = updater.update_steps(pin).ok_or_else(|| {
+                Refused::NothingToDo("its updater cannot pin that version".into())
+            })?;
             Ok(Plan {
                 work: Work::Steps(steps),
                 kind,
@@ -529,7 +529,10 @@ fn refusal(id: &ExecutorId, why: Refused) -> KernelError {
 /// How a job of `id` begins.
 enum Begin {
     /// Running: the caller spawns its task.
-    Run { job: String, cancel: CancellationToken },
+    Run {
+        job: String,
+        cancel: CancellationToken,
+    },
     /// Waiting for runs to end.
     Queued,
 }

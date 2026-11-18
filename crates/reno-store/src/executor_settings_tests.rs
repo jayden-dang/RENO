@@ -50,7 +50,10 @@ async fn the_check_time_is_kept_when_the_choices_change_and_the_reverse() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("reno.db")).unwrap();
     // A check on an executor with no row creates one with the defaults.
-    store.put_executor_checked(&id("grok"), 1_000).await.unwrap();
+    store
+        .put_executor_checked(&id("grok"), 1_000)
+        .await
+        .unwrap();
     let row = &store.executor_settings().await.unwrap()[0];
     assert!(row.auto_update);
     assert_eq!(row.last_checked_ms, Some(1_000));
@@ -60,7 +63,10 @@ async fn the_check_time_is_kept_when_the_choices_change_and_the_reverse() {
     let row = &store.executor_settings().await.unwrap()[0];
     assert!(!row.auto_update);
     assert_eq!(row.last_checked_ms, Some(1_000));
-    store.put_executor_checked(&id("grok"), 9_000).await.unwrap();
+    store
+        .put_executor_checked(&id("grok"), 9_000)
+        .await
+        .unwrap();
     let row = &store.executor_settings().await.unwrap()[0];
     assert!(!row.auto_update, "a check does not turn the switch back on");
     assert_eq!(row.last_checked_ms, Some(9_000));

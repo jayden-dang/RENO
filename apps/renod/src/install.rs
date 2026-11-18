@@ -140,6 +140,16 @@ impl Installer {
             .cloned()
             .ok_or_else(|| InstallError::NotFound(id.clone()))?;
         let slot = self.claim(id)?;
+        // An install or update job of this executor is under way: one change at a time.
+        if kernel.executors().iter().any(|info| {
+            &info.descriptor.id == id
+                && info
+                    .job
+                    .as_ref()
+                    .is_some_and(|job| !matches!(job.phase, reno_proto::JobPhase::Failed { .. }))
+        }) {
+            return Err(InstallError::InProgress(id.clone()));
+        }
         // Decide on what the harness is now, not on what it was at the last probe.
         let listed = kernel.refresh_executors(Some(id)).await?;
         let found = listed

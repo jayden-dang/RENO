@@ -814,7 +814,8 @@ async fn launch(shared: &Arc<Shared>, claim: Claim) {
         slot.hold(None);
         let attempted = match shared.claim_run(&current) {
             Ok(claim) => {
-                let attempted = attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await;
+                let attempted =
+                    attempt(shared, &cancel, &current, &spec, redactor.as_deref()).await;
                 if matches!(attempted, Attempt::Started(..)) {
                     slot.hold(claim);
                 }

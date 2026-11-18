@@ -53,7 +53,10 @@ its ports:
 - `WakeSignal` — the system woke from sleep (a handle the daemon raises; the kernel only listens);
 - `Definitions` — the definitions repository;
 - `Secrets` — the Keychain;
-- `RunLink` — a run's token file and the `reno mcp` server that reads it.
+- `RunLink` — a run's token file and the `reno mcp` server that reads it;
+- `CommandRunner` and `SelfUpdateControl` — the commands of executor installs and updates, and the
+  switch of a CLI's own updater (`MaintenancePorts`). The commands are compiled into the adapters
+  and run outside the policy engine: a person asked for them.
 
 The ports are implemented outside the kernel and faked in tests. The kernel never reads the
 system clock, spawns a process, or opens a file itself.

@@ -189,7 +189,10 @@ impl SelfUpdateControl for Switch {
     }
 
     fn restore(&self, _: SelfUpdateSwitch, previous: &str) -> Result<(), SelfUpdateError> {
-        self.calls.lock().unwrap().push(format!("restore {previous}"));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("restore {previous}"));
         Ok(())
     }
 }
@@ -270,8 +273,13 @@ fn failed(job: &Option<reno_proto::ExecutorJob>) -> Option<(JobFailure, String)>
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_declaration_reaches_the_list_for_an_executor_that_has_one_and_not_for_one_that_does_not() {
-    let with = World::new(Tool::new(missing(), Some(decl(None))), ScriptedRunner::new()).await;
+async fn the_declaration_reaches_the_list_for_an_executor_that_has_one_and_not_for_one_that_does_not()
+ {
+    let with = World::new(
+        Tool::new(missing(), Some(decl(None))),
+        ScriptedRunner::new(),
+    )
+    .await;
     let shown = with.info().maintenance.expect("declared");
     assert_eq!(shown.setup.expect("not found: a recipe").steps.len(), 2);
     assert!(shown.updater.is_none());
@@ -327,10 +335,7 @@ async fn a_recipe_install_runs_only_reno_steps_shows_its_progress_and_probes_aga
     // Only the Reno step ran; the Person step is left to the person.
     assert_eq!(world.started(), ["brew install --cask tool"]);
     let (lines, truncated) = world.fx.kernel.job_log(&id("tool")).unwrap();
-    assert_eq!(
-        lines,
-        ["$ brew install --cask tool", "==> Downloading"]
-    );
+    assert_eq!(lines, ["$ brew install --cask tool", "==> Downloading"]);
     assert!(!truncated);
 }
 
@@ -369,7 +374,11 @@ async fn a_managed_install_runs_the_adapters_own_install_as_a_job() {
 
 #[tokio::test(start_paused = true)]
 async fn what_cannot_be_done_is_refused_with_the_stable_reasons() {
-    let world = World::new(Tool::new(found("1.0.0"), Some(decl(None))), ScriptedRunner::new()).await;
+    let world = World::new(
+        Tool::new(found("1.0.0"), Some(decl(None))),
+        ScriptedRunner::new(),
+    )
+    .await;
     let kernel = &world.fx.kernel;
     // Installed: nothing to install. No updater declared: no update.
     assert!(matches!(
@@ -397,7 +406,10 @@ async fn what_cannot_be_done_is_refused_with_the_stable_reasons() {
     // An executor that is not found and has no recipe cannot be installed by Reno.
     let none = World::new(Tool::new(missing(), None), ScriptedRunner::new()).await;
     assert!(matches!(
-        none.fx.kernel.start_job(&id("tool"), JobKind::Install, false).await,
+        none.fx
+            .kernel
+            .start_job(&id("tool"), JobKind::Install, false)
+            .await,
         Err(KernelError::NothingToDo { .. })
     ));
 }
@@ -423,7 +435,11 @@ async fn a_failed_job_stays_until_dismissed_or_started_again_and_one_job_runs_at
     // The output is there to read.
     assert_eq!(
         kernel.job_log(&id("tool")).unwrap().0,
-        ["$ tool update", "boom", "error: `tool update` exited with status 2: boom"]
+        [
+            "$ tool update",
+            "boom",
+            "error: `tool update` exited with status 2: boom"
+        ]
     );
     // Retry replaces the failure; a second start while it runs is refused; dismiss refuses too.
     kernel
@@ -450,7 +466,10 @@ async fn a_failed_job_stays_until_dismissed_or_started_again_and_one_job_runs_at
 async fn a_password_prompt_fails_the_job_at_once() {
     let runner = ScriptedRunner::new().script(
         "tool update",
-        vec![Beat::Line("Password:".into()), Beat::Wait(Duration::from_secs(60))],
+        vec![
+            Beat::Line("Password:".into()),
+            Beat::Wait(Duration::from_secs(60)),
+        ],
     );
     let world = World::new(Tool::new(found("1.0.0"), Some(decl(Some(PLAIN)))), runner).await;
     world
@@ -460,7 +479,10 @@ async fn a_password_prompt_fails_the_job_at_once() {
         .await
         .unwrap();
     world.until_job(|j| failed(j).is_some()).await;
-    assert_eq!(failed(&world.info().job).unwrap().0, JobFailure::NeedsPassword);
+    assert_eq!(
+        failed(&world.info().job).unwrap().0,
+        JobFailure::NeedsPassword
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -487,7 +509,10 @@ async fn quiet_and_the_ceiling_are_reported_and_enforced() {
         .until_job(|j| {
             matches!(
                 j.as_ref().map(|j| &j.phase),
-                Some(JobPhase::Running { quiet_since_ms: Some(_), .. })
+                Some(JobPhase::Running {
+                    quiet_since_ms: Some(_),
+                    ..
+                })
             )
         })
         .await;
@@ -525,10 +550,7 @@ async fn an_executor_with_a_running_job_takes_no_run_and_takes_one_after() {
         "{:?}",
         rejection.reason
     );
-    world
-        .fx
-        .wait_status(&run, RunStatus::Failed)
-        .await;
+    world.fx.wait_status(&run, RunStatus::Failed).await;
     // After the job, a run starts.
     world.fx.kernel.cancel_job(&id("tool")).await.unwrap();
     world.fx.kernel.dismiss_job(&id("tool")).await.unwrap();
@@ -596,8 +618,10 @@ async fn a_queued_update_can_be_cancelled_and_never_runs() {
 
 #[tokio::test(start_paused = true)]
 async fn an_update_to_a_version_that_is_not_newer_is_refused() {
-    let runner = ScriptedRunner::new()
-        .script("tool latest", vec![Beat::Line("1.0.0".into()), Beat::Exit(0)]);
+    let runner = ScriptedRunner::new().script(
+        "tool latest",
+        vec![Beat::Line("1.0.0".into()), Beat::Exit(0)],
+    );
     let world = World::new(Tool::new(found("1.0.0"), Some(decl(Some(PLAIN)))), runner).await;
     // The daily check learns the newest version one day on.
     world.fx.clock.advance(DAY);
@@ -611,7 +635,11 @@ async fn an_update_to_a_version_that_is_not_newer_is_refused() {
     })
     .await;
     assert!(matches!(
-        world.fx.kernel.start_job(&id("tool"), JobKind::Update, false).await,
+        world
+            .fx
+            .kernel
+            .start_job(&id("tool"), JobKind::Update, false)
+            .await,
         Err(KernelError::NothingToDo { .. })
     ));
 }
@@ -619,7 +647,10 @@ async fn an_update_to_a_version_that_is_not_newer_is_refused() {
 #[tokio::test(start_paused = true)]
 async fn the_daily_check_updates_an_idle_executor_that_does_not_update_itself_and_never_at_start() {
     let runner = ScriptedRunner::new()
-        .script("tool latest", vec![Beat::Line("1.1.0".into()), Beat::Exit(0)])
+        .script(
+            "tool latest",
+            vec![Beat::Line("1.1.0".into()), Beat::Exit(0)],
+        )
         .script("tool update", vec![Beat::Exit(0)]);
     let world = World::new(Tool::new(found("1.0.0"), Some(decl(Some(PLAIN)))), runner).await;
     // Nothing runs at start, however long the daemon idles inside the day.
@@ -643,20 +674,28 @@ async fn the_daily_check_updates_an_idle_executor_that_does_not_update_itself_an
 async fn the_daily_check_waits_for_an_idle_executor_and_leaves_a_self_updating_cli_alone() {
     // Busy: the check does not run until the last run ends.
     let runner = ScriptedRunner::new()
-        .script("tool latest", vec![Beat::Line("1.1.0".into()), Beat::Exit(0)])
+        .script(
+            "tool latest",
+            vec![Beat::Line("1.1.0".into()), Beat::Exit(0)],
+        )
         .script("tool update", vec![Beat::Exit(0)]);
     let world = World::new(Tool::new(found("1.0.0"), Some(decl(Some(PLAIN)))), runner).await;
     let run = world.hold_a_run().await;
     world.fx.clock.advance(DAY);
     tokio::time::advance(Duration::from_millis(DAY as u64)).await;
     world.fx.idle().await;
-    assert!(world.started().is_empty(), "never swap a binary under a run");
+    assert!(
+        world.started().is_empty(),
+        "never swap a binary under a run"
+    );
     world.fx.kernel.cancel(&run).await.unwrap();
     until(async || (world.started() == ["tool latest", "tool update"]).then_some(())).await;
 
     // A self-updating CLI: only `latest` is refreshed.
-    let runner = ScriptedRunner::new()
-        .script("tool latest", vec![Beat::Line("1.1.0".into()), Beat::Exit(0)]);
+    let runner = ScriptedRunner::new().script(
+        "tool latest",
+        vec![Beat::Line("1.1.0".into()), Beat::Exit(0)],
+    );
     let world = World::new(Tool::new(found("1.0.0"), Some(decl(Some(SELF)))), runner).await;
     world.fx.clock.advance(DAY);
     tokio::time::advance(Duration::from_millis(DAY as u64)).await;
@@ -698,10 +737,8 @@ async fn auto_update_off_stops_the_daily_check_and_verified_only_pins() {
     // Verified only: the update is the pinned one, to the version the adapter was verified on.
     let tool = Tool::new(found("0.5.0"), Some(decl(Some(PLAIN))));
     let verified = tool.descriptor().cli_verified.verified;
-    let runner = ScriptedRunner::new().script(
-        &format!("tool install {verified}"),
-        vec![Beat::Exit(0)],
-    );
+    let runner =
+        ScriptedRunner::new().script(&format!("tool install {verified}"), vec![Beat::Exit(0)]);
     let world = World::new(tool, runner).await;
     world
         .fx
@@ -727,16 +764,25 @@ async fn turning_auto_update_off_turns_a_self_updating_clis_own_updater_off_and_
     )
     .await;
     let kernel = &world.fx.kernel;
-    kernel.set_auto_update(&id("tool"), false, false).await.unwrap();
+    kernel
+        .set_auto_update(&id("tool"), false, false)
+        .await
+        .unwrap();
     // The previous value is stored before the file is changed.
     assert_eq!(world.switch.calls(), ["previous", "off"]);
     let row = &world.fx.store.executor_settings().await.unwrap()[0];
     assert_eq!(row.prev_self_update.as_deref(), Some(r#"{"was":"0"}"#));
     // Off again: nothing more happens, and the first previous value survives.
-    kernel.set_auto_update(&id("tool"), false, true).await.unwrap();
+    kernel
+        .set_auto_update(&id("tool"), false, true)
+        .await
+        .unwrap();
     assert_eq!(world.switch.calls(), ["previous", "off"]);
     // On: what was there is put back and forgotten.
-    let info = kernel.set_auto_update(&id("tool"), true, true).await.unwrap();
+    let info = kernel
+        .set_auto_update(&id("tool"), true, true)
+        .await
+        .unwrap();
     assert_eq!(
         world.switch.calls(),
         ["previous", "off", r#"restore {"was":"0"}"#]
@@ -746,7 +792,10 @@ async fn turning_auto_update_off_turns_a_self_updating_clis_own_updater_off_and_
     assert_eq!(row.prev_self_update, None);
     assert!(row.verified_only);
     // On again: nothing to restore.
-    kernel.set_auto_update(&id("tool"), true, true).await.unwrap();
+    kernel
+        .set_auto_update(&id("tool"), true, true)
+        .await
+        .unwrap();
     assert_eq!(world.switch.calls().len(), 3);
 }
 
@@ -775,7 +824,13 @@ async fn the_settings_survive_a_restart() {
         .await
         .unwrap();
     fx.kernel.refresh_executors(None).await.unwrap();
-    let shown = fx.kernel.executors().remove(0).maintenance.unwrap().auto_update;
+    let shown = fx
+        .kernel
+        .executors()
+        .remove(0)
+        .maintenance
+        .unwrap()
+        .auto_update;
     assert!(!shown.on && shown.verified_only);
 }
 
@@ -784,7 +839,9 @@ async fn without_the_ports_nothing_can_be_started() {
     let tool = Tool::new(found("1.0.0"), Some(decl(Some(PLAIN))));
     let fx = Fx::new(config(1), tool.registry()).await;
     assert!(matches!(
-        fx.kernel.start_job(&id("tool"), JobKind::Update, false).await,
+        fx.kernel
+            .start_job(&id("tool"), JobKind::Update, false)
+            .await,
         Err(KernelError::MaintenanceOff)
     ));
     // And the list carries no job or declaration: an older daemon looks like this.
