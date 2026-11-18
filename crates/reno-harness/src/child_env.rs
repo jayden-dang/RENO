@@ -213,6 +213,51 @@ pub const CURSOR: DriverEnv = DriverEnv {
     prefixes: &[],
 };
 
+/// opencode: the provider credentials and endpoints models.dev lists for its providers, read off
+/// the `env` of each provider of a real 1.19.5's `/provider` (227 names; the ones that name a
+/// credential or an endpoint of a major provider are kept, not the long tail). A provider the
+/// owner signed in to through `opencode auth login` needs none: its credential is in
+/// opencode's own auth file. NOT allowed, on purpose: `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`
+/// and `OPENCODE_PERMISSION` (they would layer a config of someone else's under Reno's rules),
+/// `OPENCODE_SERVER_PASSWORD` and the generic `GITHUB_TOKEN` / `GITLAB_TOKEN`.
+pub const OPENCODE: DriverEnv = DriverEnv {
+    names: &[
+        "OPENCODE_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "OPENROUTER_API_KEY",
+        "GROQ_API_KEY",
+        "XAI_API_KEY",
+        "MISTRAL_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TOGETHER_API_KEY",
+        "FIREWORKS_API_KEY",
+        "CEREBRAS_API_KEY",
+        "COHERE_API_KEY",
+        "DEEPINFRA_API_KEY",
+        "BASETEN_API_KEY",
+        "NVIDIA_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "AZURE_API_KEY",
+        "AZURE_RESOURCE_NAME",
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "DATABRICKS_HOST",
+        "DATABRICKS_TOKEN",
+    ],
+    prefixes: &[],
+};
+
 const DEVIN: DriverEnv = DriverEnv {
     names: &["DEVIN_API_KEY", "WINDSURF_API_KEY"],
     prefixes: &[],
@@ -282,6 +327,7 @@ pub fn for_harness(harness: HarnessId) -> DriverEnv {
         HarnessId::Pi => PI,
         HarnessId::Muse => MUSE,
         HarnessId::Cursor => CURSOR,
+        HarnessId::Opencode => OPENCODE,
         HarnessId::Registry(agent) if agent.registry_id() == "gemini" => GEMINI_REGISTRY,
         HarnessId::Registry(_) => NONE,
     }
@@ -428,6 +474,24 @@ mod tests {
         ];
         assert_eq!(kept(MUSE, &daemon), ["XDG_CONFIG_HOME"]);
         assert_eq!(for_harness(HarnessId::Muse), MUSE);
+    }
+
+    #[test]
+    fn an_opencode_child_keeps_provider_keys_and_never_a_config_or_a_password_of_the_daemons() {
+        let daemon = [
+            ("ANTHROPIC_API_KEY", "k"),
+            ("OPENCODE_CONFIG_CONTENT", "{}"),
+            ("OPENCODE_CONFIG", "/c.json"),
+            ("OPENCODE_PERMISSION", "{}"),
+            ("OPENCODE_SERVER_PASSWORD", "p"),
+            ("GITHUB_TOKEN", "g"),
+            ("XDG_CONFIG_HOME", "/x"),
+            ("RENO_RUN_ID", "r"),
+        ];
+        assert_eq!(
+            kept(OPENCODE, &daemon),
+            ["ANTHROPIC_API_KEY", "XDG_CONFIG_HOME"]
+        );
     }
 
     #[test]

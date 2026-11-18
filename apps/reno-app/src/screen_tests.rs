@@ -341,7 +341,7 @@ fn executors_group_by_what_needs_you_and_check_again_probes(cx: &mut TestAppCont
     assert_eq!(ids(Group::NeedsYou), ["codex", "cursor", "acp.grok"]);
     assert_eq!(
         ids(Group::Ready),
-        ["acp.antigravity", "claude-code", "muse", "pi"]
+        ["acp.antigravity", "claude-code", "muse", "opencode", "pi"]
     );
     assert_eq!(
         ids(Group::NotInstalled),

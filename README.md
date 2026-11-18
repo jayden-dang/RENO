@@ -52,8 +52,8 @@ open, and the logins you already have.
 | Pi | `pi --mode rpc`, JSONL |
 | Muse Code | `muse serve`, Muse Session Protocol (JSON-RPC) |
 | Cursor | the pinned `@cursor/sdk`, through a small Node shim (needs `CURSOR_API_KEY`) |
+| opencode | `opencode serve`, HTTP and SSE (not ACP) |
 | Grok, Devin, Hermes, Antigravity and other ACP agents | Agent Client Protocol |
-| opencode | Planned |
 
 Reno uses your installed CLIs and your own sign-ins or API keys. It never runs a model itself.
 

@@ -1129,6 +1129,7 @@ mod tests {
         assert_eq!(executor_name("pi"), "Pi");
         assert_eq!(executor_name("muse"), "Muse Code");
         assert_eq!(executor_name("cursor"), "Cursor");
+        assert_eq!(executor_name("opencode"), "OpenCode");
         assert_eq!(executor_name("acp.grok"), "Grok");
         assert_eq!(executor_name("acp.own.mine"), "Mine");
         assert_eq!(executor_name("acp.gemini-cli"), "Gemini Cli");

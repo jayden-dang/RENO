@@ -35,15 +35,20 @@ impl MaintenanceDecl {
     /// The updater for a harness installed at `installed` (the path the probe found). The path
     /// is resolved through symlinks: Homebrew links `/opt/homebrew/bin/codex` into the Caskroom.
     pub fn updater_for(&self, installed: Option<&Path>) -> Option<&UpdaterDecl> {
-        let cask = installed.is_some_and(|path| {
-            std::fs::canonicalize(path)
-                .unwrap_or_else(|_| path.to_path_buf())
-                .components()
-                .any(|c| c.as_os_str() == "Caskroom")
-        });
+        // Homebrew links `/opt/homebrew/bin/<name>` into `Caskroom/<cask>/...` for a cask and
+        // `Cellar/<formula>/...` for a formula.
+        let resolved = installed
+            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        let under = |dir: &str| {
+            resolved
+                .as_ref()
+                .is_some_and(|path| path.components().any(|c| c.as_os_str() == dir))
+        };
+        let (cask, formula) = (under("Caskroom"), under("Cellar"));
         self.updaters.iter().find(|updater| match updater.via {
             InstalledVia::Any => true,
             InstalledVia::HomebrewCask => cask,
+            InstalledVia::HomebrewFormula => formula,
         })
     }
 }
@@ -55,6 +60,8 @@ pub enum InstalledVia {
     Any,
     /// A Homebrew cask (the binary resolves into a `Caskroom` directory).
     HomebrewCask,
+    /// A Homebrew formula (the binary resolves into a `Cellar` directory).
+    HomebrewFormula,
 }
 
 /// One harness updater.
@@ -143,7 +150,8 @@ pub struct CheckDecl {
 pub enum CheckParse {
     /// `grok update --check --json`: `{"currentVersion", "latestVersion", "updateAvailable"}`.
     GrokJson,
-    /// `brew outdated --cask --json=v2 <cask>`: lists the cask only when it is outdated.
+    /// `brew outdated [--cask] --json=v2 <name>`: lists the cask (`casks`) or the formula
+    /// (`formulae`) only when it is outdated.
     BrewOutdatedJson,
     /// `npm view <package> version`: the version alone.
     PlainVersion,
@@ -165,10 +173,12 @@ impl CheckParse {
             }
             Self::BrewOutdatedJson => {
                 let found: serde_json::Value = serde_json::from_str(json_object(stdout)?).ok()?;
-                let casks = found.get("casks")?.as_array()?;
-                match casks.first() {
-                    Some(cask) => {
-                        let latest = cask.get("current_version")?.as_str()?.trim();
+                let listed = |key: &str| found.get(key).and_then(|list| list.as_array()?.first());
+                // Both lists absent: not Homebrew's answer.
+                found.get("casks").or_else(|| found.get("formulae"))?;
+                match listed("casks").or_else(|| listed("formulae")) {
+                    Some(outdated) => {
+                        let latest = outdated.get("current_version")?.as_str()?.trim();
                         is_plain_version(latest).then(|| latest.to_owned())
                     }
                     None => installed.map(str::to_owned),
@@ -388,6 +398,45 @@ pub fn declaration(id: &HarnessId) -> Option<MaintenanceDecl> {
             managed: true,
             ..none
         },
+        // opencode on the owner's Mac is a Homebrew FORMULA of the `anomalyco/tap` tap
+        // (`/opt/homebrew/bin/opencode` links into `Cellar/opencode/1.19.5`; `brew info` says
+        // "From: anomalyco/homebrew-tap" and warns it shadows homebrew-core's `opencode`, so the
+        // formula is always named in full). The check ran: `brew outdated --json=v2
+        // anomalyco/tap/opencode` printed the `formulae` entry with `current_version` 1.19.6
+        // (exit 1, kept by `|| true`, like the Codex check). The upgrade itself was NOT run
+        // (UNVERIFIED): it replaces the install. `sign_in` is `opencode auth login` (read off
+        // `opencode auth --help`; it writes opencode's own auth file when a person runs it, never
+        // Reno). The install recipe is UNVERIFIED. opencode's own autoupdate is switched off for
+        // every run by environment (`OPENCODE_DISABLE_AUTOUPDATE`), never by config, so it is not a
+        // self-updating updater here. An npm (`opencode-ai`) or script install has no updater:
+        // `updater_for` finds none for it, and nothing is run.
+        HarnessId::Opencode => MaintenanceDecl {
+            setup: Some(SetupRecipe {
+                source: "Homebrew anomalyco/tap/opencode".to_owned(),
+                steps: vec![
+                    step(
+                        "Install",
+                        "brew install anomalyco/tap/opencode",
+                        StepRunner::Reno,
+                    ),
+                    step("Sign in", "opencode auth login", StepRunner::Person),
+                ],
+            }),
+            sign_in: Some(person("Sign in", "opencode auth login")),
+            updaters: vec![UpdaterDecl {
+                via: InstalledVia::HomebrewFormula,
+                command: "brew upgrade anomalyco/tap/opencode",
+                steps: &["brew upgrade anomalyco/tap/opencode"],
+                pinned: None,
+                check: Some(CheckDecl {
+                    command: "brew outdated --json=v2 anomalyco/tap/opencode || true",
+                    parse: CheckParse::BrewOutdatedJson,
+                }),
+                self_updating: false,
+                switch: None,
+            }],
+            ..none
+        },
         HarnessId::Registry(_) => return None,
     })
 }
@@ -424,6 +473,40 @@ mod tests {
         assert!(!is_newer("0.169.0", "0.170.0"));
         assert!(!is_newer("nightly", "0.170.0"));
         assert!(!is_newer("0.171.0", "mock"));
+    }
+
+    #[test]
+    fn opencode_updates_a_homebrew_formula_and_nothing_else() {
+        let opencode = declaration(&HarnessId::Opencode).unwrap();
+        // A Cellar path is a formula install; an npm or script install has no updater at all.
+        let cellar = std::path::Path::new("/opt/homebrew/Cellar/opencode/1.19.5/bin/opencode");
+        let updater = opencode.updater_for(Some(cellar)).unwrap();
+        assert_eq!(updater.command, "brew upgrade anomalyco/tap/opencode");
+        assert!(
+            opencode
+                .updater_for(Some(std::path::Path::new(
+                    "/Users/me/.npm-global/bin/opencode"
+                )))
+                .is_none()
+        );
+        assert!(opencode.updater_for(None).is_none());
+        // Homebrew's real answer on the owner's Mac (exit 1, kept by `|| true`).
+        let real = "{\n  \"formulae\": [\n    {\n      \"name\": \"anomalyco/tap/opencode\",\n      \"installed_versions\": [\n        \"1.19.5\"\n      ],\n      \"current_version\": \"1.19.6\",\n      \"pinned\": false,\n      \"pinned_version\": null\n    }\n  ],\n  \"casks\": []\n}\n";
+        let check = updater.check.unwrap();
+        assert_eq!(
+            check.parse.latest(real, Some("1.19.5")).as_deref(),
+            Some("1.19.6")
+        );
+        // Nothing outdated lists nothing: it is the newest.
+        assert_eq!(
+            check
+                .parse
+                .latest("{\"formulae\":[],\"casks\":[]}", Some("1.19.6"))
+                .as_deref(),
+            Some("1.19.6")
+        );
+        assert_eq!(updater.update_steps(Some("1.19.6")), None, "it cannot pin");
+        assert!(!updater.self_updating && updater.switch.is_none());
     }
 
     #[test]

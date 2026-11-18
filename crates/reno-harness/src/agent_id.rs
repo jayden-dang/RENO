@@ -91,6 +91,9 @@ pub enum HarnessId {
     Muse,
     /// Cursor, driven natively through its pinned `@cursor/sdk` and a Reno-owned Node shim.
     Cursor,
+    /// opencode (anomalyco), driven natively over its HTTP and SSE server protocol
+    /// (`opencode serve`), not ACP.
+    Opencode,
     /// An agent added from the ACP registry (`acp.<registry id>`), driven by
     /// the generic ACP harness from its registry entry: every registry
     /// agent goes through this one path.
@@ -100,7 +103,7 @@ pub enum HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 10] = [
+    pub const ALL: [HarnessId; 11] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Devin,
@@ -111,6 +114,7 @@ impl HarnessId {
         HarnessId::Pi,
         HarnessId::Muse,
         HarnessId::Cursor,
+        HarnessId::Opencode,
     ];
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
@@ -126,6 +130,7 @@ impl HarnessId {
             HarnessId::Pi => "pi",
             HarnessId::Muse => "muse",
             HarnessId::Cursor => "cursor",
+            HarnessId::Opencode => "opencode",
             HarnessId::Registry(agent) => agent.slug(),
         }
     }

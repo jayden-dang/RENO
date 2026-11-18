@@ -121,6 +121,7 @@ pub const BUILTIN_EXECUTORS: &[&str] = &[
     "pi",
     "muse",
     "cursor",
+    "opencode",
     "acp.grok",
     "acp.devin",
     "acp.hermes",

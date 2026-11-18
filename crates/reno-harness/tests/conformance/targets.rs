@@ -14,8 +14,8 @@ use reno_harness::conformance::{
 };
 use reno_harness::exec::{ExecControls, ExecError, Executor, MockExecutor, MockStep};
 use reno_harness::{
-    AcpExecutor, ClaudeExecutor, CodexExecutor, CursorExecutor, MuseExecutor, PiExecutor,
-    RegistryAgent,
+    AcpExecutor, ClaudeExecutor, CodexExecutor, CursorExecutor, MuseExecutor, OpencodeExecutor,
+    PiExecutor, RegistryAgent,
 };
 use reno_proto::{
     AccessMode, ActionClass, ApprovalSubject, ExecEvent, ExecSpec, ExecutorDescriptor, ExecutorId,
@@ -835,6 +835,137 @@ pub(crate) fn cursor_target() -> Target {
             asks_questions: false,
             ..Profile::driver()
         },
+        cwd(),
+        Limits::fake(),
+    )
+    .with_plan(plan)
+}
+
+// -- opencode ----------------------------------------------------------------------------------
+
+/// opencode over its fake `opencode serve` (1.x wire). It claims all three access modes, so the
+/// approval cases run, and the access-mode case runs the lifecycle under each (the rules are read
+/// back from the fake's agent). It does not isolate the owner's config, so that case is skipped.
+/// The fake keeps its sessions in a directory of this target, seeded with the one `resumed` names.
+pub(crate) fn opencode_target() -> Target {
+    use std::os::unix::fs::PermissionsExt;
+    let dir =
+        std::env::temp_dir().join(format!("reno-conformance-opencode-{}", std::process::id()));
+    let root = dir.join("root");
+    std::fs::create_dir_all(root.join("sessions")).expect("fake sessions dir");
+    std::fs::write(
+        root.join("sessions").join("ses_conf1.json"),
+        r#"{"id":"ses_conf1","directory":null,"agent":null}"#,
+    )
+    .expect("seeded session");
+    let wrapper = dir.join("opencode");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexport FAKE_OPENCODE_VERSION='1.19.5' FAKE_OPENCODE_ROOT='{}'\nexec python3 '{}' \"$@\"\n",
+            root.display(),
+            fixture("fake-opencode.py").display()
+        ),
+    )
+    .expect("wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // A script written while other tests fork can be "text file busy" for a moment: wait it out.
+    for _ in 0..200 {
+        match std::process::Command::new(&wrapper)
+            .arg("--version")
+            .output()
+        {
+            Err(error) if error.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => break,
+        }
+    }
+    let executor = OpencodeExecutor::new().with_executable(wrapper);
+    let reno_mcp = McpServerSpec {
+        name: "reno".into(),
+        command: "/opt/reno/reno".into(),
+        args: vec!["mcp".into()],
+        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+    };
+    let plan = Plan {
+        lifecycle: Some(
+            Scenario::new("scenario:conf-happy")
+                .expect(Expect::TextContains("conf-hello".into()))
+                .expect(Expect::ResultContains("conf-hello".into()))
+                .expect(Expect::Tool {
+                    name: "bash".into(),
+                    class: ActionClass::Command,
+                })
+                .expect(Expect::Tool {
+                    name: "edit".into(),
+                    class: ActionClass::Edit,
+                }),
+        ),
+        approval: Some(ApprovalPlan {
+            scenario: Scenario::new("scenario:approval-subjects")
+                .access(AccessMode::Supervised)
+                .mcp(vec![reno_mcp])
+                .expect(Expect::ApprovalClass(ActionClass::Command))
+                .expect(Expect::ApprovalClass(ActionClass::Edit))
+                .expect(Expect::ApprovalClass(ActionClass::McpTool))
+                .expect(Expect::ApprovalClass(ActionClass::Network))
+                .expect(Expect::ApprovalClass(ActionClass::Read)),
+            on_allow: vec![Expect::ResultContains(
+                "bash=allow edit=allow mcp=allow net=allow read=allow other=allow".into(),
+            )],
+            on_deny: vec![Expect::ResultContains(
+                "bash=deny edit=deny mcp=deny net=deny read=deny other=deny".into(),
+            )],
+            // opencode's permission reply has no field for a reason.
+            on_deny_message: Vec::new(),
+        }),
+        input: Some(
+            Scenario::new("scenario:conf-question")
+                .expect(Expect::TextContains("answered:second".into())),
+        ),
+        steer: Some(Scenario::new("scenario:steer").expect(Expect::TextContains("steered".into()))),
+        cancel: Some(Scenario::new("scenario:interrupt")),
+        crash: Some(Scenario::new("scenario:conf-crash")),
+        resume: Some(
+            Scenario::new("scenario:resumed")
+                .resume("ses_conf1")
+                .expect(Expect::SessionIs("ses_conf1".into()))
+                .expect(Expect::TextContains("back again".into())),
+        ),
+        mcp: Some(
+            Scenario::new("scenario:mcp-config")
+                .mcp(vec![
+                    McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/reno".into(),
+                        args: vec!["mcp".into()],
+                        env: [("RENO_RUN".to_owned(), "r1".to_owned())].into(),
+                    },
+                    McpServerSpec {
+                        name: "plugin-focus".into(),
+                        command: "/opt/focus/server".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                ])
+                .expect(Expect::TextContains(
+                    "mcp configured:reno,plugin-focus".into(),
+                )),
+        ),
+        output_schema: None,
+        mode_runs: Vec::new(),
+        unknown_frames: Some(UnknownFramePlan {
+            scenario: Scenario::new("scenario:conf-unknown")
+                .expect(Expect::ResultContains("unknown-done".into())),
+            keys: vec!["type:session.teleported".into()],
+        }),
+        user_config: None,
+    };
+    Target::new(
+        "opencode",
+        Arc::new(executor),
+        Profile::driver(),
         cwd(),
         Limits::fake(),
     )

@@ -6,4 +6,5 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 pub(crate) mod muse;
+pub(crate) mod opencode;
 pub(crate) mod pi;

@@ -130,6 +130,9 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("pi-acp", "pi"),
     ("muse-code", "muse"),
     ("cursor", "cursor"),
+    // opencode has a native driver; the registry lists it twice (the 1.x and the 2.x archives).
+    ("opencode", "opencode"),
+    ("opencode-v2", "opencode"),
 ];
 
 /// The built-in harness slug for a registry id Reno drives itself.
@@ -1509,6 +1512,9 @@ mod tests {
         assert_eq!(built_in("muse-code"), Some("muse"));
         // Likewise Cursor: its ACP surface is lossy, and Reno drives its SDK.
         assert_eq!(built_in("cursor"), Some("cursor"));
+        // Neither registry copy of opencode is offered beside the native driver.
+        assert_eq!(built_in("opencode"), Some("opencode"));
+        assert_eq!(built_in("opencode-v2"), Some("opencode"));
         assert_eq!(built_in("gemini"), None);
     }
 
