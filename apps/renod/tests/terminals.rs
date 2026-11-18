@@ -298,6 +298,33 @@ async fn a_live_run_gets_no_terminal_when_the_sandbox_cannot_start() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_run_counts_as_live_because_it_can_be_resumed_into_the_same_worktree() {
+    let pty = FakePty::silent();
+    let fx = daemon(&pty).await;
+    let (run, _tree) = live(&fx, &repo(&fx)).await;
+    within(fx.client.pause(None, true)).await.unwrap();
+    within(async {
+        while fx.status(&run).await != RunStatus::Interrupted {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    // A resume would put the guard back on this worktree, so the shell is limited now.
+    let opened = within(fx.client.term_open(open(&run))).await.unwrap();
+    assert!(opened.sandboxed && !opened.in_place);
+    assert!(pty.processes()[0].spec().limits.is_some());
+
+    // Cancelled for good: nothing can resume, so a new shell is not limited.
+    within(fx.client.resume(None)).await.unwrap();
+    within(fx.client.cancel_run(&run, None)).await.unwrap();
+    until_ended(&fx, &run).await;
+    let after = within(fx.client.term_open(open(&run))).await.unwrap();
+    assert!(!after.sandboxed);
+    fx.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_with_no_worktree_gets_its_own_folder_flagged_and_unlimited() {
     let pty = FakePty::silent();
     let fx = daemon(&pty).await;

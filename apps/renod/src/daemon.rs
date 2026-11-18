@@ -351,7 +351,9 @@ impl Daemon {
             registry,
             Arc::new(SystemClock),
             Some(setup),
-            Some(Arc::new(GitWorkspace::new(paths.worktrees()))),
+            Some(Arc::new(
+                GitWorkspace::new(paths.worktrees()).with_terminals(terminals.clone()),
+            )),
             link,
         )
         .await

@@ -1089,9 +1089,9 @@ async fn fs_watch(
 // ----- The Terminal tab (RP2). Person-only, like the Files tab: the guard refuses these to a run's
 // connection (the test of `run_connection_may_call` walks every method in the schema).
 
-/// Whether the thread of `run` has a run that is queued or live: the one the protected-path guard
-/// watches, so a shell in its worktree must not be able to write what the guard looks at. The
-/// thread's latest run decides, not `run`: a person opens a terminal from any of its runs.
+/// Whether the thread of `run` has a run that is queued, live or interrupted (so it may be
+/// resumed): the one the protected-path guard watches, so a shell in its worktree must not be
+/// able to write what the guard looks at. The thread's latest run decides, not `run`: a person opens a terminal from any of its runs.
 async fn thread_is_live(ctx: &Ctx, run: &RunId) -> Reply<bool> {
     let thread = ctx
         .kernel
@@ -1111,7 +1111,11 @@ async fn thread_is_live(ctx: &Ctx, run: &RunId) -> Reply<bool> {
         .get_run(&latest.run_id)
         .await
         .map_err(|e| kernel_error(&e))?;
-    Ok(summary.status == RunStatus::Queued || ACTIVE.contains(&summary.status))
+    // An interrupted run counts too: the daemon may resume it on its own (or a person may),
+    // into this same worktree, and the guard would watch it again. Safer limited than not.
+    Ok(summary.status == RunStatus::Queued
+        || summary.status == RunStatus::Interrupted
+        || ACTIVE.contains(&summary.status))
 }
 
 async fn term_open(ctx: Arc<Ctx>, p: TermOpenParams) -> Reply<TermOpened> {
@@ -1253,59 +1257,16 @@ async fn secret_delete(ctx: Arc<Ctx>, p: SecretDeleteParams) -> Reply<SecretDele
 
 async fn workspace_clean(ctx: Arc<Ctx>, p: WorkspaceCleanParams) -> Reply<WorkspaceCleanResult> {
     tracing::info!(target = ?p.target, force = p.force, "workspace clean requested");
-    // A person who names one worktree to clean closes the shells in it first, so nothing writes
-    // into a tree while it is taken apart, whatever the kernel then decides (it may keep the
-    // worktree for the work it holds). Not when a run is live in it: the kernel refuses that
-    // (`InUse`) before it touches anything, and so do we.
-    let named = named_worktree(&ctx, &p.target).await;
-    let closed_first = named
-        .as_ref()
-        .map(|path| ctx.terminals.close_dir(path))
-        .unwrap_or_default();
-    let mut items = ctx
+    // The kernel closes the shells of a worktree it releases (the release hook of the
+    // `Workspace` port, implemented over `terminals`), first for a named worktree and after a
+    // removal for a bulk clean, and reports them as `closed_terminals`: one path for every way a
+    // worktree is released.
+    let items = ctx
         .kernel
         .clean_workspaces(p.target, p.force)
         .await
         .map_err(|e| kernel_error(&e))?;
-    if named.is_some() {
-        if let Some(item) = items.first_mut() {
-            item.closed_terminals = closed_first;
-        }
-    } else {
-        // `Merged` and `AllClean` pick their own worktrees, and only the kernel knows which: a
-        // worktree it removes takes its terminals with it, one it keeps keeps its shells.
-        for item in &mut items {
-            if item.outcome == reno_proto::CleanOutcome::Removed
-                && let Ok(info) = ctx.kernel.workspace(&item.run_id).await
-            {
-                item.closed_terminals = ctx.terminals.close_dir(&info.path);
-            }
-        }
-    }
     Ok(WorkspaceCleanResult { items })
-}
-
-/// The worktree a `Run` or `Thread` clean target names, when no run is live in it.
-async fn named_worktree(ctx: &Ctx, target: &reno_proto::CleanTarget) -> Option<PathBuf> {
-    use reno_proto::{CleanTarget, ThreadStatus, WorkspaceStatus};
-    match target {
-        CleanTarget::Run { run_id } => {
-            let info = ctx.kernel.workspace(run_id).await.ok()?;
-            let open = matches!(
-                info.status,
-                WorkspaceStatus::Preparing | WorkspaceStatus::Active | WorkspaceStatus::Kept
-            );
-            let live = thread_is_live(ctx, run_id).await.ok()?;
-            (open && !live).then_some(info.path)
-        }
-        CleanTarget::Thread { thread_id } => {
-            let info = ctx.kernel.thread(thread_id).await.ok()?;
-            (info.status != ThreadStatus::Active)
-                .then_some(info.worktree)
-                .flatten()
-        }
-        CleanTarget::Merged | CleanTarget::AllClean => None,
-    }
 }
 
 async fn thread_list(ctx: Arc<Ctx>, p: ThreadListParams) -> Reply<ThreadListResult> {
@@ -1329,28 +1290,12 @@ async fn thread_get(ctx: Arc<Ctx>, p: ThreadGetParams) -> Reply<ThreadInfo> {
 /// router's guard), so a run's own token cannot close a thread, its own or another's.
 async fn thread_close(ctx: Arc<Ctx>, p: ThreadCloseParams) -> Reply<ThreadCloseResult> {
     tracing::info!(thread = %p.thread_id, force = p.force, "thread close requested");
-    // The shells in the thread's worktree close first, as they do for `workspace.clean`: nothing
-    // writes into a tree while it is released, and the worktree may be kept all the same. Not
-    // when a run is live in it: the kernel refuses a busy thread (`ThreadBusy`) before it
-    // touches anything, and so do we.
-    let info = ctx
-        .kernel
-        .thread(&p.thread_id)
-        .await
-        .map_err(|e| kernel_error(&e))?;
-    let closed_first = match &info.worktree {
-        Some(path) if info.status != reno_proto::ThreadStatus::Active => {
-            ctx.terminals.close_dir(path)
-        }
-        _ => Vec::new(),
-    };
-    let mut closed = ctx
-        .kernel
+    // The kernel closes the thread's shells before it releases the worktree (the release hook),
+    // as it does when the idle limit closes the thread.
+    ctx.kernel
         .close_thread(&p.thread_id, p.force)
         .await
-        .map_err(|e| kernel_error(&e))?;
-    closed.closed_terminals = closed_first;
-    Ok(closed)
+        .map_err(|e| kernel_error(&e))
 }
 
 // ---- subscriptions -------------------------------------------------------------------------

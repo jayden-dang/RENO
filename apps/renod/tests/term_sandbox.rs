@@ -199,6 +199,29 @@ fn a_commit_on_the_runs_branch_is_refused_also_from_a_child() {
     git(&t.repo, &["commit", "-qm", "main moves"]);
 }
 
+/// Pins a known limit (see the README's Known limits): the shared `<repo>/.git` is not denied,
+/// so a sandboxed shell can move another branch and write the repository's config, and the guard
+/// does not see either. Denying them would break ordinary git use (`git config`, `git branch -f`),
+/// so this test records today's behaviour: if it fails, the sandbox changed on purpose, and the
+/// README must change with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sandboxed_git_branch_force_and_git_config_are_allowed_and_the_guard_does_not_see_them() {
+    let t = tree();
+    git(&t.repo, &["branch", "other"]);
+    std::fs::write(t.repo.join("b.txt"), "b\n").unwrap();
+    git(&t.repo, &["add", "b.txt"]);
+    git(&t.repo, &["commit", "-qm", "two"]);
+    let two = git(&t.repo, &["rev-parse", "main"]);
+    let before = git(&t.repo, &["rev-parse", "other"]);
+    assert_ne!(before, two);
+
+    allowed(&t, "git branch -f other main");
+    allowed(&t, "git config reno.pinned yes");
+    assert_eq!(git(&t.repo, &["rev-parse", "other"]), two);
+    assert_eq!(git(&t.repo, &["config", "--get", "reno.pinned"]), "yes");
+    assert!(guard_sees(&t).await.is_empty());
+}
+
 /// What the supervisor's guard sees in `tree`: the `Workspace` port's `protected_changes`, the
 /// very call it makes after every tool call that could write.
 async fn guard_sees(tree: &Tree) -> Vec<String> {
