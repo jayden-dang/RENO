@@ -15,6 +15,15 @@ pub(crate) trait UrlOpener {
     fn open(&self, url: &str);
 }
 
+/// `RENO_REGISTRY_DEMO=browser:...` (screenshots, reviews): pages are not opened, so a demo against
+/// the fake never starts a browser.
+static MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stops [`open`] from opening anything (the demo's sign-in).
+pub(crate) fn mute() {
+    MUTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether `url` is a web link: the only kind opened from what a daemon says.
 pub(crate) fn is_web_link(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://")
@@ -44,7 +53,9 @@ pub(crate) fn open(cx: &App, url: &str) -> bool {
         None => panic!("a test reached the real URL opener: install a fake with `install`"),
     }
     #[cfg(not(test))]
-    cx.open_url(url);
+    if !MUTED.load(std::sync::atomic::Ordering::Relaxed) {
+        cx.open_url(url);
+    }
     true
 }
 

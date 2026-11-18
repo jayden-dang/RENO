@@ -16,6 +16,7 @@ use gpui::{
 
 use super::{ExecutorsScreen, info_color, mono};
 use crate::store::{SigninPhase, SigninView};
+use crate::summary;
 use crate::ui::field::{Field, Look};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
@@ -202,6 +203,33 @@ impl ExecutorsScreen {
                             "OPENAI_API_KEY".to_owned(),
                         ]),
                         _ => registry::SignIn::Nothing,
+                    });
+                }
+                // `browser:acp.cline` holds a browser sign-in on its code; `browser-done:...` ends
+                // one signed in. Nothing is opened: the page is muted.
+                "browser" | "browser-done" => {
+                    let Ok(id) = arg.parse::<ExecutorId>() else {
+                        continue;
+                    };
+                    crate::links::mute();
+                    let mut events = vec![
+                        reno_proto::SigninEvent::Page {
+                            url: "https://example.com/device".to_owned(),
+                        },
+                        reno_proto::SigninEvent::Output {
+                            line: "Your code: ABCD-1234".to_owned(),
+                        },
+                    ];
+                    if verb == "browser-done" {
+                        events.push(reno_proto::SigninEvent::Done {
+                            signed_in: true,
+                            message: None,
+                        });
+                    }
+                    let name = summary::executor_name(id.as_str());
+                    self.store.update(cx, |store, cx| {
+                        store.demo_script_signin(&id, events);
+                        store.start_signin(id, name, None, cx);
                     });
                 }
                 "add" => self.add_registry_agent(arg, cx),

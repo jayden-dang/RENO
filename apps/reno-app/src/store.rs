@@ -423,6 +423,14 @@ impl Store {
         }
     }
 
+    /// `RENO_REGISTRY_DEMO=browser:...`: what the fake daemon says of the next sign-in of `id`.
+    /// Does nothing against a real daemon.
+    pub(crate) fn demo_script_signin(&self, id: &ExecutorId, events: Vec<reno_proto::SigninEvent>) {
+        if let Some(fake) = &self.fake {
+            fake.script_signin(id, events);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn fake(&self) -> Option<&Arc<FakeDaemon>> {
         self.fake.as_ref()
