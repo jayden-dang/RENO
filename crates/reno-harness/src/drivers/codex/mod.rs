@@ -527,6 +527,10 @@ fn initialize_params(opt_out: bool) -> Value {
 
 #[async_trait]
 impl Executor for CodexExecutor {
+    fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
+        crate::exec::maintenance::declaration(&crate::HarnessId::Codex)
+    }
+
     fn descriptor(&self) -> ExecutorDescriptor {
         let cli = self
             .cli_version

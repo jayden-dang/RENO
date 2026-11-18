@@ -528,6 +528,10 @@ fn failed(diagnostic: String) -> BoxStream<'static, ExecEvent> {
 
 #[async_trait]
 impl Executor for AcpExecutor {
+    fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
+        crate::exec::maintenance::declaration(&self.spec.id)
+    }
+
     fn descriptor(&self) -> ExecutorDescriptor {
         let cli = self
             .cli_version

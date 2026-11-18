@@ -77,6 +77,19 @@ pub fn login_shell_path() -> Option<&'static OsStr> {
     snapshot()?.path.as_deref()
 }
 
+/// The shell a person's own sessions run: `$SHELL`, else the passwd entry, else a platform
+/// default. `None` off unix or when none of them is an executable.
+pub fn login_shell() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        unix::user_shells().into_iter().next()
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// The PATH the user's own sessions get, beyond this process's: the login
 /// shell's.
 pub(crate) fn user_path() -> Option<OsString> {
@@ -163,7 +176,7 @@ mod unix {
     /// The user's shells, most specific first: `$SHELL`, then the passwd
     /// entry, then well-known defaults. Non-executables and nologin shells
     /// are skipped; each is tried until one answers.
-    fn user_shells() -> Vec<PathBuf> {
+    pub(super) fn user_shells() -> Vec<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(s) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
             candidates.push(PathBuf::from(s));

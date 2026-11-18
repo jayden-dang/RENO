@@ -5171,6 +5171,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.2.1+spec-1.1.0",
+ "toml_edit 0.22.27",
  "tracing",
  "uuid",
  "zip",

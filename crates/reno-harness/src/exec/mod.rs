@@ -60,6 +60,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(unix)]
 use crate::proc::ProcessRecord;
 
+pub mod maintenance;
 mod mock;
 pub(crate) mod probe;
 mod requests;
@@ -114,6 +115,13 @@ pub trait Executor: Send + Sync {
     /// counted. The default, for an executor with no wire, counts nothing.
     fn unknown_frames(&self) -> std::collections::BTreeMap<String, u64> {
         std::collections::BTreeMap::new()
+    }
+
+    /// How this harness is installed, updated and signed in to: the commands the daemon runs
+    /// for a person (EX-1, EX-3) and the ones it shows them (EX-13). Pure data; nothing is
+    /// run here. None for a harness with nothing to declare.
+    fn maintenance(&self) -> Option<maintenance::MaintenanceDecl> {
+        None
     }
 }
 

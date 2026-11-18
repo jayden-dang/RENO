@@ -563,6 +563,10 @@ async fn launch(
 
 #[async_trait]
 impl Executor for ClaudeExecutor {
+    fn maintenance(&self) -> Option<crate::exec::maintenance::MaintenanceDecl> {
+        crate::exec::maintenance::declaration(&crate::HarnessId::ClaudeCode)
+    }
+
     fn descriptor(&self) -> ExecutorDescriptor {
         let cli = self
             .cli_version
