@@ -432,3 +432,61 @@ async fn an_update_installs_the_index_version_and_a_delisted_agent_cannot_update
             .unwrap_err();
     assert!(matches!(err, KernelError::NothingToDo { .. }), "{err}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_daily_check_updates_a_registry_agent_in_the_background_with_a_quiet_probe() {
+    let w = World::new(2, vec![]).await;
+    w.index.list("demo", "1.0.0");
+    let agent = w.agent("acp.demo");
+    let depths = agent.depths.clone();
+    w.fx.kernel
+        .add_registry_executor(Arc::new(agent))
+        .await
+        .unwrap();
+    until(async || w.info("acp.demo")?.job.is_none().then_some(())).await;
+    w.fx.idle().await;
+    assert_eq!(depths.lock().unwrap().last(), Some(&ProbeDepth::Full));
+
+    // The index moves on; a day later the check finds it and adds the new version.
+    w.index.list("demo", "1.1.0");
+    w.fx.clock.advance(DAY);
+    tokio::time::advance(std::time::Duration::from_millis(DAY as u64 + 1)).await;
+    until(async || {
+        let i = w.info("acp.demo")?;
+        (i.job.is_none()
+            && i.health
+                .is_some_and(|h| h.installed.version() == Some("1.1.0")))
+        .then_some(())
+    })
+    .await;
+    assert_eq!(w.index.installs.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        depths.lock().unwrap().last(),
+        Some(&ProbeDepth::Quiet),
+        "a background update never starts the agent"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_auto_update_off_the_daily_check_leaves_a_registry_agent_alone() {
+    let w = World::new(2, vec![]).await;
+    w.index.list("demo", "1.0.0");
+    w.fx.kernel
+        .add_registry_executor(Arc::new(w.agent("acp.demo")))
+        .await
+        .unwrap();
+    until(async || w.info("acp.demo")?.job.is_none().then_some(())).await;
+    let info =
+        w.fx.kernel
+            .set_auto_update(&id("acp.demo"), false, false)
+            .await
+            .unwrap();
+    assert!(!info.maintenance.unwrap().auto_update.on);
+    w.index.list("demo", "1.1.0");
+    w.fx.clock.advance(2 * DAY);
+    tokio::time::advance(std::time::Duration::from_millis(2 * DAY as u64)).await;
+    w.fx.idle().await;
+    assert_eq!(w.index.installs.load(Ordering::SeqCst), 1);
+}
+
+const DAY: i64 = 24 * 60 * 60 * 1000;

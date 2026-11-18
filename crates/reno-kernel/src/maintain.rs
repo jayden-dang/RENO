@@ -1135,11 +1135,21 @@ fn daily_round(shared: &Arc<Shared>, maintainer: &Arc<Maintainer>) -> Option<Dur
         {
             continue;
         }
-        let state = maintainer.state();
+        let mut state = maintainer.state();
         let setting = Maintainer::setting(&state, &id);
         if !setting.auto_update || state.checking.contains(&id) {
             continue;
         }
+        if registry_agent && setting.last_checked_ms.is_none() {
+            // An agent added from the registry has no stored check: its first one is a day from
+            // now (kept in memory, so the deadline does not move on every round).
+            state
+                .settings
+                .entry(id.clone())
+                .or_insert_with(|| ExecutorSetting::defaults(id.clone()))
+                .last_checked_ms = Some(now);
+        }
+        let setting = Maintainer::setting(&state, &id);
         let at = setting.last_checked_ms.unwrap_or(now) + DAY_MS;
         if at <= now {
             let idle = state.runs.get(&id).copied().unwrap_or(0) == 0
