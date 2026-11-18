@@ -34,6 +34,11 @@ pub(crate) struct Request {
 }
 
 impl Request {
+    /// A read of a fixed route (a health probe, the bus).
+    pub(crate) fn get_path(path: &str) -> Self {
+        Self::get(path.to_owned())
+    }
+
     fn get(path: String) -> Self {
         Self {
             method: Method::Get,
@@ -67,7 +72,6 @@ const ALLOWED: &[(Method, &str)] = &[
     // The MCP servers the server registered (a read: `POST /mcp` adds one and is refused).
     (Method::Get, "/mcp"),
     (Method::Get, "/api/mcp"),
-    (Method::Get, "/experimental/tool/ids"),
     // The bus.
     (Method::Get, "/global/event"),
     (Method::Get, "/api/event"),
@@ -422,11 +426,6 @@ pub(crate) fn mcp_listing(protocol: Protocol) -> Request {
     )
 }
 
-/// 1.x: the tool ids the server registered (is `question` among them).
-pub(crate) fn tool_ids() -> Request {
-    Request::get("/experimental/tool/ids".into())
-}
-
 /// 2.x wraps answers in `{data}`; unwrap when present.
 pub(crate) fn unwrap_data(value: &Value) -> &Value {
     value
@@ -479,7 +478,6 @@ mod tests {
             agents(Protocol::V1),
             agents(Protocol::V2),
             agent("build"),
-            tool_ids(),
             mcp_listing(Protocol::V1),
             mcp_listing(Protocol::V2),
         ];

@@ -87,6 +87,9 @@ pub enum HarnessId {
     /// Pi (the earendil-works coding agent), driven natively over its JSONL RPC
     /// (`pi --mode rpc`).
     Pi,
+    /// opencode (anomalyco), driven natively over its HTTP and SSE server protocol
+    /// (`opencode serve`), not ACP.
+    Opencode,
     /// An agent added from the ACP registry (`acp.<registry id>`), driven by
     /// the generic ACP harness from its registry entry: every registry
     /// agent goes through this one path.
@@ -96,7 +99,7 @@ pub enum HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 8] = [
+    pub const ALL: [HarnessId; 9] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Devin,
@@ -105,6 +108,7 @@ impl HarnessId {
         HarnessId::Fx,
         HarnessId::Antigravity,
         HarnessId::Pi,
+        HarnessId::Opencode,
     ];
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
@@ -118,6 +122,7 @@ impl HarnessId {
             HarnessId::Fx => "fx",
             HarnessId::Antigravity => "antigravity",
             HarnessId::Pi => "pi",
+            HarnessId::Opencode => "opencode",
             HarnessId::Registry(agent) => agent.slug(),
         }
     }

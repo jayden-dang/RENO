@@ -288,9 +288,45 @@ impl Normalizer {
                 }
                 vec![json!({"type": "permission.asked", "properties": data})]
             }
-            _ => Vec::new(),
+            // Dropped on purpose: the server's own chatter.
+            other if is_ignored(other) => Vec::new(),
+            // A frame this table has never seen: handed on under a name no 1.x frame has, so the
+            // reducer counts it (`type:v2:<kind>`) and does nothing else with it.
+            other => vec![json!({"type": format!("v2:{other}"), "properties": {}})],
         }
     }
+}
+
+/// 2.x frame kinds the driver knows by name and has no use for.
+fn is_ignored(kind: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "session.updated",
+        "session.deleted",
+        "session.compacted",
+        "session.usage.updated",
+    ];
+    const PREFIXES: &[&str] = &[
+        "server.",
+        "file.",
+        "vcs.",
+        "lsp.",
+        "mcp.",
+        "pty.",
+        "tui.",
+        "installation.",
+        "project.",
+        "workspace.",
+        "worktree.",
+        "integration.",
+        "plugin.",
+        "todo.",
+        "command.",
+        "form.",
+        "permission.",
+        "question.",
+        "message.",
+    ];
+    EXACT.contains(&kind) || PREFIXES.iter().any(|p| kind.starts_with(p))
 }
 
 /// 2.x (2.0.24 and later) implements the agent's `question` tool as a session FORM:

@@ -96,35 +96,12 @@ pub(crate) fn health_version(body: &Value) -> Option<ServerVersion> {
         .map(ServerVersion::parse)
 }
 
-/// What `opencode --version` printed (`1.19.5`, or `opencode v2.3.2` from a 2.x binary).
-pub(crate) fn parse_cli_version(text: &str) -> Option<semver::Version> {
-    text.split_whitespace().rev().find_map(|word| {
-        let word = word.trim_start_matches('v');
-        word.starts_with(|c: char| c.is_ascii_digit())
-            .then(|| semver::Version::parse(word).ok())
-            .flatten()
-    })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use serde_json::json;
 
     use super::*;
-
-    #[test]
-    fn the_cli_prints_its_version_bare_or_with_a_name_and_a_v() {
-        assert_eq!(
-            parse_cli_version("1.19.5\n"),
-            Some(semver::Version::new(1, 19, 5))
-        );
-        assert_eq!(
-            parse_cli_version("opencode v2.3.2\n"),
-            Some(semver::Version::new(2, 3, 2))
-        );
-        assert_eq!(parse_cli_version("no version here"), None);
-    }
 
     #[test]
     fn only_an_answer_with_a_version_is_a_health_answer() {
