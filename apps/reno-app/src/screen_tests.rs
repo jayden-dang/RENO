@@ -263,6 +263,9 @@ fn back_from_settings_returns_to_the_open_run_or_home(cx: &mut TestAppContext) {
         r.open_run(crate::tests::run_id("keeper1"), window, cx);
     });
     draw(vcx);
+    let kept = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("the run");
     go(vcx, &root, Nav::Settings);
     click(vcx, "settings-policy");
     go(vcx, &root, Nav::Executors);
@@ -274,6 +277,8 @@ fn back_from_settings_returns_to_the_open_run_or_home(cx: &mut TestAppContext) {
         screen.read_with(vcx, |s, _| s.run_id().clone()),
         crate::tests::run_id("keeper1")
     );
+    // The very screen that was showing, so a draft in its box and its panel are as they were.
+    assert_eq!(screen.entity_id(), kept.entity_id());
 }
 
 #[gpui::test]
@@ -315,6 +320,63 @@ fn searching_settings_filters_the_categories(cx: &mut TestAppContext) {
         Category::Notifications,
         "the page stays"
     );
+}
+
+#[gpui::test]
+fn settings_opened_again_from_elsewhere_starts_with_an_empty_search(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-search");
+    vcx.simulate_input("dock");
+    draw(vcx);
+    assert!(!painted(vcx, "settings-executors"));
+    click(vcx, "settings-back");
+    // A deep link (a run's "Open Executors") lands on a navigation that lists everything.
+    go(vcx, &root, Nav::Executors);
+    assert_eq!(category(vcx, &root), Category::Executors);
+    assert!(painted(vcx, "settings-executors") && painted(vcx, "settings-daemon"));
+}
+
+#[gpui::test]
+fn while_the_daemon_connects_the_gear_is_marked_and_settings_says_why(cx: &mut TestAppContext) {
+    let store = cx.new(|_| Store::connecting());
+    let (root, vcx) = window(cx, &store, Appearance::Light);
+    click(vcx, "nav-Runs");
+    assert!(painted(vcx, "settings-pip"));
+    assert!(
+        !painted(vcx, "settings-count"),
+        "nothing is known to need you"
+    );
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-definitions");
+    assert!(painted(vcx, "daemon-banner"));
+}
+
+#[gpui::test]
+fn with_no_executor_that_needs_you_there_is_no_count(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    assert!(painted(vcx, "settings-count"));
+    assert!(
+        !painted(vcx, "settings-pip"),
+        "connected: no mark on the gear"
+    );
+    let healthy: Vec<_> = store.read_with(vcx, |s, _| {
+        s.state()
+            .executors()
+            .iter()
+            .filter(|e| e.descriptor.id.as_str() == "claude-code")
+            .cloned()
+            .collect()
+    });
+    daemon(vcx, &store).set_executors(healthy);
+    wait_drawn(vcx, |vcx| !painted(vcx, "settings-count"));
+    go(vcx, &root, Nav::Settings);
+    assert!(!painted(vcx, "settings-executors-count"));
 }
 
 #[gpui::test]

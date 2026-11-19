@@ -108,6 +108,14 @@ impl SettingsScreen {
         self.entered(cx);
     }
 
+    /// Settings opened from another screen: the navigation lists every category again.
+    pub(crate) fn opened(&mut self, cx: &mut Context<Self>) {
+        if !self.search.read(cx).text().is_empty() {
+            self.search.update(cx, |field, cx| field.set_text("", cx));
+            cx.notify();
+        }
+    }
+
     fn entered(&mut self, cx: &mut Context<Self>) {
         match self.category {
             Category::Daemon => self.store.update(cx, |store, _| store.refresh_status()),

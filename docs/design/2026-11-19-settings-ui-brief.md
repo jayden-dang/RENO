@@ -85,3 +85,18 @@ with grouped cards in the canvas.
 ## Amendments
 
 None during review: the owner locked A as shown.
+
+## Built differently from the draft (2026-11-19)
+
+- **Add from registry:** the page keeps the registry group's existing layout (search, filters, flat
+  lines) under a page title, not cards. New copy: the title "Add from the ACP registry" and the
+  line "Agents Reno can add and drive, checked before it offers Add." (or, on a daemon without
+  the registry, "This daemon has no registry. Update Reno to add agents from it.").
+- **Add, then sign in:** an added agent leaves the registry page for Settings › Executors, so the
+  toast says where its step is: "… added. One step needs you: sign in, in Settings ›
+  Executors."
+- **Policy:** no Defaults card; the default answer and the ask timeout stay in the title line,
+  as the view-model words them.
+- **Search:** the field has no magnifier glyph (the kit `Field` draws none). It is cleared when
+  Settings opens from another screen.
+- **Back to app:** a run comes back as the very screen that was showing (draft and panel kept).

@@ -78,8 +78,9 @@ pub(crate) struct Options {
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
-    /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
-    /// state once it has loaded (screenshots, reviews).
+    /// remove:acp.cline,offline,own`: open Settings › Add from registry and put the registry
+    /// group in a state once it has loaded (screenshots, reviews). Steps on an added agent's line
+    /// (`remove:`, `signin:`) act on Settings › Executors, which is not the page shown.
     pub(crate) registry_demo: Option<String>,
     /// `RENO_OPEN=settings:<page>` (`executors`, `registry`, `definitions`, `policy`,
     /// `notifications`, `daemon`): open Settings on that page (screenshots, reviews).
@@ -763,6 +764,7 @@ impl RootView {
             self.before_settings = None;
         } else if !matches!(self.screen, Screen::Settings) {
             self.before_settings = Some(self.screen.clone());
+            self.settings.update(cx, |screen, cx| screen.opened(cx));
         }
         self.screen = match nav {
             Nav::Runs => {
@@ -803,8 +805,13 @@ impl RootView {
     pub(crate) fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.before_settings.take() {
             Some(Screen::Run(run)) => {
+                // The kept screen, not a new one: its draft and its panel stay as they were.
                 let id = run.read(cx).run_id().clone();
-                self.open_run(id, window, cx);
+                self.store
+                    .update(cx, |store, cx| store.look_at(Some(id), cx));
+                self.screen = Screen::Run(run);
+                self.focus_composer(window, cx);
+                cx.notify();
             }
             Some(Screen::Project(project)) => {
                 self.screen = Screen::Project(project);

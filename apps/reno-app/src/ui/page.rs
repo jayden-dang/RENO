@@ -201,6 +201,7 @@ pub(crate) fn banner(theme: &Theme, banner: &Banner, retry: Option<Action>) -> S
     };
     div()
         .id("daemon-banner")
+        .debug_selector(|| "daemon-banner".to_owned())
         .w_full()
         .flex()
         .items_center()
