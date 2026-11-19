@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px};
-use reno_client::{Feed, FeedState};
+use reno_client::{Feed, FeedState, Update};
 
 use crate::app::RootView;
 use crate::nav::Nav;
@@ -378,4 +378,68 @@ fn a_run_asking_a_question_has_a_needs_input_badge_and_a_lane_with_its_question(
                         == Some("Which retry policy should the webhook trigger use?")
             })
     });
+}
+
+#[gpui::test]
+fn live_runs_are_followed_and_repaint_only_while_all_runs_shows(cx: &mut TestAppContext) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let heard = Rc::new(Cell::new(0_usize));
+    let counter = heard.clone();
+    vcx.update(|_, cx| {
+        cx.observe(&store, move |_, _| counter.set(counter.get() + 1))
+            .detach();
+    });
+    let event = |seq| Update::RunEvent {
+        run: crate::tests::run_id("keeper1"),
+        seq: reno_proto::Seq(seq),
+        event: reno_proto::ExecEvent::Text { text: "x".into() },
+    };
+    // Home: a run's new event is not on screen, so nothing repaints.
+    let before = heard.get();
+    store.update(vcx, |s, cx| {
+        s.apply(event(9_000), cx);
+    });
+    assert_eq!(heard.get(), before, "not following: no repaint");
+
+    click(vcx, "bar-live");
+    draw(vcx);
+    let before = heard.get();
+    store.update(vcx, |s, cx| {
+        s.apply(event(9_001), cx);
+    });
+    assert!(heard.get() > before, "All runs shows the tail: repaint");
+
+    // Leaving All runs stops asking for repaints.
+    root.update_in(vcx, |r, window, cx| r.navigate(Nav::Triggers, window, cx));
+    let before = heard.get();
+    store.update(vcx, |s, cx| {
+        s.apply(event(9_002), cx);
+    });
+    assert_eq!(heard.get(), before);
+}
+
+#[gpui::test]
+fn back_to_app_returns_to_the_new_thread_in_its_project(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "new-thread-atlas-api"));
+    click(vcx, "new-thread-atlas-api");
+    draw(vcx);
+    let folder = root.read_with(vcx, |r, _| r.home_folder().cloned());
+    assert!(folder.is_some());
+    click(vcx, "nav-Settings");
+    draw(vcx);
+    click(vcx, "settings-back");
+    draw(vcx);
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    assert_eq!(root.read_with(vcx, |r, _| r.home_folder().cloned()), folder);
+    assert!(painted(vcx, "new-thread-title"));
 }

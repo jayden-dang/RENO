@@ -226,6 +226,8 @@ pub(crate) struct Store {
     signins: BTreeMap<ExecutorId, signin::SigninRun>,
     /// Executors with a sign-in command open in Terminal, looked at again when the person is back.
     signin_terminals: BTreeSet<ExecutorId>,
+    /// All runs is showing: live runs' transcripts are followed for their tails.
+    follow_live: bool,
     /// Runs being fetched with `run.get`.
     fetching_runs: BTreeSet<RunId>,
     /// Definition versions being fetched with `def.get`.
@@ -320,6 +322,7 @@ impl Store {
             registry_refused: BTreeMap::new(),
             signins: BTreeMap::new(),
             signin_terminals: BTreeSet::new(),
+            follow_live: false,
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
             validating: BTreeSet::new(),
@@ -546,6 +549,8 @@ impl Store {
             || changed.threads
             || changed.feeds
             || open_run_changed
+            // All runs is showing: a followed run's new event moves its lane's tail.
+            || (self.follow_live && changed.touched_runs().next().is_some())
         {
             cx.notify();
         }
@@ -563,7 +568,9 @@ impl Store {
         }
         if changed.runs {
             self.follow_waiting_questions(cx);
-            self.follow_live_runs(cx);
+            if self.follow_live {
+                self.follow_live_runs(cx);
+            }
         }
         if changed.threads
             && let Some(run) = self.open.clone()
@@ -1185,8 +1192,20 @@ impl Store {
         }
     }
 
-    /// Follows the transcript of every live run, so All runs can show what each is doing now.
-    /// A run followed is left alone; the follow ends when the run does.
+    /// All runs is showing (or has stopped): while it shows, every live run's transcript is
+    /// followed, so each lane can say what its run is doing now. Followed once on entry and as
+    /// runs start; a follow ends with its run, and nothing is followed while the page is away.
+    pub(crate) fn set_follow_live(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.follow_live == on {
+            return;
+        }
+        self.follow_live = on;
+        if on {
+            self.follow_live_runs(cx);
+        }
+    }
+
+    /// Follows the transcript of every live run. A run followed is left alone.
     fn follow_live_runs(&mut self, cx: &mut Context<Self>) {
         let Some(mirror) = &self.mirror else {
             return;

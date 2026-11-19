@@ -884,10 +884,14 @@ impl RootView {
 
     /// The one place the history hears of where the person went. Stepping back or forward
     /// arrives at a place the history is already on, which records nothing.
-    fn record(&mut self, cx: &App) {
+    fn record(&mut self, cx: &mut Context<Self>) {
         if let Some(place) = self.place(cx) {
             self.history.visit(place);
         }
+        // Live runs are followed (for their tails) only while All runs shows.
+        let lanes = matches!(self.screen, Screen::Runs);
+        self.store
+            .update(cx, |store, cx| store.set_follow_live(lanes, cx));
     }
 
     /// The bar's back and forward. Settings has its own "Back to app", so they rest there.
@@ -1023,7 +1027,9 @@ impl RootView {
             }
             Some(Screen::Runs) => self.navigate(Nav::Runs, window, cx),
             Some(Screen::Triggers) => self.navigate(Nav::Triggers, window, cx),
-            Some(Screen::Home | Screen::Settings) | None => self.navigate(Nav::Home, window, cx),
+            // The new-thread state again, in the project it was for.
+            Some(Screen::Home) => self.new_thread(self.home_folder.clone(), window, cx),
+            Some(Screen::Settings) | None => self.navigate(Nav::Home, window, cx),
         }
     }
 
