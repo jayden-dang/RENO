@@ -15,6 +15,7 @@ fn run(name: &str) -> RunId {
 fn daemon() -> FakeDaemon {
     FakeDaemon::start(FakeConfig {
         question_run: true,
+        question_demo_runs: true,
         ..FakeConfig::default()
     })
     .unwrap()

@@ -27,6 +27,7 @@ fn asking(cx: &mut TestAppContext) -> Entity<Store> {
             reno_client::fake::FakeConfig {
                 step: std::time::Duration::ZERO,
                 question_run: true,
+                question_demo_runs: true,
                 ..reno_client::fake::FakeConfig::default()
             },
             cx,

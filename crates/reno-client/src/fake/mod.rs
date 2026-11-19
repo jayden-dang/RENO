@@ -100,6 +100,10 @@ pub struct FakeConfig {
     /// "Needs input" badge and the All runs lane's "asks" show in `--fake`; tests that count runs
     /// do not have it. Default false.
     pub question_run: bool,
+    /// With `question_run`, also add the question-panel demo runs: a Grok run whose question
+    /// takes only its options, and a Claude Code run asking two questions (one multi-select).
+    /// Off for tests that count the waiting threads. Default false.
+    pub question_demo_runs: bool,
 }
 
 impl Default for FakeConfig {
@@ -114,6 +118,7 @@ impl Default for FakeConfig {
             job_duration: Duration::from_secs(3),
             registry_agents: false,
             question_run: false,
+            question_demo_runs: false,
         }
     }
 }
@@ -243,8 +248,10 @@ impl FakeDaemon {
         if config.question_run && !config.empty {
             let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
             seed.runs.push(data::question_run().map_err(proto)?);
-            seed.runs.push(data::grok_question_run().map_err(proto)?);
-            seed.runs.push(data::paged_question_run().map_err(proto)?);
+            if config.question_demo_runs {
+                seed.runs.push(data::grok_question_run().map_err(proto)?);
+                seed.runs.push(data::paged_question_run().map_err(proto)?);
+            }
         }
         let mut world = World::from_seed(seed, &cancel);
         if config.registry_agents {

@@ -668,6 +668,7 @@ impl Store {
             FakeConfig {
                 registry_agents: true,
                 question_run: true,
+                question_demo_runs: true,
                 ..FakeConfig::default()
             },
             cx,
