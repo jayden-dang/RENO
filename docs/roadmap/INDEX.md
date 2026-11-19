@@ -41,7 +41,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** A run the owner starts from Reno behaves as the same harness started in a terminal in that folder (its own settings, allow-list, hooks and MCP servers decide), the owner answers its questions from Reno, an "Always allow" given in Reno also holds in the terminal, and every daemon feature is reachable from the CLI.
 **Goals:** GOAL-2, GOAL-6, GOAL-8
 **Members:**
-- **ROAD-1** answer-harness-questions — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/src/supervisor.rs`, `crates/reno-harness/src/drivers/`, `apps/reno/`
+- **ROAD-1** answer-harness-questions — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/src/supervisor.rs`, `crates/reno-harness/src/drivers/`, `apps/reno/` — Card: [ROAD-1](roads/ROAD-1.md)
 - **ROAD-2** owner-started-vs-unattended-runs — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-kernel/`
 - **ROAD-3** terminal-parity-config — After: ROAD-2 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-harness/src/child_env.rs`, `crates/reno-harness/src/conformance/`
 - **ROAD-4** harness-decides-permissions — After: ROAD-2 — Surfaces: `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/`, `crates/reno-harness/src/wire/`
