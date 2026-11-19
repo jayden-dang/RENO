@@ -671,6 +671,7 @@ impl RunScreen {
 
     /// Deny `approval`, with the reason the agent is told.
     fn deny(&mut self, approval: ApprovalId, message: Option<String>, cx: &mut Context<Self>) {
+        self.note = None;
         let reasons = self
             .store
             .read(cx)

@@ -274,7 +274,12 @@ fn open_note(vcx: &mut VisualTestContext) {
 
 fn note_field(vcx: &VisualTestContext, root: &Entity<RootView>) -> Entity<Composer> {
     root.read_with(vcx, |r, cx| {
-        r.run_screen().unwrap().read(cx).note_input().unwrap().clone()
+        r.run_screen()
+            .unwrap()
+            .read(cx)
+            .note_input()
+            .unwrap()
+            .clone()
     })
 }
 
@@ -315,7 +320,10 @@ fn a_note_goes_to_the_daemon_as_the_denial_message_and_shows_in_the_transcript(
     let store = held(cx);
     let (root, vcx) = open_run(cx, &store, "scout1");
     open_note(vcx);
-    assert!(!painted(vcx, "approval-detail"), "the note replaces the detail");
+    assert!(
+        !painted(vcx, "approval-detail"),
+        "the note replaces the detail"
+    );
     note_field(vcx, &root).update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
     vcx.simulate_keystrokes("enter");
     wait_until(vcx, |cx| approvals(cx, &store) == 1);
@@ -336,7 +344,9 @@ fn esc_in_the_note_cancels_without_deciding(cx: &mut TestAppContext) {
     open_note(vcx);
     note_field(vcx, &root).update_in(vcx, |c, window, cx| c.fill("never mind", window, cx));
     vcx.simulate_keystrokes("escape");
-    wait_drawn(vcx, |vcx| painted(vcx, "approval-detail") && !painted(vcx, "deny-note"));
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "approval-detail") && !painted(vcx, "deny-note")
+    });
     assert_eq!(approvals(vcx, &store), 2, "nothing was decided");
     assert!(painted(vcx, "approve") && painted(vcx, "deny"));
 }

@@ -4,13 +4,15 @@
 use gpui::{
     AnyElement, Context, FontWeight, IntoElement, KeyBinding, Window, actions, div, prelude::*, px,
 };
-use reno_proto::Approval;
+use reno_proto::{Approval, ApprovalId};
 
 use super::{COLUMN, RunScreen};
+use crate::ui::composer::{Composer, ReasonEvent};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
 use crate::ui::theme;
 use crate::vm::approval_panel::{self, Kind};
+use crate::vm::capabilities::ApprovalItem;
 use crate::vm::focus_guard::{self, Facts, Target};
 use crate::vm::rules;
 
@@ -100,14 +102,50 @@ impl RunScreen {
     }
 
     /// `RENO_DEMO_MENU`: opens a menu for a screenshot.
-    pub(crate) fn open_demo_menu(&mut self, menu: &str, cx: &mut Context<Self>) {
-        if menu == "approval-more" {
+    pub(crate) fn open_demo_menu(
+        &mut self,
+        menu: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if menu == "approval-note" {
+            if let Some(id) = self.panel_for.clone() {
+                self.start_note(id, window, cx);
+            }
+        } else if menu == "approval-more" {
             self.menu_open = self.panel_for.clone();
             cx.notify();
         } else {
             let menu = menu.to_owned();
             self.steer.update(cx, |c, cx| c.open_demo_menu(&menu, cx));
         }
+    }
+
+    /// "Deny with a note…": the detail area becomes a one-line field, focused because the owner
+    /// asked for it. Enter denies with the note, Esc goes back to the panel.
+    fn start_note(&mut self, approval: ApprovalId, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let input = cx.new(|cx| {
+            Composer::field(
+                store,
+                "Tell it what to do instead",
+                "Enter to deny \u{b7} Esc to cancel",
+                cx,
+            )
+        });
+        let id = approval.clone();
+        let events = cx.subscribe(&input, move |this, _, event: &ReasonEvent, cx| {
+            match event {
+                ReasonEvent::Submitted(note) => this.deny(id.clone(), note.clone(), cx),
+                ReasonEvent::Cancelled => this.note = None,
+            }
+            cx.notify();
+        });
+        let focus = input.read(cx).focus_handle_ref().clone();
+        window.focus(&focus, cx);
+        self.menu_open = None;
+        self.note = Some((approval, input, events));
+        cx.notify();
     }
 
     /// Who gets Esc and Enter now.
@@ -128,7 +166,7 @@ impl RunScreen {
         let theme = theme::current(cx);
         let view = approval_panel::view(&approval.subject);
         let id = approval.id.clone();
-        let (busy, similar, choices, hint) = {
+        let (busy, items, choices, hint) = {
             let store = self.store.read(cx);
             let state = store.state();
             let summary = state.run(&approval.run_id);
@@ -141,8 +179,10 @@ impl RunScreen {
                 .and_then(|root| root.file_name().map(|n| n.to_string_lossy().into_owned()));
             // "Allow similar commands" is not built on the real daemon (ROAD-5): the menu shows
             // on the fake, and only where the daemon keeps standing rules.
-            let similar =
-                store.capabilities().allow_similar && state.supports(reno_proto::FEATURE_RULES);
+            let items = store.capabilities().approval_menu(
+                state.supports(reno_proto::FEATURE_APPROVAL_MESSAGE),
+                state.supports(reno_proto::FEATURE_RULES),
+            );
             let hint = rules::hint(
                 &approval.subject,
                 if bot.is_some() {
@@ -154,12 +194,19 @@ impl RunScreen {
             );
             (
                 store.is_deciding(&approval.id),
-                similar,
+                items,
                 rules::approve_choices(bot, project.as_deref()),
                 hint,
             )
         };
-        let menu_open = similar && self.menu_open.as_ref() == Some(&id);
+        let similar = items.contains(&ApprovalItem::AllowSimilar);
+        let has_note = items.contains(&ApprovalItem::DenyWithNote);
+        let menu_open = !items.is_empty() && self.menu_open.as_ref() == Some(&id);
+        let noting = self
+            .note
+            .as_ref()
+            .filter(|(nid, ..)| nid == &id)
+            .map(|(_, input, _)| input.clone());
         let allow = {
             let id = id.clone();
             cx.listener(move |this, _, _, cx| this.approve(id.clone(), None, cx))
@@ -178,7 +225,7 @@ impl RunScreen {
             .child(kit::keycap(&theme, "\u{23ce}", Some(on_fill)))
             .when(busy, |b| b.opacity(0.4))
             .when(!busy, |b| b.on_click(allow));
-        let more_button = similar.then(|| {
+        let more_button = (!items.is_empty() && noting.is_none()).then(|| {
             let toggle = {
                 let id = id.clone();
                 cx.listener(move |this, _, _, cx| {
@@ -202,8 +249,22 @@ impl RunScreen {
             )
             .when(!busy, |b| b.on_click(toggle))
         });
-        let menu =
-            menu_open.then(|| {
+        let note_item = (has_note).then(|| {
+            let id = id.clone();
+            kit::pill_button(
+                &theme,
+                "approval-menu-note",
+                ApprovalItem::DenyWithNote.label(),
+                kit::Tone::Danger,
+            )
+            .when(!busy, |b| {
+                b.on_click(cx.listener(move |this, _, window, cx| {
+                    this.start_note(id.clone(), window, cx);
+                }))
+            })
+        });
+        let scopes =
+            (menu_open && similar).then(|| {
                 div()
                     .flex()
                     .flex_wrap()
@@ -233,6 +294,40 @@ impl RunScreen {
                         },
                     ))
             });
+        let menu = (menu_open && noting.is_none()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(div().flex().justify_end().children(note_item))
+                .children(scopes)
+        });
+        let note_buttons = noting.as_ref().map(|input| {
+            let (deny_input, deny_id) = (input.clone(), id.clone());
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(8.0))
+                .child(
+                    kit::pill_button(&theme, "note-cancel", "Cancel", kit::Tone::Quiet)
+                        .child(kit::keycap(&theme, "Esc", None))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.note = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    kit::pill_button(&theme, "note-deny", "Deny", kit::Tone::Danger)
+                        .child(kit::keycap(&theme, "\u{23ce}", None))
+                        .when(!busy, |b| {
+                            b.on_click(cx.listener(move |this, _, _, cx| {
+                                let message = deny_input.read(cx).typed_reason();
+                                this.deny(deny_id.clone(), message, cx);
+                            }))
+                        }),
+                )
+        });
 
         div()
             .id("approval-panel")
@@ -242,7 +337,12 @@ impl RunScreen {
             // A click on the panel is the owner's choice to answer it by keyboard.
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| window.focus(&this.approval_focus, cx)),
+                cx.listener(|this, _, window, cx| {
+                    // Not while the note field is open: its own click puts the keyboard there.
+                    if this.note.is_none() {
+                        window.focus(&this.approval_focus, cx);
+                    }
+                }),
             )
             .on_action(cx.listener(|this, _: &DenyHeld, window, cx| {
                 if this.key_target(window) == Target::Panel
@@ -297,8 +397,14 @@ impl RunScreen {
                     .text_color(theme.text)
                     .child(view.sentence),
             )
-            .child(
-                div()
+            .child(match noting {
+                Some(input) => div()
+                    .id("deny-note")
+                    .debug_selector(|| "deny-note".to_owned())
+                    .w_full()
+                    .child(input)
+                    .into_any_element(),
+                None => div()
                     .id("approval-detail")
                     .debug_selector(|| "approval-detail".to_owned())
                     .w_full()
@@ -311,10 +417,12 @@ impl RunScreen {
                     .font_family(MONO)
                     .text_size(px(12.5))
                     .text_color(theme.muted)
-                    .child(view.detail),
-            )
-            .child(
-                div()
+                    .child(view.detail)
+                    .into_any_element(),
+            })
+            .child(match note_buttons {
+                Some(buttons) => buttons,
+                None => div()
                     .flex()
                     .items_center()
                     .justify_end()
@@ -322,7 +430,7 @@ impl RunScreen {
                     .child(deny_button)
                     .child(allow_button)
                     .children(more_button),
-            )
+            })
             .children(menu)
             .into_any_element()
     }

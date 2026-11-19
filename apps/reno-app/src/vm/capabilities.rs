@@ -119,7 +119,10 @@ mod tests {
             Capabilities::FAKE.approval_menu(true, true),
             [DenyWithNote, AllowSimilar]
         );
-        assert_eq!(Capabilities::FAKE.approval_menu(true, false), [DenyWithNote]);
+        assert_eq!(
+            Capabilities::FAKE.approval_menu(true, false),
+            [DenyWithNote]
+        );
         assert_eq!(Capabilities::FAKE.approval_menu(false, false), []);
     }
 

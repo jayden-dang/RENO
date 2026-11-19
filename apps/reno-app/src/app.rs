@@ -85,7 +85,7 @@ pub(crate) struct Options {
     /// `RENO_OPEN_FOLDS=1`: with `RENO_OPEN=run_<id>`, open every "Worked for" fold of that run
     /// (screenshots, reviews).
     pub(crate) open_folds: bool,
-    /// `RENO_DEMO_MENU=plus|permission|effort|approval-more`: with `RENO_OPEN=run_<id>`, open that
+    /// `RENO_DEMO_MENU=plus|permission|effort|approval-more|approval-note`: with `RENO_OPEN=run_<id>`, open that
     /// composer menu (screenshots, reviews).
     pub(crate) demo_menu: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
@@ -461,9 +461,9 @@ pub(crate) fn open_window(
                             cx.background_executor()
                                 .timer(Duration::from_millis(1200))
                                 .await;
-                            root.update(cx, |root, cx| {
+                            root.update_in(cx, |root, window, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {
-                                    screen.update(cx, |s, cx| s.open_demo_menu(&menu, cx));
+                                    screen.update(cx, |s, cx| s.open_demo_menu(&menu, window, cx));
                                 }
                             })
                             .ok();
