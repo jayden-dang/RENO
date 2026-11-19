@@ -1416,3 +1416,61 @@ fn an_agent_switched_off_in_settings_leaves_the_picker(cx: &mut TestAppContext) 
     wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
     assert!(!painted(vcx, "picker-tab-codex"), "switched off: not offered");
 }
+
+#[gpui::test]
+fn with_command_enter_chosen_enter_breaks_the_line_and_command_enter_sends(
+    cx: &mut TestAppContext,
+) {
+    cx.update(bind_keys);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    vcx.update(|_, cx| {
+        crate::prefs::update(cx, |p| p.send_with = crate::prefs::SendWith::CommandEnter);
+    });
+    let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
+    vcx.update(|window, cx| window.focus(&composer.read(cx).focus_handle_ref().clone(), cx));
+    vcx.simulate_input("first");
+    vcx.simulate_keystrokes("enter");
+    vcx.simulate_input("second");
+    assert_eq!(
+        composer.read_with(vcx, |c, _| c.text().to_owned()),
+        "first\nsecond",
+        "Enter starts a new line"
+    );
+    assert!(root.read_with(vcx, |r, _| r.run_screen().is_none()), "nothing was sent");
+    vcx.simulate_keystrokes("cmd-enter");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+}
+
+#[gpui::test]
+fn escape_stops_a_live_run_only_when_settings_say_so(cx: &mut TestAppContext) {
+    cx.update(bind_keys);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = crate::tests::run_id("builder1");
+    root.update_in(vcx, |r, window, cx| r.open_run(run.clone(), window, cx));
+    draw(vcx);
+    let live = |vcx: &mut gpui::VisualTestContext| {
+        store.read_with(vcx, |s, _| {
+            s.state().run(&run).is_some_and(|r| !r.status.is_terminal())
+        })
+    };
+    assert!(live(vcx), "builder1 is running in the fake");
+    let steer = root.read_with(vcx, |r, cx| r.run_screen().unwrap().read(cx).steer_input().clone());
+    vcx.update(|window, cx| window.focus(&steer.read(cx).focus_handle_ref().clone(), cx));
+
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(live(vcx), "off by default: Escape does not stop it");
+
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.escape_stops = true));
+    vcx.update(|window, cx| window.focus(&steer.read(cx).focus_handle_ref().clone(), cx));
+    vcx.simulate_keystrokes("escape");
+    wait_drawn(vcx, |vcx| !live(vcx));
+}
