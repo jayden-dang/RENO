@@ -1397,3 +1397,22 @@ fn a_new_thread_started_from_a_project_asks_and_runs_in_that_folder(cx: &mut Tes
     draw(vcx);
     assert_eq!(root.read_with(vcx, |r, _| r.home_folder().cloned()), None);
 }
+
+// --- Settings › General › In the composer --------------------------------------------------------
+
+#[gpui::test]
+fn an_agent_switched_off_in_settings_leaves_the_picker(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    store.update(cx, |s, cx| {
+        s.update_composer_prefs(|p| p.set_offered("codex", false), cx);
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    open_model_picker(vcx);
+    wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
+    assert!(!painted(vcx, "picker-tab-codex"), "switched off: not offered");
+}

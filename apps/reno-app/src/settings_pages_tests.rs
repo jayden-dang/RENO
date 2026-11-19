@@ -70,3 +70,88 @@ fn toggle_theme_writes_the_mode(cx: &mut TestAppContext) {
     draw(vcx);
     assert_eq!(vcx.update(|_, cx| prefs::current(cx).mode), Mode::Dark);
 }
+
+// --- The pages ---------------------------------------------------------------------------
+
+use crate::prefs::{Motion, SendWith};
+use crate::tests::{click, painted};
+use crate::ui::motion::{self, ReduceMotion};
+use crate::vm::settings_nav::Category;
+
+fn settings_at<'a>(
+    cx: &'a mut TestAppContext,
+    store: &Entity<Store>,
+    page: Category,
+) -> (Entity<RootView>, &'a mut VisualTestContext) {
+    let (root, vcx) = window(cx, store, Appearance::Dark);
+    draw(vcx);
+    root.update_in(vcx, |r, window, cx| r.open_settings(page, window, cx));
+    draw(vcx);
+    (root, vcx)
+}
+
+fn saved(vcx: &mut VisualTestContext) -> prefs::Prefs {
+    vcx.update(|_, cx| prefs::current(cx))
+}
+
+#[gpui::test]
+fn appearance_saves_each_choice(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::Appearance);
+    vcx.update(|_, cx| motion::init(ReduceMotion::System, false, cx));
+    for id in ["mode-system", "theme-reno", "accent-teal", "reduce-motion-system"] {
+        assert!(painted(vcx, id), "{id}");
+    }
+    click(vcx, "theme-slate");
+    click(vcx, "accent-violet");
+    click(vcx, "mode-light");
+    click(vcx, "reduce-motion-on");
+    let p = saved(vcx);
+    assert_eq!(p.theme, ThemeName::Slate);
+    assert_eq!(p.accent, AccentName::Violet);
+    assert_eq!(p.mode, Mode::Light);
+    assert_eq!(p.reduce_motion, Motion::On);
+    assert_eq!(vcx.update(|_, cx| motion::preference(cx)), ReduceMotion::On);
+    draw(vcx);
+    assert_eq!(shown(vcx).appearance, Appearance::Light, "it applies at once");
+}
+
+#[gpui::test]
+fn general_saves_its_switches_and_the_composer_list(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::General);
+    assert!(painted(vcx, "send-enter"));
+    click(vcx, "send-cmdenter");
+    click(vcx, "escape-stops");
+    click(vcx, "wrap-lines");
+    click(vcx, "hidden-files");
+    let p = saved(vcx);
+    assert_eq!(p.send_with, SendWith::CommandEnter);
+    assert!(p.escape_stops && p.wrap_lines && !p.hidden_files);
+    click(vcx, "offer-claude-code");
+    assert!(!store.read_with(vcx, |s, _| s.composer_prefs().offered("claude-code")));
+}
+
+#[gpui::test]
+fn accounts_lists_each_account_under_the_finding(cx: &mut TestAppContext) {
+    let store = fake(cx);
+    let (_root, vcx) = settings_at(cx, &store, Category::Accounts);
+    assert!(painted(vcx, "accounts-finding"));
+    assert!(painted(vcx, "account-claude-code"));
+    assert!(painted(vcx, "account-meter-claude-code"));
+    assert!(!painted(vcx, "account-meter-codex"), "signed out: no meter");
+}
+
+#[gpui::test]
+fn a_pinned_reduce_motion_holds_from_launch(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        motion::init(ReduceMotion::System, false, cx);
+        prefs::update(cx, |p| p.reduce_motion = Motion::On);
+        crate::screens::settings::pages::apply_saved_motion(cx);
+        assert_eq!(motion::preference(cx), ReduceMotion::On);
+        motion::init(ReduceMotion::On, false, cx);
+        prefs::update(cx, |p| p.reduce_motion = Motion::System);
+        crate::screens::settings::pages::apply_saved_motion(cx);
+        assert_eq!(motion::preference(cx), ReduceMotion::On, "System keeps the launch preference");
+    });
+}

@@ -13,6 +13,9 @@ use reno_client::ConnectionStatus;
 use reno_notify::Delivery;
 use reno_proto::defs::DefKind;
 
+#[path = "settings_pages.rs"]
+pub(crate) mod pages;
+
 use crate::lifecycle;
 use crate::prefs::{Pref, Prefs};
 use crate::screens::executors::{ExecutorsScreen, Part};
@@ -948,7 +951,9 @@ impl Render for SettingsScreen {
             Category::Definitions | Category::Executors | Category::Registry => {
                 self.definitions(&defs, &theme, cx)
             }
-            Category::Accounts | Category::General | Category::Appearance => vec![],
+            Category::Accounts => self.accounts_page(&theme, cx),
+            Category::General => self.general_page(&theme, cx),
+            Category::Appearance => self.appearance_page(&theme, cx),
         };
         let body = page::content(page::SETTINGS)
             .gap(px(30.0))

@@ -95,6 +95,7 @@ pub(crate) fn install_with(
 ) {
     // The one preference store: notification switches, Appearance and General.
     cx.set_global(prefs);
+    crate::screens::settings::pages::apply_saved_motion(cx);
     let banners = Banners::install(cx, store.clone(), desktop);
     let (clicks, mut received) = unbounded::<String>();
     cx.set_global(Shell {
