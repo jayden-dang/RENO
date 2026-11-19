@@ -35,9 +35,9 @@ use crate::vm::convo;
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 
+mod activity;
 mod changes;
 mod dock;
-mod draft35;
 mod files;
 mod history;
 mod output;
@@ -158,9 +158,13 @@ pub(crate) struct RunScreen {
     menu_open: Option<ApprovalId>,
     /// "Deny with a note…" was chosen: the approval, its one-line field and the field's events.
     note: Option<(ApprovalId, Entity<Composer>, Subscription)>,
-    /// ROAD-35 draft: follows the draft's state, and what the list was last measured for.
-    _draft: Option<Subscription>,
-    draft_seen: Option<(crate::draft35::Variant, bool)>,
+    /// The plan tray and the background tray over the composer are open, and the background task
+    /// whose full output the Session tab shows.
+    activity_plan_open: bool,
+    activity_tasks_open: bool,
+    activity_output: Option<String>,
+    /// How many agents the transcript's chips were measured for (a chip changes a row's height).
+    activity_chips: usize,
     _store: Subscription,
 }
 
@@ -240,20 +244,10 @@ impl RunScreen {
             pending_focus_panel: false,
             menu_open: None,
             note: None,
-            _draft: crate::draft35::Draft35::get(cx).map(|draft| {
-                cx.observe(&draft, |this, draft, cx| {
-                    let d = draft.read(cx);
-                    let seen = Some((d.variant, d.activity.is_empty()));
-                    if this.draft_seen != seen {
-                        // The rows under the transcript changed height: measure them again.
-                        this.draft_seen = seen;
-                        let n = this.rows.len();
-                        this.list.splice(0..n, n);
-                    }
-                    cx.notify();
-                })
-            }),
-            draft_seen: None,
+            activity_plan_open: false,
+            activity_tasks_open: false,
+            activity_output: None,
+            activity_chips: 0,
         };
         screen.refresh(cx);
         screen
@@ -376,10 +370,26 @@ impl RunScreen {
             .cloned()
             .collect();
         self.rebuild_rows(routing, &pending, cx);
+        self.measure_activity_chips(cx);
         self.keep_menu(&pending);
         self.resolve_panel_key(cx);
         self.follow_changes(cx);
         self.follow_thread(cx);
+    }
+
+    /// Chips under the transcript's agent text change those rows' height: measure them again when
+    /// the run's agents appear or go.
+    fn measure_activity_chips(&mut self, cx: &gpui::App) {
+        let chips = self
+            .store
+            .read(cx)
+            .run_activity(&self.run)
+            .map_or(0, |a| a.agents.len());
+        if chips != self.activity_chips {
+            self.activity_chips = chips;
+            let rows = self.rows.len();
+            self.list.splice(0..rows, rows);
+        }
     }
 
     /// The runs the transcript shows, oldest first, ending with this screen's run.
@@ -797,7 +807,6 @@ impl Render for RunScreen {
             .children(self.tick_rail(&theme, &ticks, cx));
         let chat = div()
             .id("chat-canvas")
-            .relative()
             .debug_selector(|| "chat-canvas".to_owned())
             .flex_1()
             .min_w_0()

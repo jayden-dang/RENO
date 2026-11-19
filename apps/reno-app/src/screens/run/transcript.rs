@@ -28,7 +28,7 @@ impl RunScreen {
             .when(ix == 0, |d| d.pt(px(22.0)))
             .pb(px(if last { 26.0 } else { 16.0 }))
             .child(body)
-            .children(self.draft_chips(&theme, ix, cx))
+            .children(self.activity_chips(&theme, ix, cx))
             .when(thinking, |d| d.child(self.thinking_line(&theme, cx)))
             .into_any_element()
     }

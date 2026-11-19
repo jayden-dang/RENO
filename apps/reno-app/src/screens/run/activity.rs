@@ -1,63 +1,27 @@
-//! ROAD-35 draft (throwaway): the three variants' views for following a run. Everything reads the
-//! mocked `DraftActivity` through `crate::draft35::Draft35`; nothing here touches the store's
-//! data or the protocol.
-//!
-//! A Trays: a plan tray and a background tray over the composer, subagent chips in the transcript.
-//! B Session cockpit: the Session tab's Plan / Running / Agents sections and a bar count chip.
-//! D Trays + cockpit: A and B together (the default).
+//! The run's activity (ROAD-35): the plan and background tasks in trays above the composer,
+//! subagent chips under the agent text where they were spawned, the same three things as
+//! sections of the Session tab, and an agent's own transcript as a side-panel tab. Everything
+//! reads `Store::run_activity` (the mocked contract, see `reno_client::activity`) and words
+//! itself through `vm::activity`, so the tray and the Session tab always agree.
 
 use gpui::{AnyElement, Context, FontWeight, Role, SharedString, Window, div, prelude::*, px};
-use reno_client::fake::draft35::{
-    AgentKind, AgentLane, AgentState, BackgroundTask, DraftActivity, LineRole, PlanItem,
-    PlanStatus, TaskState,
+use reno_client::activity::{
+    AgentKind, AgentLane, AgentState, BackgroundTask, LineRole, PlanItem, PlanStatus, RunActivity,
+    TaskState,
 };
 use reno_proto::RunId;
 
 use super::RunScreen;
-use crate::draft35::{Draft35, Variant};
 use crate::panel::surface::Surface;
 use crate::transcript::Row;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
+use crate::vm::activity as words;
 
-/// What one frame of the draft needs, copied out of the entity.
-struct Snap {
-    variant: Variant,
-    a: DraftActivity,
-    plan_open: bool,
-    tasks_open: bool,
-    output_of: Option<&'static str>,
-}
-
-fn snap(cx: &gpui::App) -> Option<Snap> {
-    let draft = Draft35::get(cx)?;
-    let d = draft.read(cx);
-    (!d.activity.is_empty()).then(|| Snap {
-        variant: d.variant,
-        a: d.activity.clone(),
-        plan_open: d.plan_open,
-        tasks_open: d.tasks_open,
-        output_of: d.output_of,
-    })
-}
-
-fn edit(cx: &mut gpui::App, f: impl FnOnce(&mut Draft35)) {
-    if let Some(draft) = Draft35::get(cx) {
-        draft.update(cx, |d, cx| {
-            f(d);
-            cx.notify();
-        });
-    }
-}
-
-/// The run id behind a draft agent's side-panel tab.
+/// The run id of an agent's side-panel tab.
 fn agent_run(id: &str) -> Option<RunId> {
-    RunId::from_suffix(&format!("d35{id}")).ok()
-}
-
-fn count_label(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+    RunId::from_suffix(&reno_client::activity::agent_run_suffix(id)).ok()
 }
 
 // --- shared pieces ----------------------------------------------------------------------------
@@ -74,7 +38,7 @@ fn plan_marker(theme: &Theme, status: PlanStatus) -> AnyElement {
             .child(icon(Icon::Check, 13.0, theme.faint))
             .into_any_element(),
         PlanStatus::InProgress => slot
-            .child(kit::spinner("draft35-plan-spin", 13.0, theme.accent))
+            .child(kit::spinner("activity-plan-spin", 13.0, theme.accent))
             .into_any_element(),
         PlanStatus::Pending => slot
             .child(
@@ -125,16 +89,8 @@ fn stripe_color(theme: &Theme, state: AgentState) -> gpui::Hsla {
     }
 }
 
-fn state_word(lane: &AgentLane) -> &'static str {
-    match (lane.kind, lane.state) {
-        (_, AgentState::Running) => "Running",
-        (AgentKind::Subagent, AgentState::Finished) => "Finished",
-        (AgentKind::SideChat, AgentState::Finished) => "Answered",
-    }
-}
-
 impl RunScreen {
-    fn open_agent(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_agent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(run) = agent_run(id) {
             self.open_surface(Surface::SideChat(run), window, cx);
         }
@@ -150,36 +106,47 @@ impl RunScreen {
         extra: Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = task.id;
+        let id = task.id.clone();
         let live = task.state != TaskState::Stopped;
-        let uptime = if live {
-            task.uptime_label()
-        } else {
-            format!("ran {}", task.uptime_label())
-        };
-        let stop: AnyElement = match task.state {
-            TaskState::Running => kit::line_button(
+        let uptime = words::uptime(task);
+        let run = self.run.clone();
+        let error = self
+            .store
+            .read(cx)
+            .stop_error(&self.run, &task.id)
+            .map(|e| words::stop_error_text(task, e));
+        let stop: AnyElement = match words::stop_control(task) {
+            words::StopControl::Stop => {
+                let task_id = id.clone();
+                kit::line_button(
+                    theme,
+                    format!("activity-stop-{id}"),
+                    Some(Icon::Stop),
+                    words::StopControl::Stop.label(),
+                    Tone::Quiet,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (run, task) = (run.clone(), task_id.clone());
+                    // A refusal is kept by the store and said under the task.
+                    this.store
+                        .update(cx, |store, cx| store.stop_task(&run, &task, cx))
+                        .ok();
+                }))
+                .into_any_element()
+            }
+            words::StopControl::Stopping => kit::line_button(
                 theme,
-                format!("draft35-stop-{id}"),
-                Some(Icon::Stop),
-                "Stop",
-                Tone::Quiet,
-                true,
-            )
-            .on_click(cx.listener(move |_, _, _, cx| {
-                edit(cx, |d| d.activity.stop_task(id));
-            }))
-            .into_any_element(),
-            TaskState::Stopping => kit::line_button(
-                theme,
-                format!("draft35-stopping-{id}"),
+                format!("activity-stopping-{id}"),
                 None,
-                "Stopping\u{2026}",
+                words::StopControl::Stopping.label(),
                 Tone::Quiet,
                 false,
             )
             .into_any_element(),
-            TaskState::Stopped => kit::tag(theme.muted, "Stopped").into_any_element(),
+            words::StopControl::Stopped => {
+                kit::tag(theme.muted, words::StopControl::Stopped.label()).into_any_element()
+            }
         };
         let shown: Vec<&String> = if lines == 0 {
             task.tail.last().into_iter().collect()
@@ -187,8 +154,11 @@ impl RunScreen {
             task.tail.iter().rev().take(lines).rev().collect()
         };
         div()
-            .id(SharedString::from(format!("draft35-task-{id}")))
-            .debug_selector(move || format!("draft35-task-{id}"))
+            .id(SharedString::from(format!("activity-task-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("activity-task-{id}")
+            })
             .flex()
             .flex_col()
             .gap(px(5.0))
@@ -247,6 +217,18 @@ impl RunScreen {
                             .child(SharedString::from(l.clone()))
                     })),
             )
+            .children(error.map(|text| {
+                div()
+                    .id(SharedString::from(format!("activity-stop-error-{id}")))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("activity-stop-error-{id}")
+                    })
+                    .ml(px(15.0))
+                    .text_size(px(12.5))
+                    .text_color(theme.danger)
+                    .child(SharedString::from(text))
+            }))
             .into_any_element()
     }
 
@@ -260,17 +242,22 @@ impl RunScreen {
         bar: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = lane.id;
+        let id = lane.id.clone();
         let stripe = stripe_color(theme, lane.state);
         let hover = theme.raised.opacity(0.4);
         let running = lane.state == AgentState::Running;
-        let tail = lane
-            .finding
-            .clone()
-            .unwrap_or_else(|| lane.last_line().to_owned());
+        let tail = lane.finding.clone().unwrap_or_else(|| {
+            lane.lines
+                .last()
+                .map_or_else(String::new, |l| l.text.clone())
+        });
+        let open = id.clone();
         div()
-            .id(SharedString::from(format!("draft35-lane-{id}")))
-            .debug_selector(move || format!("draft35-lane-{id}"))
+            .id(SharedString::from(format!("activity-lane-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("activity-lane-{id}")
+            })
             .flex()
             .items_stretch()
             .rounded(px(7.0))
@@ -283,13 +270,15 @@ impl RunScreen {
             .aria_label(SharedString::from(format!(
                 "{}, {}",
                 lane.name,
-                state_word(lane)
+                words::state_word(lane)
             )))
             .focusable()
             .tab_stop(true)
             .focus_visible(kit::focus_ring(theme))
             .hover(move |s| s.bg(hover))
-            .on_click(cx.listener(move |this, _, window, cx| this.open_agent(id, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_agent(&open, window, cx);
+            }))
             .child(div().w(px(3.0)).flex_none().bg(stripe))
             .child(
                 div()
@@ -331,8 +320,8 @@ impl RunScreen {
                                         .font_family(MONO)
                                         .text_size(px(12.0))
                                         .text_color(theme.muted)
-                                        .child(SharedString::from(count_label(
-                                            lane.steps(),
+                                        .child(SharedString::from(words::count(
+                                            words::steps(lane),
                                             "step",
                                             "steps",
                                         ))),
@@ -345,7 +334,7 @@ impl RunScreen {
                                     .whitespace_nowrap()
                                     .text_size(px(12.5))
                                     .text_color(if running { theme.accent } else { theme.muted })
-                                    .child(state_word(lane)),
+                                    .child(words::state_word(lane)),
                             ),
                     )
                     .when(bar && lane.kind == AgentKind::Subagent, |d| {
@@ -358,7 +347,7 @@ impl RunScreen {
                                 .child(
                                     div()
                                         .h_full()
-                                        .w(gpui::relative(lane.progress()))
+                                        .w(gpui::relative(words::progress(lane)))
                                         .rounded(px(2.0))
                                         .bg(stripe),
                                 ),
@@ -377,33 +366,67 @@ impl RunScreen {
             .into_any_element()
     }
 
-    fn finding_line(&self, theme: &Theme, a: &DraftActivity, size: f32) -> Option<AnyElement> {
-        a.finding().map(|text| {
+    /// The run's activity, when this connection has the contract and the run has any.
+    fn activity(&self, cx: &gpui::App) -> Option<RunActivity> {
+        self.store.read(cx).run_activity(&self.run)
+    }
+
+    /// The finding sentence. Only the tray says it: the Session tab does not repeat it.
+    fn finding_line(
+        &self,
+        theme: &Theme,
+        a: &RunActivity,
+        place: &'static str,
+    ) -> Option<AnyElement> {
+        words::finding(a).map(|text| {
             div()
-                .id("draft35-finding")
-                .debug_selector(|| "draft35-finding".to_owned())
+                .id(SharedString::from(format!("activity-finding-{place}")))
+                .debug_selector(move || format!("activity-finding-{place}"))
                 .w_full()
-                .text_size(px(size))
-                .line_height(px(size + 6.0))
+                .text_size(px(12.5))
+                .line_height(px(18.5))
                 .text_color(theme.muted)
                 .child(SharedString::from(text))
                 .into_any_element()
         })
     }
 
-    // --- A: trays -------------------------------------------------------------------------
+    /// `RENO_ACTIVITY_OPEN=plan,tasks,stop:dev`: opens the trays and presses Stop (screenshots).
+    pub(crate) fn open_activity_demo(&mut self, steps: &str, cx: &mut Context<Self>) {
+        for step in steps.split(',') {
+            match step {
+                "plan" => self.activity_plan_open = true,
+                "tasks" => self.activity_tasks_open = true,
+                other => {
+                    if let Some(task) = other.strip_prefix("stop:") {
+                        let run = self.run.clone();
+                        self.store
+                            .update(cx, |store, cx| store.stop_task(&run, task, cx))
+                            .ok();
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    // --- the trays above the composer -----------------------------------------------------------
 
     /// The plan tray and the background chip (and its tray), over the composer.
-    pub(super) fn draft_trays(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(s) = snap(cx).filter(|s| matches!(s.variant, Variant::A | Variant::D)) else {
+    pub(super) fn activity_trays(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(a) = self.activity(cx) else {
             return Vec::new();
         };
+        let (plan_open, tasks_open) = (self.activity_plan_open, self.activity_tasks_open);
         let mut out = Vec::new();
-        if !s.a.plan.is_empty() {
-            let current = s.a.current().map_or("All steps done", |i| i.doing.as_str());
+        if let Some((progress, current)) = words::plan_line(&a) {
             let header = div()
-                .id("draft35-plan-tray")
-                .debug_selector(|| "draft35-plan-tray".to_owned())
+                .id("activity-plan-tray")
+                .debug_selector(|| "activity-plan-tray".to_owned())
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -414,31 +437,32 @@ impl RunScreen {
                 .focusable()
                 .tab_stop(true)
                 .focus_visible(kit::focus_ring(theme))
-                .on_click(cx.listener(|_, _, _, cx| edit(cx, |d| d.plan_open = !d.plan_open)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.activity_plan_open = !this.activity_plan_open;
+                    cx.notify();
+                }))
                 .child(icon(Icon::List, 14.0, theme.muted))
                 .child(
                     div()
+                        .id("activity-plan-line")
+                        .debug_selector(|| "activity-plan-line".to_owned())
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .gap(px(6.0))
                         .whitespace_nowrap()
                         .text_size(px(13.0))
-                        .child(SharedString::from(format!(
-                            "Plan \u{b7} {}/{} \u{b7}",
-                            s.a.plan_done(),
-                            s.a.plan.len()
-                        )))
+                        .child(SharedString::from(progress))
                         .child(
                             div()
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme.accent)
-                                .child(SharedString::from(current.to_owned())),
+                                .child(SharedString::from(current)),
                         ),
                 )
                 .child(icon(
-                    if s.plan_open {
+                    if plan_open {
                         Icon::ChevUp
                     } else {
                         Icon::ChevDown
@@ -458,42 +482,47 @@ impl RunScreen {
                     .border_color(theme.hairline)
                     .child(header)
                     .children(
-                        self.finding_line(theme, &s.a, 12.5)
+                        self.finding_line(theme, &a, "tray")
                             .map(|f| div().pb(px(6.0)).child(f)),
                     )
-                    .when(s.plan_open, |d| {
-                        d.child(div().h(px(1.0)).bg(theme.hairline).mb(px(4.0)))
-                            .children(
-                                s.a.plan
-                                    .iter()
-                                    .map(|i| plan_row(theme, i, 13.0, 4.0, false)),
-                            )
+                    .when(plan_open, |d| {
+                        d.child(
+                            div()
+                                .id("activity-plan-list")
+                                .debug_selector(|| "activity-plan-list".to_owned())
+                                .child(div().h(px(1.0)).bg(theme.hairline).mb(px(4.0)))
+                                .children(
+                                    a.plan.iter().map(|i| plan_row(theme, i, 13.0, 4.0, false)),
+                                ),
+                        )
                     })
                     .into_any_element(),
             );
         }
-        if !s.a.tasks.is_empty() {
-            let running = s.a.running_tasks();
-            let (dot, label) = if running > 0 {
-                (theme.accent, format!("{running} running"))
+        if let Some(label) = words::running_label(&a) {
+            let dot = if words::running_tasks(&a) > 0 {
+                theme.accent
             } else {
-                (theme.faint, "none running".to_owned())
+                theme.faint
             };
             let chip = kit::chip(theme, "")
-                .id("draft35-bg-chip")
-                .debug_selector(|| "draft35-bg-chip".to_owned())
+                .id("activity-bg-chip")
+                .debug_selector(|| "activity-bg-chip".to_owned())
                 .cursor_pointer()
                 .role(Role::Button)
                 .aria_label("Background tasks")
                 .focusable()
                 .tab_stop(true)
                 .focus_visible(kit::focus_ring(theme))
-                .when(s.tasks_open, |c| c.border_color(theme.accent.opacity(0.6)))
-                .on_click(cx.listener(|_, _, _, cx| edit(cx, |d| d.tasks_open = !d.tasks_open)))
+                .when(tasks_open, |c| c.border_color(theme.accent.opacity(0.6)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.activity_tasks_open = !this.activity_tasks_open;
+                    cx.notify();
+                }))
                 .child(kit::dot(dot, 7.0))
                 .child(SharedString::from(label))
                 .child(icon(
-                    if s.tasks_open {
+                    if tasks_open {
                         Icon::ChevUp
                     } else {
                         Icon::ChevDown
@@ -501,15 +530,16 @@ impl RunScreen {
                     13.0,
                     theme.muted,
                 ));
-            // "Output ›": the Session tab has the full output; the composer keeps the keyboard.
-            let links: Vec<AnyElement> =
-                s.a.tasks
+            if tasks_open {
+                // "Output ›": the Session tab has the full output; the composer keeps the keyboard.
+                let links: Vec<AnyElement> = a
+                    .tasks
                     .iter()
                     .map(|t| {
-                        let id = t.id;
+                        let id = t.id.clone();
                         div()
-                            .id(SharedString::from(format!("draft35-open-output-{id}")))
-                            .debug_selector(move || format!("draft35-open-output-{id}"))
+                            .id(SharedString::from(format!("activity-open-output-{id}")))
+                            .debug_selector(move || format!("activity-open-output-{id}"))
                             .flex_none()
                             .whitespace_nowrap()
                             .text_size(px(12.5))
@@ -521,6 +551,10 @@ impl RunScreen {
                             .tab_stop(true)
                             .focus_visible(kit::focus_ring(theme))
                             .hover(|s| s.text_color(theme.text))
+                            // A press on the link must not move the keyboard out of the composer.
+                            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                window.prevent_default();
+                            })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_surface(Surface::Session, window, cx);
                             }))
@@ -528,11 +562,22 @@ impl RunScreen {
                             .into_any_element()
                     })
                     .collect();
-            if s.tasks_open {
+                let rows: Vec<AnyElement> = a
+                    .tasks
+                    .iter()
+                    .zip(links)
+                    .enumerate()
+                    .map(|(n, (t, link))| {
+                        div()
+                            .when(n > 0, |d| d.border_t_1().border_color(theme.hairline))
+                            .child(self.task_row(theme, t, 0, 12.5, Some(link), cx))
+                            .into_any_element()
+                    })
+                    .collect();
                 out.push(
                     div()
-                        .id("draft35-bg-tray")
-                        .debug_selector(|| "draft35-bg-tray".to_owned())
+                        .id("activity-bg-tray")
+                        .debug_selector(|| "activity-bg-tray".to_owned())
                         .flex()
                         .flex_col()
                         .px(px(14.0))
@@ -541,19 +586,7 @@ impl RunScreen {
                         .bg(theme.surface)
                         .border_1()
                         .border_color(theme.hairline)
-                        .children(
-                            s.a.tasks
-                                .iter()
-                                .zip(links)
-                                .enumerate()
-                                .map(|(n, (t, link))| {
-                                    div()
-                                        .when(n > 0, |d| {
-                                            d.border_t_1().border_color(theme.hairline)
-                                        })
-                                        .child(self.task_row(theme, t, 0, 12.5, Some(link), cx))
-                                }),
-                        )
+                        .children(rows)
                         .into_any_element(),
                 );
             }
@@ -563,57 +596,57 @@ impl RunScreen {
     }
 
     /// Chips under the agent text rows where subagents (and the side chat) were spawned.
-    pub(super) fn draft_chips(
+    pub(super) fn activity_chips(
         &self,
         theme: &Theme,
         ix: usize,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| matches!(s.variant, Variant::A | Variant::D))?;
+        let a = self.activity(cx)?;
         let prose_at = self.rows[..=ix.min(self.rows.len().saturating_sub(1))]
             .iter()
             .filter(|r| matches!(r, Row::Prose { .. }))
             .count()
             .checked_sub(1)
             .filter(|_| matches!(self.rows.get(ix), Some(Row::Prose { .. })))?;
-        let chips: Vec<AnyElement> =
-            s.a.agents
-                .iter()
-                .filter(|a| a.after_prose == prose_at)
-                .map(|lane| {
-                    let id = lane.id;
-                    let running = lane.state == AgentState::Running;
-                    div()
-                        .id(SharedString::from(format!("draft35-chip-{id}")))
-                        .debug_selector(move || format!("draft35-chip-{id}"))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .h(px(28.0))
-                        .px(px(11.0))
-                        .rounded(px(999.0))
-                        .bg(theme.surface)
-                        .border_1()
-                        .border_color(theme.hairline)
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(lane.chip_label()))
-                        .focusable()
-                        .tab_stop(true)
-                        .focus_visible(kit::focus_ring(theme))
-                        .hover(|s| s.border_color(theme.accent.opacity(0.5)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_agent(id, window, cx);
-                        }))
-                        .child(div().text_color(theme.muted).child("\u{21b3}"))
-                        .child(kit::dot(stripe_color(theme, lane.state), 7.0))
-                        .child(SharedString::from(lane.chip_label()))
-                        .when(running, |d| d)
-                        .into_any_element()
-                })
-                .collect();
+        let chips: Vec<AnyElement> = a
+            .agents
+            .iter()
+            .filter(|l| l.spawned_after == prose_at)
+            .map(|lane| {
+                let id = lane.id.clone();
+                let open = id.clone();
+                let label = words::chip_label(lane);
+                div()
+                    .id(SharedString::from(format!("activity-chip-{id}")))
+                    .debug_selector(move || format!("activity-chip-{id}"))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .h(px(28.0))
+                    .px(px(11.0))
+                    .rounded(px(999.0))
+                    .bg(theme.surface)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(px(13.0))
+                    .text_color(theme.text)
+                    .cursor_pointer()
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(label.clone()))
+                    .focusable()
+                    .tab_stop(true)
+                    .focus_visible(kit::focus_ring(theme))
+                    .hover(|s| s.border_color(theme.accent.opacity(0.5)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_agent(&open, window, cx);
+                    }))
+                    .child(div().text_color(theme.muted).child("\u{21b3}"))
+                    .child(kit::dot(stripe_color(theme, lane.state), 7.0))
+                    .child(SharedString::from(label))
+                    .into_any_element()
+            })
+            .collect();
         (!chips.is_empty()).then(|| {
             div()
                 .pt(px(10.0))
@@ -625,15 +658,17 @@ impl RunScreen {
         })
     }
 
-    // --- B: the Session tab's cockpit -------------------------------------------------------
+    // --- the Session tab's sections -------------------------------------------------------------
 
-    pub(super) fn draft_cockpit(
+    /// Plan, Running and Agents, above the run's metadata. `None` for a run with no activity.
+    pub(super) fn activity_sections(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| matches!(s.variant, Variant::B | Variant::D))?;
-        let heading = |text: &str, count: Option<String>| {
+        let a = self.activity(cx)?;
+        let shown = words::session_sections(&a);
+        let heading = |text: &str, count: String| {
             div()
                 .pt(px(14.0))
                 .pb(px(4.0))
@@ -644,56 +679,59 @@ impl RunScreen {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.faint)
                 .child(SharedString::from(text.to_owned()))
-                .children(count.map(|c| {
+                .child(
                     div()
                         .font_family(MONO)
                         .font_weight(FontWeight::NORMAL)
-                        .child(SharedString::from(c))
-                }))
+                        .child(SharedString::from(count)),
+                )
         };
         let mut body = div()
-            .id("draft35-cockpit")
-            .debug_selector(|| "draft35-cockpit".to_owned())
+            .id("activity-sections")
+            .debug_selector(|| "activity-sections".to_owned())
             .flex()
             .flex_col()
             .pb(px(6.0))
             .border_b_1()
-            .border_color(theme.hairline)
-            .children(
-                self.finding_line(theme, &s.a, 12.5)
-                    .filter(|_| s.variant == Variant::B),
-            );
-        if !s.a.plan.is_empty() {
+            .border_color(theme.hairline);
+        if shown.plan {
             body = body
                 .child(heading(
                     "Plan",
-                    Some(format!("{}/{}", s.a.plan_done(), s.a.plan.len())),
+                    format!("{}/{}", words::plan_done(&a), a.plan.len()),
                 ))
-                .children(s.a.plan.iter().map(|i| plan_row(theme, i, 12.5, 6.0, true)));
+                .child(
+                    div()
+                        .id("activity-session-plan")
+                        .debug_selector(|| "activity-session-plan".to_owned())
+                        .children(a.plan.iter().map(|i| plan_row(theme, i, 12.5, 6.0, true))),
+                );
         }
-        if !s.a.tasks.is_empty() {
-            body = body.child(heading("Running", Some(format!("{}", s.a.running_tasks()))));
-            for (n, t) in s.a.tasks.iter().enumerate() {
-                let id = t.id;
-                let full = s.output_of == Some(id);
+        if shown.running {
+            body = body.child(heading("Running", words::running_tasks(&a).to_string()));
+            let mut rows = div()
+                .id("activity-session-running")
+                .debug_selector(|| "activity-session-running".to_owned());
+            for (n, t) in a.tasks.iter().enumerate() {
+                let id = t.id.clone();
+                let full = self.activity_output.as_deref() == Some(t.id.as_str());
                 let toggle = kit::line_button(
                     theme,
-                    format!("draft35-output-{id}"),
+                    format!("activity-output-{id}"),
                     Some(Icon::Terminal),
                     if full { "Hide output" } else { "Output" },
                     Tone::Quiet,
                     true,
                 )
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    edit(cx, |d| {
-                        d.output_of = if d.output_of == Some(id) {
-                            None
-                        } else {
-                            Some(id)
-                        };
-                    });
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.activity_output = if this.activity_output.as_deref() == Some(id.as_str()) {
+                        None
+                    } else {
+                        Some(id.clone())
+                    };
+                    cx.notify();
                 }));
-                body = body.child(
+                rows = rows.child(
                     div()
                         .when(n > 0, |d| d.border_t_1().border_color(theme.hairline))
                         .child(self.task_row(
@@ -706,16 +744,25 @@ impl RunScreen {
                         )),
                 );
             }
+            body = body.child(rows);
         }
-        if !s.a.agents.is_empty() {
+        if shown.agents {
+            let lanes: Vec<AnyElement> = a
+                .agents
+                .iter()
+                .map(|l| self.agent_lane(theme, l, 12.5, false, cx))
+                .collect();
             body = body
-                .child(heading("Agents", Some(format!("{}", s.a.agents.len()))))
+                .child(heading("Agents", a.agents.len().to_string()))
                 .child(
-                    div().flex().flex_col().gap(px(6.0)).pb(px(6.0)).children(
-                        s.a.agents
-                            .iter()
-                            .map(|l| self.agent_lane(theme, l, 12.5, false, cx)),
-                    ),
+                    div()
+                        .id("activity-session-agents")
+                        .debug_selector(|| "activity-session-agents".to_owned())
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .pb(px(6.0))
+                        .children(lanes),
                 );
         }
         Some(body.into_any_element())
@@ -723,20 +770,20 @@ impl RunScreen {
 
     // --- the subagent / side-chat tab ---------------------------------------------------------
 
-    /// The body of a draft agent's tab: its short transcript, read-only.
-    pub(super) fn draft_agent_body(
+    /// The body of an agent's tab: its short transcript, read-only. `None` when the run has no such
+    /// agent (the tab then shows its placeholder).
+    pub(super) fn activity_agent_body(
         &self,
         theme: &Theme,
         run: &RunId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let id = run.as_str().strip_prefix("run_")?.strip_prefix("d35")?;
-        let draft = Draft35::get(cx)?;
-        let lane = draft.read(cx).activity.agent(id)?.clone();
+        let id = reno_client::activity::agent_of_run(run)?;
+        let lane = self.activity(cx)?.agents.into_iter().find(|l| l.id == id)?;
         let running = lane.state == AgentState::Running;
         let mut col = div()
-            .id("draft35-agent-body")
-            .debug_selector(|| "draft35-agent-body".to_owned())
+            .id("activity-agent-body")
+            .debug_selector(|| "activity-agent-body".to_owned())
             .size_full()
             .overflow_y_scroll()
             .px(px(20.0))
@@ -760,7 +807,7 @@ impl RunScreen {
                     )
                     .child(kit::tag(
                         if running { theme.accent } else { theme.muted },
-                        state_word(&lane),
+                        words::state_word(&lane),
                     )),
             );
         if let Some(finding) = &lane.finding {

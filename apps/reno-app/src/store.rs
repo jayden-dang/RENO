@@ -31,6 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use gpui::{AppContext as _, Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
+use reno_client::activity::{ActivityDesk, RunActivity, StopError};
 use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
@@ -198,6 +199,8 @@ pub(crate) struct Store {
     fake: Option<Arc<FakeDaemon>>,
     /// Which not-yet controls show: set from the connection (the fake turns them on).
     capabilities: Capabilities,
+    /// A Stop on a background task that was not taken, by run and task, until the next try.
+    stop_errors: std::collections::HashMap<(RunId, String), StopError>,
     /// Where the real daemon's socket is, shown in Settings.
     socket: Option<PathBuf>,
     /// Approvals with a decision in flight (their buttons are disabled).
@@ -316,6 +319,7 @@ impl Store {
             mirror: None,
             fake: None,
             capabilities: Capabilities::REAL,
+            stop_errors: std::collections::HashMap::new(),
             socket: None,
             deciding: BTreeSet::new(),
             firing: BTreeSet::new(),
@@ -495,6 +499,56 @@ impl Store {
         result
     }
 
+    /// The in-process fake daemon, for tests that move its clock.
+    #[cfg(test)]
+    pub(crate) fn fake_daemon(&self) -> Option<Arc<FakeDaemon>> {
+        self.fake.clone()
+    }
+
+    /// The ONE seam to the run-activity contract. Today it is the fake daemon's mocked contract,
+    /// and only where [`Capabilities::run_activity`] is on; ROAD-52 replaces what this returns
+    /// with the real daemon's, and nothing else in the app changes.
+    fn activity_desk(&self) -> Option<&dyn ActivityDesk> {
+        if !self.capabilities.run_activity {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn ActivityDesk)
+    }
+
+    /// The run's plan, background tasks and agents; `None` when this connection has no such
+    /// contract or the run has none of them.
+    pub(crate) fn run_activity(&self, run: &RunId) -> Option<RunActivity> {
+        self.activity_desk()
+            .map(|desk| desk.activity(run))
+            .filter(|activity| !activity.is_empty())
+    }
+
+    /// Asks a background task of `run` to stop. A refusal is kept for the screen to say inline
+    /// (`stop_error`) until the next try.
+    pub(crate) fn stop_task(
+        &mut self,
+        run: &RunId,
+        task: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), StopError> {
+        let key = (run.clone(), task.to_owned());
+        self.stop_errors.remove(&key);
+        let result = self
+            .activity_desk()
+            .ok_or(StopError::UnknownTask)
+            .and_then(|desk| desk.stop_task(run, task));
+        if let Err(error) = &result {
+            self.stop_errors.insert(key, error.clone());
+        }
+        cx.notify();
+        result
+    }
+
+    /// Why the last Stop of this task was not taken.
+    pub(crate) fn stop_error(&self, run: &RunId, task: &str) -> Option<&StopError> {
+        self.stop_errors.get(&(run.clone(), task.to_owned()))
+    }
+
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
         self.deciding.contains(id)
     }
@@ -669,10 +723,31 @@ impl Store {
                 registry_agents: true,
                 question_run: true,
                 question_demo_runs: true,
+                activity_runs: true,
                 ..FakeConfig::default()
             },
             cx,
         );
+        self.tick_fake_activity(cx);
+    }
+
+    /// The fake's run activity moves on a timer (output, uptime, plan items). Tests drive it by
+    /// hand with `FakeDaemon::advance_activity` instead.
+    fn tick_fake_activity(&mut self, cx: &mut Context<Self>) {
+        const EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+        let Some(fake) = self.fake.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(EVERY).await;
+                fake.advance_activity(EVERY.as_millis() as u64);
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// Like [`Store::start_fake`], with a config (an empty world, missing features).

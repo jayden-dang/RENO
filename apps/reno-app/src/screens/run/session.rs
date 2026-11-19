@@ -94,7 +94,7 @@ impl RunScreen {
                 .collect::<Vec<_>>()
         };
 
-        body.children(self.draft_cockpit(theme, cx))
+        body.children(self.activity_sections(theme, cx))
             .children(failed.map(|failed| {
                 div()
                     .flex()

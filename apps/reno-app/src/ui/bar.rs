@@ -48,8 +48,6 @@ pub(crate) struct Bar<'a> {
     pub(crate) more_open: bool,
     /// The run screen is showing: the panel toggle and the "Toggle side panel" item exist.
     pub(crate) on_run: bool,
-    /// ROAD-35 draft: variant B's muted count chip beside the thread chip.
-    pub(crate) draft_chip: Option<String>,
     pub(crate) more_at: Anchor_,
     pub(crate) updates_at: Anchor_,
 }
@@ -224,21 +222,6 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
                 .on_click(on(|root, _, cx| root.toggle_more(cx))),
         )
         .child(chip)
-        .children(bar.draft_chip.as_ref().map(|text| {
-            div()
-                .id("draft35-bar-chip")
-                .debug_selector(|| "draft35-bar-chip".to_owned())
-                .flex_none()
-                .h(px(CONTROL))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .rounded(px(7.0))
-                .text_size(px(12.5))
-                .text_color(theme.muted)
-                .whitespace_nowrap()
-                .child(SharedString::from(text.clone()))
-        }))
         .child(div().flex_1().min_w_0())
         .child(
             kit::icon_chip(theme, Icon::Play, format!("{} live", bar.live))

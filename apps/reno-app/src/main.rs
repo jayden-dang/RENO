@@ -11,7 +11,6 @@ mod app;
 mod attach;
 mod banners;
 mod desktop;
-mod draft35;
 mod lifecycle;
 mod links;
 mod local;
@@ -27,6 +26,8 @@ mod transcript;
 mod ui;
 mod vm;
 
+#[cfg(test)]
+mod activity_tests;
 #[cfg(test)]
 mod composer_tests;
 #[cfg(test)]

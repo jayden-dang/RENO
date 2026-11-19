@@ -17,6 +17,9 @@ pub(crate) struct Capabilities {
     /// A question can be answered from the app (ROAD-1 is not built: the fake's mocked answer
     /// contract). Without it the question panel is read-only.
     pub(crate) answer_questions: bool,
+    /// The run's plan, background tasks and subagents (ROAD-35 / ROAD-52 are not built: the fake's
+    /// mocked activity contract). Without it none of those controls exist.
+    pub(crate) run_activity: bool,
 }
 
 /// One row of the "+" menu.
@@ -63,6 +66,7 @@ impl Capabilities {
         permission_modes: false,
         allow_similar: false,
         answer_questions: false,
+        run_activity: false,
     };
 
     /// The fake daemon: every not-yet control is on.
@@ -72,6 +76,7 @@ impl Capabilities {
         permission_modes: true,
         allow_similar: true,
         answer_questions: true,
+        run_activity: true,
     };
 
     /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
@@ -113,7 +118,12 @@ mod tests {
         assert_eq!(Capabilities::REAL.plus_items(false), []);
         assert_eq!(Capabilities::REAL.plus_items(true), [PlusItem::Files]);
         let real = Capabilities::REAL;
-        assert!(!real.permission_modes && !real.allow_similar && !real.answer_questions);
+        assert!(
+            !real.permission_modes
+                && !real.allow_similar
+                && !real.answer_questions
+                && !real.run_activity
+        );
     }
 
     #[test]

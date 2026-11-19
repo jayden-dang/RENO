@@ -56,7 +56,7 @@ impl RunScreen {
             self.dock_drawn = true;
             let question = self.question_dock(window, cx);
             let theme = theme::current(cx);
-            let trays = self.draft_trays(&theme, cx);
+            let trays = self.activity_trays(&theme, cx);
             return self
                 .dock_frame()
                 .gap(px(8.0))

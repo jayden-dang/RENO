@@ -581,10 +581,10 @@ impl Scenario {
     }
 }
 
-/// ROAD-35 draft: the busy Claude Code run (`plan1`) the plan, background-task and subagent
+/// ROAD-35: the busy Claude Code run (`plan1`) the plan, background-task and subagent
 /// variants open on, and an empty one (`plan0`) where none of that shows. The plan, tasks and
-/// agents themselves are [`super::draft35::DraftActivity`], client-side only.
-pub(super) fn draft35_runs() -> Ids<Vec<SeedRun>> {
+/// agents themselves are [`crate::activity::RunActivity`], client-side only.
+pub(super) fn activity_runs() -> Ids<Vec<SeedRun>> {
     Ok(vec![
         SeedRun {
             summary: summary(
