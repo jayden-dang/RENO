@@ -608,8 +608,17 @@ impl World {
                 format!("{} is built in: use {built_in}", listed.name),
             ));
         }
-        if let Some(why) =
-            reno_proto::cannot_run(listed.name, curated(listed.id, listed.version).1.as_ref())
+        // Already added at the listed version is "nothing to do", whatever the audit says of it.
+        let current = self.registry_executor(id).is_some_and(|at| {
+            self.executors[at]
+                .health
+                .as_ref()
+                .and_then(|h| h.installed.version())
+                == Some(listed.version)
+        });
+        if !current
+            && let Some(why) =
+                reno_proto::cannot_run(listed.name, curated(listed.id, listed.version).1.as_ref())
         {
             return Err(err(ErrorCode::Conflict, why));
         }

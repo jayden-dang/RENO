@@ -243,8 +243,11 @@ pub(crate) async fn add(
     if let Some(message) = needs(entry, reg::readiness(entry)) {
         return Err(conflict(message));
     }
+    // Already added at the listed version is the kernel's "nothing to do", whatever the audit
+    // says of that version.
+    let current = reg::record(agent).is_some_and(|r| r.version == entry.version);
     let known = reno_harness::acp_known::facts(&entry.id, &entry.version);
-    if let Some(why) = reno_proto::cannot_run(&entry.name, known.status.as_ref()) {
+    if !current && let Some(why) = reno_proto::cannot_run(&entry.name, known.status.as_ref()) {
         return Err(conflict(why));
     }
     let executor = AcpExecutor::registry(agent, &entry.name)
