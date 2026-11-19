@@ -20,7 +20,9 @@ actions!(
         ClosePanelTab,
         ReopenPanelTab,
         NextPanelTab,
-        PrevPanelTab
+        PrevPanelTab,
+        // Hands the keyboard to the approval panel waiting in the run.
+        JumpToPanel
     ]
 );
 
@@ -35,6 +37,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-t", NewPanelTab, None),
         // ⌘W closes the run panel's tab when one is open, else the window (RootView).
         KeyBinding::new("cmd-w", ClosePanelTab, None),
+        KeyBinding::new("cmd-j", JumpToPanel, None),
         KeyBinding::new("cmd-shift-t", ReopenPanelTab, None),
         KeyBinding::new("ctrl-tab", NextPanelTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevPanelTab, None),

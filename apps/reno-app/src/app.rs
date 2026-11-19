@@ -20,8 +20,8 @@ use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
 use crate::actions::{
-    self, ClosePanelTab, GoRuns, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab, Quit,
-    ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
+    self, ClosePanelTab, GoRuns, JumpToPanel, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab,
+    Quit, ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
 };
 use crate::lifecycle;
 use crate::nav::Nav;
@@ -250,6 +250,7 @@ pub(crate) fn run(options: Options) {
         motion::init(preference, false, cx);
         actions::bind_keys(cx);
         composer::bind_keys(cx);
+        crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         if let Some(path) = options.panel_state_path() {
@@ -1381,6 +1382,11 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
                 this.panel_action(PanelAction::Toggle, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &JumpToPanel, w, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.jump_to_approval(w, cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &NewPanelTab, w, cx| {
                 this.panel_action(PanelAction::NewTab, w, cx);

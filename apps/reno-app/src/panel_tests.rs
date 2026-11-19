@@ -18,6 +18,7 @@ use crate::vm::capabilities::Capabilities;
 /// A fake store with two held approvals (keeper's push, scout's fetch), connected.
 fn held(cx: &mut TestAppContext) -> Entity<Store> {
     cx.update(|cx| {
+        crate::actions::bind_keys(cx);
         bind_keys(cx);
         crate::screens::run::bind_keys(cx);
     });
@@ -64,9 +65,15 @@ fn status_of(
 #[gpui::test]
 fn the_store_derives_its_capabilities_from_the_connection(cx: &mut TestAppContext) {
     let real = cx.update(|cx| cx.new(|_| Store::connecting()));
-    assert_eq!(real.read_with(cx, |s, _| s.capabilities()), Capabilities::REAL);
+    assert_eq!(
+        real.read_with(cx, |s, _| s.capabilities()),
+        Capabilities::REAL
+    );
     let store = held(cx);
-    assert_eq!(store.read_with(cx, |s, _| s.capabilities()), Capabilities::FAKE);
+    assert_eq!(
+        store.read_with(cx, |s, _| s.capabilities()),
+        Capabilities::FAKE
+    );
 }
 
 #[gpui::test]
@@ -74,7 +81,10 @@ fn the_approval_panel_replaces_the_composer_and_allow_once_decides(cx: &mut Test
     let store = held(cx);
     let (_root, vcx) = open_run(cx, &store, "keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "approval-panel"));
-    assert!(!painted(vcx, "composer"), "the panel takes the composer's place");
+    assert!(
+        !painted(vcx, "composer"),
+        "the panel takes the composer's place"
+    );
     assert!(painted(vcx, "approval-kind"), "the kind label shows");
     assert!(painted(vcx, "approval-detail"), "the exact command shows");
     click(vcx, "approve");
@@ -141,7 +151,9 @@ fn the_split_menu_is_on_the_fake_only(cx: &mut TestAppContext) {
     let (_root, vcx) = open_run(cx, &store, "keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
     store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
-    wait_drawn(vcx, |vcx| painted(vcx, "approval-panel") && !painted(vcx, "approve-more"));
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "approval-panel") && !painted(vcx, "approve-more")
+    });
     assert!(painted(vcx, "approve") && painted(vcx, "deny"));
 }
 
@@ -172,9 +184,14 @@ fn the_permission_chip_shrinks_to_its_icon_while_a_panel_is_open(cx: &mut TestAp
     let (root, vcx) = open_run(cx, &store, "keeper1");
     let composer = steer(vcx, &root);
     composer.update_in(vcx, |c, window, cx| c.fill("draft", window, cx));
-    wait_drawn(vcx, |vcx| painted(vcx, "approval-panel") && painted(vcx, "composer"));
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "approval-panel") && painted(vcx, "composer")
+    });
     assert!(painted(vcx, "permission-chip"));
-    assert!(!painted(vcx, "permission-chip-label"), "icon only under a panel");
+    assert!(
+        !painted(vcx, "permission-chip-label"),
+        "icon only under a panel"
+    );
 }
 
 #[gpui::test]
@@ -228,10 +245,7 @@ fn a_step_on_a_live_run_goes_to_the_daemon(cx: &mut TestAppContext) {
     click(vcx, "effort-step-high");
     wait_until(vcx, |cx| {
         store.read_with(cx, |s, _| {
-            s.state()
-                .run(&run_id("keeper1"))
-                .and_then(|r| r.effort)
-                == Some(Effort::High)
+            s.state().run(&run_id("keeper1")).and_then(|r| r.effort) == Some(Effort::High)
         })
     });
 }

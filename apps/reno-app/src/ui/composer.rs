@@ -451,11 +451,6 @@ impl Composer {
         cx.notify();
     }
 
-    /// The small reason input of a denial.
-    pub(crate) fn reason(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        Self::with_mode(store, Mode::Reason, cx)
-    }
-
     /// A one-line field like the reason field, with its own placeholder and hint: Enter emits
     /// [`ReasonEvent::Submitted`], Escape clears it.
     pub(crate) fn field(
@@ -536,10 +531,15 @@ impl Composer {
         }
     }
 
-    /// What is typed in a reason field, trimmed; `None` when blank.
+    /// What is typed in a one-line field, trimmed; `None` when blank.
     pub(crate) fn typed_reason(&self) -> Option<String> {
         let reason = self.model.text().trim();
         (!reason.is_empty()).then(|| reason.to_owned())
+    }
+
+    /// Whether anything is typed (a draft the owner would lose sight of).
+    pub(crate) fn has_text(&self) -> bool {
+        !self.model.text().is_empty()
     }
 
     #[cfg(test)]

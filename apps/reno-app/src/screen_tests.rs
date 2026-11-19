@@ -1023,58 +1023,6 @@ fn open_run_screen(
 }
 
 #[gpui::test]
-fn deny_in_the_run_sends_what_was_typed_beside_it(cx: &mut TestAppContext) {
-    cx.update(crate::ui::composer::bind_keys);
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-    let screen = open_run_screen(vcx, &root, "scout1");
-    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
-    let approval = reno_proto::ApprovalId::from_suffix("scoutfetch").unwrap();
-    let input = screen
-        .read_with(vcx, |s, _| s.reason_input(&approval).cloned())
-        .expect("the reason field sits under the card");
-    input.update_in(vcx, |c, window, cx| {
-        c.fill("use the mirror instead", window, cx);
-    });
-    click(vcx, "deny");
-    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
-    wait_drawn(vcx, |vcx| {
-        store.update(vcx, |s, cx| s.load_history(cx));
-        history_of(&store, vcx, "appr_scoutfetch")
-            .is_some_and(|r| r.message.as_deref() == Some("use the mirror instead"))
-    });
-}
-
-#[gpui::test]
-fn enter_in_the_reason_field_denies_too(cx: &mut TestAppContext) {
-    cx.update(crate::ui::composer::bind_keys);
-    let store = fake_store(cx);
-    connected(cx, &store);
-    wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-    let screen = open_run_screen(vcx, &root, "keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "deny"));
-    let approval = reno_proto::ApprovalId::from_suffix("keeperpush").unwrap();
-    let input = screen
-        .read_with(vcx, |s, _| s.reason_input(&approval).cloned())
-        .expect("the reason field");
-    input.update_in(vcx, |c, window, cx| {
-        c.fill("not tonight", window, cx);
-        c.submit(window, cx);
-    });
-    wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
-    wait_drawn(vcx, |vcx| {
-        store.update(vcx, |s, cx| s.load_history(cx));
-        history_of(&store, vcx, "appr_keeperpush")
-            .is_some_and(|r| r.message.as_deref() == Some("not tonight"))
-    });
-}
-
-#[gpui::test]
 fn the_approve_menu_keeps_the_answer_for_the_bot(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
@@ -1297,7 +1245,7 @@ fn an_older_daemon_offers_only_what_it_keeps(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn without_rules_or_reasons_the_card_is_approve_and_deny(cx: &mut TestAppContext) {
+fn without_rules_the_panel_is_allow_once_and_deny(cx: &mut TestAppContext) {
     let store = store_with(
         cx,
         FakeConfig {
@@ -1312,16 +1260,11 @@ fn without_rules_or_reasons_the_card_is_approve_and_deny(cx: &mut TestAppContext
     wait_until(cx, |cx| crate::tests::approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    let screen = open_run_screen(vcx, &root, "scout1");
+    open_run_screen(vcx, &root, "scout1");
     wait_drawn(vcx, |vcx| painted(vcx, "deny"));
     assert!(
         !painted(vcx, "approve-more"),
         "no menu without standing rules"
-    );
-    let approval = reno_proto::ApprovalId::from_suffix("scoutfetch").unwrap();
-    assert!(
-        !screen.read_with(vcx, |s, cx| s.shows_reason(&approval, cx)),
-        "no reason field the daemon would drop"
     );
     click(vcx, "deny");
     wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);

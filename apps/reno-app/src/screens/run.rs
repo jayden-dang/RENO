@@ -25,7 +25,7 @@ use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
 use crate::transcript::{self as model, Built, Facts, Key, Resolution, Row, ToolEntry};
-use crate::ui::composer::{Composer, ReasonEvent};
+use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
@@ -34,7 +34,6 @@ use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewS
 use crate::vm::convo;
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
-use crate::vm::rules;
 
 mod changes;
 mod dock;
@@ -47,10 +46,8 @@ mod syntax;
 mod terminal;
 mod transcript;
 
+pub(crate) use dock::bind_keys;
 pub(crate) use panel::PanelAction;
-
-/// Keys of the Run screen.
-pub(crate) fn bind_keys(_cx: &mut gpui::App) {}
 
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
@@ -138,10 +135,17 @@ pub(crate) struct RunScreen {
     last_writes: usize,
     changes_timer: Option<Task<()>>,
     steer: Entity<Composer>,
-    /// The reason field under each held action of this run: typing in it and pressing Deny (or
-    /// Enter) denies with those words (ui-brief 2026-11-17, from direction B).
-    reasons: HashMap<ApprovalId, (Entity<Composer>, Subscription)>,
-    /// The held action whose Approve ▾ menu is open.
+    /// The approval panel's focus: it never takes the keyboard on its own; a click on it or ⌘J
+    /// gives it the keys (the mis-press guard).
+    approval_focus: FocusHandle,
+    /// The approval the panel was last drawn for, and whether the steer box stays on screen
+    /// under it (the owner was typing when it opened).
+    panel_for: Option<ApprovalId>,
+    keep_composer: bool,
+    /// The dock was drawn at least once: a panel already waiting when the screen opened is not
+    /// one the owner was interrupted by.
+    dock_drawn: bool,
+    /// The held action whose ▾ menu is open.
     menu_open: Option<ApprovalId>,
     _store: Subscription,
 }
@@ -213,7 +217,10 @@ impl RunScreen {
             last_writes: 0,
             changes_timer: None,
             steer,
-            reasons: HashMap::new(),
+            approval_focus: cx.focus_handle(),
+            panel_for: None,
+            keep_composer: false,
+            dock_drawn: false,
             menu_open: None,
         };
         screen.refresh(cx);
@@ -231,21 +238,6 @@ impl RunScreen {
     pub(crate) fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         use gpui::Focusable as _;
         self.steer.read(cx).focus_handle(cx)
-    }
-
-    /// Whether the card offers a reason field: the daemon takes one with a denial.
-    pub(crate) fn shows_reason(&self, approval: &ApprovalId, cx: &gpui::App) -> bool {
-        self.reasons.contains_key(approval)
-            && self
-                .store
-                .read(cx)
-                .state()
-                .supports(reno_proto::FEATURE_APPROVAL_MESSAGE)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reason_input(&self, approval: &ApprovalId) -> Option<&Entity<Composer>> {
-        self.reasons.get(approval).map(|(input, _)| input)
     }
 
     #[cfg(test)]
@@ -322,7 +314,7 @@ impl RunScreen {
             .cloned()
             .collect();
         self.rebuild_rows(routing, &pending, cx);
-        self.keep_reasons(&pending, cx);
+        self.keep_menu(&pending);
         self.resolve_panel_key(cx);
         self.follow_changes(cx);
         self.follow_thread(cx);
@@ -649,30 +641,14 @@ impl RunScreen {
         }
     }
 
-    /// One reason field per held action of this run; a field goes when its action is answered.
-    fn keep_reasons(&mut self, pending: &[Approval], cx: &mut Context<Self>) {
-        self.reasons
-            .retain(|id, _| pending.iter().any(|approval| &approval.id == id));
+    /// The ▾ menu closes with its approval.
+    fn keep_menu(&mut self, pending: &[Approval]) {
         if self
             .menu_open
             .as_ref()
             .is_some_and(|id| !pending.iter().any(|approval| &approval.id == id))
         {
             self.menu_open = None;
-        }
-        for approval in pending {
-            if self.reasons.contains_key(&approval.id) {
-                continue;
-            }
-            let store = self.store.clone();
-            let input = cx.new(|cx| Composer::reason(store, cx));
-            let id = approval.id.clone();
-            let events = cx.subscribe(&input, move |this, _, event: &ReasonEvent, cx| {
-                if let ReasonEvent::Submitted(message) = event {
-                    this.deny(id.clone(), message.clone(), cx);
-                }
-            });
-            self.reasons.insert(approval.id.clone(), (input, events));
         }
     }
 
@@ -771,7 +747,7 @@ impl Render for RunScreen {
                     .items_center()
                     .px(px(24.0))
                     .child(transcript)
-                    .child(self.dock()),
+                    .child(self.dock(window, cx)),
             );
 
         let stage = div()
