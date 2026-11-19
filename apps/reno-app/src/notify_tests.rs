@@ -391,7 +391,7 @@ fn the_notifications_tab_toggles_persist_beside_the_socket(cx: &mut TestAppConte
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     root.update_in(vcx, |r, window, cx| r.navigate(Nav::Settings, window, cx));
     draw(vcx);
-    click(vcx, "tab-Notifications");
+    click(vcx, "settings-notifications");
     wait_drawn(vcx, |vcx| painted(vcx, "notify-finished"));
     for key in ["notifications", "backgroundOnly", "finished", "dockBadge"] {
         assert!(painted(vcx, &format!("notify-{key}")), "{key}");

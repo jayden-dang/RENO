@@ -908,6 +908,42 @@ pub(crate) fn build(state: &State, now_ms: u64) -> ExecutorsView {
     build_with(state, now_ms, None)
 }
 
+/// The rows of the Executors page, unsorted.
+fn rows_of(
+    state: &State,
+    now_ms: u64,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> Vec<ExecutorRow> {
+    let busy = busy_executors(state);
+    let listing = listing.filter(|_| state.supports(reno_proto::FEATURE_EXECUTOR_REGISTRY));
+    let ctx = Ctx {
+        installs: state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL),
+        maintain: state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN),
+        now_ms,
+        listing,
+        busy: &busy,
+    };
+    state
+        .executors()
+        .iter()
+        .filter(|info| !shown_in_registry_group(info, listing))
+        .map(|info| row(info, ctx))
+        .collect()
+}
+
+/// How many executors can't take runs: the count beside Settings in the sidebar and beside
+/// Executors in the settings navigation, the same number the Executors page's lede states.
+pub(crate) fn needing_count(
+    state: &State,
+    now_ms: u64,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> usize {
+    rows_of(state, now_ms, listing)
+        .iter()
+        .filter(|r| r.group == Group::NeedsYou)
+        .count()
+}
+
 /// [`build`] with the registry's last answer: the names of added agents, which are delisted or
 /// the person's own, and which are still being added (those are on the registry group).
 pub(crate) fn build_with(
@@ -917,21 +953,7 @@ pub(crate) fn build_with(
 ) -> ExecutorsView {
     let installs = state.supports(reno_proto::FEATURE_EXECUTOR_INSTALL);
     let maintain = state.supports(reno_proto::FEATURE_EXECUTOR_MAINTAIN);
-    let busy = busy_executors(state);
-    let listing = listing.filter(|_| state.supports(reno_proto::FEATURE_EXECUTOR_REGISTRY));
-    let ctx = Ctx {
-        installs,
-        maintain,
-        now_ms,
-        listing,
-        busy: &busy,
-    };
-    let mut rows: Vec<ExecutorRow> = state
-        .executors()
-        .iter()
-        .filter(|info| !shown_in_registry_group(info, listing))
-        .map(|info| row(info, ctx))
-        .collect();
+    let mut rows = rows_of(state, now_ms, listing);
     // Groups in order; what needs the human first within Needs you, the rest by name.
     rows.sort_by(|a, b| {
         a.group
@@ -1175,6 +1197,7 @@ mod tests {
         let view = build(&state, NOW);
         assert_eq!(view.lede, "1 ready to run");
         assert_eq!(view.needing, 0);
+        assert_eq!(needing_count(&state, NOW, None), 0);
         let row = only(&view);
         assert_eq!(row.name, "Claude Code");
         assert_eq!(row.need, None);
@@ -1386,6 +1409,8 @@ mod tests {
             ["codex", "acp.grok", "acp.hermes", "claude-code", "mock"]
         );
         assert_eq!(view.needing, 3);
+        // The sidebar's Settings count and the Executors category say the same number.
+        assert_eq!(needing_count(&state, NOW, None), 3);
         assert_eq!(view.lede, "3 executors can't take runs");
         assert_eq!(
             view.detail,

@@ -558,7 +558,7 @@ fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
     draw(vcx);
 
-    // Every nav row has a screen; Settings is a row now.
+    // Settings is the sidebar's footer row.
     click(vcx, "nav-Settings");
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
 }

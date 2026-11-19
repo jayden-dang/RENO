@@ -1,6 +1,7 @@
-//! Navigation destinations: the sidebar's five rows (ui-brief 2026-11-17). Screens of later
-//! phases (flows, bots, teams, boards, messages, evaluations, improvements) get a row when they
-//! are built, not before.
+//! Navigation destinations. The sidebar lists Home, Runs and Triggers; Settings is the sidebar's
+//! footer row, and Executors lives inside Settings (ui-brief 2026-11-19, settings).
+//! `Nav::Executors` stays a destination so the composer, a run and the palette can deep-link to
+//! Settings › Executors.
 
 use crate::ui::icon::Icon;
 
@@ -9,13 +10,17 @@ pub(crate) enum Nav {
     Home,
     Runs,
     Triggers,
+    /// Settings › Executors.
     Executors,
     Settings,
 }
 
 impl Nav {
     /// The sidebar's rows, in order.
-    pub(crate) const ROWS: [Self; 5] = [
+    pub(crate) const ROWS: [Self; 3] = [Self::Home, Self::Runs, Self::Triggers];
+
+    /// Every destination, in the order the palette offers them.
+    pub(crate) const ALL: [Self; 5] = [
         Self::Home,
         Self::Runs,
         Self::Triggers,
@@ -50,8 +55,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_sidebar_has_five_rows_and_no_inbox() {
+    fn the_sidebar_lists_three_rows_and_settings_is_not_one() {
         let labels: Vec<_> = Nav::ROWS.iter().map(|n| n.label()).collect();
+        assert_eq!(labels, ["Home", "Runs", "Triggers"]);
+    }
+
+    #[test]
+    fn every_destination_is_still_reachable() {
+        let labels: Vec<_> = Nav::ALL.iter().map(|n| n.label()).collect();
         assert_eq!(
             labels,
             ["Home", "Runs", "Triggers", "Executors", "Settings"]

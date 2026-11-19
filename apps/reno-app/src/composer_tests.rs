@@ -970,9 +970,14 @@ fn a_signed_out_harness_wears_a_dot_and_the_account_row_says_who_is_signed_in(
     click(vcx, "picker-account");
     draw(vcx);
     assert!(!painted(vcx, "model-picker"), "it leaves the picker");
+    // For Settings › Executors.
     assert_eq!(
         root.read_with(vcx, |r, _| r.nav()),
-        crate::nav::Nav::Executors
+        crate::nav::Nav::Settings
+    );
+    assert_eq!(
+        root.read_with(vcx, |r, cx| r.settings().read(cx).category()),
+        crate::vm::settings_nav::Category::Executors
     );
 }
 

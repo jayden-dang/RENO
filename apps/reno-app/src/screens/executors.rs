@@ -1,7 +1,8 @@
-//! Executors: each agent CLI Reno drives, one 40 px line apiece, grouped by what a person can do
-//! about it (UI brief 2026-11-18). The headline says how many can take runs; a line that blocks
-//! has one control that fixes it: Sign in…, Update, Install / Install…, or Retry. Live through
-//! `executors.watch`.
+//! Executors, a page of Settings (ui-brief 2026-11-19, settings): each agent CLI Reno drives, one
+//! two-line row apiece in a card per group of what a person can do about it. The title says how
+//! many can take runs; a row that blocks has one control that fixes it: Sign in…, Update,
+//! Install / Install…, or Retry. Live through `executors.watch`. The ACP registry is the same
+//! entity's other page, "Add from registry".
 //!
 //! Reno runs installs and updates as jobs (`executor.job.*`): the line shows them queued, running
 //! and failed, and the view-model turns the daemon's job into words. An interactive step (a
@@ -33,8 +34,15 @@ use crate::vm::executors::{
     Need, RecipeView,
 };
 
-/// The column of the page.
-const COLUMN: f32 = 980.0;
+/// Which of the two Settings pages this entity draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// The executors Reno drives.
+    #[default]
+    Roster,
+    /// Agents to add from the ACP registry.
+    Registry,
+}
 
 pub(crate) struct ExecutorsScreen {
     store: Entity<Store>,
@@ -51,6 +59,7 @@ pub(crate) struct ExecutorsScreen {
     ticking: bool,
     /// The ACP registry group: filter, search, open lines, forms and the keys editors.
     registry: RegistryUi,
+    part: Part,
     scroll: gpui::ScrollHandle,
 }
 
@@ -148,7 +157,17 @@ impl ExecutorsScreen {
             terminal: BTreeSet::new(),
             ticking: false,
             registry: RegistryUi::new(cx),
+            part: Part::Roster,
             scroll: gpui::ScrollHandle::new(),
+        }
+    }
+
+    /// Draws the roster or the registry page.
+    pub(crate) fn set_part(&mut self, part: Part, cx: &mut Context<Self>) {
+        if self.part != part {
+            self.part = part;
+            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            cx.notify();
         }
     }
 
@@ -1162,7 +1181,13 @@ impl ExecutorsScreen {
         body
     }
 
-    fn line(&mut self, row: &ExecutorRow, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn line(
+        &mut self,
+        row: &ExecutorRow,
+        last: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let open = self.expanded.contains(&row.id)
             || (self.reviewing.contains(&row.id) && row.recipe.is_some());
         let running = row.job.as_ref().is_some_and(|j| j.running());
@@ -1209,16 +1234,23 @@ impl ExecutorsScreen {
                     theme.faint,
                 ))
                 .child(dot)
-                .child(kit::logo(theme, &row.id, 18.0))
+                .child(kit::logo(theme, &row.id, 20.0))
                 .child(
                     div()
-                        .flex_none()
-                        .w(px(108.0))
-                        .truncate()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(SharedString::from(row.name.clone())),
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(SharedString::from(row.name.clone())),
+                        )
+                        .child(self.middle(row, theme).text_size(px(12.5))),
                 )
-                .child(self.middle(row, theme))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(&id, cx)))
         };
         let confirm = self.remove_confirm(row, theme, cx);
@@ -1227,14 +1259,14 @@ impl ExecutorsScreen {
             .w_full()
             .flex()
             .flex_col()
-            .border_b_1()
-            .border_color(theme.hairline)
+            .when(!last, |d| d.border_b_1().border_color(theme.hairline))
             .when(open, |d| d.bg(theme.row_selected()))
             .when(running && !open, |d| d.bg(info_color(theme).opacity(0.06)))
             .child(
                 div()
-                    .h(px(40.0))
-                    .px(px(8.0))
+                    .min_h(px(56.0))
+                    .py(px(10.0))
+                    .px(px(14.0))
                     .flex()
                     .items_center()
                     .gap(px(12.0))
@@ -1268,10 +1300,7 @@ impl ExecutorsScreen {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .py(px(6.0))
-            .px(px(8.0))
-            .text_size(px(12.0))
-            .text_color(theme.muted)
+            .pb(px(10.0))
             .when(group == Group::Test, |d| {
                 d.cursor_pointer()
                     .child(icon(
@@ -1288,24 +1317,35 @@ impl ExecutorsScreen {
                         cx.notify();
                     }))
             })
-            .child(div().font_weight(FontWeight::MEDIUM).child(group.label()))
             .child(
                 div()
-                    .text_color(theme.faint)
-                    .child(format!("{}", rows.len())),
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(group.label()),
             )
+            .child(page::count(theme, rows.len(), page::CountTone::Soft))
             .child(div().flex_1())
-            .children(group.note().map(|n| div().text_color(theme.faint).child(n)));
+            .children(
+                group
+                    .note()
+                    .map(|n| div().text_size(px(12.5)).text_color(theme.faint).child(n)),
+            );
+        let count = rows.len();
         let lines: Vec<AnyElement> = if collapsed {
             vec![]
         } else {
-            rows.iter().map(|r| self.line(r, theme, cx)).collect()
+            rows.iter()
+                .enumerate()
+                .map(|(i, r)| self.line(r, i + 1 == count, theme, cx))
+                .collect()
         };
         div()
             .flex()
             .flex_col()
             .child(label)
-            .children(lines)
+            .when(!lines.is_empty(), |d| {
+                d.child(page::table_frame(theme, page::table()).children(lines))
+            })
             .into_any_element()
     }
 }
@@ -1390,65 +1430,72 @@ impl Render for ExecutorsScreen {
             .child(check_all);
 
         let blocked = view.needing > 0;
-        let headline = div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if blocked { theme.danger } else { theme.text })
-                    .child(SharedString::from(view.lede.clone())),
-            )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(theme.muted)
-                    .child(SharedString::from(view.detail.clone())),
-            );
+        let page_body = match self.part {
+            Part::Roster => {
+                let headline = div()
+                    .flex()
+                    .items_start()
+                    .gap(px(16.0))
+                    .child(
+                        page::title(&theme, view.lede.clone(), view.detail.clone(), blocked)
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .child(trailing.pt(px(2.0)));
+                let groups: Vec<AnyElement> = Group::ALL
+                    .iter()
+                    .filter_map(|g| {
+                        let in_group = view.group(*g);
+                        (!in_group.is_empty()).then_some((*g, in_group))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|(g, in_group)| self.group(g, &in_group, &theme, cx))
+                    .collect();
+                page::content(page::SETTINGS)
+                    .gap(px(30.0))
+                    .when_some(view.banner.as_ref(), |c, b| {
+                        c.child(page::banner(&theme, b, Some(retry.clone())))
+                    })
+                    .child(headline)
+                    .when_some(
+                        page::note(
+                            &theme,
+                            &view.rows,
+                            "The daemon lists no executors. Start it with an agent CLI installed.",
+                        ),
+                        ParentElement::child,
+                    )
+                    .children(groups)
+            }
+            Part::Registry => {
+                let registry_group = self
+                    .registry_view(cx)
+                    .map(|registry| self.registry_group(&registry, &theme, cx));
+                let missing = registry_group.is_none();
+                page::content(page::SETTINGS)
+                    .gap(px(30.0))
+                    .when_some(view.banner.as_ref(), |c, b| {
+                        c.child(page::banner(&theme, b, Some(retry.clone())))
+                    })
+                    .child(page::title(
+                        &theme,
+                        "Add from the ACP registry",
+                        if missing {
+                            "This daemon has no registry. Update Reno to add agents from it."
+                        } else {
+                            "Agents Reno can add and drive, checked before it offers Add."
+                        },
+                        false,
+                    ))
+                    .children(registry_group)
+            }
+        };
 
-        let groups: Vec<AnyElement> = Group::ALL
-            .iter()
-            .filter_map(|g| {
-                let in_group = view.group(*g);
-                (!in_group.is_empty()).then_some((*g, in_group))
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|(g, in_group)| self.group(g, &in_group, &theme, cx))
-            .collect();
-        let registry_group = self
-            .registry_view(cx)
-            .map(|registry| self.registry_group(&registry, &theme, cx));
-
-        let body = page::content(COLUMN)
-            .gap(px(18.0))
-            .when_some(view.banner.as_ref(), |c, b| {
-                c.child(page::banner(&theme, b, Some(retry)))
-            })
-            .child(headline)
-            .when_some(
-                page::note(
-                    &theme,
-                    &view.rows,
-                    "The daemon lists no executors. Start it with an agent CLI installed.",
-                ),
-                ParentElement::child,
-            )
-            .children(groups)
-            .children(registry_group);
-
-        div()
-            .id("executors")
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(page::header(&theme, "Executors", trailing))
-            .child(
-                page::column("executors-scroll")
-                    .track_scroll(&self.scroll)
-                    .child(body),
-            )
+        div().id("executors").size_full().flex().flex_col().child(
+            page::settings_column("executors-scroll")
+                .track_scroll(&self.scroll)
+                .child(page_body),
+        )
     }
 }

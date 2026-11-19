@@ -30,7 +30,7 @@ use crate::screens::executors::ExecutorsScreen;
 use crate::screens::home::HomeScreen;
 use crate::screens::run::{PanelAction, RunScreen};
 use crate::screens::runs::RunsScreen;
-use crate::screens::settings::SettingsScreen;
+use crate::screens::settings::{NavActions, SettingsScreen};
 use crate::screens::triggers::TriggersScreen;
 use crate::store::{Store, StoreEvent};
 use crate::ui::composer;
@@ -42,6 +42,7 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
+use crate::vm::settings_nav::Category;
 
 /// How the app was launched.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -77,9 +78,13 @@ pub(crate) struct Options {
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
-    /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
-    /// state once it has loaded (screenshots, reviews).
+    /// remove:acp.cline,offline,own`: open Settings › Add from registry and put the registry
+    /// group in a state once it has loaded (screenshots, reviews). Steps on an added agent's line
+    /// (`remove:`, `signin:`) act on Settings › Executors, which is not the page shown.
     pub(crate) registry_demo: Option<String>,
+    /// `RENO_OPEN=settings:<page>` (`executors`, `registry`, `definitions`, `policy`,
+    /// `notifications`, `daemon`): open Settings on that page (screenshots, reviews).
+    pub(crate) open_settings: Option<Category>,
     /// `RENO_DATA_DIR`: where the app keeps its own files (the saved panel state). With
     /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
     /// data dir.
@@ -124,6 +129,16 @@ impl Options {
             Some("triggers") => Some(Nav::Triggers),
             Some("executors") => Some(Nav::Executors),
             Some("settings") => Some(Nav::Settings),
+            Some(other) if other.starts_with("settings:") => {
+                let key = &other["settings:".len()..];
+                options.open_settings = Some(
+                    Category::ALL
+                        .into_iter()
+                        .find(|c| c.key() == key)
+                        .ok_or_else(|| format!("RENO_OPEN: no settings page {key}"))?,
+                );
+                Some(Nav::Settings)
+            }
             Some(other) if other.starts_with("project:") => {
                 options.open_project = Some(PathBuf::from(&other["project:".len()..]));
                 None
@@ -205,6 +220,8 @@ pub(crate) struct Start {
     /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
     /// state once it has loaded (screenshots, reviews).
     pub(crate) registry_demo: Option<String>,
+    /// The Settings page to open on.
+    pub(crate) open_settings: Option<Category>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -258,6 +275,7 @@ pub(crate) fn run(options: Options) {
             terminal_input: options.terminal_input.clone(),
             follow_up: options.follow_up.clone(),
             registry_demo: options.registry_demo.clone(),
+            open_settings: options.open_settings,
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -303,6 +321,7 @@ pub(crate) fn open_window(
         terminal_input,
         follow_up,
         registry_demo,
+        open_settings,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -323,13 +342,17 @@ pub(crate) fn open_window(
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
+                if let Some(category) = open_settings {
+                    root.open_settings(category, window, cx);
+                }
                 if let Some(script) = registry_demo {
                     // After the registry has been read.
                     cx.spawn_in(window, async move |root, cx| {
                         cx.background_executor()
                             .timer(Duration::from_millis(1500))
                             .await;
-                        root.update_in(cx, |root, _, cx| {
+                        root.update_in(cx, |root, window, cx| {
+                            root.open_settings(Category::Registry, window, cx);
                             root.executors
                                 .update(cx, |screen, cx| screen.registry_demo(&script, cx));
                         })
@@ -452,7 +475,6 @@ enum Screen {
     Run(Entity<RunScreen>),
     Project(Entity<crate::screens::project::ProjectScreen>),
     Triggers,
-    Executors,
     Settings,
 }
 
@@ -465,6 +487,8 @@ pub(crate) struct RootView {
     settings: Entity<SettingsScreen>,
     toasts: Entity<Toasts>,
     screen: Screen,
+    /// What Settings opened over: "Back to app" returns to it.
+    before_settings: Option<Screen>,
     sidebar_hidden: bool,
     /// Project folders opened or closed against their default.
     folders_toggled: std::collections::HashSet<crate::vm::projects::FolderKey>,
@@ -491,7 +515,7 @@ impl RootView {
         let runs = cx.new(|cx| RunsScreen::new(store.clone(), cx));
         let triggers = cx.new(|cx| TriggersScreen::new(store.clone(), cx));
         let executors = cx.new(|cx| ExecutorsScreen::new(store.clone(), cx));
-        let settings = cx.new(|cx| SettingsScreen::new(store.clone(), cx));
+        let settings = cx.new(|cx| SettingsScreen::new(store.clone(), executors.clone(), cx));
         let subscriptions = vec![
             cx.subscribe_in(
                 &home.read(cx).composer().clone(),
@@ -534,7 +558,7 @@ impl RootView {
                             toast::Tone::Info,
                             "Executor installed",
                             format!(
-                                "{} is installed. Check its sign-in on the Executors screen.",
+                                "{} is installed. Check its sign-in in Settings › Executors.",
                                 crate::summary::executor_name(id)
                             ),
                         );
@@ -618,6 +642,7 @@ impl RootView {
             pending_fired: None,
             toasts,
             screen: Screen::Home,
+            before_settings: None,
             sidebar_hidden: false,
             folders_toggled: std::collections::HashSet::new(),
             appearance_override,
@@ -659,7 +684,6 @@ impl RootView {
             Screen::Home => Nav::Home,
             Screen::Runs | Screen::Run(_) | Screen::Project(_) => Nav::Runs,
             Screen::Triggers => Nav::Triggers,
-            Screen::Executors => Nav::Executors,
             Screen::Settings => Nav::Settings,
         }
     }
@@ -735,6 +759,13 @@ impl RootView {
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
         self.leave_home(cx);
+        let into_settings = matches!(nav, Nav::Settings | Nav::Executors);
+        if !into_settings {
+            self.before_settings = None;
+        } else if !matches!(self.screen, Screen::Settings) {
+            self.before_settings = Some(self.screen.clone());
+            self.settings.update(cx, |screen, cx| screen.opened(cx));
+        }
         self.screen = match nav {
             Nav::Runs => {
                 self.runs.update(cx, |screen, cx| screen.shown(cx));
@@ -742,8 +773,11 @@ impl RootView {
             }
             Nav::Triggers => Screen::Triggers,
             Nav::Executors => {
-                self.executors.update(cx, |screen, cx| screen.shown(cx));
-                Screen::Executors
+                self.settings.update(cx, |screen, cx| {
+                    screen.set_category(Category::Executors, cx);
+                    screen.shown(cx);
+                });
+                Screen::Settings
             }
             Nav::Settings => {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
@@ -753,6 +787,41 @@ impl RootView {
         };
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// Shows one page of Settings.
+    pub(crate) fn open_settings(
+        &mut self,
+        category: Category,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(Nav::Settings, window, cx);
+        self.settings
+            .update(cx, |screen, cx| screen.set_category(category, cx));
+    }
+
+    /// "Back to app": the screen Settings opened over, or Home.
+    pub(crate) fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.before_settings.take() {
+            Some(Screen::Run(run)) => {
+                // The kept screen, not a new one: its draft and its panel stay as they were.
+                let id = run.read(cx).run_id().clone();
+                self.store
+                    .update(cx, |store, cx| store.look_at(Some(id), cx));
+                self.screen = Screen::Run(run);
+                self.focus_composer(window, cx);
+                cx.notify();
+            }
+            Some(Screen::Project(project)) => {
+                self.screen = Screen::Project(project);
+                self.focus_composer(window, cx);
+                cx.notify();
+            }
+            Some(Screen::Runs) => self.navigate(Nav::Runs, window, cx),
+            Some(Screen::Triggers) => self.navigate(Nav::Triggers, window, cx),
+            Some(Screen::Home | Screen::Settings) | None => self.navigate(Nav::Home, window, cx),
+        }
     }
 
     /// Shows one run and follows its transcript.
@@ -983,6 +1052,36 @@ impl Render for RootView {
             sidebar::WIDTH + 8.0
         }));
         let on_run = matches!(self.screen, Screen::Run(_));
+        let in_settings = matches!(self.screen, Screen::Settings);
+        let (needing, connection) = {
+            let store = self.store.read(cx);
+            (
+                crate::vm::executors::needing_count(
+                    store.state(),
+                    store.now_ms(),
+                    store.registry().listing.as_ref(),
+                ),
+                store.connection(),
+            )
+        };
+        // While Settings shows, its navigation takes the sidebar's place.
+        let settings_nav = (in_settings && !self.sidebar_hidden).then(|| {
+            let this = cx.entity();
+            let actions = NavActions {
+                back: {
+                    let this = this.clone();
+                    Rc::new(move |window: &mut Window, cx: &mut App| {
+                        this.update(cx, |root, cx| root.leave_settings(window, cx));
+                    })
+                },
+                hide: Rc::new(move |_: &mut Window, cx: &mut App| {
+                    this.update(cx, |root, cx| root.toggle_sidebar(cx));
+                }),
+            };
+            self.settings.update(cx, |screen, cx| {
+                screen.nav_column(&theme, needing, connection, &actions, cx)
+            })
+        });
 
         let panel = div()
             .id("canvas-panel")
@@ -1006,7 +1105,6 @@ impl Render for RootView {
                 Screen::Run(run) => run.clone().into_any_element(),
                 Screen::Project(project) => project.clone().into_any_element(),
                 Screen::Triggers => self.triggers.clone().into_any_element(),
-                Screen::Executors => self.executors.clone().into_any_element(),
                 Screen::Settings => self.settings.clone().into_any_element(),
             });
 
@@ -1062,13 +1160,18 @@ impl Render for RootView {
             .font_family(SANS)
             .text_size(px(13.5))
             .when(!self.sidebar_hidden, |root| {
-                root.child(sidebar::sidebar(
-                    &theme,
-                    self.store.read(cx),
-                    self.nav(),
-                    &self.folders_toggled,
-                    &handlers,
-                ))
+                if let Some(nav) = settings_nav {
+                    root.child(nav)
+                } else {
+                    root.child(sidebar::sidebar(
+                        &theme,
+                        self.store.read(cx),
+                        self.nav(),
+                        needing,
+                        &self.folders_toggled,
+                        &handlers,
+                    ))
+                }
             })
             .child(main)
             .children(self.palette.clone())
@@ -1122,9 +1225,14 @@ mod tests {
                 terminal_input: None,
                 follow_up: None,
                 registry_demo: None,
+                open_settings: None,
                 data_dir: None,
             })
         );
+        let policy = parse(&[], &[("RENO_OPEN", "settings:policy")]).unwrap();
+        assert_eq!(policy.open, Some(Nav::Settings));
+        assert_eq!(policy.open_settings, Some(Category::Policy));
+        assert!(parse(&[], &[("RENO_OPEN", "settings:nope")]).is_err());
         let run = parse(&[], &[("RENO_OPEN", "run_keeper1")]).unwrap();
         assert_eq!(run.open, None);
         assert_eq!(

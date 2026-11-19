@@ -79,6 +79,8 @@ icons! {
     Search => "search",
     Settings => "settings",
     Shield => "shield",
+    Bell => "bell",
+    Server => "server",
     Sidebar => "sidebar",
     Sliders => "sliders",
     Spark => "spark",

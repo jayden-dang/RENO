@@ -842,10 +842,12 @@ pub(crate) fn remove_refused_words(name: &str) -> String {
     format!("Can't remove {name} while a run on it is queued or live.")
 }
 
-/// The toast when an add ends: "Cline added. It can take runs." / "... One step needs you: sign in."
+/// The toast when an add ends: "Cline added. It can take runs." / "... One step needs you: sign
+/// in, in Settings › Executors."
 pub(crate) fn added_words(name: &str, sign_in: bool) -> String {
     if sign_in {
-        format!("{name} added. One step needs you: sign in.")
+        // The add starts on the registry page; the sign-in is on the roster, so say where.
+        format!("{name} added. One step needs you: sign in, in Settings › Executors.")
     } else {
         format!("{name} added. It can take runs.")
     }
@@ -1545,7 +1547,7 @@ mod tests {
         );
         assert_eq!(
             added_words("Cline", true),
-            "Cline added. One step needs you: sign in."
+            "Cline added. One step needs you: sign in, in Settings › Executors."
         );
         assert!(own_agent_ready("mine", "my-agent --acp"));
         assert!(!own_agent_ready(" ", "my-agent") && !own_agent_ready("mine", ""));
