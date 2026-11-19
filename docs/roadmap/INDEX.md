@@ -21,20 +21,43 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 
 ## Focus
 
-**Now:** MILE-1
-**Next:** MILE-2, MILE-3
+**Now:** MILE-10
+**Next:** MILE-1
 
 | ID | Milestone | Depends-on | Commitment |
 |---|---|---|---|
-| MILE-1 | Harness parity | none | Planned |
-| MILE-2 | Choose where and how a task runs | none | Planned |
+| MILE-10 | Workflow design on a mocked daemon | none | Planned |
+| MILE-1 | Harness parity | MILE-10 | Planned |
+| MILE-2 | Choose where and how a task runs | MILE-10 | Planned |
 | MILE-3 | Harness depth | MILE-1 | Planned |
 | MILE-4 | Agents hand work to each other | MILE-1, MILE-3 | Planned |
-| MILE-5 | Notices and terminal status | none | Planned |
-| MILE-6 | The redesigned app | MILE-2, MILE-3, MILE-4, MILE-5 | Planned |
+| MILE-5 | Notices and terminal status | MILE-10 | Planned |
+| MILE-6 | The app on the real daemon | MILE-10, MILE-2, MILE-3, MILE-4, MILE-5 | Planned |
 | MILE-7 | Bots made by chat | MILE-4 | Planned |
 | MILE-8 | Teams on one goal | MILE-4 | Planned |
 | MILE-9 | Checked work and gated improvement | MILE-8 | Planned |
+
+## MILE-10 — Workflow design on a mocked daemon
+
+**Outcome:** The owner clicks through every main workflow in the new design on mocked data (start a task in a project, branch or worktree; answer questions and approvals from one inbox; follow a run with its subagents, background tasks and plan; hand work to other harnesses; make a bot by chat; manage executors and settings) and grades each one good enough or not.
+**Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8, GOAL-9
+**Members:**
+- **ROAD-30** ui-direction — After: none — Surfaces: None — the new design is drafted with `draft-ui` first
+- **ROAD-29** app-budgets-and-profiling — After: none — Surfaces: `xtask/src/bench.rs`, `docs/BENCHMARKS.md`, `apps/reno-app/`
+- **ROAD-52** mocked-contracts — After: none — Surfaces: `crates/reno-client/src/fake/`, `crates/reno-proto/`
+- **ROAD-31** composer — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/`
+- **ROAD-32** sidebar-and-sessions — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/`
+- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/`
+- **ROAD-34** palette-and-keymap — After: ROAD-30 — Surfaces: `apps/reno-app/`
+- **ROAD-35** panel-surfaces — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/src/panel/`
+- **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/`
+- **ROAD-38** first-run-and-shell — After: ROAD-30 — Surfaces: `apps/reno-app/`
+- **ROAD-53** workflow-review-and-contract-drafts — After: ROAD-31, ROAD-32, ROAD-33, ROAD-34, ROAD-35, ROAD-37, ROAD-38 — Surfaces: `docs/specs/`
+**Depends-on:** none
+**Commitment:** Planned
+**Closed:** None
+**Deferred:** None
+**Blockers:** None
 
 ## MILE-1 — Harness parity
 
@@ -47,7 +70,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-4** harness-decides-permissions — After: ROAD-2 — Surfaces: `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/`, `crates/reno-harness/src/wire/`
 - **ROAD-5** always-allow-into-harness-settings — After: ROAD-4 — Surfaces: `crates/reno-harness/src/drivers/`, `apps/renod/`, `apps/reno/`
 - **ROAD-6** cli-reaches-every-method — After: none — Surfaces: `apps/reno/`
-**Depends-on:** none
+**Depends-on:** MILE-10
 **Commitment:** Planned
 **Closed:** None
 **Deferred:** None
@@ -63,7 +86,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-9** thread-names-pins-archive — After: none — Surfaces: `crates/reno-proto/src/thread.rs`, `crates/reno-store/`, `apps/reno/`
 - **ROAD-10** run-control — After: ROAD-4 — Surfaces: `crates/reno-kernel/src/supervisor.rs`, `crates/reno-store/`, `crates/reno-harness/src/drivers/`
 - **ROAD-11** workspace-and-git-views — After: none — Surfaces: `crates/reno-proto/src/workspace.rs`, `crates/reno-proto/src/files.rs`, `apps/renod/`
-**Depends-on:** none
+**Depends-on:** MILE-10
 **Commitment:** Planned
 **Closed:** None
 **Deferred:** None
@@ -113,29 +136,21 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-26** banners-from-the-daemon — After: none — Surfaces: `apps/renod/`, `crates/reno-notify/`
 - **ROAD-27** terminal-program-status — After: none — Surfaces: `crates/reno-term/`, `apps/renod/`
 - **ROAD-28** terminal-search-and-links — After: none — Surfaces: `crates/reno-term/`, `apps/reno-app/src/terminal.rs`
-**Depends-on:** none
+**Depends-on:** MILE-10
 **Commitment:** Planned
 **Closed:** None
 **Deferred:** None
 **Blockers:** None
 
-## MILE-6 — The redesigned app
+## MILE-6 — The app on the real daemon
 
-**Outcome:** The owner does from the app everything MILE-1 to MILE-5 made possible from the CLI, in a new design, and the app stays inside written idle, streaming and cold-start budgets.
+**Outcome:** Every workflow designed in MILE-10 runs on the real daemon instead of mocks, and the app stays inside its written idle, streaming and cold-start budgets.
 **Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8
 **Members:**
-- **ROAD-29** app-budgets-and-profiling — After: none — Surfaces: `xtask/src/bench.rs`, `docs/BENCHMARKS.md`, `apps/reno-app/`
-- **ROAD-30** ui-direction — After: none — Surfaces: None — the new design is drafted with `draft-ui` first
-- **ROAD-31** composer — After: ROAD-30 — Surfaces: `apps/reno-app/`
-- **ROAD-32** sidebar-and-sessions — After: ROAD-30 — Surfaces: `apps/reno-app/`
-- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/`
-- **ROAD-34** palette-and-keymap — After: ROAD-30 — Surfaces: `apps/reno-app/`
-- **ROAD-35** panel-surfaces — After: ROAD-30 — Surfaces: `apps/reno-app/src/panel/`
-- **ROAD-36** project-actions — After: ROAD-7, ROAD-30 — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno-app/`
-- **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/`
-- **ROAD-38** first-run-and-shell — After: ROAD-30 — Surfaces: `apps/reno-app/`
+- **ROAD-54** replace-mocks-with-real-contracts — After: MILE-10 — Surfaces: `apps/reno-app/`, `crates/reno-client/`
+- **ROAD-36** project-actions — After: ROAD-7, MILE-10 — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno-app/`
 - **ROAD-39** browser-tab-for-a-person — After: ROAD-35 — Surfaces: None — needs a new boundary crate for the web view, decided when it starts
-**Depends-on:** MILE-2, MILE-3, MILE-4, MILE-5
+**Depends-on:** MILE-10, MILE-2, MILE-3, MILE-4, MILE-5
 **Commitment:** Planned
 **Closed:** None
 **Deferred:**
