@@ -419,7 +419,9 @@ impl RunScreen {
             Surface::Planned(kind) => view::planned_page(theme, kind),
             Surface::History => self.history_body(theme, width, cx),
             Surface::Terminal(slot) => self.terminal_body(theme, slot, cx),
-            Surface::SideChat(_) => view::planned_page(theme, HomeKind::SideChat),
+            Surface::SideChat(run) => self
+                .draft_agent_body(theme, &run, cx)
+                .unwrap_or_else(|| view::planned_page(theme, HomeKind::SideChat)),
             Surface::File(path) => self.file_body(theme, &path, cx),
             Surface::Files => self.files_body(theme, width, window, cx),
             Surface::Commit(sha) => self.commit_body(theme, &sha, cx),

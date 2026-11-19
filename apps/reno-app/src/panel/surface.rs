@@ -56,7 +56,9 @@ impl Surface {
             Self::Terminal(_) => "Terminal".into(),
             Self::History => "History".into(),
             Self::Commit(sha) => sha.chars().take(7).collect(),
-            Self::SideChat(_) => "Side chat".into(),
+            Self::SideChat(run) => reno_client::fake::draft35::agent_tab_title(run.as_str())
+                .unwrap_or("Side chat")
+                .into(),
             Self::Planned(kind) => kind.label().into(),
         }
     }

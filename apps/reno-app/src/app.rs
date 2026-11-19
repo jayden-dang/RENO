@@ -54,6 +54,9 @@ use crate::vm::shell::{self, Chip, History, Place};
 pub(crate) struct Options {
     /// `--fake`: run `FakeDaemon` in-process.
     pub(crate) fake: bool,
+    /// `--draft35` (with `--fake`): the ROAD-35 design draft, with `RENO_DRAFT35=a|b|c` and
+    /// `RENO_DRAFT35_STATE=busy|empty` choosing where it starts.
+    pub(crate) draft35: Option<(crate::draft35::Variant, crate::draft35::Mode)>,
     /// `RENO_APPEARANCE=light|dark`: preview a palette without touching system settings.
     pub(crate) appearance: Option<Appearance>,
     /// `RENO_QUIT_AFTER_MS`: exercise the clean-quit path without a human.
@@ -121,11 +124,28 @@ impl Options {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let mut options = Self::default();
+        let mut draft = false;
         for arg in args {
             match arg.as_str() {
                 "--fake" => options.fake = true,
+                "--draft35" => {
+                    draft = true;
+                }
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if draft {
+            if !options.fake {
+                return Err("--draft35 needs --fake".to_owned());
+            }
+            options.draft35 = Some((
+                env("RENO_DRAFT35")
+                    .and_then(|v| crate::draft35::Variant::parse(&v))
+                    .unwrap_or(crate::draft35::Variant::A),
+                env("RENO_DRAFT35_STATE")
+                    .and_then(|v| crate::draft35::Mode::parse(&v))
+                    .unwrap_or(crate::draft35::Mode::Busy),
+            ));
         }
         options.appearance = match env("RENO_APPEARANCE").as_deref() {
             Some("light") => Some(Appearance::Light),
@@ -180,6 +200,12 @@ impl Options {
                 Some(Surface::Commit(other["commit:".len()..].to_owned()))
             }
             Some("terminal") => Some(Surface::Terminal(0)),
+            // ROAD-35 draft: a subagent's tab (`agent:researcher`).
+            Some(other) if other.starts_with("agent:") => {
+                RunId::from_suffix(&format!("d35{}", &other["agent:".len()..]))
+                    .ok()
+                    .map(Surface::SideChat)
+            }
             Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
                 Some(Surface::File(other["file:".len()..].to_owned()))
             }
@@ -199,6 +225,11 @@ impl Options {
             .map(PathBuf::from);
         Ok(options)
     }
+}
+
+/// `RENO_DRAFT35_OPEN=plan,tasks,sheet:agents`: which trays the draft starts open (screenshots).
+fn env_open() -> Option<String> {
+    std::env::var("RENO_DRAFT35_OPEN").ok()
 }
 
 /// Registers Geist and Geist Mono (SIL OFL, see `assets/fonts/Geist-OFL.txt`).
@@ -278,10 +309,24 @@ pub(crate) fn run(options: Options) {
             }
             .set_without_saving(cx);
         }
+        if let Some((variant, mode)) = options.draft35 {
+            crate::draft35::install(variant, mode, env_open().as_deref(), cx);
+        }
         let toasts = toast::install(cx);
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
-            if options.fake {
+            if options.draft35.is_some() {
+                store.start_fake_with(
+                    reno_client::fake::FakeConfig {
+                        registry_agents: true,
+                        question_run: true,
+                        question_demo_runs: true,
+                        draft35_runs: true,
+                        ..reno_client::fake::FakeConfig::default()
+                    },
+                    cx,
+                );
+            } else if options.fake {
                 store.start_fake(cx);
             } else {
                 store.start_socket(cx);
@@ -1468,6 +1513,7 @@ impl Render for RootView {
             updates_open: self.updates_open,
             more_open: self.more_open,
             on_run,
+            draft_chip: crate::draft35::bar_chip(cx).filter(|_| on_run),
             more_at: self.more_at.clone(),
             updates_at: self.updates_at.clone(),
         };
@@ -1505,6 +1551,12 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &PrevPanelTab, w, cx| {
                 this.panel_action(PanelAction::PrevTab, w, cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::draft35::PrevVariant, _, cx| {
+                crate::draft35::cycle(-1, cx);
+            }))
+            .on_action(cx.listener(|_, _: &crate::draft35::NextVariant, _, cx| {
+                crate::draft35::cycle(1, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &GoRuns, window, cx| this.navigate(Nav::Runs, window, cx)),
@@ -1544,6 +1596,7 @@ impl Render for RootView {
                     .child(main),
             )
             .children(popovers)
+            .children(crate::draft35::switcher(cx))
             .children(self.palette.clone())
             .child(self.toasts.clone())
     }
@@ -1594,6 +1647,7 @@ mod tests {
             o,
             Ok(Options {
                 fake: true,
+                draft35: None,
                 appearance: Some(Appearance::Light),
                 quit_after: Some(Duration::from_millis(250)),
                 reduce_motion: true,

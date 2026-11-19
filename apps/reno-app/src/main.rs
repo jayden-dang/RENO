@@ -11,6 +11,7 @@ mod app;
 mod attach;
 mod banners;
 mod desktop;
+mod draft35;
 mod lifecycle;
 mod links;
 mod local;

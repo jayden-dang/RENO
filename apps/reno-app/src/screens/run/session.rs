@@ -94,24 +94,25 @@ impl RunScreen {
                 .collect::<Vec<_>>()
         };
 
-        body.children(failed.map(|failed| {
-            div()
-                .flex()
-                .flex_col()
-                .child(heading("Executor health"))
-                .child(health_lines(theme, &failed.row))
-                .child(self.executor_actions(&failed.row, theme, cx))
-        }))
-        .child(heading("Run"))
-        .children(group(&sections.run))
-        .when(!sections.workspace.is_empty(), |d| {
-            d.child(heading("Workspace"))
-                .children(group(&sections.workspace))
-        })
-        .child(heading("Usage"))
-        .children(group(&sections.usage))
-        .children(self.thread_block(theme, cx))
-        .into_any_element()
+        body.children(self.draft_cockpit(theme, cx))
+            .children(failed.map(|failed| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(heading("Executor health"))
+                    .child(health_lines(theme, &failed.row))
+                    .child(self.executor_actions(&failed.row, theme, cx))
+            }))
+            .child(heading("Run"))
+            .children(group(&sections.run))
+            .when(!sections.workspace.is_empty(), |d| {
+                d.child(heading("Workspace"))
+                    .children(group(&sections.workspace))
+            })
+            .child(heading("Usage"))
+            .children(group(&sections.usage))
+            .children(self.thread_block(theme, cx))
+            .into_any_element()
     }
 }
 

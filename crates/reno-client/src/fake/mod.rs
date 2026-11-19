@@ -39,6 +39,7 @@
 
 mod changes;
 pub mod data;
+pub mod draft35;
 mod extras;
 pub mod files;
 mod history;
@@ -104,6 +105,9 @@ pub struct FakeConfig {
     /// takes only its options, and a Claude Code run asking two questions (one multi-select).
     /// Off for tests that count the waiting threads. Default false.
     pub question_demo_runs: bool,
+    /// ROAD-35 draft only: add the two plan-demo runs (`plan1` busy, `plan0` empty) that the
+    /// `--draft35` variants open on. Default false.
+    pub draft35_runs: bool,
 }
 
 impl Default for FakeConfig {
@@ -119,6 +123,7 @@ impl Default for FakeConfig {
             registry_agents: false,
             question_run: false,
             question_demo_runs: false,
+            draft35_runs: false,
         }
     }
 }
@@ -252,6 +257,10 @@ impl FakeDaemon {
                 seed.runs.push(data::grok_question_run().map_err(proto)?);
                 seed.runs.push(data::paged_question_run().map_err(proto)?);
             }
+        }
+        if config.draft35_runs && !config.empty {
+            let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
+            seed.runs.extend(data::draft35_runs().map_err(proto)?);
         }
         let mut world = World::from_seed(seed, &cancel);
         if config.registry_agents {

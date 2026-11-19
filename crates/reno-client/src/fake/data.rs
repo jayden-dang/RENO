@@ -580,3 +580,71 @@ impl Scenario {
         }
     }
 }
+
+/// ROAD-35 draft: the busy Claude Code run (`plan1`) the plan, background-task and subagent
+/// variants open on, and an empty one (`plan0`) where none of that shows. The plan, tasks and
+/// agents themselves are [`super::draft35::DraftActivity`], client-side only.
+pub(super) fn draft35_runs() -> Ids<Vec<SeedRun>> {
+    Ok(vec![
+        SeedRun {
+            summary: summary(
+                "plan1",
+                "claude-code",
+                RunStatus::Running,
+                None,
+                "builder \u{b7} reno: fix the ACP v2 handshake",
+                14 * MINUTE,
+                30_000,
+            )?,
+            journal: vec![
+                started(),
+                text(
+                    "The ACP handshake test fails on a version mismatch. I will read the handshake code and the failing test first, and look up what the v2 spec changes while I work.",
+                ),
+                tool(
+                    "p1",
+                    "read",
+                    json!({ "file_path": "crates/reno-harness/src/acp/handshake.rs" }),
+                ),
+                tool_ok("p1", "212 lines"),
+                text(
+                    "The client sends protocol version 1 and never reads the agent's counter-offer. I wrote the negotiation fix: it takes the lower of the two versions and fails with a named error when they share none.",
+                ),
+                tool(
+                    "p2",
+                    "edit",
+                    json!({ "file_path": "crates/reno-harness/src/acp/handshake.rs" }),
+                ),
+                tool_ok("p2", "ok"),
+                text(
+                    "Starting the dev server so I can try the client by hand, then running the whole test suite.",
+                ),
+                tool("p3", "bash", json!({ "command": "npm run dev" })),
+                tool_ok("p3", "listening on :5173"),
+                tool("p4", "bash", json!({ "command": "cargo test --workspace" })),
+            ],
+        },
+        SeedRun {
+            summary: summary(
+                "plan0",
+                "claude-code",
+                RunStatus::Running,
+                None,
+                "builder \u{b7} reno: rename the settings tab",
+                3 * MINUTE,
+                20_000,
+            )?,
+            journal: vec![
+                started(),
+                text(
+                    "Renaming the Settings tab label in the sidebar footer; reading where it is defined.",
+                ),
+                tool(
+                    "q1",
+                    "read",
+                    json!({ "file_path": "apps/reno-app/src/ui/sidebar.rs" }),
+                ),
+            ],
+        },
+    ])
+}

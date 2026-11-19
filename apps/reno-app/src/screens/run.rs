@@ -37,6 +37,7 @@ use crate::vm::routing::{self, RoutingView};
 
 mod changes;
 mod dock;
+mod draft35;
 mod files;
 mod history;
 mod output;
@@ -157,6 +158,9 @@ pub(crate) struct RunScreen {
     menu_open: Option<ApprovalId>,
     /// "Deny with a note…" was chosen: the approval, its one-line field and the field's events.
     note: Option<(ApprovalId, Entity<Composer>, Subscription)>,
+    /// ROAD-35 draft: follows the draft's state, and what the list was last measured for.
+    _draft: Option<Subscription>,
+    draft_seen: Option<(crate::draft35::Variant, bool)>,
     _store: Subscription,
 }
 
@@ -236,6 +240,20 @@ impl RunScreen {
             pending_focus_panel: false,
             menu_open: None,
             note: None,
+            _draft: crate::draft35::Draft35::get(cx).map(|draft| {
+                cx.observe(&draft, |this, draft, cx| {
+                    let d = draft.read(cx);
+                    let seen = Some((d.variant, d.activity.is_empty()));
+                    if this.draft_seen != seen {
+                        // The rows under the transcript changed height: measure them again.
+                        this.draft_seen = seen;
+                        let n = this.rows.len();
+                        this.list.splice(0..n, n);
+                    }
+                    cx.notify();
+                })
+            }),
+            draft_seen: None,
         };
         screen.refresh(cx);
         screen
@@ -777,8 +795,11 @@ impl Render for RunScreen {
             )
             // After the list, so it is on top of it and takes the clicks.
             .children(self.tick_rail(&theme, &ticks, cx));
+        let island = self.draft_island(&theme, cx);
+        let sheet = self.draft_sheet(&theme, cx);
         let chat = div()
             .id("chat-canvas")
+            .relative()
             .debug_selector(|| "chat-canvas".to_owned())
             .flex_1()
             .min_w_0()
@@ -790,6 +811,7 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
+            .children(island)
             .child(
                 div()
                     .flex_1()
@@ -800,7 +822,8 @@ impl Render for RunScreen {
                     .px(px(24.0))
                     .child(transcript)
                     .child(self.dock(window, cx)),
-            );
+            )
+            .children(sheet);
 
         let stage = div()
             .id("run")
