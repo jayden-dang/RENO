@@ -806,6 +806,12 @@ impl RootView {
         self.palette.is_some()
     }
 
+    /// The palette, while it is open.
+    #[cfg(test)]
+    pub(crate) fn palette(&self) -> Option<&Entity<Palette>> {
+        self.palette.as_ref()
+    }
+
     pub(crate) fn appearance(&self, window: &Window) -> Appearance {
         self.appearance_override
             .unwrap_or_else(|| Appearance::from(window.appearance()))
@@ -1181,14 +1187,25 @@ impl RootView {
         if self.palette.is_some() {
             return;
         }
-        let palette = cx.new(Palette::new);
+        let (threads, scope) = self.palette_inputs(cx);
+        let store = self.store.clone();
+        let palette = cx.new(|cx| Palette::new(store, threads, scope, cx));
         cx.subscribe_in(
             &palette,
             window,
             |this, _, event: &PaletteEvent, window, cx| {
                 this.close_palette(window, cx);
-                if let PaletteEvent::Run(action) = event {
-                    this.run_palette_action(*action, window, cx);
+                match event {
+                    PaletteEvent::Run(action) => this.run_palette_action(*action, window, cx),
+                    PaletteEvent::OpenRun(run) => this.open_run(run.clone(), window, cx),
+                    PaletteEvent::OpenFile { path, line } => {
+                        if let Some(screen) = this.run_screen().cloned() {
+                            screen.update(cx, |screen, cx| {
+                                screen.open_file_at(path, *line, window, cx);
+                            });
+                        }
+                    }
+                    PaletteEvent::Close => {}
                 }
             },
         )
@@ -1198,6 +1215,56 @@ impl RootView {
         overlay::set(cx, palette.entity_id(), true);
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// The palette's threads (the sidebar's rows) and the focused thread whose files it searches.
+    fn palette_inputs(
+        &self,
+        cx: &App,
+    ) -> (
+        Vec<crate::vm::palette::Thread>,
+        Option<crate::ui::palette::Scope>,
+    ) {
+        use crate::vm::{palette, projects};
+        let store = self.store.read(cx);
+        let state = store.state();
+        let runs = state.runs();
+        let toggled = std::collections::HashSet::new();
+        let folders = projects::folders(
+            &runs,
+            |dir| store.root_of(dir),
+            &projects::Inputs {
+                seen: store.seen(),
+                toggled: &toggled,
+                looking_at: store.looking_at(),
+                now_ms: store.now_ms(),
+                thread_of: &|run| store.thread_of(run),
+            },
+        );
+        let threads = palette::threads(
+            &folders,
+            |run| state.run(run).map_or(0, |r| r.updated_at_ms),
+            |run| {
+                state.approvals_for(run).next().map(|a| palette::Held {
+                    sentence: format!(
+                        "{} {}",
+                        crate::summary::approval_bot(state, a).unwrap_or("A run"),
+                        crate::summary::approval_what(state, a)
+                    ),
+                    command: crate::summary::subject_line(&a.subject),
+                })
+            },
+        );
+        let scope = store.looking_at().and_then(|looking| {
+            folders
+                .iter()
+                .find(|f| f.rows.iter().any(|r| r.members.contains(looking)))
+                .map(|f| crate::ui::palette::Scope {
+                    project: f.name.clone(),
+                    run: looking.clone(),
+                })
+        });
+        (threads, scope)
     }
 
     pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {

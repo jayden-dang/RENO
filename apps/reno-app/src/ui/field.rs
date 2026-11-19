@@ -34,6 +34,9 @@ pub(crate) struct Look {
     /// Rows tall when multi-line.
     pub(crate) rows: usize,
     pub(crate) width: Option<f32>,
+    /// No fill, border or padding, and the parent's text size: a field that is the surface's
+    /// own first line (the palette's search). Its placeholder stays beside the caret.
+    pub(crate) bare: bool,
 }
 
 impl Look {
@@ -43,6 +46,7 @@ impl Look {
         multiline: false,
         rows: 1,
         width: Some(240.0),
+        bare: false,
     };
     pub(crate) const LINE: Look = Look {
         pill: false,
@@ -50,6 +54,7 @@ impl Look {
         multiline: false,
         rows: 1,
         width: None,
+        bare: false,
     };
     pub(crate) const COMMAND: Look = Look {
         pill: false,
@@ -57,6 +62,15 @@ impl Look {
         multiline: false,
         rows: 1,
         width: None,
+        bare: false,
+    };
+    pub(crate) const BARE: Look = Look {
+        pill: false,
+        mono: false,
+        multiline: false,
+        rows: 1,
+        width: None,
+        bare: true,
     };
     pub(crate) const ENV: Look = Look {
         pill: false,
@@ -64,6 +78,7 @@ impl Look {
         multiline: true,
         rows: 4,
         width: None,
+        bare: false,
     };
 }
 
@@ -359,6 +374,19 @@ impl Render for Field {
             start = end + 1;
         }
 
+        if look.bare
+            && empty
+            && let Some(first) = lines.pop()
+        {
+            lines.push(
+                first.child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(theme.faint)
+                        .child(self.placeholder.clone()),
+                ),
+            );
+        }
         let selector = self.id.to_string();
         let body = div()
             .flex_1()
@@ -366,8 +394,8 @@ impl Render for Field {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .when(!look.multiline && focused, |d| d.items_end())
-            .when(empty && !focused, |d| {
+            .when(!look.multiline && !look.bare && focused, |d| d.items_end())
+            .when(empty && !focused && !look.bare, |d| {
                 d.child(
                     div()
                         .h(px(line_h))
@@ -376,7 +404,7 @@ impl Render for Field {
                         .child(self.placeholder.clone()),
                 )
             })
-            .when(!(empty && !focused), |d| d.children(lines));
+            .when(!(empty && !focused) || look.bare, |d| d.children(lines));
         div()
             .id(self.id.clone())
             .debug_selector(move || selector.clone())
@@ -404,20 +432,22 @@ impl Render for Field {
             .when_some(look.width, |d, w| d.w(px(w)))
             .when(look.width.is_none(), |d| d.w_full())
             .min_w_0()
-            .px(px(if look.pill { 14.0 } else { 10.0 }))
-            .py(px(if look.multiline { 8.0 } else { 5.0 }))
-            .when(look.multiline, |d| {
-                d.min_h(px(line_h * look.rows as f32 + 16.0))
+            .when(!look.bare, |d| {
+                d.px(px(if look.pill { 14.0 } else { 10.0 }))
+                    .py(px(if look.multiline { 8.0 } else { 5.0 }))
+                    .when(look.multiline, |d| {
+                        d.min_h(px(line_h * look.rows as f32 + 16.0))
+                    })
+                    .rounded(px(if look.pill { 999.0 } else { 8.0 }))
+                    .bg(theme.raised)
+                    .border_1()
+                    .border_color(if focused {
+                        theme.accent
+                    } else {
+                        theme.hairline
+                    })
+                    .text_size(px(if look.mono { 12.0 } else { 13.0 }))
             })
-            .rounded(px(if look.pill { 999.0 } else { 8.0 }))
-            .bg(theme.raised)
-            .border_1()
-            .border_color(if focused {
-                theme.accent
-            } else {
-                theme.hairline
-            })
-            .text_size(px(if look.mono { 12.0 } else { 13.0 }))
             .when(look.mono, |d| d.font_family(MONO))
             .font_weight(FontWeight::NORMAL)
             .text_color(theme.text)

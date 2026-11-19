@@ -68,7 +68,7 @@ pub(crate) fn run_dot(theme: &Theme, dot: Dot, size: f32) -> Div {
 
 /// A thread row's badge: a tinted word, never a saturated disc. "Needs input" is warning,
 /// "Needs approval" success (brief, "Sidebar").
-fn badge_tag(theme: &Theme, badge: Badge) -> Div {
+pub(crate) fn badge_tag(theme: &Theme, badge: Badge) -> Div {
     kit::tag(
         match badge {
             Badge::NeedsInput => theme.warning,
