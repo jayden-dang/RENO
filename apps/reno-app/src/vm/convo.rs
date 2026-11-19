@@ -261,13 +261,58 @@ pub(crate) fn final_messages(rows: &[Row]) -> Vec<usize> {
         .collect()
 }
 
-/// The tick rail: the index of each user message's row.
-pub(crate) fn ticks(rows: &[Row]) -> Vec<usize> {
-    rows.iter()
-        .enumerate()
-        .filter(|(_, r)| matches!(r, Row::User { .. }))
-        .map(|(i, _)| i)
-        .collect()
+/// One tick of the rail: a user message's row and where it sits in the whole transcript.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TickMark {
+    /// The message's row in the list.
+    pub(crate) row: usize,
+    /// Its place from the top of the transcript (0.0) to its end (1.0), by estimated height.
+    pub(crate) at: f32,
+}
+
+/// What a row weighs in the minimap: an estimate of its height in points, from its text.
+fn row_weight(row: &Row) -> f32 {
+    let lines = |chars: usize, per_line: usize| (chars / per_line + 1) as f32;
+    match row {
+        Row::User { text, .. } => {
+            36.0 + 23.0 * lines(user_text(text, false).shown.chars().count(), 60)
+        }
+        Row::Prose { text, .. } => 16.0 + 24.0 * lines(text.chars().count(), 75),
+        Row::Tools { calls, .. } => 16.0 + 22.0 * step_lines(calls).len() as f32,
+        _ => 40.0,
+    }
+}
+
+/// The tick rail as a minimap: one tick per user message, at the message's place in the whole
+/// transcript, so the rail reads as the conversation's shape.
+pub(crate) fn tick_marks(rows: &[Row]) -> Vec<TickMark> {
+    let total: f32 = rows.iter().map(row_weight).sum();
+    let mut above = 0.0;
+    let mut marks = Vec::new();
+    for (row, r) in rows.iter().enumerate() {
+        if matches!(r, Row::User { .. }) {
+            marks.push(TickMark {
+                row,
+                at: if total > 0.0 { above / total } else { 0.0 },
+            });
+        }
+        above += row_weight(r);
+    }
+    marks
+}
+
+/// Which tick is the message in view: the last one at or above the list's top row (the first,
+/// when the top is above them all). An index into `marks`.
+pub(crate) fn current_tick(marks: &[TickMark], top_row: usize) -> Option<usize> {
+    if marks.is_empty() {
+        return None;
+    }
+    Some(marks.iter().rposition(|m| m.row <= top_row).unwrap_or(0))
+}
+
+/// The rail shows only when the transcript scrolls.
+pub(crate) fn rail_visible(max_scroll_px: f32) -> bool {
+    max_scroll_px > 1.0
 }
 
 /// A shimmer's opacity at `phase` (0..1); fixed while motion is reduced.
@@ -592,11 +637,55 @@ mod tests {
         assert!(final_messages(&[user(0), prose(1), tools(2, ok()), done(3)]).is_empty());
     }
 
+    fn long_prose(key: u64, chars: usize) -> Row {
+        Row::Prose {
+            key: Key(key),
+            text: "x".repeat(chars),
+        }
+    }
+
     #[test]
-    fn the_tick_rail_has_one_tick_per_user_message() {
-        let rows = [user(0), prose(1), user(2), tools(3, ok()), user(4)];
-        assert_eq!(ticks(&rows), [0, 2, 4]);
-        assert!(ticks(&[prose(1)]).is_empty());
+    fn a_tick_sits_where_its_message_sits_in_the_whole_transcript() {
+        let rows = [user(0), long_prose(1, 3000), user(2), prose(3)];
+        let marks = tick_marks(&rows);
+        assert_eq!(marks.iter().map(|m| m.row).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(marks[0].at, 0.0, "the first message is at the top");
+        assert!(marks[1].at > 0.8 && marks[1].at < 1.0, "{marks:?}");
+        // Twice the text before it moves the message later; the same text keeps it where it was.
+        let longer = [user(0), long_prose(1, 6000), user(2), prose(3)];
+        assert!(tick_marks(&longer)[1].at > marks[1].at);
+        let steps = [user(0), tools(1, ok()), user(2), tools(3, ok())];
+        let even = tick_marks(&steps);
+        assert!(even[1].at > 0.3 && even[1].at < 0.7, "{even:?}");
+        assert!(tick_marks(&[prose(1)]).is_empty());
+    }
+
+    #[test]
+    fn the_message_in_view_is_the_last_one_at_or_above_the_top_row() {
+        let marks = [
+            TickMark { row: 0, at: 0.0 },
+            TickMark { row: 4, at: 0.3 },
+            TickMark { row: 9, at: 0.7 },
+        ];
+        assert_eq!(current_tick(&marks, 0), Some(0));
+        assert_eq!(current_tick(&marks, 3), Some(0));
+        assert_eq!(current_tick(&marks, 4), Some(1));
+        assert_eq!(current_tick(&marks, 8), Some(1));
+        assert_eq!(current_tick(&marks, 40), Some(2));
+        let later = [TickMark { row: 2, at: 0.0 }];
+        assert_eq!(
+            current_tick(&later, 0),
+            Some(0),
+            "above them all: the first"
+        );
+        assert_eq!(current_tick(&[], 0), None);
+    }
+
+    #[test]
+    fn the_rail_hides_when_the_transcript_fits() {
+        assert!(!rail_visible(0.0));
+        assert!(!rail_visible(0.5));
+        assert!(rail_visible(120.0));
     }
 
     #[test]

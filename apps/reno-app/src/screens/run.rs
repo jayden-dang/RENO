@@ -83,9 +83,6 @@ pub(crate) struct RunScreen {
     /// How many times an older run's rows were built (tests assert it stays put).
     #[cfg(test)]
     older_builds: usize,
-    /// The row a tick on the rail last scrolled to.
-    #[cfg(test)]
-    scrolled_to: Option<usize>,
     /// What Review compares: the whole thread (default) or the latest run.
     scope: ReviewScope,
     /// The Session tab's "Close thread" is asking for a confirmation.
@@ -183,8 +180,6 @@ impl RunScreen {
             segments: HashMap::new(),
             #[cfg(test)]
             older_builds: 0,
-            #[cfg(test)]
-            scrolled_to: None,
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
@@ -275,11 +270,10 @@ impl RunScreen {
         &self.facts
     }
 
-    /// The row the last click on the tick rail asked to show (the list itself ignores a scroll
-    /// when everything fits, so a test cannot read it back from there).
+    /// The first row the list shows.
     #[cfg(test)]
-    pub(crate) fn scrolled_to(&self) -> Option<usize> {
-        self.scrolled_to
+    pub(crate) fn top_row(&self) -> usize {
+        self.list.logical_scroll_top().item_ix
     }
 
     #[cfg(test)]
@@ -454,10 +448,6 @@ impl RunScreen {
 
     /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
     fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
-        #[cfg(test)]
-        {
-            self.scrolled_to = Some(ix);
-        }
         self.list.scroll_to(ListOffset {
             item_ix: ix,
             offset_in_item: px(0.0),
@@ -467,42 +457,56 @@ impl RunScreen {
 
     /// The thin rail at the column's left edge: one tick for each user message; a click scrolls
     /// to it.
-    fn tick_rail(&self, theme: &Theme, ticks: &[usize], cx: &mut Context<Self>) -> AnyElement {
-        let faint = theme.faint;
-        let text = theme.text;
-        div()
-            .absolute()
-            .left_0()
-            .top_0()
-            .bottom_0()
-            .w(px(RAIL))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(4.0))
-            .children(ticks.iter().map(|&ix| {
-                let selector = format!("tick-{ix}");
-                div()
-                    .id(SharedString::from(selector.clone()))
-                    .debug_selector(move || selector.clone())
-                    .w(px(RAIL))
-                    .h(px(12.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .w(px(8.0))
-                            .h(px(2.0))
-                            .rounded(px(1.0))
-                            .bg(faint)
-                            .hover(move |s| s.bg(text)),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
-            }))
-            .into_any_element()
+    fn tick_rail(
+        &self,
+        theme: &Theme,
+        marks: &[convo::TickMark],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let scrolls = f32::from(self.list.max_offset_for_scrollbar().y);
+        if marks.is_empty() || !convo::rail_visible(scrolls) {
+            return None;
+        }
+        let current = convo::current_tick(marks, self.list.logical_scroll_top().item_ix);
+        let (faint, text) = (theme.faint.opacity(0.6), theme.text);
+        Some(
+            div()
+                .id("tick-rail")
+                .debug_selector(|| "tick-rail".to_owned())
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(RAIL))
+                .children(marks.iter().enumerate().map(|(n, mark)| {
+                    let ix = mark.row;
+                    let lit = current == Some(n);
+                    let selector = format!("tick-{ix}");
+                    div()
+                        .id(SharedString::from(selector.clone()))
+                        .debug_selector(move || selector.clone())
+                        .absolute()
+                        .top(gpui::relative(mark.at))
+                        .left_0()
+                        .w(px(RAIL))
+                        .h(px(12.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .w(px(if lit { 10.0 } else { 7.0 }))
+                                .h(px(2.0))
+                                .rounded(px(1.0))
+                                .bg(if lit { text } else { faint })
+                                .when(lit, |d| d.debug_selector(|| "tick-current".to_owned()))
+                                .hover(move |s| s.bg(text)),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
+                }))
+                .into_any_element(),
+        )
     }
 
     /// Parses each prose row's text, those inside a fold too.
@@ -723,7 +727,7 @@ impl RunScreen {
 impl Render for RunScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
-        let ticks = convo::ticks(&self.rows);
+        let ticks = convo::tick_marks(&self.rows);
         let transcript = div()
             .id("transcript")
             .relative()
@@ -741,7 +745,7 @@ impl Render for RunScreen {
                 ),
             )
             // After the list, so it is on top of it and takes the clicks.
-            .child(self.tick_rail(&theme, &ticks, cx));
+            .children(self.tick_rail(&theme, &ticks, cx));
         let chat = div()
             .id("chat-canvas")
             .debug_selector(|| "chat-canvas".to_owned())

@@ -153,20 +153,102 @@ fn a_long_user_message_collapses_and_opens(cx: &mut TestAppContext) {
     wait_drawn(vcx, |vcx| painted(vcx, "user-less"));
 }
 
-#[gpui::test]
-fn the_tick_rail_has_a_tick_for_each_user_message_and_a_click_scrolls_to_it(
-    cx: &mut TestAppContext,
+/// A thread of two runs whose first is long enough that the transcript scrolls.
+fn long_thread<'a>(
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<RootView>,
+    &'a mut VisualTestContext,
+    Entity<RunScreen>,
 ) {
-    let (_root, vcx, screen) = open(cx, "builder0");
-    wait_drawn(vcx, |vcx| painted(vcx, "tick-0"));
-    let users = rows(vcx, &screen)
+    use crate::tests::{run_status, send_from_home};
+    let current_run_of = |vcx: &mut VisualTestContext, root: &Entity<RootView>| {
+        let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+        screen.read_with(vcx, |s, _| s.run_id().clone())
+    };
+    let store = fake_store(cx);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| s.state().approvals().len() == 2)
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let first = send_from_home(vcx, &root, "/burst 3000");
+    wait_drawn(vcx, |vcx| {
+        run_status(vcx, &store, &first).is_some_and(reno_proto::RunStatus::is_terminal)
+    });
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("a run screen");
+    let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
+    steer.update_in(vcx, |c, window, cx| c.fill("second task", window, cx));
+    draw(vcx);
+    click(vcx, "send");
+    wait_drawn(vcx, |vcx| current_run_of(vcx, &root) != first);
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("a run screen");
+    wait_drawn(vcx, |vcx| {
+        let rows = rows(vcx, &screen);
+        rows.iter()
+            .filter(|r| matches!(r, Row::User { .. }))
+            .count()
+            == 2
+            && kinds(&rows).last() == Some(&"done")
+    });
+    (root, vcx, screen)
+}
+
+fn user_rows(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> Vec<usize> {
+    rows(vcx, screen)
         .iter()
-        .filter(|r| matches!(r, Row::User { .. }))
-        .count();
-    assert_eq!(users, 1);
-    assert!(!painted(vcx, "tick-1"), "one tick for the one message");
-    click(vcx, "tick-0");
-    assert_eq!(screen.read_with(vcx, |s, _| s.scrolled_to()), Some(0));
+        .enumerate()
+        .filter(|(_, r)| matches!(r, Row::User { .. }))
+        .map(|(ix, _)| ix)
+        .collect()
+}
+
+#[gpui::test]
+fn the_tick_rail_is_a_minimap_and_a_click_really_scrolls(cx: &mut TestAppContext) {
+    let (_root, vcx, screen) = long_thread(cx);
+    wait_drawn(vcx, |vcx| painted(vcx, "tick-rail"));
+    let users = user_rows(vcx, &screen);
+    assert_eq!(users.len(), 2);
+    let (first, second) = (format!("tick-{}", users[0]), format!("tick-{}", users[1]));
+    wait_drawn(vcx, |vcx| painted(vcx, &first) && painted(vcx, &second));
+    let rail = vcx.debug_bounds("tick-rail").unwrap();
+    let (a, b) = (
+        vcx.debug_bounds(Box::leak(first.clone().into_boxed_str()))
+            .unwrap(),
+        vcx.debug_bounds(Box::leak(second.clone().into_boxed_str()))
+            .unwrap(),
+    );
+    // The first message is at the top of the rail; the second, after a long answer, is far below.
+    assert!(a.top() - rail.top() < gpui::px(14.0), "{a:?} in {rail:?}");
+    assert!(
+        b.top() - rail.top() > rail.size.height * 0.6,
+        "{b:?} in {rail:?}"
+    );
+    // The transcript follows its tail: the message in view is the last one.
+    assert!(screen.read_with(vcx, |s, _| s.top_row()) > 0);
+    // A click scrolls the list for real, so that message is at the top.
+    click(vcx, &first);
+    assert_eq!(screen.read_with(vcx, |s, _| s.top_row()), users[0]);
+    wait_drawn(vcx, |vcx| painted(vcx, "tick-current"));
+    let current = vcx.debug_bounds("tick-current").unwrap();
+    assert!(current.top() < b.top(), "the first message is the one lit");
+    // The last message is near the end, so the list stops at its bottom: the top is at or below it.
+    click(vcx, &second);
+    assert!(screen.read_with(vcx, |s, _| s.top_row()) >= users[1]);
+}
+
+#[gpui::test]
+fn a_transcript_that_fits_has_no_tick_rail(cx: &mut TestAppContext) {
+    let (_root, vcx, _screen) = open(cx, "reviewer1");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "message-copy-0") || painted(vcx, "composer")
+    });
+    draw(vcx);
+    assert!(!painted(vcx, "tick-rail"));
 }
 
 #[gpui::test]
