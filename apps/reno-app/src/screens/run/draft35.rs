@@ -700,7 +700,7 @@ impl RunScreen {
                     .font_weight(FontWeight::MEDIUM)
                     .child(SharedString::from(format!(
                         "Plan {}/{}",
-                        s.a.step_number(),
+                        s.a.plan_done(),
                         s.a.plan.len()
                     )))
                     .into_any_element(),
@@ -709,7 +709,7 @@ impl RunScreen {
         let subs =
             s.a.agents
                 .iter()
-                .filter(|a| a.kind == AgentKind::Subagent)
+                .filter(|a| a.kind == AgentKind::Subagent && a.state == AgentState::Running)
                 .count();
         for text in [
             (!s.a.tasks.is_empty()).then(|| format!("{} running", s.a.running_tasks())),
