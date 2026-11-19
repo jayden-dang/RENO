@@ -49,6 +49,9 @@ mod transcript;
 
 pub(crate) use panel::PanelAction;
 
+/// Keys of the Run screen.
+pub(crate) fn bind_keys(_cx: &mut gpui::App) {}
+
 /// How long a burst of finished tool calls waits before the changes are read again.
 const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
