@@ -102,7 +102,9 @@ impl RunScreen {
                 resolution,
                 ..
             } => match convo::question_view(questions, resolution) {
-                convo::QuestionView::Card => question_card(theme, questions, resolution),
+                convo::QuestionView::Waiting(line) => {
+                    event_line(theme, Icon::Question, theme.warning, &line)
+                }
                 convo::QuestionView::Answered(pairs) => answered_bubble(theme, &pairs),
                 convo::QuestionView::Closed(line) => closed_line(theme, &line),
             },
@@ -689,134 +691,6 @@ pub(super) fn disclosure(
             theme.muted,
         ))
         .child(label)
-}
-
-/// The tone of the card's leading "?": warning while the question waits, then the tone of how
-/// it ended.
-pub(super) fn question_icon_tone(theme: &Theme, resolution: &Resolution) -> gpui::Hsla {
-    match resolution {
-        Resolution::Pending => theme.warning,
-        Resolution::Declined | Resolution::Unanswered => theme.faint,
-        Resolution::Answered(_) => theme.success,
-    }
-}
-
-/// The question card. Pending, it is the live ask; resolved, it is the record of how it ended:
-/// a status tag, the options dimmed (the chosen one lit) and no promise of a later phase.
-pub(super) fn question_card(
-    theme: &Theme,
-    questions: &[reno_proto::Question],
-    resolution: &Resolution,
-) -> AnyElement {
-    let tag = match resolution {
-        Resolution::Pending => None,
-        Resolution::Declined => Some((theme.faint, "Declined", "question-tag-declined")),
-        Resolution::Unanswered => Some((theme.faint, "Not answered", "question-tag-unanswered")),
-        Resolution::Answered(_) => Some((theme.success, "Answered", "question-tag-answered")),
-    };
-    let answer_of = |i: usize| match resolution {
-        Resolution::Answered(answers) => answers.get(i).cloned().flatten(),
-        _ => None,
-    };
-    let card = div()
-        .w_full()
-        .p(px(16.0))
-        .rounded(px(18.0))
-        .bg(theme.surface)
-        .border_1()
-        .border_color(theme.hairline)
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .children(questions.iter().enumerate().map(|(i, q)| {
-            let answer = answer_of(i);
-            let chosen = |o: &str| {
-                answer
-                    .as_deref()
-                    .is_some_and(|a| a.split(", ").any(|part| part == o))
-            };
-            let free_text = answer
-                .as_ref()
-                .filter(|_| !q.options.iter().any(|o| chosen(o)));
-            let header_tag = tag.filter(|_| i == 0).map(|(tone, label, selector)| {
-                div()
-                    .ml_auto()
-                    .debug_selector(move || selector.to_owned())
-                    .child(kit::tag(tone, label))
-            });
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(icon(
-                            Icon::Question,
-                            15.0,
-                            question_icon_tone(theme, resolution),
-                        ))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(q.prompt.clone()),
-                        )
-                        .children(header_tag),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(8.0))
-                        .children(q.options.iter().map(|o| {
-                            let chip = kit::chip(theme, o.clone());
-                            match resolution {
-                                Resolution::Pending => chip,
-                                _ if chosen(o) => chip
-                                    .border_color(theme.success.opacity(0.7))
-                                    .bg(theme.success.opacity(0.14))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .debug_selector(|| "question-chosen-chip".to_owned()),
-                                _ => chip
-                                    .opacity(0.5)
-                                    .text_color(theme.faint)
-                                    .debug_selector(|| "question-dimmed-chip".to_owned()),
-                            }
-                        })),
-                )
-                .children(free_text.map(|text| {
-                    div()
-                        .text_size(px(13.5))
-                        .text_color(theme.text)
-                        .child(SharedString::from(format!("\u{201c}{text}\u{201d}")))
-                }))
-        }));
-    match resolution {
-        Resolution::Pending => card.child(
-            div()
-                .debug_selector(|| "question-pending-note".to_owned())
-                .text_size(px(12.5))
-                .text_color(theme.faint)
-                .child("Answering from the app arrives in a later phase."),
-        ),
-        Resolution::Declined => card.child(
-            div()
-                .debug_selector(|| "question-declined-line".to_owned())
-                .text_size(px(12.5))
-                .text_color(theme.faint)
-                .child("Nobody answered in time."),
-        ),
-        Resolution::Unanswered => card.child(
-            div()
-                .text_size(px(12.5))
-                .text_color(theme.faint)
-                .child("The run went on without an answer."),
-        ),
-        Resolution::Answered(_) => card,
-    }
-    .into_any_element()
 }
 
 /// A one-line event: a muted icon and a sentence.

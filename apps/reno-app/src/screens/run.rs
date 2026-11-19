@@ -843,10 +843,7 @@ fn migrated(store: &Store, key: &PanelKey, cx: &gpui::App) -> Option<crate::pane
 }
 
 #[cfg(test)]
-use transcript::{question_card, question_icon_tone};
 
-#[cfg(test)]
-mod question_card_tests;
 
 #[cfg(test)]
 mod changes_tests;

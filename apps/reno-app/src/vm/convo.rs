@@ -203,8 +203,8 @@ pub(crate) fn run_elapsed_ms(
 /// What a question shows as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum QuestionView {
-    /// Still open: the card.
-    Card,
+    /// Still open: one line; the question itself is the panel's, above the composer.
+    Waiting(String),
     /// Answered: each question muted above its answer, in a user bubble.
     Answered(Vec<(String, Option<String>)>),
     /// No longer answerable: one muted line.
@@ -213,7 +213,10 @@ pub(crate) enum QuestionView {
 
 pub(crate) fn question_view(questions: &[Question], resolution: &Resolution) -> QuestionView {
     match resolution {
-        Resolution::Pending => QuestionView::Card,
+        Resolution::Pending => QuestionView::Waiting(format!(
+            "Waiting for your answer \u{b7} {}",
+            questions.first().map_or("", |q| q.prompt.as_str())
+        )),
         Resolution::Answered(answers) => QuestionView::Answered(
             questions
                 .iter()
@@ -540,10 +543,10 @@ mod tests {
     }
 
     #[test]
-    fn a_question_is_a_card_while_open_a_bubble_when_answered_a_line_when_closed() {
+    fn a_question_is_a_line_while_open_a_bubble_when_answered_a_line_when_closed() {
         assert_eq!(
             question_view(&[q()], &Resolution::Pending),
-            QuestionView::Card
+            QuestionView::Waiting("Waiting for your answer \u{b7} Which colour?".into())
         );
         assert_eq!(
             question_view(&[q()], &Resolution::Answered(vec![Some("Red".into())])),
