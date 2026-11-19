@@ -1,51 +1,24 @@
-//! Home: what needs me right now, and is Reno making progress without me?
-//!
-//! A centred column of at most 720 px: the finding pill, context chips, the composer, the
-//! settings line and three suggestion chips. The attention pill docks at the bottom. This is the
-//! new-thread state ("Start a task"); the live count, ⌘K and the daemon status are in the bar.
+//! Home is the new-thread state (ui-brief, "New-thread state"): the mark, "What should we build
+//! in <project>?" (the project underlined, opening that project), a chip strip above the
+//! composer, and nothing else. What needs the owner lives in the sidebar badges, All runs and the
+//! composer's panels. Offline and connecting still say so.
 
 use gpui::{
-    Context, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString, Subscription,
+    Window, div, prelude::*, px,
 };
 use reno_client::ConnectionStatus;
 
+use super::ScreenEvent;
 use crate::store::Store;
-use crate::summary::{self, Finding};
-use crate::ui::attention::AttentionDock;
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
-use crate::ui::theme::{self, Theme};
-use crate::vm::routing::{self, Class};
+use crate::ui::theme;
+use crate::vm::new_thread;
+use crate::vm::projects::FolderKey;
 
-/// The suggestion chips: label, then the text they put in the composer.
-const SUGGESTIONS: [(&str, &str); 3] = [
-    (
-        "Add retry to the webhook trigger",
-        "Add bounded retry with jitter to the webhook trigger",
-    ),
-    (
-        "Run nightly-deps now",
-        "Run nightly-deps now for web-console and atlas-api",
-    ),
-    (
-        "Research ACP v2",
-        "Research how ACP v2 changes permission requests",
-    ),
-];
-
-/// One entry of the settings line: a muted icon and its text.
-fn setting(theme: &Theme, glyph: Icon, text: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .child(icon(glyph, 14.0, theme.muted))
-        .child(text)
-}
-
-/// What the top of the column says.
+/// What the top of the column says besides the heading.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Headline {
     /// No daemon: the reason, and the page says so plainly.
@@ -53,69 +26,51 @@ pub(crate) enum Headline {
         reason: String,
     },
     Connecting,
-    Finding(Finding),
+    Ready,
 }
 
 pub(crate) struct HomeScreen {
     store: Entity<Store>,
     composer: Entity<Composer>,
-    dock: Entity<AttentionDock>,
     /// The project a new thread is for (a project's "+"); none for "Start a task".
-    project: Option<String>,
+    project: Option<(String, FolderKey)>,
     _store: Subscription,
 }
 
 impl HomeScreen {
     pub(crate) fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| Composer::new(store.clone(), cx));
-        let dock = cx.new(|cx| AttentionDock::new(store.clone(), cx));
         Self {
-            _store: cx.observe(&store, |this, _, cx| {
-                this.read_class_bots(cx);
-                cx.notify();
-            }),
+            _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             composer,
-            dock,
             project: None,
         }
     }
 
     /// The project's name a new thread is for, or `None`.
-    pub(crate) fn set_project(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_project(
+        &mut self,
+        project: Option<(String, FolderKey)>,
+        cx: &mut Context<Self>,
+    ) {
         if self.project != project {
             self.project = project;
             cx.notify();
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn project(&self) -> Option<&str> {
-        self.project.as_deref()
+    pub(crate) fn heading(&self) -> new_thread::Heading {
+        new_thread::heading(self.project.as_ref().map(|(name, _)| name.as_str()))
     }
 
-    /// The settings line shows the access the selected class's bot grants: read the bots' definitions.
-    fn read_class_bots(&mut self, cx: &mut Context<Self>) {
-        let wanted: Vec<_> = {
-            let state = self.store.read(cx).state();
-            Class::ALL
-                .iter()
-                .filter_map(|class| routing::bot_to_fetch(state, *class))
-                .collect()
-        };
-        for (name, version) in wanted {
-            self.store
-                .update(cx, |store, cx| store.ensure_bot(&name, version, cx));
-        }
+    #[cfg(test)]
+    pub(crate) fn project(&self) -> Option<&str> {
+        self.project.as_ref().map(|(name, _)| name.as_str())
     }
 
     pub(crate) fn composer(&self) -> &Entity<Composer> {
         &self.composer
-    }
-
-    #[cfg(test)]
-    pub(crate) fn dock(&self) -> &Entity<AttentionDock> {
-        &self.dock
     }
 
     pub(crate) fn headline(&self, cx: &gpui::App) -> Headline {
@@ -127,225 +82,137 @@ impl HomeScreen {
                     .unwrap_or_else(|| "The daemon connection closed.".to_owned()),
             },
             ConnectionStatus::Connecting => Headline::Connecting,
-            ConnectionStatus::Connected => {
-                Headline::Finding(summary::finding(store.state(), store.now_ms()))
-            }
+            ConnectionStatus::Connected => Headline::Ready,
         }
     }
 
-    fn finding_pill(
-        &self,
-        headline: &Headline,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let pill = div()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .h(px(40.0))
-            .px(px(18.0))
-            .rounded(px(999.0))
-            .bg(theme.surface)
-            .border_1()
-            .border_color(theme.hairline)
-            .text_size(px(14.5));
-        match headline {
-            Headline::Finding(Finding::Held { lead, detail, run }) => pill
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(lead.clone()),
-                )
-                .child(div().text_color(theme.muted).child(detail.clone()))
-                .child(
-                    div()
-                        .id("review")
-                        .h(px(26.0))
-                        .px(px(12.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(999.0))
-                        .border_1()
-                        .border_color(theme.hairline)
-                        .text_size(px(13.0))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover({
-                            let hover = theme.raised;
-                            move |s| s.bg(hover)
-                        })
-                        .on_click({
-                            let store = self.store.clone();
-                            let run = run.clone();
-                            move |_, _, cx| {
-                                store.update(cx, |store, cx| store.show_run(run.clone(), cx));
-                            }
-                        })
-                        .child("Open"),
-                ),
-            Headline::Finding(Finding::Calm { text }) => pill
-                .child(icon(Icon::Check, 16.0, theme.success))
-                .child(div().text_color(theme.muted).child(text.clone())),
-            Headline::Offline { .. } => pill
-                .border_color(theme.warning.opacity(0.4))
-                .child(icon(Icon::Question, 16.0, theme.warning))
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child("Daemon not running"),
-                )
-                .child(
-                    kit::pill_button(theme, "retry-now", "Retry now", Tone::Quiet).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.store.update(cx, |store, _| store.retry_now());
-                        }),
-                    ),
-                ),
-            Headline::Connecting => pill.child(
-                div()
-                    .text_color(theme.muted)
-                    .child("Connecting to the daemon…"),
-            ),
+    fn open_project(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, key)) = &self.project {
+            cx.emit(ScreenEvent::OpenProject(key.clone()));
         }
     }
 }
+
+impl EventEmitter<ScreenEvent> for HomeScreen {}
 
 impl Render for HomeScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
         let headline = self.headline(cx);
-        let class = self.composer.read(cx).class();
-        let access = routing::class_access(self.store.read(cx).state(), class);
-        let offline_reason = match &headline {
-            Headline::Offline { reason } => Some(reason.clone()),
-            _ => None,
-        };
+        let heading = self.heading();
+        let project = self.project.as_ref().map(|(name, _)| name.clone());
 
-        let settings_line = div()
-            .w_full()
+        let title = div()
+            .id("new-thread-title")
+            .debug_selector(|| "new-thread-title".to_owned())
             .flex()
-            .items_center()
-            .gap(px(22.0))
-            .px(px(14.0))
-            .text_size(px(13.5))
-            .text_color(theme.muted)
-            .child(setting(
-                &theme,
-                Icon::Branch,
-                "writes in an isolated worktree",
-            ))
-            .when_some(access, |d, access| {
-                d.child(setting(&theme, Icon::Shield, access))
-            })
-            .child(setting(&theme, Icon::Clock, "now · or schedule"));
-
-        let suggestions = div()
-            .flex()
-            .flex_wrap()
+            .items_baseline()
             .justify_center()
-            .gap(px(10.0))
-            .children(SUGGESTIONS.map(|(label, fill)| {
-                kit::chip(&theme, label)
-                    .id(SharedString::from(format!("suggest-{label}")))
-                    .h(px(36.0))
-                    .px(px(16.0))
-                    .text_size(px(14.0))
-                    .cursor_pointer()
-                    .hover({
-                        let hover = theme.raised;
-                        move |s| s.bg(hover)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.composer
-                            .update(cx, |composer, cx| composer.fill(fill, window, cx));
-                    }))
-            }));
-
-        // Placeholder context: team and repository come from state once the protocol has them.
-        let context_chips = div()
-            .w_full()
-            .flex()
-            .justify_end()
-            .gap(px(8.0))
-            .child(kit::icon_chip(&theme, Icon::Team, "team core"))
-            .child(kit::icon_chip(
-                &theme,
-                Icon::Folder,
-                self.project.clone().unwrap_or_else(|| "reno".to_owned()),
-            ));
-
-        let column = div()
-            .w_full()
-            .max_w(px(720.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(14.0))
-            .child(self.finding_pill(&headline, &theme, cx))
-            .when_some(self.project.clone(), |col, project| {
-                col.child(
-                    div()
-                        .id("new-thread-title")
-                        .debug_selector(|| "new-thread-title".to_owned())
-                        .text_size(px(22.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(format!("What should we build in {project}?")),
-                )
-            })
-            .when_some(offline_reason, |col, reason| {
-                col.child(
-                    div()
-                        .max_w(px(560.0))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(4.0))
-                        .text_size(px(13.5))
-                        .text_color(theme.muted)
-                        .children(
-                            reason
-                                .lines()
-                                .map(|line| div().child(line.trim_end().to_owned())),
-                        )
-                        .child("Or run reno-app --fake for a demo daemon."),
-                )
-            })
-            .child(context_chips)
-            .child(self.composer.clone())
-            .child(settings_line)
-            .child(div().pt(px(8.0)).child(suggestions));
-
-        div()
-            .id("home")
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
+            .text_size(px(28.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child(SharedString::from(heading.before.clone()))
+            .children(heading.project.clone().map(|name| {
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .id("new-thread-project")
+                    .debug_selector(|| "new-thread-project".to_owned())
+                    .cursor_pointer()
+                    .underline()
+                    .child(SharedString::from(name))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
+            }))
+            .child(SharedString::from(heading.after.clone()));
+
+        let chips = div().w_full().flex().gap(px(8.0)).children(
+            new_thread::chips(project.as_deref())
+                .into_iter()
+                .map(|chip| {
+                    let selector = format!("new-thread-chip-{}", chip.id);
+                    let base = match chip.id {
+                        "this-mac" => kit::icon_chip(&theme, Icon::Server, chip.label),
+                        "project" => kit::icon_chip(&theme, Icon::Folder, chip.label),
+                        _ => kit::chip(&theme, chip.label),
+                    };
+                    let shown = selector.clone();
+                    let more = chip.id == "more";
+                    base.id(SharedString::from(selector))
+                        .debug_selector(move || shown.clone())
+                        .when(more, |d| {
+                            // "\u{2026}" opens the palette: more places and actions.
+                            d.cursor_pointer().on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::actions::OpenPalette), cx);
+                            })
+                        })
+                }),
+        );
+
+        let notice = match &headline {
+            Headline::Offline { reason } => Some(
+                div()
+                    .max_w(px(560.0))
                     .flex()
                     .flex_col()
                     .items_center()
-                    .justify_center()
-                    .px(px(24.0))
-                    .pb(px(150.0))
-                    .child(column),
-            )
+                    .gap(px(4.0))
+                    .text_size(px(13.5))
+                    .text_color(theme.muted)
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child("Daemon not running"),
+                    )
+                    .children(
+                        reason
+                            .lines()
+                            .map(|line| div().child(line.trim_end().to_owned())),
+                    )
+                    .child("Or run reno-app --fake for a demo daemon.")
+                    .child(
+                        kit::pill_button(&theme, "retry-now", "Retry now", Tone::Quiet).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.store.update(cx, |store, _| store.retry_now());
+                            }),
+                        ),
+                    ),
+            ),
+            Headline::Connecting => Some(
+                div()
+                    .text_size(px(13.5))
+                    .text_color(theme.muted)
+                    .child("Connecting to the daemon\u{2026}"),
+            ),
+            Headline::Ready => None,
+        };
+
+        div()
+            .id("home")
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px(px(24.0))
+            .pb(px(60.0))
             .child(
                 div()
-                    .absolute()
-                    .bottom(px(16.0))
-                    .left(px(0.0))
-                    .right(px(0.0))
+                    .w_full()
+                    .max_w(px(720.0))
                     .flex()
-                    .justify_center()
-                    .px(px(24.0))
-                    .child(self.dock.clone()),
+                    .flex_col()
+                    .items_center()
+                    .gap(px(18.0))
+                    .child(
+                        div()
+                            .id("new-thread-mark")
+                            .debug_selector(|| "new-thread-mark".to_owned())
+                            .child(icon(Icon::Mark, 40.0, theme.text)),
+                    )
+                    .child(title)
+                    .children(notice)
+                    .child(div().h(px(6.0)))
+                    .child(chips)
+                    .child(self.composer.clone()),
             )
     }
 }

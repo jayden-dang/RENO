@@ -61,8 +61,6 @@ pub(crate) const RUNS_PAGE: u32 = 20;
 #[derive(Clone, Debug)]
 pub(crate) enum StoreEvent {
     RunStarted(RunId),
-    /// Show this run: what needs you is answered inside it (ui-brief 2026-11-17).
-    ShowRun(RunId),
     /// A trigger was fired by hand: what became of it.
     TriggerFired {
         name: String,
@@ -367,11 +365,6 @@ impl Store {
             last_failure: None,
             bridge: None,
         }
-    }
-
-    /// Asks the shell to show `run`.
-    pub(crate) fn show_run(&mut self, run: RunId, cx: &mut Context<Self>) {
-        cx.emit(StoreEvent::ShowRun(run));
     }
 
     /// The canonical repository root `dir` is in, if any.
@@ -1375,6 +1368,7 @@ impl Store {
     }
 
     /// Answers a held action. The card leaves when the daemon reports the new list.
+    #[cfg(test)]
     pub(crate) fn decide(
         &mut self,
         id: ApprovalId,

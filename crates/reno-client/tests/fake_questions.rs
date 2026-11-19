@@ -45,7 +45,10 @@ fn rules_follow_the_agent() {
     let d = daemon();
     assert!(d.rules(&run("asker1"), "req-asker-policy").text_allowed);
     assert!(!d.rules(&run("grok1"), "req-grok-format").text_allowed);
-    assert_eq!(d.rules(&run("asker1"), "req-asker-policy").max_text_len, Some(500));
+    assert_eq!(
+        d.rules(&run("asker1"), "req-asker-policy").max_text_len,
+        Some(500)
+    );
 }
 
 #[test]
@@ -83,7 +86,10 @@ async fn an_answer_is_journaled_the_run_resumes_and_a_second_answer_is_not_pendi
     let got = client.get_run(&id).await.unwrap();
     assert_eq!(got.status, RunStatus::Running);
     assert_eq!(
-        d.answer(&id, request("req-asker-policy", "policy", &["Fail fast and alert"])),
+        d.answer(
+            &id,
+            request("req-asker-policy", "policy", &["Fail fast and alert"])
+        ),
         Err(AnswerError::QuestionNotPending)
     );
 }
@@ -93,7 +99,10 @@ fn typed_text_over_the_cap_is_refused() {
     let d = daemon();
     let too_long = "x".repeat(501);
     assert!(matches!(
-        d.answer(&run("asker1"), request("req-asker-policy", "policy", &[&too_long])),
+        d.answer(
+            &run("asker1"),
+            request("req-asker-policy", "policy", &[&too_long])
+        ),
         Err(AnswerError::AnswerInvalid { .. })
     ));
 }

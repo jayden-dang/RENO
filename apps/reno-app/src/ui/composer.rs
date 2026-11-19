@@ -518,6 +518,7 @@ impl Composer {
         Self::with_mode(store, Mode::Steer(run), cx)
     }
 
+    #[cfg(test)]
     pub(crate) fn class(&self) -> Class {
         self.class
     }
@@ -1612,7 +1613,7 @@ impl Focusable for Composer {
 impl Composer {
     fn placeholder(&self, cx: &App) -> SharedString {
         match &self.mode {
-            Mode::Home => "What should Reno orchestrate?".into(),
+            Mode::Home => "Do anything".into(),
             Mode::Reason => self.labels.as_ref().map_or_else(
                 || "Or tell it what to do instead \u{2014} Deny sends your words".into(),
                 |(placeholder, _)| placeholder.clone(),

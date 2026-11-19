@@ -142,7 +142,9 @@ fn the_badge_is_the_sidebar_count(cx: &mut TestAppContext) {
     let (_root, vcx) = window(cx, &store, Appearance::Dark);
     hold_a_push(vcx, &store);
     vcx.run_until_parked();
-    let need = store.read_with(vcx, |s, _| crate::summary::attention(s.state()).needs_you());
+    let need = store.read_with(vcx, |s, _| {
+        s.state().approvals().len() + crate::summary::waiting_questions(s.state()).len()
+    });
     assert_eq!(recorder.badge(), Some(Some(need.to_string())));
 }
 

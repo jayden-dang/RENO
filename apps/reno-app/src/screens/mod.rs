@@ -18,4 +18,6 @@ pub(crate) enum ScreenEvent {
     OpenRun(RunId),
     /// Show the Executors screen.
     OpenExecutors,
+    /// Show a project's page (its name in the new-thread heading).
+    OpenProject(crate::vm::projects::FolderKey),
 }

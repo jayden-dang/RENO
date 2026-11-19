@@ -44,7 +44,10 @@ pub struct AnswerRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnswerError {
     /// The answer breaks the question's rules; `allowed` lists what would be taken.
-    AnswerInvalid { reason: String, allowed: Vec<String> },
+    AnswerInvalid {
+        reason: String,
+        allowed: Vec<String>,
+    },
     /// The question was already answered, or is closed.
     QuestionNotPending,
 }

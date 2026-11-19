@@ -9,6 +9,7 @@ pub(crate) struct Heading {
 }
 
 impl Heading {
+    #[cfg(test)]
     pub(crate) fn text(&self) -> String {
         format!(
             "{}{}{}",
@@ -70,7 +71,10 @@ mod tests {
     #[test]
     fn the_chip_strip_is_this_mac_the_project_and_more() {
         let labels = |p| chips(p).into_iter().map(|c| c.label).collect::<Vec<_>>();
-        assert_eq!(labels(Some("atlas-api")), ["This Mac", "atlas-api", "\u{2026}"]);
+        assert_eq!(
+            labels(Some("atlas-api")),
+            ["This Mac", "atlas-api", "\u{2026}"]
+        );
         assert_eq!(labels(None), ["This Mac", "\u{2026}"]);
     }
 }

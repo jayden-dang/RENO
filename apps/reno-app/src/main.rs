@@ -29,6 +29,8 @@ mod vm;
 #[cfg(test)]
 mod composer_tests;
 #[cfg(test)]
+mod new_thread_tests;
+#[cfg(test)]
 mod notify_tests;
 #[cfg(test)]
 mod panel_tests;

@@ -50,7 +50,10 @@ fn check_one(
         if !rules.text_allowed {
             return Err(invalid("this question takes only its options", allowed));
         }
-        if rules.max_text_len.is_some_and(|max| label.chars().count() > max) {
+        if rules
+            .max_text_len
+            .is_some_and(|max| label.chars().count() > max)
+        {
             return Err(invalid("the answer is too long", Vec::new()));
         }
     }
@@ -105,14 +108,26 @@ impl QuestionDesk for FakeDaemon {
                     .find(|a| a.question_id == question.id)
                     .ok_or_else(|| invalid("a question has no answer", question.options.clone()))?;
                 check_one(question, rules, &answer.labels)?;
-                said.push(answer.labels.iter().map(|l| format!("\"{l}\"")).collect::<Vec<_>>());
+                said.push(
+                    answer
+                        .labels
+                        .iter()
+                        .map(|l| format!("\"{l}\""))
+                        .collect::<Vec<_>>(),
+                );
             }
             let summary = format!(
                 "User answered: {}",
-                said.iter().map(|s| s.join(", ")).collect::<Vec<_>>().join("; ")
+                said.iter()
+                    .map(|s| s.join(", "))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             );
             let id = format!("ask-{}", request.question_id);
-            world.push(run, data::tool(&id, "AskUserQuestion", serde_json::json!({})));
+            world.push(
+                run,
+                data::tool(&id, "AskUserQuestion", serde_json::json!({})),
+            );
             world.push(run, data::tool_ok(&id, &summary));
             world.set_status(run, RunStatus::Running);
             Ok(())

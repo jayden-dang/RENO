@@ -579,6 +579,7 @@ impl RootView {
                 window,
                 Self::on_open_executors,
             ),
+            cx.subscribe_in(&home, window, Self::on_screen_event),
             cx.subscribe_in(&runs, window, Self::on_screen_event),
             cx.subscribe_in(&triggers, window, Self::on_screen_event),
             cx.subscribe_in(&executors, window, Self::on_screen_event),
@@ -605,7 +606,7 @@ impl RootView {
                             message.clone(),
                         );
                     }
-                    StoreEvent::RunStarted(run) | StoreEvent::ShowRun(run) => {
+                    StoreEvent::RunStarted(run) => {
                         this.open_run(run.clone(), window, cx);
                     }
                     // The composer that sent it takes its draft back.
@@ -741,6 +742,7 @@ impl RootView {
         match event {
             ScreenEvent::OpenRun(run) => self.open_run(run.clone(), window, cx),
             ScreenEvent::OpenExecutors => self.navigate(Nav::Executors, window, cx),
+            ScreenEvent::OpenProject(key) => self.open_project(key.clone(), window, cx),
         }
     }
 
@@ -900,10 +902,10 @@ impl RootView {
             .as_ref()
             .and_then(|k| k.root())
             .map(std::path::Path::to_path_buf);
-        let name = folder.as_ref().map(crate::vm::projects::FolderKey::name);
+        let project = folder.as_ref().map(|k| (k.name(), k.clone()));
         self.home_folder = folder;
         self.home.update(cx, |home, cx| {
-            home.set_project(name, cx);
+            home.set_project(project, cx);
             home.composer()
                 .update(cx, |composer, cx| composer.set_folder(root, cx));
         });

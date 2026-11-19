@@ -24,7 +24,7 @@ use crate::panel::saved::Saved;
 use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self as model, Built, Facts, Key, Resolution, Row, ToolEntry};
+use crate::transcript::{self as model, Built, Facts, Key, Row, ToolEntry};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
@@ -841,9 +841,6 @@ fn migrated(store: &Store, key: &PanelKey, cx: &gpui::App) -> Option<crate::pane
     };
     Saved::get(&PanelKey(only.run_id.to_string()), cx)
 }
-
-#[cfg(test)]
-
 
 #[cfg(test)]
 mod changes_tests;

@@ -348,11 +348,7 @@ pub(super) fn paged_question_run() -> Ids<SeedRun> {
                     reno_proto::Question {
                         id: "targets".to_owned(),
                         prompt: "Which platforms should it build for?".to_owned(),
-                        options: vec![
-                            "macOS".to_owned(),
-                            "Linux".to_owned(),
-                            "Windows".to_owned(),
-                        ],
+                        options: vec!["macOS".to_owned(), "Linux".to_owned(), "Windows".to_owned()],
                         multi_select: true,
                     },
                 ],

@@ -80,9 +80,15 @@ fn a_single_choice_sends_on_click_and_the_transcript_shows_the_answered_bubble(
 ) {
     let store = asking(cx);
     let (_root, vcx) = open_run(cx, &store, "asker1");
-    assert!(painted(vcx, "composer"), "the panel sits above the composer");
+    assert!(
+        painted(vcx, "composer"),
+        "the panel sits above the composer"
+    );
     assert!(painted(vcx, "question-option-2") && painted(vcx, "question-skip"));
-    assert!(painted(vcx, "question-send"), "Send is there for typed text");
+    assert!(
+        painted(vcx, "question-send"),
+        "Send is there for typed text"
+    );
     click(vcx, "question-option-2");
     wait_drawn(vcx, |vcx| painted(vcx, "question-answered"));
     assert!(has_answer(&store, vcx, "asker1"));
@@ -126,7 +132,10 @@ fn esc_with_the_composer_focused_does_nothing_and_cmd_j_then_a_digit_answers(
     draw(vcx);
     vcx.simulate_keystrokes("escape");
     draw(vcx);
-    assert!(painted(vcx, "question-panel"), "Esc stayed with the composer");
+    assert!(
+        painted(vcx, "question-panel"),
+        "Esc stayed with the composer"
+    );
     vcx.simulate_keystrokes("1");
     draw(vcx);
     assert!(!has_answer(&store, vcx, "asker1"), "a digit did not answer");
@@ -145,7 +154,10 @@ fn esc_on_a_claimed_panel_closes_it_and_the_chip_reopens_it(cx: &mut TestAppCont
     vcx.simulate_keystrokes("escape");
     draw(vcx);
     assert!(!painted(vcx, "question-panel"));
-    assert!(painted(vcx, "question-chip"), "Question waiting \u{b7} Open");
+    assert!(
+        painted(vcx, "question-chip"),
+        "Question waiting \u{b7} Open"
+    );
     assert_eq!(status(&store, vcx, "asker1"), RunStatus::WaitingInput);
     click(vcx, "question-chip");
     draw(vcx);
@@ -161,9 +173,15 @@ fn two_questions_page_with_next_and_send_the_whole_set(cx: &mut TestAppContext) 
     let (root, vcx) = open_run(cx, &store, "pager1");
     let run = screen(&root, vcx);
     assert!(painted(vcx, "question-counter") && painted(vcx, "question-next"));
-    assert!(!painted(vcx, "question-send"), "Send waits for the last page");
+    assert!(
+        !painted(vcx, "question-send"),
+        "Send waits for the last page"
+    );
     click(vcx, "question-option-1");
-    assert!(!has_answer(&store, vcx, "pager1"), "a paged ask does not send on click");
+    assert!(
+        !has_answer(&store, vcx, "pager1"),
+        "a paged ask does not send on click"
+    );
     click(vcx, "question-next");
     draw(vcx);
     assert_eq!(run.read_with(vcx, |r, _| r.question_page()), Some(1));
@@ -181,7 +199,10 @@ fn with_the_real_capabilities_the_panel_is_read_only(cx: &mut TestAppContext) {
     store.update(cx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
     let (_root, vcx) = open_run(cx, &store, "asker1");
     assert!(painted(vcx, "question-prompt"), "the question shows");
-    assert!(painted(vcx, "question-readonly-note"), "Answer it in Claude Code for now");
+    assert!(
+        painted(vcx, "question-readonly-note"),
+        "Answer it in Claude Code for now"
+    );
     for gone in [
         "question-send",
         "question-skip",

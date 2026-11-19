@@ -84,30 +84,6 @@ pub(crate) fn task_params(
     }
 }
 
-/// The bot of `class` and its version, when the daemon has it and its definition is not read yet.
-pub(crate) fn bot_to_fetch(state: &State, class: Class) -> Option<(String, u32)> {
-    let bot = state
-        .defs()
-        .defs
-        .iter()
-        .find(|d| d.kind == DefKind::Bot && d.name == class.bot())?;
-    state
-        .def_record(DefKind::Bot, &bot.name, bot.version)
-        .is_none()
-        .then(|| (bot.name.clone(), bot.version))
-}
-
-/// The access mode the class's bot grants, in words, once its definition is read.
-pub(crate) fn class_access(state: &State, class: Class) -> Option<&'static str> {
-    let bot = state
-        .defs()
-        .defs
-        .iter()
-        .find(|d| d.kind == DefKind::Bot && d.name == class.bot())?;
-    let record = state.def_record(DefKind::Bot, &bot.name, bot.version)?;
-    crate::vm::runs::access_words(record.body.get("access")?.as_str()?)
-}
-
 /// What a daemon without a router is asked to run on: the first executor whose last probe found
 /// it usable, else Claude Code.
 fn fallback_executor(state: &State) -> Option<ExecutorId> {

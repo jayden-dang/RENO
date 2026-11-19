@@ -136,8 +136,7 @@ impl RunScreen {
         let Some(q) = self.question.as_mut() else {
             return;
         };
-        let typed = q.input.read(cx).text().to_owned();
-        if !typed.trim().is_empty() {
+        if let Some(typed) = q.input.read(cx).typed_reason() {
             q.draft.type_text(&typed);
         }
         let answers = q.draft.answers(&q.model);
@@ -238,12 +237,10 @@ impl RunScreen {
     fn question_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme::current(cx);
         let answerable = self.store.read(cx).capabilities().answer_questions;
-        let agent = self
-            .store
-            .read(cx)
-            .state()
-            .run(&self.run)
-            .map_or_else(|| "The agent".to_owned(), |r| summary::executor_name(r.executor.as_str()));
+        let agent = self.store.read(cx).state().run(&self.run).map_or_else(
+            || "The agent".to_owned(),
+            |r| summary::executor_name(r.executor.as_str()),
+        );
         let claimed = self.question_claimed(window, cx);
         let Some(q) = self.question.as_ref() else {
             return div().into_any_element();
@@ -254,8 +251,8 @@ impl RunScreen {
         };
         let counter = q.model.counter(page);
         let last = q.draft.on_last_page(&q.model);
-        let has_answer = !q.draft.answers(&q.model).is_empty()
-            || !q.input.read(cx).text().trim().is_empty();
+        let has_answer =
+            !q.draft.answers(&q.model).is_empty() || q.input.read(cx).typed_reason().is_some();
         let refusal = q.refusal.as_ref().map(|r| r.message(&agent));
         let input = q.input.clone();
 
@@ -281,9 +278,8 @@ impl RunScreen {
             }))
             .child(div().flex_1())
             .child(
-                kit::icon_button(&theme, "question-close", Icon::X, 26.0).on_click(
-                    cx.listener(|this, _, _, cx| this.close_question(cx)),
-                ),
+                kit::icon_button(&theme, "question-close", Icon::X, 26.0)
+                    .on_click(cx.listener(|this, _, _, cx| this.close_question(cx))),
             );
 
         let prompt = div()
@@ -294,24 +290,34 @@ impl RunScreen {
             .text_color(theme.text)
             .child(view.prompt.clone());
 
-        let options = div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .children(view.options.iter().enumerate().map(|(ix, option)| {
-                let picked = q.draft.is_picked(ix);
-                let row = div().flex().items_center().gap(px(12.0)).px(px(8.0)).h(px(36.0)).rounded(px(10.0));
-                if !answerable {
-                    // Read-only: what it offered, as plain text. Nothing here answers.
-                    return row
-                        .text_size(px(14.0))
-                        .text_color(theme.muted)
-                        .child(option.label.clone())
-                        .into_any_element();
-                }
-                let keycap = DIGITS.get(ix).map(|d| kit::keycap(&theme, d, None));
-                let hover = theme.raised;
-                row.id(gpui::SharedString::from(format!("question-option-{}", ix + 1)))
+        let options =
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .children(view.options.iter().enumerate().map(|(ix, option)| {
+                    let picked = q.draft.is_picked(ix);
+                    let row = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .px(px(8.0))
+                        .h(px(36.0))
+                        .rounded(px(10.0));
+                    if !answerable {
+                        // Read-only: what it offered, as plain text. Nothing here answers.
+                        return row
+                            .text_size(px(14.0))
+                            .text_color(theme.muted)
+                            .child(option.label.clone())
+                            .into_any_element();
+                    }
+                    let keycap = DIGITS.get(ix).map(|d| kit::keycap(&theme, d, None));
+                    let hover = theme.raised;
+                    row.id(gpui::SharedString::from(format!(
+                        "question-option-{}",
+                        ix + 1
+                    )))
                     .debug_selector(move || format!("question-option-{}", ix + 1))
                     .cursor_pointer()
                     .when(picked, |d| d.bg(theme.raised))
@@ -322,7 +328,7 @@ impl RunScreen {
                     .children(keycap)
                     .child(option.label.clone())
                     .into_any_element()
-            }));
+                }));
 
         let write_own = div()
             .id("question-write-own")
@@ -365,14 +371,15 @@ impl RunScreen {
                     b.on_click(cx.listener(|this, _, _, cx| this.send_question(cx)))
                 })
             } else {
-                kit::pill_button(&theme, "question-next", "Next", kit::Tone::Primary)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                kit::pill_button(&theme, "question-next", "Next", kit::Tone::Primary).on_click(
+                    cx.listener(|this, _, _, cx| {
                         if let Some(q) = this.question.as_mut() {
                             q.refusal = None;
                             q.draft.next(&q.model);
                         }
                         cx.notify();
-                    }))
+                    }),
+                )
             });
 
         let readonly_note = (!answerable).then(|| {
@@ -412,9 +419,10 @@ impl RunScreen {
                 cx.listener(|this, _, window, cx| {
                     // A click on the panel is the owner's choice to answer it by keyboard, unless
                     // it went to the line, which takes the keyboard itself.
-                    let typing = this.question.as_ref().is_some_and(|q| {
-                        q.input.read(cx).focus_handle_ref().is_focused(window)
-                    });
+                    let typing = this
+                        .question
+                        .as_ref()
+                        .is_some_and(|q| q.input.read(cx).focus_handle_ref().is_focused(window));
                     if !typing {
                         window.focus(&this.question_focus, cx);
                     }
@@ -426,7 +434,9 @@ impl RunScreen {
                 }
             }))
             .on_action(cx.listener(|this, _: &SendQuestion, window, cx| {
-                if !this.question_claimed(window, cx) || !this.store.read(cx).capabilities().answer_questions {
+                if !this.question_claimed(window, cx)
+                    || !this.store.read(cx).capabilities().answer_questions
+                {
                     return;
                 }
                 let last = this

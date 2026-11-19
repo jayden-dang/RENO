@@ -135,7 +135,12 @@ pub(crate) fn check(model: &PanelModel, answers: &[QuestionAnswer]) -> Result<()
         });
     }
     for page in &model.pages {
-        let allowed = || page.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>();
+        let allowed = || {
+            page.options
+                .iter()
+                .map(|o| o.label.clone())
+                .collect::<Vec<_>>()
+        };
         let labels = answers
             .iter()
             .find(|a| a.question_id == page.id)
@@ -314,11 +319,17 @@ mod tests {
 
     #[test]
     fn a_draft_picks_one_or_toggles_many_and_pages_with_next() {
-        let m = model(&[q("a", &["A", "B"], false), q("b", &["X", "Y", "Z"], true)], OPEN);
+        let m = model(
+            &[q("a", &["A", "B"], false), q("b", &["X", "Y", "Z"], true)],
+            OPEN,
+        );
         let mut d = Draft::new(&m);
         d.pick(&m, 0);
         d.pick(&m, 1);
-        assert!(!d.is_picked(0) && d.is_picked(1), "a single choice replaces");
+        assert!(
+            !d.is_picked(0) && d.is_picked(1),
+            "a single choice replaces"
+        );
         assert!(!d.on_last_page(&m));
         d.next(&m);
         assert_eq!(d.page, 1);
@@ -393,11 +404,15 @@ mod tests {
         );
         assert_eq!(
             check(&m, &[ans("a", &["A"])]),
-            Err(Refusal::Missing { prompt: "b?".into() })
+            Err(Refusal::Missing {
+                prompt: "b?".into()
+            })
         );
         assert_eq!(
             check(&m, &[ans("a", &["A"]), ans("b", &[])]),
-            Err(Refusal::Missing { prompt: "b?".into() })
+            Err(Refusal::Missing {
+                prompt: "b?".into()
+            })
         );
         assert_eq!(
             check(&m, &[ans("a", &["A"]), ans("b", &["X"]), ans("zz", &["X"])]),
@@ -416,7 +431,11 @@ mod tests {
     fn tool(id: &str, name: &str) -> ExecEvent {
         ExecEvent::Tool {
             id: id.to_owned(),
-            call: reno_proto::ToolCall::new(name, serde_json::json!({}), reno_proto::ActionClass::Other),
+            call: reno_proto::ToolCall::new(
+                name,
+                serde_json::json!({}),
+                reno_proto::ActionClass::Other,
+            ),
         }
     }
 
@@ -438,11 +457,24 @@ mod tests {
         assert!(open_question(RunStatus::Running, &asked).is_none());
         let answered = vec![needs("r1"), tool("t", "AskUserQuestion"), result("t")];
         assert!(open_question(waiting, &answered).is_none());
-        let declined = vec![needs("r1"), ExecEvent::InputExpired { request_id: "r1".into() }];
+        let declined = vec![
+            needs("r1"),
+            ExecEvent::InputExpired {
+                request_id: "r1".into(),
+            },
+        ];
         assert!(open_question(waiting, &declined).is_none());
         let other_tool = vec![needs("r1"), tool("t", "bash"), result("t")];
-        assert!(open_question(waiting, &other_tool).is_some(), "another tool's result is not an answer");
-        let second = vec![needs("r1"), tool("t", "AskUserQuestion"), result("t"), needs("r2")];
+        assert!(
+            open_question(waiting, &other_tool).is_some(),
+            "another tool's result is not an answer"
+        );
+        let second = vec![
+            needs("r1"),
+            tool("t", "AskUserQuestion"),
+            result("t"),
+            needs("r2"),
+        ];
         assert_eq!(open_question(waiting, &second).unwrap().0, "r2");
     }
 }

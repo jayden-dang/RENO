@@ -11,13 +11,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use reno_client::{ConnectionStatus, Update};
-use reno_proto::{ApprovalDecision, RunId, RunStatus, StopReason};
+use reno_proto::{RunId, RunStatus, StopReason};
 
 use crate::app::RootView;
 use crate::nav::Nav;
 use crate::screens::home::Headline;
 use crate::store::Store;
-use crate::summary::{self, Attention, Finding};
 use crate::transcript::{Outcome, Row};
 use crate::ui::theme::Appearance;
 use crate::ui::toast;
@@ -116,66 +115,11 @@ fn home_renders_with_the_demo_state(cx: &mut TestAppContext) {
             root.read_with(vcx, |r, _| (r.home().clone(), r.nav(), r.sidebar_hidden()));
         assert_eq!(nav, Nav::Home);
         assert!(!hidden, "the sidebar shows on Home");
-        let headline = home.read_with(vcx, |h, cx| h.headline(cx));
-        let Headline::Finding(finding) = headline else {
-            panic!("expected a finding, got {headline:?}");
-        };
-        assert!(matches!(finding, Finding::Held { .. }));
-        assert_eq!(
-            finding.sentence(),
-            "2 actions are held for you — keeper's push in atlas-api has waited 6h."
-        );
+        assert_eq!(home.read_with(vcx, |h, cx| h.headline(cx)), Headline::Ready);
     }
 
-    let counts = store.read_with(cx, |s, _| summary::attention(s.state()));
-    assert_eq!(
-        counts,
-        Attention {
-            need: 2,
-            questions: 0,
-            running: 1,
-            bots: 5
-        }
-    );
     let connection = store.read_with(cx, |s, _| s.connection());
     assert_eq!(connection, ConnectionStatus::Connected);
-}
-
-#[gpui::test]
-fn approving_through_the_view_model_removes_the_approval(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    wait_until(cx, |cx| approvals(cx, &store) == 2);
-    let (root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-
-    let dock = root.read_with(vcx, |r, cx| r.home().read(cx).dock().clone());
-    let first = store.read_with(vcx, |s, _| s.state().approvals()[0].clone());
-    dock.update(vcx, |dock, cx| {
-        dock.decide(&first, ApprovalDecision::ApproveOnce, cx);
-    });
-    assert!(
-        store.read_with(vcx, |s, _| s.is_deciding(&first.id)),
-        "the card is busy while the decision is in flight"
-    );
-
-    // The card leaves only when the fake reports the new list.
-    wait_until(vcx, |cx| approvals(cx, &store) == 1);
-    let left = store.read_with(vcx, |s, _| s.state().approvals()[0].clone());
-    assert_ne!(left.id, first.id);
-    assert!(!store.read_with(vcx, |s, _| s.is_deciding(&first.id)));
-    draw(vcx);
-
-    let second = left;
-    dock.update(vcx, |dock, cx| {
-        dock.decide(&second, ApprovalDecision::Deny, cx);
-    });
-    wait_until(vcx, |cx| approvals(cx, &store) == 0);
-    draw(vcx);
-    let headline = root.read_with(vcx, |r, cx| r.home().clone().read(cx).headline(cx));
-    let Headline::Finding(finding) = headline else {
-        panic!("expected a finding");
-    };
-    assert!(matches!(finding, Finding::Calm { .. }), "{finding:?}");
 }
 
 #[gpui::test]
@@ -436,41 +380,6 @@ pub(crate) fn send_from_home(
     });
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     screen.read_with(vcx, |s, _| s.run_id().clone())
-}
-
-#[gpui::test]
-fn clicking_approve_on_the_home_card_approves(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    wait_until(cx, |cx| approvals(cx, &store) == 2);
-    let (_root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-    click(vcx, "approve-appr_keeperpush");
-    assert!(
-        store.read_with(vcx, |s, _| s
-            .is_deciding(&"appr_keeperpush".parse().unwrap()))
-            || approvals(vcx, &store) == 1,
-        "the click reached the store"
-    );
-    wait_until(vcx, |cx| approvals(cx, &store) == 1);
-    assert_eq!(
-        store.read_with(vcx, |s, _| s.state().approvals()[0].id.to_string()),
-        "appr_scoutfetch"
-    );
-}
-
-#[gpui::test]
-fn clicking_deny_on_the_home_card_denies(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    wait_until(cx, |cx| approvals(cx, &store) == 2);
-    let (_root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-    click(vcx, "deny-appr_scoutfetch");
-    wait_until(vcx, |cx| approvals(cx, &store) == 1);
-    wait_until(vcx, |cx| {
-        store.read_with(cx, |s, _| {
-            s.state().run(&run_id("scout1")).map(|r| r.status) == Some(RunStatus::Failed)
-        })
-    });
 }
 
 #[gpui::test]
