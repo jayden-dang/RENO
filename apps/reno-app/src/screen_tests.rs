@@ -380,6 +380,29 @@ fn with_no_executor_that_needs_you_there_is_no_count(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn policy_opened_before_the_daemon_answers_reads_the_standing_rules_once_it_does(
+    cx: &mut TestAppContext,
+) {
+    crate::tests::one_window_test_at_a_time();
+    cx.update(gpui_tokio::init);
+    // Reno opened on Settings › Policy while the daemon is still starting: no features yet.
+    let store = cx.new(|_| Store::connecting());
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |r, window, cx| {
+        r.open_settings(Category::Policy, window, cx);
+    });
+    draw(vcx);
+    assert!(store.read_with(vcx, |s, _| s.rules().is_none()));
+    // The daemon answers; the list the page asked for is read then, not left loading.
+    store.update(vcx, |s, cx| {
+        s.start_fake_with(crate::tests::instant_script(), cx)
+    });
+    wait_drawn(vcx, |vcx| {
+        store.read_with(vcx, |s, _| s.rules().is_some_and(|r| r.is_ok()))
+    });
+}
+
+#[gpui::test]
 fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
