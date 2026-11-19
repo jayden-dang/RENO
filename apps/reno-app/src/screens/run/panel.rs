@@ -274,21 +274,17 @@ impl RunScreen {
         };
         let path = run.cwd.as_ref().map(|p| p.display().to_string());
         let model = self.model_label(cx).map(|(name, _)| name);
-        let held = state.approvals_for(&self.run).next();
-        let note = panel_home::finding_note(run, held, self.result.as_deref(), store.now_ms());
         let facts = HomeFacts {
             files: store.supports_files(),
             history: store.supports_history(),
             terminals: store.supports_terminals(),
             status: run.status,
-            problem: summary::reported_problem(run),
             executor: run.executor.as_str(),
             project: project.as_deref(),
             path: path.as_deref(),
             record,
             model: model.as_deref(),
             bot: summary::run_bot(run),
-            note: Some(&note),
         };
         Some(panel_home::home(&facts, &pane))
     }

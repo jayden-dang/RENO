@@ -1132,7 +1132,7 @@ fn project_of(
 }
 
 #[gpui::test]
-fn a_runs_crumb_opens_its_project_whose_history_holds_only_its_decisions(cx: &mut TestAppContext) {
+fn a_projects_history_holds_only_its_own_decisions(cx: &mut TestAppContext) {
     use crate::vm::projects::FolderKey;
     let store = fake_store(cx);
     connected(cx, &store);
@@ -1145,8 +1145,11 @@ fn a_runs_crumb_opens_its_project_whose_history_holds_only_its_decisions(cx: &mu
     click(vcx, "approve");
     wait_until(vcx, |cx| crate::tests::approvals(cx, &store) == 1);
 
-    click(vcx, "crumb-project");
+    // The run's header, and its crumb, are gone: the project opens by its folder.
     let atlas = FolderKey::Repo(std::path::PathBuf::from("/demo/atlas-api"));
+    root.update_in(vcx, |r, window, cx| {
+        r.open_project(atlas.clone(), window, cx);
+    });
     assert_eq!(project_of(vcx, &root), Some(atlas));
     let project = root
         .read_with(vcx, |r, _| r.project_screen().cloned())

@@ -14,6 +14,7 @@ use crate::ui::kit::MONO;
 use crate::ui::theme::Theme;
 use crate::ui::toast;
 use crate::vm::changes as facts;
+use crate::vm::convo;
 
 /// Puts `text` on the clipboard and says so.
 pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
@@ -32,99 +33,80 @@ impl RunScreen {
         if !set.remove(id) {
             set.insert(id.to_owned());
         }
-        if let Some(ix) = self.rows.iter().position(|r| r.key() == key) {
-            self.list.splice(ix..ix + 1, 1);
-        }
+        self.remeasure(key);
         cx.notify();
     }
 
-    /// Whether the output of `call` shows: a group of one shows it as soon as it opens, a longer
-    /// group lets each call open its own.
-    fn shows_output(&self, call: &ToolEntry, group: usize) -> bool {
-        call.output.is_some() && (group == 1 || self.outputs_open.contains(&call.id))
-    }
-
-    /// One call of an open group: its line and, when it shows, its output.
-    pub(super) fn tool_entry(
+    /// One step of a tool group: a muted line with its icon, and under it, when the call printed
+    /// something and the line is open, that output.
+    pub(super) fn step_row(
         &self,
         theme: &Theme,
         key: Key,
-        call: &ToolEntry,
-        group: usize,
+        line: &convo::StepLine,
+        calls: &[ToolEntry],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let shown = self.shows_output(call, group);
-        let (summary_text, color) = match &call.outcome {
-            Outcome::Pending => ("running".to_owned(), theme.faint),
-            Outcome::Ok(s) => (s.clone().unwrap_or_else(|| "ok".to_owned()), theme.muted),
-            Outcome::Failed(s) => (
-                s.clone().unwrap_or_else(|| "failed".to_owned()),
-                theme.danger,
-            ),
+        let call = line
+            .call
+            .as_ref()
+            .and_then(|id| calls.iter().find(|c| &c.id == id));
+        let output = call.filter(|c| c.output.is_some());
+        let shown = output.is_some_and(|c| self.outputs_open.contains(&c.id));
+        let glyph = match line.icon {
+            convo::StepIcon::Terminal => Icon::Terminal,
+            convo::StepIcon::Read => Icon::Search,
+            convo::StepIcon::Edit => Icon::Pencil,
+            convo::StepIcon::Fetch => Icon::Globe,
+            convo::StepIcon::Tool => Icon::Spark,
         };
-        // A longer group's calls open one by one; a group of one needs no chevron.
-        let expandable = call.output.is_some() && group > 1;
-        let id = call.id.clone();
-        let line = div()
-            .id(SharedString::from(format!("tool-line-{id}")))
-            .debug_selector({
-                let id = id.clone();
-                move || format!("tool-line-{id}")
-            })
+        let opacity = if line.live { Self::shimmer(cx) } else { 1.0 };
+        let id = line.call.clone().unwrap_or_else(|| "edits".to_owned());
+        let selector = format!("step-{id}");
+        let row = div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
             .flex()
-            .items_start()
-            .justify_between()
-            .gap(px(16.0))
-            .px(px(14.0))
-            .py(px(8.0))
-            .when(expandable, |d| {
-                let hover = theme.raised;
-                let id = id.clone();
+            .items_center()
+            .gap(px(8.0))
+            .text_size(px(13.0))
+            .text_color(theme.muted)
+            .when_some(output.map(|c| c.id.clone()), |d, call_id| {
+                let text = theme.text;
                 d.cursor_pointer()
-                    .hover(move |s| s.bg(hover))
+                    .hover(move |s| s.text_color(text))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_output(key, &id, false, cx);
+                        this.toggle_output(key, &call_id, false, cx);
                     }))
             })
+            .child(icon(
+                glyph,
+                14.0,
+                if line.failed { theme.danger } else { theme.faint },
+            ))
             .child(
                 div()
                     .min_w_0()
-                    .flex()
-                    .items_start()
-                    .gap(px(8.0))
-                    .when(expandable, |d| {
-                        d.child(div().pt(px(2.0)).child(icon(
-                            if shown { Icon::ChevDown } else { Icon::Fwd },
-                            12.0,
-                            theme.faint,
-                        )))
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .font_family(MONO)
-                            .text_size(px(12.5))
-                            .child(SharedString::from(call.label.clone())),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(280.0))
                     .truncate()
-                    .text_size(px(12.5))
-                    .text_color(color)
-                    .child(summary_text),
-            );
-        let block = call
-            .output
-            .as_ref()
+                    .opacity(opacity)
+                    .when(line.live, |d| d.debug_selector(|| "step-live".to_owned()))
+                    .child(SharedString::from(line.text.clone())),
+            )
+            .when(output.is_some(), |d| {
+                d.child(icon(
+                    if shown { Icon::ChevDown } else { Icon::Fwd },
+                    12.0,
+                    theme.faint,
+                ))
+            });
+        let block = output
             .filter(|_| shown)
-            .map(|out| self.output_block(theme, key, call, out, cx));
+            .and_then(|c| c.output.as_ref().map(|out| self.output_block(theme, key, c, out, cx)));
         div()
             .flex()
             .flex_col()
-            .child(line)
+            .gap(px(6.0))
+            .child(row)
             .children(block)
             .into_any_element()
     }

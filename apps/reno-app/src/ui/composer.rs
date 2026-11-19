@@ -195,6 +195,25 @@ pub(crate) enum SteerState {
     Ended(String),
 }
 
+/// What the round button at the box's foot does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockAction {
+    /// Send what is typed (dim while nothing is).
+    Send,
+    /// Stop the run: the box is empty and the run can be stopped.
+    Stop,
+}
+
+/// The send / stop morph: Stop (a square) while the run can be stopped and the box has nothing to
+/// send; Send as soon as there is text.
+pub(crate) fn dock_action(stoppable: bool, has_text: bool) -> DockAction {
+    if stoppable && !has_text {
+        DockAction::Stop
+    } else {
+        DockAction::Send
+    }
+}
+
 /// The steer box's state for `run` (`None` before the run is known).
 pub(crate) fn steer_state(run: Option<&reno_proto::RunSummary>) -> SteerState {
     let Some(run) = run else {
@@ -1712,9 +1731,33 @@ impl Composer {
         }
     }
 
-    /// The round button at the foot's right: Steer, Send or nothing to send. Stop lives in the run
-    /// header (brief 2026-11-18), so the box never shows a second one.
+    /// Whether this box's run can be stopped: anything not finished, a run waiting on you
+    /// included.
+    fn stoppable(&self, cx: &App) -> bool {
+        let Mode::Steer(run) = &self.mode else {
+            return false;
+        };
+        self.store
+            .read(cx)
+            .state()
+            .run(run)
+            .is_some_and(|r| !r.status.is_terminal() && !summary::stopped_by_person(r))
+    }
+
+    /// The round button at the foot's right: Stop (a square) while the run is live and the box is
+    /// empty, else Send (an arrow, dim until there is text).
     fn action_button(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        if dock_action(self.stoppable(cx), self.model.can_submit()) == DockAction::Stop
+            && let Mode::Steer(run) = &self.mode
+        {
+            let run = run.clone();
+            return kit::stop_button(theme)
+                .debug_selector(|| "composer-stop".to_owned())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let run = run.clone();
+                    this.store.update(cx, |store, cx| store.cancel_run(run, cx));
+                }));
+        }
         let can_send = self.can_send(cx);
         kit::send_button(theme, can_send)
             .debug_selector(|| "send".to_owned())
@@ -1974,6 +2017,15 @@ fn preview_unavailable_text(reason: &str, connected: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_round_button_is_stop_while_live_and_empty_and_send_with_text() {
+        use super::{DockAction, dock_action};
+        assert_eq!(dock_action(true, false), DockAction::Stop);
+        assert_eq!(dock_action(true, true), DockAction::Send);
+        assert_eq!(dock_action(false, false), DockAction::Send, "an ended run");
+        assert_eq!(dock_action(false, true), DockAction::Send);
+    }
+
     use super::*;
 
     #[test]

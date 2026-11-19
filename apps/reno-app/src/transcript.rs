@@ -356,6 +356,22 @@ pub(crate) fn fold_turns(rows: Vec<Row>, elapsed_ms: Option<u64>) -> Vec<Row> {
     out
 }
 
+/// Says when the prompt was sent: the run's start. A steer has no time of its own.
+pub(crate) fn stamp_prompt(rows: &mut [Row], at_ms: u64) {
+    for row in rows {
+        if let Row::User {
+            key,
+            steer: false,
+            at_ms: stamp,
+            ..
+        } = row
+            && *key == Key::PROMPT
+        {
+            *stamp = Some(at_ms);
+        }
+    }
+}
+
 /// The result of [`build_rows`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Built {
@@ -695,30 +711,6 @@ pub(crate) fn tool_label(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// "Ran 3 commands", "Edited 14 files, ran 2 commands", "Used 1 tool".
-pub(crate) fn group_title(calls: &[ToolEntry]) -> String {
-    let count = |kind| calls.iter().filter(|c| c.kind == kind).count();
-    let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
-    let mut parts = Vec::new();
-    let edits = count(ToolKind::Edit);
-    if edits > 0 {
-        parts.push(format!("edited {}", plural(edits, "file")));
-    }
-    let commands = count(ToolKind::Command);
-    if commands > 0 {
-        parts.push(format!("ran {}", plural(commands, "command")));
-    }
-    let other = count(ToolKind::Other);
-    if other > 0 {
-        parts.push(format!("used {}", plural(other, "tool")));
-    }
-    let mut title = parts.join(", ");
-    if let Some(first) = title.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    title
-}
-
 #[cfg(test)]
 mod tests {
     use reno_proto::{ActionClass, RunId, SessionRef, ToolCall};
@@ -893,12 +885,10 @@ mod tests {
         assert_eq!(calls[0].label, "ls");
         assert_eq!(calls[0].outcome, Outcome::Ok(Some("Cargo.toml".into())));
         assert_eq!(calls[1].outcome, Outcome::Failed(Some("1 failed".into())));
-        assert_eq!(group_title(calls), "Ran 2 commands");
         let Row::Tools { calls, .. } = &built.rows[2] else {
             panic!("expected a second group");
         };
         assert_eq!(calls[0].outcome, Outcome::Pending, "no result yet");
-        assert_eq!(group_title(calls), "Ran 1 command");
     }
 
     #[test]
@@ -948,25 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn group_titles_mix_kinds() {
-        let entry = |kind| ToolEntry {
-            id: String::new(),
-            kind,
-            label: String::new(),
-            outcome: Outcome::Pending,
-            output: None,
-        };
-        let mixed = [
-            entry(ToolKind::Edit),
-            entry(ToolKind::Edit),
-            entry(ToolKind::Command),
-            entry(ToolKind::Other),
-        ];
-        assert_eq!(
-            group_title(&mixed),
-            "Edited 2 files, ran 1 command, used 1 tool"
-        );
-        assert_eq!(group_title(&mixed[3..]), "Used 1 tool");
+    fn tool_kinds_and_labels_come_from_the_call() {
         assert_eq!(tool_kind("apply_patch"), ToolKind::Edit);
         assert_eq!(tool_kind("Bash"), ToolKind::Command);
         assert_eq!(tool_kind("web_fetch"), ToolKind::Other);
@@ -1630,6 +1602,19 @@ mod tests {
         assert_eq!(inner[0].key(), Key(1).in_segment(2));
         assert_ne!(rows[1].key(), rows[0].key());
         assert_ne!(Key::fold(Key(5)), Key(5));
+    }
+
+    #[test]
+    fn the_prompt_is_stamped_with_the_runs_start_and_a_steer_is_not() {
+        let mut rows = build_rows(
+            Some("do it"),
+            &at(vec![ExecEvent::UserMessage { text: "and".into() }]),
+            &[],
+        )
+        .rows;
+        stamp_prompt(&mut rows, 5_000);
+        assert!(matches!(&rows[0], Row::User { at_ms: Some(5_000), .. }), "{rows:?}");
+        assert!(matches!(&rows[1], Row::User { at_ms: None, steer: true, .. }), "{rows:?}");
     }
 
     fn routing_view() -> RoutingView {

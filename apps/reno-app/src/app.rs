@@ -701,7 +701,6 @@ impl RootView {
         match event {
             ScreenEvent::OpenRun(run) => self.open_run(run.clone(), window, cx),
             ScreenEvent::OpenExecutors => self.navigate(Nav::Executors, window, cx),
-            ScreenEvent::OpenProject(key) => self.open_project(key.clone(), window, cx),
         }
     }
 

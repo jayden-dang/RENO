@@ -1,5 +1,5 @@
 //! The side panel on the run screen, against the fake daemon: layout, the tab strip and its keys,
-//! the Home page and its letters, the tokens chip and the header's Stop.
+//! the Home page and its letters, and the composer's Stop.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -226,7 +226,7 @@ fn the_home_lists_its_rows_with_letters_and_opens_one_with_its_key(cx: &mut Test
         assert!(painted(vcx, &format!("home-row-{row}")), "{row}");
     }
     assert!(painted(vcx, "home-add-action"));
-    assert!(painted(vcx, "home-now"));
+    assert!(!painted(vcx, "home-now"), "the panel does not repeat the status");
 
     // A built row opens its tab: C goes to Review (the New tab is replaced).
     vcx.simulate_keystrokes("c");
@@ -342,31 +342,9 @@ fn closed_tabs_are_listed_on_the_home_and_open_again_from_it(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn the_tokens_chip_hides_at_zero_and_opens_session(cx: &mut TestAppContext) {
-    let (_root, vcx, screen) = ready(cx);
-    // builder1 has reported no tokens yet in the fake script's first frames: no chip.
-    let has_usage = screen.read_with(vcx, |s, _| s.facts().usage.is_some_and(|u| u.total() > 0));
-    assert_eq!(painted(vcx, "usage-chip"), has_usage);
-    if !has_usage {
-        screen.update(vcx, |s, cx| {
-            s.facts.usage = Some(crate::transcript::Usage {
-                input: 1_000,
-                output: 400,
-            });
-            cx.notify();
-        });
-        draw(vcx);
-    }
-    assert!(painted(vcx, "usage-chip"));
-    click(vcx, "usage-chip");
-    assert_eq!(active(vcx, &screen), Surface::Session);
-    assert!(painted(vcx, "details"));
-}
-
-#[gpui::test]
-fn a_live_run_has_stop_in_the_header_and_an_ended_one_does_not(cx: &mut TestAppContext) {
+fn a_live_run_has_stop_in_the_composer_and_an_ended_one_does_not(cx: &mut TestAppContext) {
     let (_root, vcx, _screen) = ready(cx);
-    assert!(painted(vcx, "header-stop"), "builder1 is running");
-    click(vcx, "header-stop");
-    wait_drawn(vcx, |vcx| !painted(vcx, "header-stop"));
+    assert!(painted(vcx, "composer-stop"), "builder1 is running");
+    click(vcx, "composer-stop");
+    wait_drawn(vcx, |vcx| !painted(vcx, "composer-stop"));
 }

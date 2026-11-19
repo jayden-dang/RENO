@@ -15,7 +15,7 @@ use super::surface::{Counts, Surface};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
-use crate::vm::panel_home::{Home, HomeKind, HomeRow, Now, NowTone};
+use crate::vm::panel_home::{Home, HomeKind, HomeRow, NowTone};
 
 /// What a click in the panel asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,38 +283,6 @@ pub(crate) fn tone_ink(theme: &Theme, tone: NowTone) -> Hsla {
     }
 }
 
-/// "held for you" as "Held for you.": the state word, capitalised, with its full stop.
-pub(crate) fn lead_word(lead: &str) -> String {
-    let mut chars = lead.chars();
-    match chars.next() {
-        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
-        None => String::new(),
-    }
-}
-
-/// The finding sentence: the state word in bold and in its colour, then the rest, on one line
-/// that wraps.
-pub(crate) fn finding_text(theme: &Theme, now: &Now, muted: Hsla) -> gpui::Div {
-    div()
-        .min_w_0()
-        .flex()
-        .flex_wrap()
-        .gap_x(px(5.0))
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(tone_ink(theme, now.tone))
-                .child(SharedString::from(lead_word(&now.lead))),
-        )
-        .when(!now.text.is_empty(), |d| {
-            d.child(
-                div()
-                    .text_color(muted)
-                    .child(SharedString::from(now.text.clone())),
-            )
-        })
-}
-
 /// A key's cap: a small bordered box, in mono.
 fn keycap(theme: &Theme, label: &str) -> gpui::Div {
     div()
@@ -481,23 +449,6 @@ pub(crate) fn home_page(theme: &Theme, home: &Home, closed: &[Surface], emit: &E
                 .on_click(move |_, window, cx| open(Cmd::Open(HomeKind::Changes), window, cx))
         }));
 
-    let now = &home.now;
-    let now_line = div()
-        .id("home-now")
-        .debug_selector(|| "home-now".to_owned())
-        .flex()
-        .items_start()
-        .gap(px(9.0))
-        .text_size(px(14.0))
-        .line_height(px(21.0))
-        .child(
-            div()
-                .flex_none()
-                .pt(px(7.0))
-                .child(kit::dot(tone_dot(theme, now.tone), 7.0)),
-        )
-        .child(finding_text(theme, now, theme.muted));
-
     let meta = div()
         .flex()
         .items_center()
@@ -515,7 +466,6 @@ pub(crate) fn home_page(theme: &Theme, home: &Home, closed: &[Surface], emit: &E
         .border_b_1()
         .border_color(theme.hairline)
         .child(where_line)
-        .child(now_line)
         .child(meta);
 
     let group = |label: &'static str, rows: &[HomeRow]| {

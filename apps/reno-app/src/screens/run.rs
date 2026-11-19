@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
-    ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
+    ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
 };
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
@@ -29,6 +29,7 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
+use crate::vm::convo;
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
@@ -37,7 +38,6 @@ use crate::vm::rules;
 mod changes;
 mod dock;
 mod files;
-mod header;
 mod history;
 mod output;
 mod panel;
@@ -53,6 +53,8 @@ const CHANGES_EVERY: Duration = Duration::from_secs(1);
 
 /// Width of the transcript column and of the steer input.
 const COLUMN: f32 = 760.0;
+/// Width of the tick rail at the column's left edge.
+const RAIL: f32 = 16.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
 
@@ -80,6 +82,9 @@ pub(crate) struct RunScreen {
     /// How many times an older run's rows were built (tests assert it stays put).
     #[cfg(test)]
     older_builds: usize,
+    /// The row a tick on the rail last scrolled to.
+    #[cfg(test)]
+    scrolled_to: Option<usize>,
     /// What Review compares: the whole thread (default) or the latest run.
     scope: ReviewScope,
     /// The Session tab's "Close thread" is asking for a confirmation.
@@ -177,6 +182,8 @@ impl RunScreen {
             segments: HashMap::new(),
             #[cfg(test)]
             older_builds: 0,
+            #[cfg(test)]
+            scrolled_to: None,
             scope: ReviewScope::default(),
             close_confirm: false,
             facts: Facts::default(),
@@ -267,6 +274,13 @@ impl RunScreen {
         &self.facts
     }
 
+    /// The row the last click on the tick rail asked to show (the list itself ignores a scroll
+    /// when everything fits, so a test cannot read it back from there).
+    #[cfg(test)]
+    pub(crate) fn scrolled_to(&self) -> Option<usize> {
+        self.scrolled_to
+    }
+
     #[cfg(test)]
     pub(crate) fn is_following_tail(&self) -> bool {
         self.list.is_following_tail()
@@ -276,11 +290,19 @@ impl RunScreen {
         if !self.open.remove(&key) {
             self.open.insert(key);
         }
-        // The row's height changed: measure it again.
-        if let Some(ix) = self.rows.iter().position(|r| r.key() == key) {
+        self.remeasure(key);
+        cx.notify();
+    }
+
+    /// The row holding `key` (itself, or inside a fold) changed height: measure it again.
+    pub(super) fn remeasure(&mut self, key: Key) {
+        let holds = |row: &Row| {
+            row.key() == key
+                || matches!(row, Row::Worked { rows, .. } if rows.iter().any(|r| r.key() == key))
+        };
+        if let Some(ix) = self.rows.iter().position(holds) {
             self.list.splice(ix..ix + 1, 1);
         }
-        cx.notify();
     }
 
     /// Rebuilds the rows from the store and tells the list what changed.
@@ -347,7 +369,18 @@ impl RunScreen {
                     .as_deref()
                     .unwrap_or_else(|| summary::parse_title(&r.title).what)
             });
-            model::build_rows(prompt, events, with)
+            let mut built = model::build_rows(prompt, events, with);
+            if let Some(run) = state.run(id) {
+                model::stamp_prompt(&mut built.rows, run.created_at_ms);
+                let elapsed = convo::run_elapsed_ms(
+                    run.status.is_terminal(),
+                    run.created_at_ms,
+                    run.updated_at_ms,
+                    events,
+                );
+                built.rows = model::fold_turns(built.rows, elapsed);
+            }
+            built
         };
         let divider = |id: &RunId, at: usize, model: Option<String>| {
             state.run(id).filter(|_| at > 0).map(|r| Row::Divider {
@@ -398,23 +431,81 @@ impl RunScreen {
         }
         self.prefix_len = rows.len();
         self.prefix_runs = prefix_runs;
-        for row in &rows {
-            if let Row::Prose { key, text } = row {
-                self.markdown.entry(*key).or_default().set_text(text);
-            }
-        }
+        self.feed_markdown(&rows);
         rows.extend(tail);
         self.apply(Built { rows, facts });
+    }
+
+    /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
+    fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.scrolled_to = Some(ix);
+        }
+        self.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    }
+
+    /// The thin rail at the column's left edge: one tick for each user message; a click scrolls
+    /// to it.
+    fn tick_rail(&self, theme: &Theme, ticks: &[usize], cx: &mut Context<Self>) -> AnyElement {
+        let faint = theme.faint;
+        let text = theme.text;
+        div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(RAIL))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .children(ticks.iter().map(|&ix| {
+                let selector = format!("tick-{ix}");
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .w(px(RAIL))
+                    .h(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(2.0))
+                            .rounded(px(1.0))
+                            .bg(faint)
+                            .hover(move |s| s.bg(text)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
+            }))
+            .into_any_element()
+    }
+
+    /// Parses each prose row's text, those inside a fold too.
+    fn feed_markdown(&mut self, rows: &[Row]) {
+        for row in rows {
+            match row {
+                Row::Prose { key, text } => {
+                    self.markdown.entry(*key).or_default().set_text(text);
+                }
+                Row::Worked { rows, .. } => self.feed_markdown(rows),
+                _ => {}
+            }
+        }
     }
 
     /// The latest run's rows replace what followed the older runs'.
     fn apply_tail(&mut self, facts: Facts, tail: Vec<Row>) {
         self.facts = facts;
-        for row in &tail {
-            if let Row::Prose { key, text } = row {
-                self.markdown.entry(*key).or_default().set_text(text);
-            }
-        }
+        self.feed_markdown(&tail);
         let at = self.prefix_len.min(self.rows.len());
         let same = self.rows[at..]
             .iter()
@@ -476,14 +567,7 @@ impl RunScreen {
         if self.store.read(cx).supports_changes() {
             let status = self.summary(cx).map(|r| r.status);
             let ended = status.is_some_and(RunStatus::is_terminal);
-            let writes = self
-                .rows
-                .iter()
-                .filter_map(|row| match row {
-                    Row::Tools { calls, .. } => Some(calls),
-                    _ => None,
-                })
-                .flatten()
+            let writes = tool_calls(&self.rows)
                 .filter(|c| c.kind != model::ToolKind::Other && c.finished())
                 .count();
             let moved = self.last_status != status || writes > self.last_writes;
@@ -602,11 +686,7 @@ impl RunScreen {
     fn apply(&mut self, built: Built) {
         let Built { rows, facts } = built;
         self.facts = facts;
-        for row in &rows {
-            if let Row::Prose { key, text } = row {
-                self.markdown.entry(*key).or_default().set_text(text);
-            }
-        }
+        self.feed_markdown(&rows);
         let same = self
             .rows
             .iter()
@@ -627,19 +707,25 @@ impl RunScreen {
 impl Render for RunScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
+        let ticks = convo::ticks(&self.rows);
         let transcript = div()
             .id("transcript")
+            .relative()
             .flex_1()
             .min_h_0()
             .w_full()
             .max_w(px(COLUMN))
             .child(
-                list(
-                    self.list.clone(),
-                    cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx)),
-                )
-                .size_full(),
-            );
+                div().size_full().pl(px(RAIL)).child(
+                    list(
+                        self.list.clone(),
+                        cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx)),
+                    )
+                    .size_full(),
+                ),
+            )
+            // After the list, so it is on top of it and takes the clicks.
+            .child(self.tick_rail(&theme, &ticks, cx));
         let chat = div()
             .id("chat-canvas")
             .debug_selector(|| "chat-canvas".to_owned())
@@ -653,7 +739,6 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
-            .child(self.header(&theme, cx))
             .child(
                 div()
                     .flex_1()
@@ -675,6 +760,15 @@ impl Render for RunScreen {
             .child(chat);
         self.with_panel(stage, &theme, window, cx)
     }
+}
+
+/// Every tool call of `rows`, those inside a fold too.
+fn tool_calls(rows: &[Row]) -> Box<dyn Iterator<Item = &ToolEntry> + '_> {
+    Box::new(rows.iter().flat_map(|row| match row {
+        Row::Tools { calls, .. } => Box::new(calls.iter()) as Box<dyn Iterator<Item = &ToolEntry>>,
+        Row::Worked { rows, .. } => tool_calls(rows),
+        _ => Box::new(std::iter::empty()),
+    }))
 }
 
 /// The panel key of `run`: its thread when the daemon has threads and has named it, else the run.
@@ -705,6 +799,9 @@ mod question_card_tests;
 
 #[cfg(test)]
 mod changes_tests;
+
+#[cfg(test)]
+mod convo_tests;
 
 #[cfg(test)]
 mod files_tests;

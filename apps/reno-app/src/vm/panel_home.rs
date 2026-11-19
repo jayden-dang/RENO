@@ -211,8 +211,6 @@ pub(crate) struct HomeFacts<'a> {
     /// The daemon serves the Terminal tab (feature `terminals`).
     pub(crate) terminals: bool,
     pub(crate) status: RunStatus,
-    /// The agent's reported problem on a passed run.
-    pub(crate) problem: Option<Problem>,
     /// The executor's id, for its name, glyph and fork capability.
     pub(crate) executor: &'a str,
     /// The folder's name.
@@ -224,8 +222,6 @@ pub(crate) struct HomeFacts<'a> {
     /// The model by name.
     pub(crate) model: Option<&'a str>,
     pub(crate) bot: Option<&'a str>,
-    /// What follows the state word in the finding sentence.
-    pub(crate) note: Option<&'a str>,
 }
 
 /// The state's colour, which the panel maps to the theme.
@@ -290,14 +286,6 @@ pub(crate) struct Where {
     pub(crate) diff: Option<DiffPill>,
 }
 
-/// The finding sentence: a dot, the state word in bold, the rest.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Now {
-    pub(crate) tone: NowTone,
-    pub(crate) lead: String,
-    pub(crate) text: String,
-}
-
 /// The muted line under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Meta {
@@ -317,7 +305,6 @@ impl Meta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Home {
     pub(crate) place: Where,
-    pub(crate) now: Now,
     pub(crate) meta: Meta,
     /// Changes, Files, History.
     pub(crate) inspect: Vec<HomeRow>,
@@ -499,11 +486,6 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
             branch_full: branch_full.clone(),
             diff: diff_pill(pane),
         },
-        now: Now {
-            tone: now_tone(facts.status, facts.problem),
-            lead: summary::status_words(facts.status, facts.problem).to_owned(),
-            text: facts.note.unwrap_or_default().to_owned(),
-        },
         meta: meta(facts, pane),
         inspect: vec![
             changes_row(pane, place),
@@ -542,67 +524,7 @@ pub(crate) fn home(facts: &HomeFacts<'_>, pane: &Pane) -> Home {
     }
 }
 
-/// What follows the state word in the finding sentence: who holds what and for how long, the
-/// agent's own report when it reported a problem, or what the branch holds once the run ended.
-/// Ends with a full stop, or is empty when there is nothing to add.
-pub(crate) fn finding_note(
-    run: &RunSummary,
-    held: Option<&reno_proto::Approval>,
-    result: Option<&str>,
-    now_ms: u64,
-) -> String {
-    let who = summary::run_bot(run).unwrap_or("It");
-    match run.status {
-        RunStatus::WaitingApproval => {
-            let Some(approval) = held else {
-                return String::new();
-            };
-            let verb = if approval.subject.command.is_some() {
-                "wants to run"
-            } else {
-                "wants to use"
-            };
-            let what = summary::subject_line(&approval.subject);
-            match summary::age_label(now_ms.saturating_sub(approval.requested_at_ms)).as_str() {
-                "just now" => format!("{who} {verb} {what} \u{2014} just held."),
-                age => format!("{who} {verb} {what} \u{2014} held {age}."),
-            }
-        }
-        RunStatus::WaitingInput => format!("{who} is waiting for your answer."),
-        _ => {
-            if let (Some(report), Some(_)) = (&run.report, summary::reported_problem(run)) {
-                return report.summary.clone();
-            }
-            result.map(|line| format!("{line}.")).unwrap_or_default()
-        }
-    }
-}
-
 // --- the tokens chip -----------------------------------------------------------------------------
-
-/// The chip's label: input plus output tokens, the cache left out. "999", "1.4k", "38k", "1.2m";
-/// cut, never rounded up, so a label never reads larger than the count.
-pub(crate) fn usage_chip(usage: Usage) -> String {
-    let n = usage.total();
-    let scaled = |unit: u64, suffix: &str| {
-        let tenths = n / (unit / 10);
-        if tenths < 100 {
-            let (whole, tenth) = (tenths / 10, tenths % 10);
-            if tenth == 0 {
-                format!("{whole}{suffix}")
-            } else {
-                format!("{whole}.{tenth}{suffix}")
-            }
-        } else {
-            format!("{}{suffix}", tenths / 10)
-        }
-    };
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=999_999 => scaled(1_000, "k"),
-        _ => scaled(1_000_000, "m"),
-    }
-}
 
 /// 12345 becomes "12,345".
 pub(crate) fn group_digits(n: u64) -> String {
@@ -796,14 +718,12 @@ mod tests {
             history: true,
             terminals: true,
             status,
-            problem: None,
             executor: "claude-code",
             project: Some("porch"),
             path: Some("/work/porch"),
             record: Record::Present,
             model: Some("Opus 4"),
             bot: Some("reviewer"),
-            note: Some("Waiting on you."),
         }
     }
 
@@ -1184,61 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn now_has_a_tone_a_lead_and_a_text() {
-        let cases = [
-            (RunStatus::Running, None, NowTone::Running, "running"),
-            (RunStatus::Queued, None, NowTone::Running, "queued"),
-            (
-                RunStatus::WaitingInput,
-                None,
-                NowTone::Waiting,
-                "needs input",
-            ),
-            (
-                RunStatus::WaitingApproval,
-                None,
-                NowTone::Waiting,
-                "held for you",
-            ),
-            (RunStatus::Succeeded, None, NowTone::Done, "passed"),
-            (
-                RunStatus::Succeeded,
-                Some(Problem::Blocked),
-                NowTone::Blocked,
-                "blocked",
-            ),
-            (
-                RunStatus::Succeeded,
-                Some(Problem::Failed),
-                NowTone::Failed,
-                "reported failed",
-            ),
-            (RunStatus::Failed, None, NowTone::Failed, "failed"),
-            (
-                RunStatus::Interrupted,
-                None,
-                NowTone::Stopped,
-                "interrupted",
-            ),
-            (RunStatus::Cancelled, None, NowTone::Stopped, "stopped"),
-        ];
-        for (status, problem, tone, lead) in cases {
-            let mut f = facts(status);
-            f.problem = problem;
-            let h = home(&f, &Pane::Loading);
-            assert_eq!(
-                (h.now.tone, h.now.lead.as_str()),
-                (tone, lead),
-                "{status:?}"
-            );
-            assert_eq!(h.now.text, "Waiting on you.");
-        }
-        let mut f = facts(RunStatus::Running);
-        f.note = None;
-        assert_eq!(home(&f, &Pane::Loading).now.text, "");
-    }
-
-    #[test]
     fn the_meta_line_lists_what_is_known_then_the_commits() {
         let pane = files_pane(&[file("a", 1, 1)], "3 commits");
         let h = home(&facts(RunStatus::Running), &pane);
@@ -1262,34 +1127,6 @@ mod tests {
         f.model = None;
         f.bot = None;
         assert_eq!(home(&f, &Pane::Loading).meta.text(), "Claude Code");
-    }
-
-    // --- the tokens chip ---
-
-    fn chip(input: u64, output: u64) -> String {
-        usage_chip(Usage { input, output })
-    }
-
-    #[test]
-    fn the_chip_counts_input_and_output_and_abbreviates() {
-        for (total, label) in [
-            (0, "0"),
-            (999, "999"),
-            (1_000, "1k"),
-            (1_434, "1.4k"),
-            (9_999, "9.9k"),
-            (10_000, "10k"),
-            (38_214, "38k"),
-            (999_999, "999k"),
-            (1_000_000, "1m"),
-            (1_550_000, "1.5m"),
-            (25_000_000, "25m"),
-        ] {
-            assert_eq!(chip(total, 0), label, "{total}");
-        }
-        // Input and output add up.
-        assert_eq!(chip(1_000, 434), "1.4k");
-        assert_eq!(chip(u64::MAX, 1), chip(u64::MAX, 0));
     }
 
     // --- the Session tab ---
@@ -1438,68 +1275,5 @@ mod tests {
         let s = session(&f);
         assert!(s.executor_health);
         assert_eq!(s.workspace[0].sub.as_deref(), Some("workspace removed"));
-    }
-
-    // --- the finding's words ---
-
-    fn held(command: &str, at_ms: u64) -> reno_proto::Approval {
-        reno_proto::Approval {
-            id: reno_proto::ApprovalId::from_suffix("a1").unwrap(),
-            run_id: RunId::from_suffix("a000001").unwrap(),
-            subject: reno_proto::ApprovalSubject {
-                action: reno_proto::ActionClass::Command,
-                tool: "Bash".to_owned(),
-                command: Some(command.to_owned()),
-                paths: Vec::new(),
-                raw: serde_json::Value::Null,
-            },
-            requested_at_ms: at_ms,
-        }
-    }
-
-    #[test]
-    fn a_held_action_reads_who_wants_what_and_for_how_long() {
-        let mut r = run(RunStatus::WaitingApproval);
-        r.title = "keeper \u{b7} porch: push".to_owned();
-        let a = held("/bin/zsh -lc 'git push -u origin HEAD'", 0);
-        assert_eq!(
-            finding_note(&r, Some(&a), None, 3 * 60_000),
-            "keeper wants to run git push -u origin HEAD \u{2014} held 3m."
-        );
-        // Held for under a minute, and with no bot named.
-        r.title = "fix the thing".to_owned();
-        assert_eq!(
-            finding_note(&r, Some(&a), None, 10_000),
-            "It wants to run git push -u origin HEAD \u{2014} just held."
-        );
-    }
-
-    #[test]
-    fn a_wait_for_an_answer_and_a_run_still_going_say_little() {
-        assert_eq!(
-            finding_note(&run(RunStatus::WaitingInput), None, None, 0),
-            "It is waiting for your answer."
-        );
-        assert_eq!(finding_note(&run(RunStatus::Running), None, None, 0), "");
-    }
-
-    #[test]
-    fn an_ended_run_says_its_report_or_what_its_branch_holds() {
-        let mut r = run(RunStatus::Succeeded);
-        let result = "Branch reno/x has 1 commit, 1 file changed (+72 \u{2212}73)";
-        assert_eq!(
-            finding_note(&r, None, Some(result), 0),
-            format!("{result}.")
-        );
-        // The agent's own words come first when it reported a problem.
-        r.report = Some(RunReport {
-            status: ReportStatus::Blocked,
-            summary: "Cargo.lock is committed but not pushed.".to_owned(),
-        });
-        assert_eq!(
-            finding_note(&r, None, Some(result), 0),
-            "Cargo.lock is committed but not pushed."
-        );
-        assert_eq!(finding_note(&run(RunStatus::Failed), None, None, 0), "");
     }
 }

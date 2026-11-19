@@ -267,7 +267,7 @@ fn a_finder_copy_pastes_as_a_chip_on_home_and_a_toast_on_a_steer(cx: &mut TestAp
 
     // A steer: a toast, no chip, the text as it was.
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
+    wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
     let steer = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .unwrap()
@@ -295,7 +295,7 @@ fn dropping_files_on_a_steer_says_a_steer_is_text(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
+    wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("note.txt");
     std::fs::write(&file, b"x").unwrap();
@@ -426,15 +426,14 @@ fn a_draft_comes_back_when_the_daemon_refuses_the_task(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn a_live_run_has_one_stop_in_the_header_and_the_box_steers(cx: &mut TestAppContext) {
+fn a_live_run_has_one_button_that_is_stop_when_empty_and_send_with_text(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     click(vcx, "recent-run_keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
-    assert!(!painted(vcx, "stop"), "the box has no second Stop");
-    assert!(painted(vcx, "send"), "the box shows Send, dim until typed");
+    wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
+    assert!(!painted(vcx, "send"), "empty and live: the one button is Stop");
     let steer = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .unwrap()
@@ -442,16 +441,15 @@ fn a_live_run_has_one_stop_in_the_header_and_the_box_steers(cx: &mut TestAppCont
     assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
     steer.update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
     wait_drawn(vcx, |vcx| steer.read_with(vcx, |c, cx| c.can_send(cx)));
-    assert!(
-        painted(vcx, "header-stop"),
-        "typing does not hide the header Stop"
-    );
+    assert!(painted(vcx, "send"), "text: the button is Send");
+    assert!(!painted(vcx, "composer-stop"), "typing turns Stop into Send");
     click(vcx, "send");
     assert_eq!(steer.read_with(vcx, |c, _| c.text().to_owned()), "");
     wait_drawn(vcx, |vcx| painted(vcx, "composer-note"));
     assert!(steer.read_with(vcx, |c, _| c.is_sent_noted()));
-    // The header Stop stops the run.
-    click(vcx, "header-stop");
+    // Empty again and still live: Stop is back, and it stops the run.
+    wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
+    click(vcx, "composer-stop");
     wait_until(vcx, |cx| {
         store.read_with(cx, |s, _| {
             s.state()
@@ -463,7 +461,7 @@ fn a_live_run_has_one_stop_in_the_header_and_the_box_steers(cx: &mut TestAppCont
     // Ended: no Stop; the box now offers a new run in the project, so Send stays (disabled
     // until something is typed).
     wait_drawn(vcx, |vcx| {
-        !painted(vcx, "header-stop") && painted(vcx, "composer-note")
+        !painted(vcx, "composer-stop") && painted(vcx, "composer-note")
     });
     assert!(!steer.read_with(vcx, |c, cx| c.can_send(cx)));
 }

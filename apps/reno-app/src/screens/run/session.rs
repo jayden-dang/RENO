@@ -5,7 +5,7 @@ use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 
 use super::super::executors::health_lines;
 use super::RunScreen;
-use crate::panel::view::{finding_text, tone_ink};
+use crate::panel::view::tone_ink;
 use crate::summary;
 use crate::ui::kit;
 use crate::ui::theme::Theme;
@@ -25,7 +25,7 @@ impl RunScreen {
             .py(px(18.0))
             .flex()
             .flex_col();
-        let (sections, failed, finding, executor) = {
+        let (sections, failed, executor) = {
             let store = self.store.read(cx);
             let Some(run) = store.state().run(&self.run) else {
                 return body
@@ -70,7 +70,6 @@ impl RunScreen {
             (
                 panel_home::session(&facts),
                 failed,
-                self.home(cx),
                 run.executor.as_str().to_owned(),
             )
         };
@@ -95,21 +94,7 @@ impl RunScreen {
                 .collect::<Vec<_>>()
         };
 
-        let finding_block = finding.map(|home| {
-            div()
-                .id("session-finding")
-                .debug_selector(|| "session-finding".to_owned())
-                .px(px(14.0))
-                .py(px(12.0))
-                .rounded(px(10.0))
-                .bg(theme.text.opacity(0.06))
-                .text_size(px(13.5))
-                .line_height(px(20.0))
-                .child(finding_text(theme, &home.now, theme.muted))
-        });
-
-        body.children(finding_block)
-            .children(failed.map(|failed| {
+        body.children(failed.map(|failed| {
                 div()
                     .flex()
                     .flex_col()

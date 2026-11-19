@@ -162,6 +162,21 @@ pub(crate) fn send_button(theme: &Theme, enabled: bool) -> Stateful<Div> {
         .child(icon(Icon::Up, 17.0, arrow))
 }
 
+/// The round Stop at the steer box's foot: the same disc as [`send_button`], with a square.
+pub(crate) fn stop_button(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("composer-stop")
+        .flex_none()
+        .size(px(34.0))
+        .rounded(px(17.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.text)
+        .cursor_pointer()
+        .child(icon(Icon::Stop, 14.0, theme.canvas))
+}
+
 /// How a [`pill_button`] looks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tone {

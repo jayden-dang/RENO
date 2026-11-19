@@ -1,7 +1,12 @@
 //! The transcript: one function per row kind and the cards inside them. State and the rebuild
 //! from the store live in `run.rs`; this only draws.
+//!
+//! The look is the reference app's: agent text bare on the canvas, the user's words in a neutral
+//! raised bubble, tool activity as one muted line each, and a finished turn folded behind
+//! "Worked for Ns".
 
 use super::*;
+use crate::ui::motion;
 
 impl RunScreen {
     pub(super) fn render_row(
@@ -14,25 +19,95 @@ impl RunScreen {
         let Some(row) = self.rows.get(ix) else {
             return div().into_any_element();
         };
-        let body = match row {
-            Row::User { text, steer, .. } => user_bubble(&theme, text, *steer),
-            Row::Prose { key, .. } => match self.markdown.get(key) {
-                Some(stream) => div()
-                    .text_size(px(15.0))
-                    .line_height(px(24.0))
-                    .child(markdown_view::blocks(stream.tree(), &theme, window))
-                    .into_any_element(),
-                None => div().into_any_element(),
-            },
-            Row::Reasoning { key, text } => self.reasoning(&theme, *key, text, cx),
-            Row::Tools { key, calls } => self.tools(&theme, *key, calls, cx),
+        let last = ix + 1 == self.rows.len();
+        let body = self.row_body(row, Some(ix), &theme, window, cx);
+        // "Thinking" under the last row while the agent works between steps.
+        let thinking = last && self.is_thinking(cx);
+        div()
+            .w_full()
+            .when(ix == 0, |d| d.pt(px(22.0)))
+            .pb(px(if last { 26.0 } else { 16.0 }))
+            .child(body)
+            .when(thinking, |d| d.child(self.thinking_line(&theme, cx)))
+            .into_any_element()
+    }
+
+    /// Whether the run is live and between steps (see [`convo::thinking`]).
+    fn is_thinking(&self, cx: &Context<Self>) -> bool {
+        let live = self
+            .summary(cx)
+            .is_some_and(|r| r.status == RunStatus::Running);
+        convo::thinking(&self.rows, live)
+    }
+
+    /// The shimmer's opacity now; fixed while motion is reduced.
+    pub(super) fn shimmer(cx: &mut Context<Self>) -> f32 {
+        let phase = motion::pulse_delta(&motion::PULSE, cx.entity_id(), cx);
+        convo::shimmer_opacity(phase, cx.reduce_motion())
+    }
+
+    fn thinking_line(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let opacity = Self::shimmer(cx);
+        div()
+            .id("thinking")
+            .debug_selector(|| "thinking".to_owned())
+            .pt(px(14.0))
+            .text_size(px(13.0))
+            .text_color(theme.muted)
+            .opacity(opacity)
+            .child("Thinking")
+            .into_any_element()
+    }
+
+    /// One row. `top` is its index in the list; a row inside a fold has none.
+    fn row_body(
+        &self,
+        row: &Row,
+        top: Option<usize>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match row {
+            Row::User {
+                key,
+                text,
+                steer,
+                at_ms,
+            } => self.user_message(theme, *key, text, *steer, *at_ms, cx),
+            Row::Prose { key, text } => {
+                let Some(stream) = self.markdown.get(key) else {
+                    return div().into_any_element();
+                };
+                let actions = top
+                    .filter(|ix| convo::final_message_ix(&self.rows) == Some(*ix))
+                    .map(|_| self.message_actions(theme, text));
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .line_height(px(24.0))
+                            .child(markdown_view::blocks(stream.tree(), theme, window)),
+                    )
+                    .children(actions)
+                    .into_any_element()
+            }
+            Row::Reasoning { key, text } => self.reasoning(theme, *key, text, cx),
+            Row::Tools { key, calls } => self.steps(theme, *key, calls, cx),
             Row::Question {
                 questions,
                 resolution,
                 ..
-            } => question_card(&theme, questions, resolution),
-            Row::Approval { key, approval } => self.approval_card(&theme, *key, approval, cx),
-            Row::Asked { line, .. } => event_line(&theme, Icon::Shield, theme.muted, line),
+            } => match convo::question_view(questions, resolution) {
+                convo::QuestionView::Card => question_card(theme, questions, resolution),
+                convo::QuestionView::Answered(pairs) => answered_bubble(theme, &pairs),
+                convo::QuestionView::Closed(line) => closed_line(theme, &line),
+            },
+            Row::Approval { key, approval } => self.approval_card(theme, *key, approval, cx),
+            Row::Asked { line, .. } => event_line(theme, Icon::Shield, theme.muted, line),
             Row::ModelChanged { model, .. } => {
                 let name = {
                     let store = self.store.read(cx);
@@ -43,13 +118,14 @@ impl RunScreen {
                     )
                 };
                 event_line(
-                    &theme,
+                    theme,
                     Icon::Route,
                     theme.muted,
                     &format!("Switched to {name}"),
                 )
             }
-            Row::Routing { key, view } => self.routing_card(&theme, *key, view, cx),
+            Row::Routing { key, view } => self.routing_card(theme, *key, view, cx),
+            Row::Worked { key, secs, rows } => self.worked(theme, *key, *secs, rows, window, cx),
             Row::Done {
                 stop,
                 result,
@@ -58,7 +134,7 @@ impl RunScreen {
                 ..
             } => div()
                 .child(done_line(
-                    &theme,
+                    theme,
                     *stop,
                     result.as_deref(),
                     diagnostic.as_deref(),
@@ -66,32 +142,205 @@ impl RunScreen {
                 ))
                 // Only the thread's latest run says what the branch holds.
                 .children(
-                    (self
-                        .rows
-                        .iter()
-                        .rposition(|r| matches!(r, Row::Done { .. }))
-                        == Some(ix))
-                    .then(|| self.result_line(&theme, cx))
-                    .flatten(),
+                    (top.is_some()
+                        && self
+                            .rows
+                            .iter()
+                            .rposition(|r| matches!(r, Row::Done { .. }))
+                            == top)
+                        .then(|| self.result_line(theme, cx))
+                        .flatten(),
                 )
                 .into_any_element(),
-            Row::Worked { .. } => div().into_any_element(),
             Row::Divider {
                 executor,
                 model,
                 at_ms,
                 ..
-            } => self.divider(&theme, executor, model.as_deref(), *at_ms, cx),
+            } => self.divider(theme, executor, model.as_deref(), *at_ms, cx),
+        }
+    }
+
+    /// "Worked for 3m 12s ›": a disclosure that opens the turn's interim text and steps in place.
+    fn worked(
+        &self,
+        theme: &Theme,
+        key: Key,
+        secs: Option<u64>,
+        rows: &[Row],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.open.contains(&key);
+        let text = theme.text;
+        let head = div()
+            .id(SharedString::from(format!("worked-{}", key.0)))
+            .debug_selector({
+                let id = format!("worked-{}", key.0);
+                move || id.clone()
+            })
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .text_size(px(13.0))
+            .text_color(theme.muted)
+            .cursor_pointer()
+            .hover(move |s| s.text_color(text))
+            .child(SharedString::from(convo::worked_label(secs)))
+            .child(icon(
+                if open { Icon::ChevDown } else { Icon::Fwd },
+                13.0,
+                theme.muted,
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)));
+        let inner: Vec<AnyElement> = if open {
+            rows.iter()
+                .map(|row| self.row_body(row, None, theme, window, cx))
+                .collect()
+        } else {
+            Vec::new()
         };
         div()
-            .w_full()
-            .when(ix == 0, |d| d.pt(px(22.0)))
-            .pb(px(if ix + 1 == self.rows.len() {
-                26.0
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(head)
+            .when(open, |d| {
+                d.child(div().flex().flex_col().gap(px(12.0)).children(inner))
+            })
+            .into_any_element()
+    }
+
+    /// A user message: a neutral raised bubble on the right; the time and Copy show on hover, and
+    /// a long one collapses behind "Show more".
+    fn user_message(
+        &self,
+        theme: &Theme,
+        key: Key,
+        text: &str,
+        steer: bool,
+        at_ms: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shown = convo::user_text(text, self.open.contains(&key));
+        let group = SharedString::from(format!("user-{}", key.0));
+        let copy_text = text.to_owned();
+        let toggle = shown.toggle.map(|label| {
+            let selector = if self.open.contains(&key) {
+                "user-less"
             } else {
-                16.0
-            }))
-            .child(body)
+                "user-more"
+            };
+            div()
+                .id(selector)
+                .debug_selector(move || selector.to_owned())
+                .pt(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(px(13.0))
+                .text_color(theme.muted)
+                .cursor_pointer()
+                .child(label)
+                .child(icon(
+                    if label == "Show more" {
+                        Icon::ChevDown
+                    } else {
+                        Icon::ChevUp
+                    },
+                    12.0,
+                    theme.muted,
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
+        });
+        let time = at_ms.map(|at| convo::clock_label(at, &chrono::Local));
+        div()
+            .group(group.clone())
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(4.0))
+            .when(steer, |d| {
+                d.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.faint)
+                        .child("You \u{b7} steer"),
+                )
+            })
+            .child(
+                div()
+                    .max_w(px(560.0))
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .rounded(px(18.0))
+                    .bg(theme.raised)
+                    .text_size(px(15.0))
+                    .line_height(px(23.0))
+                    .child(SharedString::from(shown.shown))
+                    .children(toggle),
+            )
+            .child(
+                div()
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .opacity(0.0)
+                    .group_hover(group, |s| s.opacity(1.0))
+                    .children(time.map(|t| {
+                        div()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .text_color(theme.faint)
+                            .child(SharedString::from(t))
+                    }))
+                    .child(
+                        kit::icon_button(theme, format!("user-copy-{}", key.0), Icon::Copy, 22.0)
+                            .on_click(move |_, _, cx| {
+                                output::copy(cx, copy_text.clone(), "Message copied");
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The quiet icons under the final agent message of a finished turn.
+    fn message_actions(&self, theme: &Theme, text: &str) -> AnyElement {
+        let text = text.to_owned();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                kit::icon_button(theme, "message-copy", Icon::Copy, 24.0).on_click(
+                    move |_, _, cx| {
+                        output::copy(cx, text.clone(), "Message copied");
+                    },
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// One muted line for each step of a tool group.
+    pub(super) fn steps(
+        &self,
+        theme: &Theme,
+        key: Key,
+        calls: &[ToolEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let lines = convo::step_lines(calls);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .children(
+                lines
+                    .iter()
+                    .map(|line| self.step_row(theme, key, line, calls, cx)),
+            )
             .into_any_element()
     }
 
@@ -137,7 +386,7 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// "Routed to Codex: Claude Code was signed out", with the "why" collapsed.
+    /// "Routed to Codex \u{b7} Claude Code was signed out": one muted row; the "why" opens under it.
     pub(super) fn routing_card(
         &self,
         theme: &Theme,
@@ -153,46 +402,26 @@ impl RunScreen {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .text_size(px(13.5))
+            .text_size(px(13.0))
+            .text_color(theme.muted)
             .when(view.has_detail(), |d| {
                 d.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
             })
             .child(icon(Icon::Route, 14.0, theme.faint))
-            .when_some(chosen.clone(), |d, who| {
+            .when_some(chosen, |d, who| {
                 d.child(kit::exec_glyph(theme, &who.id, 14.0))
             })
             .child(
                 div()
-                    .flex_none()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(SharedString::from(view.headline.clone())),
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(convo::routing_line(view))),
             )
-            .when_some(
-                chosen.and_then(|c| c.secondary().map(str::to_owned)),
-                |d, id| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.faint)
-                            .child(SharedString::from(id)),
-                    )
-                },
-            )
-            .when_some(view.because.clone(), |d, because| {
-                d.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.muted)
-                        .child(SharedString::from(format!("\u{b7} {because}"))),
-                )
-            })
-            .child(div().flex_1())
             .when(view.has_detail(), |d| {
                 d.child(icon(
                     if open { Icon::ChevDown } else { Icon::Fwd },
-                    14.0,
+                    13.0,
                     theme.muted,
                 ))
             });
@@ -281,12 +510,6 @@ impl RunScreen {
             .id("routing-card")
             .debug_selector(|| "routing-card".to_owned())
             .w_full()
-            .px(px(14.0))
-            .py(px(10.0))
-            .rounded(px(12.0))
-            .bg(theme.surface)
-            .border_1()
-            .border_color(theme.hairline)
             .child(head)
             .when(open, |d| d.child(detail))
             .into_any_element()
@@ -321,47 +544,6 @@ impl RunScreen {
                         .line_height(px(21.0))
                         .text_color(theme.muted)
                         .child(SharedString::from(text.to_owned())),
-                )
-            })
-            .into_any_element()
-    }
-
-    pub(super) fn tools(
-        &self,
-        theme: &Theme,
-        key: Key,
-        calls: &[ToolEntry],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let open = self.open.contains(&key);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .child(
-                disclosure(
-                    theme,
-                    SharedString::from(format!("tools-{}", key.0)),
-                    open,
-                    model::group_title(calls),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
-            )
-            .when(open, |d| {
-                d.child(
-                    div()
-                        .ml(px(24.0))
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(theme.hairline)
-                        .bg(theme.surface)
-                        .flex()
-                        .flex_col()
-                        .children(
-                            calls
-                                .iter()
-                                .map(|call| self.tool_entry(theme, key, call, calls.len(), cx)),
-                        ),
                 )
             })
             .into_any_element()
@@ -605,33 +787,57 @@ impl RunScreen {
     }
 }
 
-/// A user message: right-aligned bubble.
-pub(super) fn user_bubble(theme: &Theme, text: &str, steer: bool) -> AnyElement {
+/// An answered question: the question muted above the answer, in the user's bubble.
+fn answered_bubble(theme: &Theme, pairs: &[(String, Option<String>)]) -> AnyElement {
     div()
+        .id("question-answered")
+        .debug_selector(|| "question-answered".to_owned())
         .w_full()
         .flex()
         .flex_col()
         .items_end()
-        .gap(px(5.0))
-        .when(steer, |d| {
-            d.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(theme.faint)
-                    .child("You \u{b7} steer"),
-            )
-        })
-        .child(
+        .gap(px(10.0))
+        .children(pairs.iter().map(|(question, answer)| {
             div()
                 .max_w(px(560.0))
-                .px(px(18.0))
-                .py(px(12.0))
-                .rounded(px(20.0))
-                .bg(theme.accent.opacity(0.14))
-                .text_size(px(15.0))
-                .line_height(px(23.0))
-                .child(SharedString::from(text.to_owned())),
-        )
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(theme.muted)
+                        .child(SharedString::from(question.clone())),
+                )
+                .child(
+                    div()
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .rounded(px(18.0))
+                        .bg(theme.raised)
+                        .text_size(px(15.0))
+                        .line_height(px(23.0))
+                        .child(SharedString::from(
+                            answer.clone().unwrap_or_else(|| "Answered".to_owned()),
+                        )),
+                )
+        }))
+        .into_any_element()
+}
+
+/// A question that can no longer be answered: one muted line where it was asked.
+fn closed_line(theme: &Theme, line: &str) -> AnyElement {
+    div()
+        .id("question-closed")
+        .debug_selector(|| "question-closed".to_owned())
+        .flex()
+        .items_center()
+        .gap(px(9.0))
+        .text_size(px(13.0))
+        .text_color(theme.muted)
+        .child(icon(Icon::Question, 14.0, theme.faint))
+        .child(SharedString::from(line.to_owned()))
         .into_any_element()
 }
 

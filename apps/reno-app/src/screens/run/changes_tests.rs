@@ -46,15 +46,22 @@ fn open(vcx: &mut VisualTestContext, root: &Entity<RootView>, run: &str) -> Enti
         .expect("a run screen")
 }
 
-fn tools_key(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>) -> u64 {
+/// The key of the fold of a finished turn that holds the call `call` (its step is behind it).
+fn fold_key(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>, call: &str) -> u64 {
     screen.read_with(vcx, |s, _| {
         s.rows()
             .iter()
             .find_map(|r| match r {
-                Row::Tools { key, .. } => Some(key.0),
+                Row::Worked { key, rows, .. }
+                    if rows.iter().any(|r| {
+                        matches!(r, Row::Tools { calls, .. } if calls.iter().any(|c| c.id == call))
+                    }) =>
+                {
+                    Some(key.0)
+                }
                 _ => None,
             })
-            .expect("a tool group")
+            .expect("a fold")
     })
 }
 
@@ -74,16 +81,16 @@ fn a_failed_tools_output_opens_folded_and_unfolds(cx: &mut TestAppContext) {
     wait_drawn(vcx, |vcx| {
         screen.read_with(vcx, |s, _| !s.rows().is_empty())
     });
-    let key = tools_key(vcx, &screen);
-    wait_drawn(vcx, |vcx| painted(vcx, &format!("tools-{key}")));
+    let key = fold_key(vcx, &screen, "t2");
+    wait_drawn(vcx, |vcx| painted(vcx, &format!("worked-{key}")));
 
-    // Collapsed: no block, and no noise.
-    assert!(!painted(vcx, "tool-output-t2"));
-    click(vcx, &format!("tools-{key}"));
-    assert!(
-        painted(vcx, "tool-output-t2"),
-        "a group of one shows its output"
-    );
+    // Folded: no steps, no block. Opened: the step, and still no block until it is opened.
+    assert!(!painted(vcx, "step-t2"));
+    click(vcx, &format!("worked-{key}"));
+    wait_drawn(vcx, |vcx| painted(vcx, "step-t2"));
+    assert!(!painted(vcx, "tool-output-t2"), "collapsed: no noise");
+    click(vcx, "step-t2");
+    assert!(painted(vcx, "tool-output-t2"), "the step opens its output");
     assert!(
         painted(vcx, "output-more-t2"),
         "the first lines, then the rest"
@@ -110,10 +117,7 @@ fn a_call_without_output_adds_no_block(cx: &mut TestAppContext) {
     wait_drawn(vcx, |vcx| {
         screen.read_with(vcx, |s, _| !s.rows().is_empty())
     });
-    let key = tools_key(vcx, &screen);
-    wait_drawn(vcx, |vcx| painted(vcx, &format!("tools-{key}")));
-    click(vcx, &format!("tools-{key}"));
-    assert!(painted(vcx, "tool-line-t1"));
+    wait_drawn(vcx, |vcx| painted(vcx, "step-t1"));
     assert!(!painted(vcx, "tool-output-t1"));
 }
 
@@ -128,7 +132,7 @@ fn review_shows_in_the_panel_beside_the_transcript_and_each_file_folds(cx: &mut 
     wait_drawn(vcx, |vcx| painted(vcx, "change-patch-Cargo.toml"));
     assert!(painted(vcx, "panel-tab-review"));
     assert!(painted(vcx, "panel-tab-session"));
-    assert!(painted(vcx, "review-finding"));
+    assert!(!painted(vcx, "review-finding"), "the panel does not repeat the status");
     assert!(painted(vcx, "chat-canvas"));
     assert!(painted(vcx, "composer"), "the chat is not replaced");
     // The header's Changes pill is gone.

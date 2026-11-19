@@ -14,7 +14,7 @@ use reno_syntax::HighlightSpan;
 use super::RunScreen;
 use super::output::copy;
 use crate::panel::surface::Surface;
-use crate::panel::view::{Prefs, finding_text};
+use crate::panel::view::Prefs;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view;
@@ -554,20 +554,6 @@ impl RunScreen {
     /// files. The transcript beside it stays.
     pub(super) fn review_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let pane = self.review_pane(cx);
-        let finding = self.home(cx).map(|home| {
-            div()
-                .id("review-finding")
-                .debug_selector(|| "review-finding".to_owned())
-                .flex_none()
-                .px(px(16.0))
-                .py(px(12.0))
-                .border_b_1()
-                .border_color(theme.hairline)
-                .text_size(px(13.0))
-                .line_height(px(19.5))
-                .text_color(theme.muted)
-                .child(finding_text(theme, &home.now, theme.muted))
-        });
         let body: AnyElement = match &pane {
             Pane::Files(o) => self.files_view(theme, o, cx),
             other => {
@@ -594,7 +580,6 @@ impl RunScreen {
             .size_full()
             .flex()
             .flex_col()
-            .children(finding)
             .child(
                 div()
                     .flex_1()
