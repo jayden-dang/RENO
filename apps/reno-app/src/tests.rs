@@ -383,6 +383,16 @@ pub(crate) fn rows_of(vcx: &mut VisualTestContext, root: &Entity<RootView>) -> V
     screen.map_or_else(Vec::new, |s| s.read_with(vcx, |s, _| s.rows().to_vec()))
 }
 
+/// The rows with the folds opened out: what the transcript holds, in order.
+pub(crate) fn flat(rows: Vec<Row>) -> Vec<Row> {
+    rows.into_iter()
+        .flat_map(|row| match row {
+            Row::Worked { rows, .. } => flat(rows),
+            other => vec![other],
+        })
+        .collect()
+}
+
 pub(crate) fn kinds(rows: &[Row]) -> Vec<&'static str> {
     rows.iter()
         .map(|r| match r {
@@ -397,6 +407,7 @@ pub(crate) fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::ModelChanged { .. } => "model",
             Row::Routing { .. } => "routing",
             Row::Divider { .. } => "divider",
+            Row::Worked { .. } => "worked",
             Row::Done { .. } => "done",
         })
         .collect()
@@ -587,7 +598,7 @@ fn opening_a_run_from_the_sidebar_shows_its_transcript(cx: &mut TestAppContext) 
     assert!(text.starts_with("Three crates have minor updates"));
     // The header, the details pane and the card are on screen.
     assert!(painted(vcx, "approve"));
-    assert!(painted(vcx, "header-stop"));
+    assert!(painted(vcx, "composer-stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let facts = screen.read_with(vcx, |s, _| s.facts().clone());
     assert_eq!(facts.model.as_deref(), Some("opus-5.5"));
@@ -601,7 +612,8 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     draw(vcx);
     let run = send_from_home(vcx, &root, "write a haiku");
 
-    // Rows only ever grow at the end while the run streams; the final shape is fixed.
+    // Rows only ever grow at the end while the run streams; when the turn finishes, its interim
+    // text and steps fold behind one row, and the final shape is fixed.
     let mut seen: Vec<Vec<&'static str>> = Vec::new();
     wait_drawn(vcx, |vcx| {
         let k = kinds(&rows_of(vcx, &root));
@@ -612,15 +624,15 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     });
     assert_eq!(
         seen.last().unwrap(),
-        &["prompt", "routing", "prose", "tools", "prose", "done"]
+        &["prompt", "routing", "worked", "prose", "done"]
     );
-    for pair in seen.windows(2) {
+    for pair in seen.windows(2).filter(|p| !p[1].contains(&"worked")) {
         assert!(
             pair[1].len() >= pair[0].len() && pair[1].starts_with(&pair[0][..pair[0].len() - 1]),
             "rows changed out of order: {pair:?}"
         );
     }
-    let rows = rows_of(vcx, &root);
+    let rows = flat(rows_of(vcx, &root));
     let Row::Prose { text, .. } = &rows[2] else {
         panic!("expected prose");
     };
@@ -659,7 +671,8 @@ fn approving_inline_with_a_click_resumes_the_run(cx: &mut TestAppContext) {
         Some(RunStatus::Succeeded)
     );
     assert_eq!(approvals(vcx, &store), 1, "only scout's approval is left");
-    let rows = rows_of(vcx, &root);
+    // The finished turn is folded: look inside it.
+    let rows = flat(rows_of(vcx, &root));
     assert!(!rows.iter().any(|r| matches!(r, Row::Approval { .. })));
     assert!(rows.iter().any(|r| matches!(r, Row::Asked { .. })));
     assert!(!painted(vcx, "approve"), "the card is gone");
@@ -699,12 +712,12 @@ fn stop_cancels_the_run(cx: &mut TestAppContext) {
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     let run = send_from_home(vcx, &root, "/long job");
-    wait_drawn(vcx, |vcx| painted(vcx, "header-stop"));
-    click(vcx, "header-stop");
+    wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
+    click(vcx, "composer-stop");
     wait_drawn(vcx, |vcx| {
         run_status(vcx, &store, &run) == Some(RunStatus::Cancelled)
     });
-    wait_drawn(vcx, |vcx| !painted(vcx, "header-stop"));
+    wait_drawn(vcx, |vcx| !painted(vcx, "composer-stop"));
     let rows = rows_of(vcx, &root);
     assert!(matches!(
         rows.last(),
@@ -775,7 +788,7 @@ fn a_finished_run_sends_a_new_run_in_its_project(cx: &mut TestAppContext) {
     });
     // The box says what sending does, and takes typing.
     assert!(painted(vcx, "composer-note"));
-    assert!(!painted(vcx, "header-stop"));
+    assert!(!painted(vcx, "composer-stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let steer = screen.read_with(vcx, |s, _| s.steer_input().clone());
     steer.update_in(vcx, |c, window, cx| c.fill("one more thing", window, cx));

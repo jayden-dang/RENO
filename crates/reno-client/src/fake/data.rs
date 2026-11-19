@@ -293,6 +293,12 @@ pub(super) fn question_run() -> Ids<SeedRun> {
     })
 }
 
+/// What the reviewer's run fetched.
+const CACHE_DOC_URL: &str = "https://docs.example/cache-control";
+
+/// The long brief the pagination run was given: over the 320 characters a message shows whole.
+const LONG_PROMPT: &str = "The pagination test in atlas-api fails about one run in twenty, and only on CI. Reproduce the flake locally first: run the test in a loop, pin the random seed when it fails, and keep the failing seed in the commit message. Then find the cause rather than adding a retry: look at how pages are cut when two rows share a timestamp, and at whether the cursor survives a concurrent insert. Fix it in the query, add a test that fails before the fix and passes after, and leave the other tests alone.";
+
 pub(super) fn seed() -> Ids<Seed> {
     let ls = || tool("t1", "bash", json!({ "command": "ls" }));
     let runs = vec![
@@ -361,6 +367,7 @@ pub(super) fn seed() -> Ids<Seed> {
             ],
         },
         SeedRun {
+            // It worked for 3 minutes 12 seconds, start to finish.
             summary: summary(
                 "reviewer1",
                 "codex",
@@ -368,11 +375,23 @@ pub(super) fn seed() -> Ids<Seed> {
                 Some(StopReason::Completed),
                 "reviewer · web-console: review PR 214, cache headers",
                 26 * HOUR,
-                25 * HOUR,
+                26 * HOUR - (3 * MINUTE + 12_000),
             )?,
             journal: vec![
                 started(),
-                text("The cache-control change is correct; one nit on the max-age constant."),
+                text("I will read the change before judging it."),
+                tool("r1", "Read", json!({ "file_path": "src/cache.rs" })),
+                tool_ok("r1", "42 lines"),
+                tool("r2", "bash", json!({ "command": "cargo test -p cache" })),
+                tool_ok("r2", "7 passed"),
+                tool("r3", "web_fetch", json!({ "url": CACHE_DOC_URL })),
+                tool_ok("r3", "200"),
+                text("The headers are right."),
+                tool("r5", "edit", json!({ "file_path": "src/cache.rs" })),
+                tool_ok("r5", "ok"),
+                tool("r6", "edit", json!({ "file_path": "src/headers.rs" })),
+                tool_ok("r6", "ok"),
+                text("The cache-control change is correct; I named the max-age constant."),
                 done(StopReason::Completed, Some("Approved with one nit."), None),
             ],
         },
@@ -389,18 +408,45 @@ pub(super) fn seed() -> Ids<Seed> {
             journal: vec![],
         },
         SeedRun {
-            summary: summary(
-                "builder0",
-                "claude-code",
-                RunStatus::Failed,
-                Some(StopReason::Error),
-                "builder · atlas-api: fix the flaky pagination test",
-                5 * HOUR,
-                4 * HOUR,
-            )?,
+            summary: RunSummary {
+                prompt: Some(LONG_PROMPT.to_owned()),
+                ..summary(
+                    "builder0",
+                    "claude-code",
+                    RunStatus::Failed,
+                    Some(StopReason::Error),
+                    "builder · atlas-api: fix the flaky pagination test",
+                    5 * HOUR,
+                    4 * HOUR,
+                )?
+            },
             journal: vec![
                 started(),
                 text("Running the pagination test in a loop to reproduce the flake."),
+                // Asked and never answered: the question closes with the time limit.
+                ExecEvent::NeedsInput {
+                    request_id: "req-builder0-seed".to_owned(),
+                    questions: vec![reno_proto::Question {
+                        id: "seed".to_owned(),
+                        prompt: "Pin the random seed for the loop?".to_owned(),
+                        options: vec!["Pin it".to_owned(), "Leave it".to_owned()],
+                        multi_select: false,
+                    }],
+                },
+                ExecEvent::InputExpired {
+                    request_id: "req-builder0-seed".to_owned(),
+                },
+                ExecEvent::NeedsInput {
+                    request_id: "req-builder0-loop".to_owned(),
+                    questions: vec![reno_proto::Question {
+                        id: "loop".to_owned(),
+                        prompt: "How many times should the loop run?".to_owned(),
+                        options: vec!["20 times".to_owned(), "100 times".to_owned()],
+                        multi_select: false,
+                    }],
+                },
+                tool("t1", "AskUserQuestion", json!({})),
+                tool_ok("t1", "User answered: \"100 times\""),
                 tool(
                     "t2",
                     "bash",

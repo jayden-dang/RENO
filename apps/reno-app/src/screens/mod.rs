@@ -18,6 +18,4 @@ pub(crate) enum ScreenEvent {
     OpenRun(RunId),
     /// Show the Executors screen.
     OpenExecutors,
-    /// Show a project's Allowlist and History.
-    OpenProject(crate::vm::projects::FolderKey),
 }
