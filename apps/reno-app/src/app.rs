@@ -1241,20 +1241,9 @@ impl RootView {
                 thread_of: &|run| store.thread_of(run),
             },
         );
-        let threads = palette::threads(
-            &folders,
-            |run| state.run(run).map_or(0, |r| r.updated_at_ms),
-            |run| {
-                state.approvals_for(run).next().map(|a| palette::Held {
-                    sentence: format!(
-                        "{} {}",
-                        crate::summary::approval_bot(state, a).unwrap_or("A run"),
-                        crate::summary::approval_what(state, a)
-                    ),
-                    command: crate::summary::subject_line(&a.subject),
-                })
-            },
-        );
+        let threads = palette::threads(&folders, |run| {
+            state.run(run).map_or(0, |r| r.updated_at_ms)
+        });
         let scope = store.looking_at().and_then(|looking| {
             folders
                 .iter()

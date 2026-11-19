@@ -113,7 +113,7 @@ fn enter_opens_the_first_waiting_thread(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn typing_filters_and_a_held_action_carries_its_sentence_and_command(cx: &mut TestAppContext) {
+fn typing_filters_the_threads(cx: &mut TestAppContext) {
     let store = held(cx);
     let (root, vcx) = opened(cx, &store);
     vcx.simulate_keystrokes("cmd-k a d v i s");
@@ -121,32 +121,32 @@ fn typing_filters_and_a_held_action_carries_its_sentence_and_command(cx: &mut Te
     let s = sheet(vcx, &root);
     let threads = s.sections.iter().find(|x| x.kind == Kind::Threads).unwrap();
     assert_eq!(thread_title(&threads.items[0]), "check upstream advisories");
-    match &threads.items[0] {
-        Item::Thread(t) => {
-            let held = t.held.as_ref().expect("scout's fetch is held");
-            assert_eq!(held.sentence, "scout wants network access");
-            assert!(
-                held.command.starts_with("GET https://advisories"),
-                "{held:?}"
-            );
-        }
-        _ => unreachable!(),
-    }
-    assert!(
-        painted(vcx, "palette-held"),
-        "the selected held row shows its second line"
-    );
 }
 
 #[gpui::test]
-fn a_waiting_question_shows_no_second_line(cx: &mut TestAppContext) {
+fn a_waiting_thread_is_one_line_whatever_it_waits_for(cx: &mut TestAppContext) {
     let store = held(cx);
     let (root, vcx) = opened(cx, &store);
     vcx.simulate_keystrokes("cmd-k");
     draw(vcx);
-    let first = selected(vcx, &root).unwrap();
-    assert_eq!(thread_title(&first), "pick the retry policy");
-    assert!(!painted(vcx, "palette-held"));
+    assert_eq!(
+        thread_title(&selected(vcx, &root).unwrap()),
+        "pick the retry policy"
+    );
+    assert!(
+        !painted(vcx, "palette-held"),
+        "a question: the badge says it"
+    );
+    vcx.simulate_keystrokes("down");
+    draw(vcx);
+    assert_eq!(
+        thread_title(&selected(vcx, &root).unwrap()),
+        "check upstream advisories"
+    );
+    assert!(
+        !painted(vcx, "palette-held"),
+        "a held action: the badge says it too"
+    );
 }
 
 #[gpui::test]
@@ -245,10 +245,6 @@ fn arrows_move_the_selection_and_wrap(cx: &mut TestAppContext) {
     assert_eq!(
         thread_title(&selected(vcx, &root).unwrap()),
         "check upstream advisories"
-    );
-    assert!(
-        painted(vcx, "palette-held"),
-        "the held approval opens its second line"
     );
     vcx.simulate_keystrokes("up up");
     draw(vcx);

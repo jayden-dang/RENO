@@ -56,14 +56,6 @@ impl Tab {
     }
 }
 
-/// A held action of a thread, in words, and its exact command.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Held {
-    /// "scout wants network access", worded as Home's approval card.
-    pub(crate) sentence: String,
-    pub(crate) command: String,
-}
-
 /// One thread the palette can open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Thread {
@@ -77,8 +69,6 @@ pub(crate) struct Thread {
     pub(crate) dot: Dot,
     pub(crate) age: String,
     pub(crate) updated_ms: u64,
-    /// Set when its latest run holds an action for the person.
-    pub(crate) held: Option<Held>,
 }
 
 /// One matching line of a file.
@@ -495,12 +485,8 @@ pub(crate) fn step(selected: usize, len: usize, down: bool) -> usize {
     }
 }
 
-/// The palette's threads, from the sidebar's folders. `updated` and `held` read the run.
-pub(crate) fn threads(
-    folders: &[Folder],
-    updated: impl Fn(&RunId) -> u64,
-    held: impl Fn(&RunId) -> Option<Held>,
-) -> Vec<Thread> {
+/// The palette's threads, from the sidebar's folders. `updated` reads the run.
+pub(crate) fn threads(folders: &[Folder], updated: impl Fn(&RunId) -> u64) -> Vec<Thread> {
     folders
         .iter()
         .flat_map(|folder| {
@@ -513,7 +499,6 @@ pub(crate) fn threads(
                 dot: row.dot,
                 age: row.age.clone(),
                 updated_ms: updated(&row.run),
-                held: held(&row.run),
             })
         })
         .collect()
@@ -543,7 +528,6 @@ mod tests {
             },
             age: "1h".to_owned(),
             updated_ms,
-            held: None,
         }
     }
 
@@ -901,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn threads_come_from_the_sidebar_rows_with_their_project_and_held_action() {
+    fn threads_come_from_the_sidebar_rows_with_their_project() {
         let row = ThreadRow {
             thread: None,
             run: run("scout1"),
@@ -919,16 +903,11 @@ mod tests {
             waiting: 1,
             rows: vec![row],
         }];
-        let held = Held {
-            sentence: "scout wants network access".to_owned(),
-            command: "GET https://advisories.example.org/feeds/web-console.json".to_owned(),
-        };
-        let out = threads(&folders, |_| 42, |_| Some(held.clone()));
+        let out = threads(&folders, |_| 42);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, "check upstream advisories");
         assert_eq!(out[0].project, "web-console");
         assert_eq!(out[0].executor, "codex");
         assert_eq!(out[0].updated_ms, 42);
-        assert_eq!(out[0].held, Some(held));
     }
 }

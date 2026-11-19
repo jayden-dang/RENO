@@ -567,22 +567,11 @@ impl Palette {
                 .child(el)
         };
         let title = |e: StyledText| div().flex_shrink(1.0).min_w_0().truncate().child(e);
-        let mut second: Option<AnyElement> = None;
         let (line, spoken) = match item {
             Item::Thread(t) => {
-                if on && let Some(held) = &t.held {
-                    second = Some(held_line(
-                        theme,
-                        held.sentence.clone(),
-                        held.command.clone(),
-                    ));
-                }
-                let spoken = match (t.badge, &t.held) {
-                    (Some(b), Some(h)) if on => {
-                        format!("{}, {}, {}", t.title, b.label(), h.sentence)
-                    }
-                    (Some(b), _) => format!("{}, {}", t.title, b.label()),
-                    _ => t.title.clone(),
+                let spoken = match t.badge {
+                    Some(b) => format!("{}, {}", t.title, b.label()),
+                    None => t.title.clone(),
                 };
                 (
                     line.child(glyph(kit::logo(theme, &t.executor, 14.0)))
@@ -664,45 +653,8 @@ impl Palette {
                 cx.listener(move |this, _, _, cx| this.activate_item(item.clone(), cx))
             })
             .child(line)
-            .children(second)
             .into_any_element()
     }
-}
-
-/// A selected held action's second line: its sentence, its command, and what ↵ does.
-fn held_line(theme: &Theme, sentence: String, command: String) -> AnyElement {
-    div()
-        .id("palette-held")
-        .debug_selector(|| "palette-held".to_owned())
-        .pl(px(26.0))
-        .pb(px(7.0))
-        .mt(px(-3.0))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .text_size(px(12.0))
-        .child(div().flex_none().text_color(theme.text).child(sentence))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .font_family(MONO)
-                .text_size(px(11.5))
-                .text_color(theme.muted)
-                .child(command),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .text_color(theme.faint)
-                .child(kit::keycap(theme, "\u{21b5}", None))
-                .child("open"),
-        )
-        .into_any_element()
 }
 
 impl Render for Palette {
