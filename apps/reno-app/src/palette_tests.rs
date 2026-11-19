@@ -253,3 +253,29 @@ fn arrows_move_the_selection_and_wrap(cx: &mut TestAppContext) {
         other => panic!("wrapped to the last row, a command: {other:?}"),
     }
 }
+
+#[gpui::test]
+fn control_j_and_k_move_down_and_up_like_the_arrows(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (root, vcx) = opened(cx, &store);
+    vcx.simulate_keystrokes("cmd-k ctrl-j");
+    draw(vcx);
+    assert_eq!(
+        thread_title(&selected(vcx, &root).unwrap()),
+        "check upstream advisories"
+    );
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(vcx);
+    assert_eq!(
+        thread_title(&selected(vcx, &root).unwrap()),
+        "pick the retry policy"
+    );
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(vcx);
+    assert!(
+        matches!(selected(vcx, &root), Some(Item::Command(_))),
+        "wraps to the last row"
+    );
+    let query = root.read_with(vcx, |r, cx| r.palette().unwrap().read(cx).sheet());
+    assert_eq!(query.tab, Tab::All, "nothing was typed");
+}

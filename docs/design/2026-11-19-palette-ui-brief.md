@@ -119,7 +119,7 @@ The palette is the app's only search and its main way around: the sidebar has no
   what it waits for; the thread itself says the rest.
 - **Components:** rung 1 — `kit::logo`, `sidebar::badge_tag` (make it shared), `icon`,
   `kit::keycap`; `summary::parse_title` for the title.
-- **Keys and clicks:** ↑ ↓ move (wrapping); ↵ or a click activates:
+- **Keys and clicks:** ↑ ↓, or ⌃J ⌃K, move (wrapping); ↵ or a click activates:
   - a thread opens it (`open_run` on its latest run);
   - a command runs it;
   - a file opens it in the side panel's Files tab;
@@ -147,6 +147,7 @@ selected, and the tabs count every kind of result before you switch.
 4. No second line for a question: "the status dot is enough".
 5. No second line for a held action either (while testing the build): "we just show the title of
    session it good dont' make it complex".
+6. ⌃J and ⌃K move the selection down and up, like ↓ ↑ ("for dev").
 
 ## Open for the build and the contracts (not decided here)
 

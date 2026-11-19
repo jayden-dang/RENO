@@ -321,15 +321,21 @@ impl Palette {
         }
     }
 
+    fn move_selection(&mut self, down: bool) {
+        let len = self.sheet().items().len();
+        self.selected = vm::step(self.selected, len, down);
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         let m = key.modifiers;
         match key.key.as_str() {
             "escape" => cx.emit(PaletteEvent::Close),
             "enter" => self.activate(cx),
-            "down" | "up" => {
-                let len = self.sheet().items().len();
-                self.selected = vm::step(self.selected, len, key.key == "down");
+            // ↓ ↑, and ⌃J ⌃K as in a terminal or an editor.
+            "down" | "up" => self.move_selection(key.key == "down"),
+            "j" | "k" if m.control && !(m.platform || m.alt || m.shift) => {
+                self.move_selection(key.key == "j");
             }
             "tab" => {
                 let tab = vm::scope(&self.query, self.tab).0.step(!m.shift);
