@@ -24,6 +24,8 @@ use crate::vm::settings_nav::{self, Pip};
 pub(crate) const WIDTH: f32 = 248.0;
 /// Height of the titlebar band the traffic lights sit in.
 pub(crate) const TITLEBAR: f32 = 40.0;
+/// Where the titlebar band's first item starts: clear of the traffic lights.
+pub(crate) const MARK_INSET: f32 = 84.0;
 
 pub(crate) type NavHandler = Rc<dyn Fn(Nav, &mut Window, &mut App)>;
 pub(crate) type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -333,9 +335,18 @@ pub(crate) fn sidebar(
         .flex_none()
         .flex()
         .items_center()
-        .justify_end()
         .gap(px(2.0))
+        .pl(px(MARK_INSET))
         .pr(px(10.0))
+        .child(
+            // Reno's mark, after the traffic lights, in ink like the words around it.
+            div().debug_selector(|| "reno-mark".to_owned()).child(icon(
+                Icon::Mark,
+                14.0,
+                theme.text,
+            )),
+        )
+        .child(div().flex_1())
         .child(
             kit::icon_button(theme, "hide-sidebar", Icon::Sidebar, 28.0)
                 .on_click(move |_, window, cx| hide(window, cx)),

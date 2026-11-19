@@ -66,6 +66,7 @@ icons! {
     Link => "link",
     List => "list",
     Lock => "lock",
+    Mark => "mark",
     Merge => "merge",
     More => "more",
     Msg => "msg",
