@@ -131,7 +131,11 @@ impl SettingsScreen {
                     screen.shown(cx);
                 });
             }
-            Category::Definitions | Category::Notifications => {}
+            Category::Definitions
+            | Category::Notifications
+            | Category::Accounts
+            | Category::General
+            | Category::Appearance => {}
         }
     }
 
@@ -286,6 +290,9 @@ impl SettingsScreen {
             Category::Policy => Icon::Shield,
             Category::Notifications => Icon::Bell,
             Category::Daemon => Icon::Server,
+            Category::Accounts => Icon::Team,
+            Category::General => Icon::Settings,
+            Category::Appearance => Icon::Eye,
         };
         let key = category.key();
         let trailing: Option<AnyElement> = match category {
@@ -941,6 +948,7 @@ impl Render for SettingsScreen {
             Category::Definitions | Category::Executors | Category::Registry => {
                 self.definitions(&defs, &theme, cx)
             }
+            Category::Accounts | Category::General | Category::Appearance => vec![],
         };
         let body = page::content(page::SETTINGS)
             .gap(px(30.0))

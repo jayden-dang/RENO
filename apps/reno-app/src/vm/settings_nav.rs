@@ -8,20 +8,26 @@ use reno_client::ConnectionStatus;
 pub(crate) enum Category {
     #[default]
     Executors,
+    Accounts,
     Registry,
     Definitions,
     Policy,
+    General,
+    Appearance,
     Notifications,
     Daemon,
 }
 
 impl Category {
     /// In the order the navigation lists them.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Executors,
+        Self::Accounts,
         Self::Registry,
         Self::Definitions,
         Self::Policy,
+        Self::General,
+        Self::Appearance,
         Self::Notifications,
         Self::Daemon,
     ];
@@ -30,6 +36,9 @@ impl Category {
         match self {
             Self::Executors => "Executors",
             Self::Registry => "Add from registry",
+            Self::Accounts => "Accounts",
+            Self::General => "General",
+            Self::Appearance => "Appearance",
             Self::Definitions => "Definitions",
             Self::Policy => "Policy",
             Self::Notifications => "Notifications",
@@ -42,6 +51,9 @@ impl Category {
         match self {
             Self::Executors => "executors",
             Self::Registry => "registry",
+            Self::Accounts => "accounts",
+            Self::General => "general",
+            Self::Appearance => "appearance",
             Self::Definitions => "definitions",
             Self::Policy => "policy",
             Self::Notifications => "notifications",
@@ -52,9 +64,9 @@ impl Category {
     /// The heading the category sits under.
     pub(crate) const fn group(self) -> &'static str {
         match self {
-            Self::Executors | Self::Registry => "Agents",
+            Self::Executors | Self::Accounts | Self::Registry => "Agents",
             Self::Definitions | Self::Policy => "Automation",
-            Self::Notifications => "App",
+            Self::General | Self::Appearance | Self::Notifications => "App",
             Self::Daemon => "System",
         }
     }
@@ -66,6 +78,13 @@ impl Category {
                 "executor agent harness cli install sign in login update auto-update version check models claude codex grok cursor muse pi opencode antigravity"
             }
             Self::Registry => "acp registry add agent your own agent keys environment",
+            Self::Accounts => "account usage plan limit meter session week signed in email",
+            Self::General => {
+                "general send enter escape stop composer conversation wrap lines hidden files dotfiles agents offer picker"
+            }
+            Self::Appearance => {
+                "appearance theme dark light system mode accent colour color reno slate teal blue violet motion reduce animation"
+            }
             Self::Definitions => "definitions bots triggers files validate schedule",
             Self::Policy => "policy rules allow deny ask standing rules revoke approvals",
             Self::Notifications => "notifications banners dock badge finished background",
@@ -135,9 +154,12 @@ mod tests {
             listed,
             [
                 ("Agents", "Executors"),
+                ("Agents", "Accounts"),
                 ("Agents", "Add from registry"),
                 ("Automation", "Definitions"),
                 ("Automation", "Policy"),
+                ("App", "General"),
+                ("App", "Appearance"),
                 ("App", "Notifications"),
                 ("System", "Daemon"),
             ]
@@ -154,6 +176,11 @@ mod tests {
         assert_eq!(matching("dock"), [Category::Notifications]);
         assert_eq!(matching("socket"), [Category::Daemon]);
         assert_eq!(matching("registry"), [Category::Registry]);
+        assert_eq!(matching("slate"), [Category::Appearance]);
+        assert_eq!(matching("accent"), [Category::Appearance]);
+        assert_eq!(matching("escape"), [Category::General]);
+        assert_eq!(matching("wrap"), [Category::General]);
+        assert_eq!(matching("usage"), [Category::Accounts]);
         assert!(matching("zzz").is_empty());
     }
 
