@@ -204,7 +204,8 @@ const KNOWN: &[Known] = &[
         "harn",
         "0.10.202",
         &[Nothing],
-        NeedsRenoFix("session/new needs an environmentPolicy that Reno does not send yet"),
+        // Was NeedsRenoFix (environmentPolicy); fixed, and re-probed ok on 2026-11-19.
+        Works,
     ),
     k(
         "junie",
@@ -388,6 +389,12 @@ mod tests {
         assert_eq!(newer.status, None, "a new release may fix it");
         assert_eq!(newer.checked_version.as_deref(), Some("0.1.49"));
         assert_eq!(newer.sign_in, audited.sign_in);
+    }
+
+    #[test]
+    fn harn_runs_now_that_reno_sends_its_environment_policy() {
+        // Re-probed 2026-11-19 on 0.10.202 after the environmentPolicy fix: session/new is ok.
+        assert_eq!(facts("harn", "0.10.202").status, Some(RegistryStatus::Ok));
     }
 
     #[test]
