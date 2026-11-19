@@ -308,7 +308,7 @@ mod tests {
     fn typing_selection_and_choice(cx: &mut gpui::TestAppContext) {
         let palette = cx.new(Palette::new);
         palette.update(cx, |p, _| {
-            assert_eq!(p.chosen().map(|e| e.label), Some("Home"));
+            assert_eq!(p.chosen().map(|e| e.label), Some("Start a task"));
             p.move_selection(false);
             assert_eq!(
                 p.chosen().map(|e| e.label),

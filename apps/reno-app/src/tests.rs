@@ -547,8 +547,8 @@ fn clicking_sidebar_rows_navigates(cx: &mut TestAppContext) {
     );
     draw(vcx);
 
-    // A nav row that has a screen goes there; "+" does too.
-    click(vcx, "nav-Home");
+    // "Start a task" goes to the new-thread state.
+    click(vcx, "new-task");
     assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
     draw(vcx);
     click(vcx, "recent-run_scout1");
@@ -820,9 +820,9 @@ fn the_run_screen_draws_in_both_appearances_and_toggles_details(cx: &mut TestApp
         draw(vcx);
         click(vcx, "recent-run_keeper1");
         wait_drawn(vcx, |vcx| painted(vcx, "approve"));
-        click(vcx, "details-toggle");
+        click(vcx, "panel-toggle");
         draw(vcx);
-        click(vcx, "details-toggle");
+        click(vcx, "panel-toggle");
         draw(vcx);
         assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
     }

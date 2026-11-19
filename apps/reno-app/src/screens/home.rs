@@ -1,8 +1,8 @@
 //! Home: what needs me right now, and is Reno making progress without me?
 //!
 //! A centred column of at most 720 px: the finding pill, context chips, the composer, the
-//! settings line and three suggestion chips. The attention pill docks at the bottom; the corner
-//! carries live count, ⌘K and the daemon status.
+//! settings line and three suggestion chips. The attention pill docks at the bottom. This is the
+//! new-thread state ("Start a task"); the live count, ⌘K and the daemon status are in the bar.
 
 use gpui::{
     Context, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Window, div,
@@ -10,14 +10,12 @@ use gpui::{
 };
 use reno_client::ConnectionStatus;
 
-use crate::actions::OpenPalette;
 use crate::store::Store;
 use crate::summary::{self, Finding};
 use crate::ui::attention::AttentionDock;
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
-use crate::ui::sidebar::daemon_label;
 use crate::ui::theme::{self, Theme};
 use crate::vm::routing::{self, Class};
 
@@ -62,6 +60,8 @@ pub(crate) struct HomeScreen {
     store: Entity<Store>,
     composer: Entity<Composer>,
     dock: Entity<AttentionDock>,
+    /// The project a new thread is for (a project's "+"); none for "Start a task".
+    project: Option<String>,
     _store: Subscription,
 }
 
@@ -77,7 +77,21 @@ impl HomeScreen {
             store,
             composer,
             dock,
+            project: None,
         }
+    }
+
+    /// The project's name a new thread is for, or `None`.
+    pub(crate) fn set_project(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        if self.project != project {
+            self.project = project;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project(&self) -> Option<&str> {
+        self.project.as_deref()
     }
 
     /// The settings line shows the access the selected class's bot grants: read the bots' definitions.
@@ -197,36 +211,6 @@ impl HomeScreen {
             ),
         }
     }
-
-    fn corner(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let store = self.store.read(cx);
-        let live = summary::attention(store.state()).running;
-        let status = store.connection();
-        let dot = match status {
-            ConnectionStatus::Connected => theme.success,
-            ConnectionStatus::Connecting => theme.warning,
-            ConnectionStatus::Disconnected => theme.danger,
-        };
-        div()
-            .absolute()
-            .top(px(14.0))
-            .right(px(16.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(kit::icon_chip(theme, Icon::Play, format!("{live} live")))
-            .child(
-                kit::icon_chip(theme, Icon::Search, "⌘K")
-                    .id("open-palette")
-                    .cursor_pointer()
-                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx)),
-            )
-            .child(
-                kit::chip(theme, daemon_label(status))
-                    .flex_row_reverse()
-                    .child(kit::dot(dot, 7.0)),
-            )
-    }
 }
 
 impl Render for HomeScreen {
@@ -287,7 +271,11 @@ impl Render for HomeScreen {
             .justify_end()
             .gap(px(8.0))
             .child(kit::icon_chip(&theme, Icon::Team, "team core"))
-            .child(kit::icon_chip(&theme, Icon::Folder, "reno"));
+            .child(kit::icon_chip(
+                &theme,
+                Icon::Folder,
+                self.project.clone().unwrap_or_else(|| "reno".to_owned()),
+            ));
 
         let column = div()
             .w_full()
@@ -297,6 +285,16 @@ impl Render for HomeScreen {
             .items_center()
             .gap(px(14.0))
             .child(self.finding_pill(&headline, &theme, cx))
+            .when_some(self.project.clone(), |col, project| {
+                col.child(
+                    div()
+                        .id("new-thread-title")
+                        .debug_selector(|| "new-thread-title".to_owned())
+                        .text_size(px(22.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("What should we build in {project}?")),
+                )
+            })
             .when_some(offline_reason, |col, reason| {
                 col.child(
                     div()
@@ -349,6 +347,5 @@ impl Render for HomeScreen {
                     .px(px(24.0))
                     .child(self.dock.clone()),
             )
-            .child(self.corner(&theme, cx))
     }
 }

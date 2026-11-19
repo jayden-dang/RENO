@@ -262,6 +262,37 @@ pub(super) fn empty_seed() -> Seed {
 }
 
 /// The demo world at startup.
+/// A run whose agent asked a question and waits for the answer.
+pub(super) fn question_run() -> Ids<SeedRun> {
+    Ok(SeedRun {
+        summary: summary(
+            "asker1",
+            "claude-code",
+            RunStatus::WaitingInput,
+            None,
+            "builder \u{b7} web-console: pick the retry policy",
+            40 * MINUTE,
+            3 * MINUTE,
+        )?,
+        journal: vec![
+            started(),
+            text("Two retry policies fit the webhook trigger. I need you to choose."),
+            ExecEvent::NeedsInput {
+                request_id: "req-asker-policy".to_owned(),
+                questions: vec![reno_proto::Question {
+                    id: "policy".to_owned(),
+                    prompt: "Which retry policy should the webhook trigger use?".to_owned(),
+                    options: vec![
+                        "Bounded retry with jitter".to_owned(),
+                        "Fail fast and alert".to_owned(),
+                    ],
+                    multi_select: false,
+                }],
+            },
+        ],
+    })
+}
+
 pub(super) fn seed() -> Ids<Seed> {
     let ls = || tool("t1", "bash", json!({ "command": "ls" }));
     let runs = vec![

@@ -95,6 +95,10 @@ pub struct FakeConfig {
     /// state): the demo `--fake` runs with them, tests that count executors do not. The registry
     /// index itself is always served. Default false.
     pub registry_agents: bool,
+    /// Add a run waiting on a question from its agent (`WaitingInput`) to the demo world, so the
+    /// "Needs input" badge and the All runs lane's "asks" show in `--fake`; tests that count runs
+    /// do not have it. Default false.
+    pub question_run: bool,
 }
 
 impl Default for FakeConfig {
@@ -108,6 +112,7 @@ impl Default for FakeConfig {
             empty: false,
             job_duration: Duration::from_secs(3),
             registry_agents: false,
+            question_run: false,
         }
     }
 }
@@ -229,11 +234,15 @@ impl FakeDaemon {
     /// Starts a fake daemon with no client. Connect with [`FakeDaemon::connect`].
     pub fn start(config: FakeConfig) -> Result<Self, ClientError> {
         let cancel = CancellationToken::new();
-        let seed = if config.empty {
+        let mut seed = if config.empty {
             data::empty_seed()
         } else {
             data::seed().map_err(|e| ClientError::Protocol(e.to_string()))?
         };
+        if config.question_run && !config.empty {
+            seed.runs
+                .push(data::question_run().map_err(|e| ClientError::Protocol(e.to_string()))?);
+        }
         let mut world = World::from_seed(seed, &cancel);
         if config.registry_agents {
             world

@@ -66,12 +66,12 @@ fn the_run_is_two_canvases_with_a_gutter_and_the_panel_hides_and_returns(cx: &mu
     // The tab strip is 42 px.
     assert!((vcx.debug_bounds("panel-tabs").unwrap().size.height - px(42.0)).abs() < px(0.5));
 
-    click(vcx, "panel-hide");
+    click(vcx, "panel-toggle");
     draw(vcx);
     assert!(!painted(vcx, "panel-canvas"));
     assert!(!painted(vcx, "panel-gutter"));
     // The toggle brings it back, to where it was.
-    click(vcx, "details-toggle");
+    click(vcx, "panel-toggle");
     draw(vcx);
     assert!(painted(vcx, "panel-canvas"));
     assert_eq!(active(vcx, &screen), Surface::Review);
@@ -90,7 +90,7 @@ fn a_narrow_window_overlays_the_chat_instead_of_splitting_it(cx: &mut TestAppCon
     draw(vcx);
     // Below 1100 px the panel starts closed, and opens over the whole chat.
     assert!(!painted(vcx, "panel-canvas"));
-    click(vcx, "details-toggle");
+    click(vcx, "panel-toggle");
     draw(vcx);
     let chat = vcx.debug_bounds("chat-canvas").unwrap();
     let panel = vcx.debug_bounds("panel-canvas").unwrap();

@@ -50,6 +50,10 @@ pub(crate) struct ProjectScreen {
 }
 
 impl ProjectScreen {
+    pub(crate) fn key(&self) -> &FolderKey {
+        &self.key
+    }
+
     pub(crate) fn new(store: Entity<Store>, key: FolderKey, cx: &mut Context<Self>) -> Self {
         store.update(cx, |store, cx| {
             store.load_history(cx);
@@ -140,11 +144,6 @@ impl ProjectScreen {
                     .child(page::cell(div().child(remove), Some(REMOVE_W)))
             }))
             .into_any_element()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn key(&self) -> &FolderKey {
-        &self.key
     }
 
     pub(crate) fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {

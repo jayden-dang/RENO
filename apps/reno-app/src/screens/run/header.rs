@@ -1,12 +1,11 @@
 //! The chat header: where the run is (project, executor, title), its state, Stop, the tokens chip
-//! and the panel toggle.
+//! (the panel toggle is in the status bar).
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px};
 
 use super::{RunScreen, ScreenEvent};
 use crate::panel::surface::Surface;
 use crate::summary;
-use crate::ui::icon::Icon;
 use crate::ui::kit;
 use crate::ui::theme::Theme;
 use crate::vm::panel_home;
@@ -82,11 +81,6 @@ impl RunScreen {
             .child(div().flex_1())
             .children(self.stop_button(theme, cx))
             .children(self.usage_chip(theme, cx))
-            .child(
-                kit::icon_button(theme, "details-toggle", Icon::Sidebar, 30.0)
-                    .debug_selector(|| "details-toggle".to_owned())
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
-            )
     }
 
     /// The header's Stop, on a run that can be stopped.

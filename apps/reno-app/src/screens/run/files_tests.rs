@@ -391,7 +391,7 @@ fn the_watch_runs_only_while_the_tab_is_the_visible_one(cx: &mut TestAppContext)
     );
 
     // The panel hidden: dropped. Shown: back.
-    click(vcx, "panel-hide");
+    click(vcx, "panel-toggle");
     draw(vcx);
     wait_drawn(vcx, |_| fake.fs_watches() == 0);
     vcx.dispatch_action(crate::actions::TogglePanel);

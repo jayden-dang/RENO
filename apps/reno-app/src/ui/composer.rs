@@ -338,6 +338,8 @@ pub(crate) struct Composer {
     /// Whether the open picker was for a live run (switch it) or a next task. When the run
     /// ends or starts under it, the picker closes rather than change meaning under the cursor.
     picker_for_live: bool,
+    /// Home: the folder a new thread works in (a project's "+"), or none for the daemon's own.
+    folder: Option<PathBuf>,
     _store: Subscription,
     _events: Subscription,
 }
@@ -402,6 +404,7 @@ impl Composer {
             chip_bounds: Rc::default(),
             class_bounds: Rc::default(),
             picker_for_live: false,
+            folder: None,
         };
         // A composer that goes away with a menu open takes its signal with it.
         let owner = cx.entity_id();
@@ -489,6 +492,29 @@ impl Composer {
             params.model_options.clone_from(&pick.options);
         }
         params
+    }
+
+    /// A new task's params: the class's bot, the chosen harness and model, and the folder the
+    /// thread is for. The send and the route preview both ask with these, so they agree.
+    fn home_params(
+        &self,
+        prompt: &str,
+        attachments: &[reno_proto::Attachment],
+        state: &reno_client::State,
+    ) -> TaskRunParams {
+        let mut params =
+            self.with_pick(routing::task_params(prompt, self.class, attachments, state));
+        params.cwd.clone_from(&self.folder);
+        params
+    }
+
+    /// Home: the folder new threads work in. Asks for a fresh route preview for it.
+    pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.folder != folder {
+            self.folder = folder;
+            self.refresh_preview(cx);
+            cx.notify();
+        }
     }
 
     /// What is typed in a reason field, trimmed; `None` when blank.
@@ -668,12 +694,7 @@ impl Composer {
         });
         match self.mode.clone() {
             Mode::Home => {
-                let params = self.with_pick(routing::task_params(
-                    &prompt,
-                    self.class,
-                    &wire,
-                    self.store.read(cx).state(),
-                ));
+                let params = self.home_params(&prompt, &wire, self.store.read(cx).state());
                 self.store
                     .update(cx, |store, cx| store.submit_task(params, ticket, cx));
             }
@@ -955,12 +976,7 @@ impl Composer {
         let key = {
             let state = self.store.read(cx).state();
             PreviewKey {
-                task: self.with_pick(routing::task_params(
-                    self.model.text().trim(),
-                    self.class,
-                    &[],
-                    state,
-                )),
+                task: self.home_params(self.model.text().trim(), &[], state),
                 probes: state
                     .executors()
                     .iter()

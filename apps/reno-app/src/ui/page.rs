@@ -105,7 +105,7 @@ pub(crate) enum CountTone {
 /// A count in a pill: "2" beside Settings, beside a category, after a section heading.
 pub(crate) fn count(theme: &Theme, n: usize, tone: CountTone) -> Div {
     let (fill, ink) = match tone {
-        CountTone::Danger => (theme.danger, gpui::white()),
+        CountTone::Danger => (theme.danger, theme.on_fill(theme.danger)),
         CountTone::Soft => (theme.raised, theme.muted),
     };
     div()

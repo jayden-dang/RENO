@@ -1317,3 +1317,59 @@ fn the_model_picker_and_the_context_card_raise_the_overlay_signal(cx: &mut TestA
     click(vcx, "context-ring");
     assert!(!overlay_open(vcx), "and clears it");
 }
+
+#[gpui::test]
+fn a_new_thread_started_from_a_project_asks_and_runs_in_that_folder(cx: &mut TestAppContext) {
+    cx.update(bind_keys);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let daemon = store.read_with(cx, |s, _| s.fake().cloned().unwrap());
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let composer = root.read_with(vcx, |r, cx| r.home().read(cx).composer().clone());
+    wait_drawn(vcx, |vcx| ready(vcx, &composer));
+
+    let project = crate::vm::projects::FolderKey::Repo("/w/porch".into());
+    root.update_in(vcx, |r, window, cx| {
+        r.new_thread(Some(project.clone()), window, cx);
+    });
+    draw(vcx);
+    assert_eq!(
+        root.read_with(vcx, |r, _| r.nav()),
+        crate::nav::Nav::Home,
+        "the new-thread state is Home"
+    );
+    assert_eq!(
+        root.read_with(vcx, |r, cx| r.home().read(cx).project().map(str::to_owned)),
+        Some("porch".to_owned()),
+        "the page says which project the thread is for"
+    );
+    // The route preview is asked for that folder, so it and the send agree.
+    composer.update_in(vcx, |c, window, cx| {
+        c.fill("fix the porch light", window, cx)
+    });
+    settle_debounce(vcx);
+    wait_until(vcx, |_| {
+        daemon
+            .route_previews()
+            .last()
+            .is_some_and(|p| p.cwd.as_deref() == Some(std::path::Path::new("/w/porch")))
+    });
+
+    composer.update_in(vcx, |c, window, cx| c.submit(window, cx));
+    wait_until(vcx, |cx| {
+        store.read_with(cx, |s, _| {
+            s.state().runs().iter().any(|r| {
+                r.title.contains("fix the porch light")
+                    && r.cwd.as_deref() == Some(std::path::Path::new("/w/porch"))
+            })
+        })
+    });
+
+    // "Start a task" afterwards is not in any project.
+    root.update_in(vcx, |r, window, cx| {
+        r.navigate(crate::nav::Nav::Home, window, cx)
+    });
+    draw(vcx);
+    assert_eq!(root.read_with(vcx, |r, _| r.home_folder().cloned()), None);
+}

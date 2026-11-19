@@ -590,7 +590,7 @@ fn tool_kind(name: &str) -> ToolKind {
 }
 
 /// What a tool call shows: its command, path or URL; otherwise the tool's name.
-fn tool_label(name: &str, input: &serde_json::Value) -> String {
+pub(crate) fn tool_label(name: &str, input: &serde_json::Value) -> String {
     let field = |keys: &[&str]| {
         keys.iter()
             .find_map(|k| input.get(*k).and_then(serde_json::Value::as_str))
