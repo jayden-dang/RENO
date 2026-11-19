@@ -135,7 +135,7 @@ impl RunScreen {
         }
         let (supported, connected) = {
             let store = self.store.read(cx);
-            (store.supports_files(), store.files_client().is_some())
+            (store.supports_files(), store.client().is_some())
         };
         if !supported || !connected {
             return;
@@ -205,7 +205,7 @@ impl RunScreen {
         T: Send + 'static,
         Fut: Future<Output = Result<T, ClientError>> + Send + 'static,
     {
-        let Some(client) = self.store.read(cx).files_client() else {
+        let Some(client) = self.store.read(cx).client() else {
             done(
                 self,
                 Err(Fail::Other("the daemon is not connected".to_owned())),
@@ -404,7 +404,7 @@ impl RunScreen {
     // --- watching -----------------------------------------------------------------------------
 
     fn start_watch(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.store.read(cx).files_client() else {
+        let Some(client) = self.store.read(cx).client() else {
             return;
         };
         let run = self.run.clone();

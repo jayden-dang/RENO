@@ -350,7 +350,7 @@ impl RunScreen {
             let id = tab.id.clone()?;
             matches!(view.read(cx).phase(), Phase::Live).then_some(id)
         });
-        let client = self.store.read(cx).term_client();
+        let client = self.store.read(cx).client();
         let (Some(id), Some(client)) = (live, client) else {
             return self.run_then(slot, then, window, cx);
         };
@@ -388,7 +388,7 @@ impl RunScreen {
         self.panel.close(&surface);
         if let Some(tab) = self.terms.tabs.remove(&slot)
             && let Some(id) = tab.id
-            && let Some(client) = self.store.read(cx).term_client()
+            && let Some(client) = self.store.read(cx).client()
         {
             Tokio::spawn(cx, async move { client.term_close(id).await }).detach();
         }
@@ -424,7 +424,7 @@ impl RunScreen {
 
     /// The daemon holds as many terminals as it allows: close one that has ended, and try again.
     fn close_an_ended_terminal(&mut self, slot: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = self.store.read(cx).term_client() else {
+        let Some(client) = self.store.read(cx).client() else {
             return;
         };
         let run = self.run.clone();

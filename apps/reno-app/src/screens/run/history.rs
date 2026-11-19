@@ -211,8 +211,8 @@ impl RunScreen {
     /// Starts or refreshes what the History and Commit tabs read, once they show. Called wherever
     /// the panel's tabs change and when the store does.
     pub(super) fn sync_history(&mut self, cx: &mut Context<Self>) {
-        let supported = self.store.read(cx).supports_history()
-            && self.store.read(cx).history_client().is_some();
+        let supported =
+            self.store.read(cx).supports_history() && self.store.read(cx).client().is_some();
         if !supported {
             return;
         }
@@ -285,7 +285,7 @@ impl RunScreen {
         T: Send + 'static,
         Fut: Future<Output = Result<T, ClientError>> + Send + 'static,
     {
-        let Some(client) = self.store.read(cx).history_client() else {
+        let Some(client) = self.store.read(cx).client() else {
             done(self, Err("the daemon is not connected".to_owned()), cx);
             return;
         };
@@ -683,7 +683,7 @@ impl RunScreen {
     ) -> AnyElement {
         let (supported, connected) = {
             let store = self.store.read(cx);
-            (store.supports_history(), store.history_client().is_some())
+            (store.supports_history(), store.client().is_some())
         };
         let page = |tag: &'static str, inner: AnyElement| -> AnyElement {
             div()

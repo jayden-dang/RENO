@@ -928,7 +928,7 @@ fn a_restored_panel_reattaches_a_live_shell_and_says_a_dead_one_ended(cx: &mut T
 
     // One shell dies (the daemon forgets it) and output piles up past what is held.
     let store = screen.read_with(vcx, |s, _| s.store.clone());
-    let client = store.read_with(vcx, |s, _| s.term_client().unwrap());
+    let client = store.read_with(vcx, |s, _| s.client().unwrap());
     let gone = dies.clone();
     let task = vcx
         .update(|_, cx| gpui_tokio::Tokio::spawn(cx, async move { client.term_close(gone).await }));

@@ -82,7 +82,7 @@ impl RunScreen {
         if checksum.is_empty() || !self.store.read(cx).supports_history() {
             return;
         }
-        let Some(client) = self.store.read(cx).history_client() else {
+        let Some(client) = self.store.read(cx).client() else {
             return;
         };
         let key = Key {

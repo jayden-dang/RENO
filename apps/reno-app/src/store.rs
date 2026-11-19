@@ -711,7 +711,8 @@ impl Store {
         }));
     }
 
-    fn client(&self) -> Option<Client> {
+    /// The connected client. A tab whose answers stay in the tab, not the mirror, calls this.
+    pub(crate) fn client(&self) -> Option<Client> {
         self.mirror.as_ref().and_then(Mirror::client)
     }
 
@@ -835,21 +836,9 @@ impl Store {
         self.state.supports(reno_proto::FEATURE_FILES)
     }
 
-    /// The connected client, for the Files tab's own requests: it reads and watches through the
-    /// client directly, since its answers live in the tab and not in the mirror.
-    pub(crate) fn files_client(&self) -> Option<Client> {
-        self.client()
-    }
-
     /// Whether the daemon serves the Terminal tab (feature `terminals`).
     pub(crate) fn supports_terminals(&self) -> bool {
         self.state.supports(reno_proto::FEATURE_TERMINALS)
-    }
-
-    /// The connected client, for the Terminal tab's own requests: a terminal's output is a
-    /// stream the view folds itself, so its calls go through the client directly.
-    pub(crate) fn term_client(&self) -> Option<Client> {
-        self.client()
     }
 
     /// Whether the daemon has threads (feature `threads`).
@@ -861,11 +850,6 @@ impl Store {
     /// log, the uncommitted scope, file sources for syntax colour, and the diff checksum.
     pub(crate) fn supports_history(&self) -> bool {
         self.state.supports(reno_proto::FEATURE_HISTORY)
-    }
-
-    /// The connected client, for the History tab's own requests: its answers live in the tab.
-    pub(crate) fn history_client(&self) -> Option<Client> {
-        self.client()
     }
 
     /// Whether the daemon can answer a diff over `scope`.

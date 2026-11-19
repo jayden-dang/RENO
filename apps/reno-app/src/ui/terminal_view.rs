@@ -324,7 +324,7 @@ impl TerminalView {
     }
 
     fn client(&self, cx: &App) -> Option<reno_client::Client> {
-        self.store.read(cx).term_client()
+        self.store.read(cx).client()
     }
 
     fn fail(&mut self, fail: OpenFail, cx: &mut Context<Self>) {
