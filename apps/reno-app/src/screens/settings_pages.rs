@@ -96,9 +96,8 @@ fn choice<T: Copy + PartialEq + 'static>(
 ) -> AnyElement {
     kit::segmented(theme)
         .children(options.iter().map(|&(value, key, label)| {
-            kit::segment(theme, format!("{stem}-{key}"), label, value == current).on_click(
-                cx.listener(move |_, _, _, cx| prefs::update(cx, |p| set(p, value))),
-            )
+            kit::segment(theme, format!("{stem}-{key}"), label, value == current)
+                .on_click(cx.listener(move |_, _, _, cx| prefs::update(cx, |p| set(p, value))))
         }))
         .into_any_element()
 }
@@ -182,28 +181,30 @@ impl SettingsScreen {
         let appearance = theme.appearance;
         kit::segmented(theme)
             .children(
-                [(ThemeName::Reno, "reno", "Reno"), (ThemeName::Slate, "slate", "Slate")].map(
-                    |(name, key, label)| {
-                        let palette = palette_for(name, appearance, p.accent);
-                        kit::segment(theme, format!("theme-{key}"), label, name == p.theme)
-                            .gap(px(6.0))
-                            .child(
-                                // The theme in a split circle: its canvas and its muted ink.
-                                div()
-                                    .size(px(14.0))
-                                    .flex()
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .border_1()
-                                    .border_color(hex(palette.text).opacity(0.25))
-                                    .child(div().w(px(7.0)).h_full().bg(hex(palette.canvas)))
-                                    .child(div().flex_1().h_full().bg(hex(palette.muted))),
-                            )
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                prefs::update(cx, |p| p.theme = name);
-                            }))
-                    },
-                ),
+                [
+                    (ThemeName::Reno, "reno", "Reno"),
+                    (ThemeName::Slate, "slate", "Slate"),
+                ]
+                .map(|(name, key, label)| {
+                    let palette = palette_for(name, appearance, p.accent);
+                    kit::segment(theme, format!("theme-{key}"), label, name == p.theme)
+                        .gap(px(6.0))
+                        .child(
+                            // The theme in a split circle: its canvas and its muted ink.
+                            div()
+                                .size(px(14.0))
+                                .flex()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(hex(palette.text).opacity(0.25))
+                                .child(div().w(px(7.0)).h_full().bg(hex(palette.canvas)))
+                                .child(div().flex_1().h_full().bg(hex(palette.muted))),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            prefs::update(cx, |p| p.theme = name);
+                        }))
+                }),
             )
             .into_any_element()
     }
@@ -283,14 +284,26 @@ impl SettingsScreen {
                 card(
                     theme,
                     vec![
-                        row(theme, "Send messages with", Some(send_help.into()), send, false),
+                        row(
+                            theme,
+                            "Send messages with",
+                            Some(send_help.into()),
+                            send,
+                            false,
+                        ),
                         row(
                             theme,
                             "Escape stops the agent",
                             None,
-                            switch(theme, "escape-stops", p.escape_stops, |p| {
-                                p.escape_stops = !p.escape_stops;
-                            }, cx),
+                            switch(
+                                theme,
+                                "escape-stops",
+                                p.escape_stops,
+                                |p| {
+                                    p.escape_stops = !p.escape_stops;
+                                },
+                                cx,
+                            ),
                             true,
                         ),
                     ],
@@ -301,20 +314,28 @@ impl SettingsScreen {
                 "Files tab",
                 card(
                     theme,
-                    vec![
-                        row(
+                    vec![row(
+                        theme,
+                        "Show hidden files",
+                        None,
+                        switch(
                             theme,
-                            "Show hidden files",
-                            None,
-                            switch(theme, "hidden-files", p.hidden_files, |p| {
+                            "hidden-files",
+                            p.hidden_files,
+                            |p| {
                                 p.hidden_files = !p.hidden_files;
-                            }, cx),
-                            true,
+                            },
+                            cx,
                         ),
-                    ],
+                        true,
+                    )],
                 ),
             ),
-            section(theme, "In the composer", card(theme, self.offered_rows(theme, cx))),
+            section(
+                theme,
+                "In the composer",
+                card(theme, self.offered_rows(theme, cx)),
+            ),
         ]
     }
 
@@ -355,11 +376,13 @@ impl SettingsScreen {
                             .font_weight(FontWeight::MEDIUM)
                             .child(summary::executor_name(&id)),
                     )
-                    .child(kit::switch(theme, format!("offer-{id}"), on).on_click(move |_, _, cx| {
-                        store.update(cx, |s, cx| {
-                            s.update_composer_prefs(|p| p.set_offered(&key, !on), cx);
-                        });
-                    }))
+                    .child(kit::switch(theme, format!("offer-{id}"), on).on_click(
+                        move |_, _, cx| {
+                            store.update(cx, |s, cx| {
+                                s.update_composer_prefs(|p| p.set_offered(&key, !on), cx);
+                            });
+                        },
+                    ))
                     .into_any_element()
             })
             .collect()
@@ -381,7 +404,12 @@ impl SettingsScreen {
             div()
                 .id("accounts-finding")
                 .debug_selector(|| "accounts-finding".to_owned())
-                .child(page::title(theme, view.title.clone(), view.detail.clone(), view.warn))
+                .child(page::title(
+                    theme,
+                    view.title.clone(),
+                    view.detail.clone(),
+                    view.warn,
+                ))
                 .into_any_element(),
             card(theme, rows),
         ]
@@ -391,7 +419,11 @@ impl SettingsScreen {
 fn account_row(theme: &Theme, r: &Row, last: bool) -> AnyElement {
     let id = format!("account-{}", r.executor);
     let meter = r.meter.as_ref().map(|m| {
-        let tone = if m.near_limit() { theme.warning } else { theme.accent };
+        let tone = if m.near_limit() {
+            theme.warning
+        } else {
+            theme.accent
+        };
         let meter_id = format!("account-meter-{}", r.executor);
         let words = m.words();
         div()
@@ -401,7 +433,9 @@ fn account_row(theme: &Theme, r: &Row, last: bool) -> AnyElement {
                 "{}, {}% used{}",
                 m.label,
                 (m.used * 100.0).round(),
-                m.resets.as_ref().map_or_else(String::new, |r| format!(", {r}"))
+                m.resets
+                    .as_ref()
+                    .map_or_else(String::new, |r| format!(", {r}"))
             )))
             .flex_none()
             .flex()

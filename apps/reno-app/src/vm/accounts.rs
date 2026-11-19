@@ -88,7 +88,10 @@ pub(crate) fn view(executors: &[ExecutorInfo], now_ms: u64) -> View {
         [] => String::new(),
         [one] => format!("{one} is signed out; sign in from Executors."),
         [a, b] => format!("{a} and {b} are signed out; sign in from Executors."),
-        more => format!("{} accounts are signed out; sign in from Executors.", more.len()),
+        more => format!(
+            "{} accounts are signed out; sign in from Executors.",
+            more.len()
+        ),
     });
     View {
         title,
@@ -178,19 +181,31 @@ mod tests {
         vec![
             info(
                 "acp.grok",
-                Some(health(SignedIn::Yes { account: Some("ada@example.com".into()) }, None)),
+                Some(health(
+                    SignedIn::Yes {
+                        account: Some("ada@example.com".into()),
+                    },
+                    None,
+                )),
             ),
             info(
                 "codex",
                 Some(health(
-                    SignedIn::No { hint: "run `codex login`".into() },
-                    usage(Some("ChatGPT Plus"), vec![UsageWindow::new("Session", 0.12, None)]),
+                    SignedIn::No {
+                        hint: "run `codex login`".into(),
+                    },
+                    usage(
+                        Some("ChatGPT Plus"),
+                        vec![UsageWindow::new("Session", 0.12, None)],
+                    ),
                 )),
             ),
             info(
                 "claude-code",
                 Some(health(
-                    SignedIn::Yes { account: Some("ada@example.com".into()) },
+                    SignedIn::Yes {
+                        account: Some("ada@example.com".into()),
+                    },
                     usage(
                         None,
                         vec![
@@ -200,7 +215,15 @@ mod tests {
                     ),
                 )),
             ),
-            info("cursor", Some(health(SignedIn::No { hint: "set CURSOR_API_KEY".into() }, None))),
+            info(
+                "cursor",
+                Some(health(
+                    SignedIn::No {
+                        hint: "set CURSOR_API_KEY".into(),
+                    },
+                    None,
+                )),
+            ),
             info("pi", Some(health(SignedIn::Unknown, None))),
             info("muse", None),
         ]
@@ -224,7 +247,10 @@ mod tests {
         assert_eq!(names, ["Claude Code", "Grok", "Codex", "Cursor"]);
         let claude = &v.rows[0];
         assert_eq!(claude.who, "ada@example.com");
-        assert_eq!(claude.meter.as_ref().unwrap().words(), "Session 54% \u{b7} resets in 2h");
+        assert_eq!(
+            claude.meter.as_ref().unwrap().words(),
+            "Session 54% \u{b7} resets in 2h"
+        );
         let codex = &v.rows[2];
         assert!(codex.signed_out && codex.meter.is_none());
         assert_eq!(codex.who, "Signed out");
@@ -249,7 +275,10 @@ mod tests {
 
     #[test]
     fn with_no_usage_the_title_says_so() {
-        let none = vec![info("cursor", Some(health(SignedIn::No { hint: "x".into() }, None)))];
+        let none = vec![info(
+            "cursor",
+            Some(health(SignedIn::No { hint: "x".into() }, None)),
+        )];
         let v = view(&none, NOW);
         assert_eq!(v.title, "No usage to show");
         assert_eq!(v.detail, "Cursor is signed out; sign in from Executors.");

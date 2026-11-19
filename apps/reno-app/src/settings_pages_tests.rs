@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use gpui::{Entity, TestAppContext, VisualTestContext};
 
 use crate::app::RootView;
 use crate::prefs::{self, AccentName, Mode, ThemeName};
@@ -54,7 +54,11 @@ fn a_saved_mode_wins_over_the_system(cx: &mut TestAppContext) {
     assert_eq!(shown(vcx).appearance, Appearance::Light);
     vcx.update(|_, cx| prefs::update(cx, |p| p.mode = Mode::System));
     draw(vcx);
-    assert_eq!(shown(vcx).appearance, Appearance::Dark, "System: the window's appearance");
+    assert_eq!(
+        shown(vcx).appearance,
+        Appearance::Dark,
+        "System: the window's appearance"
+    );
 }
 
 #[gpui::test]
@@ -99,7 +103,12 @@ fn appearance_saves_each_choice(cx: &mut TestAppContext) {
     let store = fake(cx);
     let (_root, vcx) = settings_at(cx, &store, Category::Appearance);
     vcx.update(|_, cx| motion::init(ReduceMotion::System, false, cx));
-    for id in ["mode-system", "theme-reno", "accent-teal", "reduce-motion-system"] {
+    for id in [
+        "mode-system",
+        "theme-reno",
+        "accent-teal",
+        "reduce-motion-system",
+    ] {
         assert!(painted(vcx, id), "{id}");
     }
     click(vcx, "theme-slate");
@@ -113,7 +122,11 @@ fn appearance_saves_each_choice(cx: &mut TestAppContext) {
     assert_eq!(p.reduce_motion, Motion::On);
     assert_eq!(vcx.update(|_, cx| motion::preference(cx)), ReduceMotion::On);
     draw(vcx);
-    assert_eq!(shown(vcx).appearance, Appearance::Light, "it applies at once");
+    assert_eq!(
+        shown(vcx).appearance,
+        Appearance::Light,
+        "it applies at once"
+    );
 }
 
 #[gpui::test]
@@ -127,7 +140,10 @@ fn general_saves_its_switches_and_the_composer_list(cx: &mut TestAppContext) {
     let p = saved(vcx);
     assert_eq!(p.send_with, SendWith::CommandEnter);
     assert!(p.escape_stops && !p.hidden_files);
-    assert!(!painted(vcx, "wrap-lines"), "no wrap switch until the viewer can wrap");
+    assert!(
+        !painted(vcx, "wrap-lines"),
+        "no wrap switch until the viewer can wrap"
+    );
     click(vcx, "offer-claude-code");
     assert!(!store.read_with(vcx, |s, _| s.composer_prefs().offered("claude-code")));
 }
@@ -152,6 +168,10 @@ fn a_pinned_reduce_motion_holds_from_launch(cx: &mut TestAppContext) {
         motion::init(ReduceMotion::On, false, cx);
         prefs::update(cx, |p| p.reduce_motion = Motion::System);
         crate::screens::settings::pages::apply_saved_motion(cx);
-        assert_eq!(motion::preference(cx), ReduceMotion::On, "System keeps the launch preference");
+        assert_eq!(
+            motion::preference(cx),
+            ReduceMotion::On,
+            "System keeps the launch preference"
+        );
     });
 }

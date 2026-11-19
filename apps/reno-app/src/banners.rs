@@ -38,7 +38,11 @@ impl Banners {
     /// The notifier for `store`, installed for the whole app: it watches every Reno window's
     /// activation (so "only when in the background" knows), and starts with a first pass.
     /// Its switches are read from the app's preference store (`prefs::current`).
-    pub(crate) fn install(cx: &mut App, store: Entity<Store>, desktop: Rc<dyn Desktop>) -> Entity<Self> {
+    pub(crate) fn install(
+        cx: &mut App,
+        store: Entity<Store>,
+        desktop: Rc<dyn Desktop>,
+    ) -> Entity<Self> {
         let now = cx.background_executor().now();
         let banners = cx.new(|cx| Self {
             _store: cx.observe(&store, |this: &mut Self, _, cx| this.on_store(cx)),

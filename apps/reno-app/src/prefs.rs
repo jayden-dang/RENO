@@ -56,8 +56,11 @@ trait Word: Copy + Default + PartialEq + Sized + 'static {
 }
 
 impl Word for Mode {
-    const ALL: &'static [(Self, &'static str)] =
-        &[(Self::System, "system"), (Self::Light, "light"), (Self::Dark, "dark")];
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::System, "system"),
+        (Self::Light, "light"),
+        (Self::Dark, "dark"),
+    ];
 }
 
 impl Word for ThemeName {
@@ -65,8 +68,11 @@ impl Word for ThemeName {
 }
 
 impl Word for AccentName {
-    const ALL: &'static [(Self, &'static str)] =
-        &[(Self::Teal, "teal"), (Self::Blue, "blue"), (Self::Violet, "violet")];
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::Teal, "teal"),
+        (Self::Blue, "blue"),
+        (Self::Violet, "violet"),
+    ];
 }
 
 /// Reduce motion: follow macOS, or pinned.
@@ -79,8 +85,11 @@ pub(crate) enum Motion {
 }
 
 impl Word for Motion {
-    const ALL: &'static [(Self, &'static str)] =
-        &[(Self::System, "system"), (Self::On, "on"), (Self::Off, "off")];
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::System, "system"),
+        (Self::On, "on"),
+        (Self::Off, "off"),
+    ];
 }
 
 /// What sends a message from the composer.
@@ -213,7 +222,8 @@ impl Prefs {
             }
         }
         let word = |key: &str| map.get(key).and_then(Value::as_str);
-        let flag = |key: &str, default: bool| map.get(key).and_then(Value::as_bool).unwrap_or(default);
+        let flag =
+            |key: &str, default: bool| map.get(key).and_then(Value::as_bool).unwrap_or(default);
         prefs.mode = Mode::from_word(word("mode"));
         prefs.theme = ThemeName::from_word(word("theme"));
         prefs.accent = AccentName::from_word(word("accent"));
@@ -430,7 +440,10 @@ mod tests {
         assert_eq!(p.accent, AccentName::Teal);
         assert_eq!(p.mode, Mode::Light);
         let json: Value = serde_json::from_slice(&p.to_json()).unwrap();
-        assert_eq!(json["theme"], "reno", "a known key is rewritten, not carried as unknown");
+        assert_eq!(
+            json["theme"], "reno",
+            "a known key is rewritten, not carried as unknown"
+        );
     }
 
     #[gpui::test]

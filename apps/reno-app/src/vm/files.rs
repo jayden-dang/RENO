@@ -1218,7 +1218,11 @@ mod tests {
                 None,
             )),
         );
-        assert_eq!(names(&m), [".github", ".env.example", "a.rs"], "listed by default");
+        assert_eq!(
+            names(&m),
+            [".github", ".env.example", "a.rs"],
+            "listed by default"
+        );
         m.set_show_hidden(false);
         assert_eq!(names(&m), ["a.rs"]);
         m.set_show_hidden(true);

@@ -375,13 +375,21 @@ mod tests {
         // docs/design/2026-11-19-settings-pages-ui-brief.md, "Themes and accents".
         let d = palette_for(ThemeName::Slate, Appearance::Dark, AccentName::Teal);
         assert_eq!(
-            [d.shell, d.canvas, d.card, d.surface, d.raised, d.text, d.muted, d.faint],
-            [0x0a0d14, 0x0e121b, 0x121828, 0x172033, 0x283247, 0xe2e8f0, 0x94a3b8, 0x6f7d93]
+            [
+                d.shell, d.canvas, d.card, d.surface, d.raised, d.text, d.muted, d.faint
+            ],
+            [
+                0x0a0d14, 0x0e121b, 0x121828, 0x172033, 0x283247, 0xe2e8f0, 0x94a3b8, 0x6f7d93
+            ]
         );
         let l = palette_for(ThemeName::Slate, Appearance::Light, AccentName::Teal);
         assert_eq!(
-            [l.shell, l.canvas, l.card, l.surface, l.raised, l.text, l.muted, l.faint],
-            [0xe2e8f0, 0xf1f5f9, 0xffffff, 0xffffff, 0xd3dbe6, 0x0f172a, 0x475569, 0x64748b]
+            [
+                l.shell, l.canvas, l.card, l.surface, l.raised, l.text, l.muted, l.faint
+            ],
+            [
+                0xe2e8f0, 0xf1f5f9, 0xffffff, 0xffffff, 0xd3dbe6, 0x0f172a, 0x475569, 0x64748b
+            ]
         );
         assert_eq!(d.danger, reno_dark().danger, "semantic colours are shared");
         assert_eq!(d.ansi, reno_dark().ansi, "so is the terminal's set");

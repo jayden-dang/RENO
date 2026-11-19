@@ -1414,7 +1414,10 @@ fn an_agent_switched_off_in_settings_leaves_the_picker(cx: &mut TestAppContext) 
     draw(vcx);
     open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
-    assert!(!painted(vcx, "picker-tab-codex"), "switched off: not offered");
+    assert!(
+        !painted(vcx, "picker-tab-codex"),
+        "switched off: not offered"
+    );
 }
 
 #[gpui::test]
@@ -1439,7 +1442,10 @@ fn with_command_enter_chosen_enter_breaks_the_line_and_command_enter_sends(
         "first\nsecond",
         "Enter starts a new line"
     );
-    assert!(root.read_with(vcx, |r, _| r.run_screen().is_none()), "nothing was sent");
+    assert!(
+        root.read_with(vcx, |r, _| r.run_screen().is_none()),
+        "nothing was sent"
+    );
     vcx.simulate_keystrokes("cmd-enter");
     wait_drawn(vcx, |vcx| {
         root.read_with(vcx, |r, _| r.run_screen().is_some())
@@ -1462,7 +1468,9 @@ fn escape_stops_a_live_run_only_when_settings_say_so(cx: &mut TestAppContext) {
         })
     };
     assert!(live(vcx), "builder1 is running in the fake");
-    let steer = root.read_with(vcx, |r, cx| r.run_screen().unwrap().read(cx).steer_input().clone());
+    let steer = root.read_with(vcx, |r, cx| {
+        r.run_screen().unwrap().read(cx).steer_input().clone()
+    });
     vcx.update(|window, cx| window.focus(&steer.read(cx).focus_handle_ref().clone(), cx));
 
     vcx.simulate_keystrokes("escape");
