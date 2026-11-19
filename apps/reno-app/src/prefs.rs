@@ -1,4 +1,5 @@
-//! The app's own preferences: what the desktop notifications do. Kept on this machine in
+//! The app's own preferences: what the desktop notifications do, how Reno looks (Settings ›
+//! Appearance) and how the composer and the Files tab behave (Settings › General). Kept on this machine in
 //! `app-settings.json` beside the daemon's socket (like `app-seen.json`), read at start and written
 //! on every change. With `--fake` they live in memory only.
 //!
@@ -9,7 +10,116 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
-/// The four switches of Settings → Notifications. All default to on.
+/// System, Light or Dark: the one source of the app's appearance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Mode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// A curated theme (its neutrals).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ThemeName {
+    #[default]
+    Reno,
+    Slate,
+}
+
+/// The accent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AccentName {
+    #[default]
+    Teal,
+    Blue,
+    Violet,
+}
+
+/// A choice written as one word in the file.
+trait Word: Copy + Default + PartialEq + Sized + 'static {
+    const ALL: &'static [(Self, &'static str)];
+
+    fn word(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(v, _)| *v == self)
+            .map_or("", |(_, w)| w)
+    }
+
+    fn from_word(word: Option<&str>) -> Self {
+        Self::ALL
+            .iter()
+            .find(|(_, w)| Some(*w) == word)
+            .map_or_else(Self::default, |(v, _)| *v)
+    }
+}
+
+impl Word for Mode {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::System, "system"),
+        (Self::Light, "light"),
+        (Self::Dark, "dark"),
+    ];
+}
+
+impl Word for ThemeName {
+    const ALL: &'static [(Self, &'static str)] = &[(Self::Reno, "reno"), (Self::Slate, "slate")];
+}
+
+impl Word for AccentName {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::Teal, "teal"),
+        (Self::Blue, "blue"),
+        (Self::Violet, "violet"),
+    ];
+}
+
+/// Reduce motion: follow macOS, or pinned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Motion {
+    #[default]
+    System,
+    On,
+    Off,
+}
+
+impl Word for Motion {
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::System, "system"),
+        (Self::On, "on"),
+        (Self::Off, "off"),
+    ];
+}
+
+/// What sends a message from the composer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SendWith {
+    /// Enter sends; ⇧ Enter starts a new line.
+    #[default]
+    Enter,
+    /// ⌘ Enter sends; Enter starts a new line.
+    CommandEnter,
+}
+
+impl Word for SendWith {
+    const ALL: &'static [(Self, &'static str)] =
+        &[(Self::Enter, "enter"), (Self::CommandEnter, "cmdEnter")];
+}
+
+/// The keys of the file this build reads besides the notification switches.
+const KEYS: [&str; 7] = [
+    "mode",
+    "theme",
+    "accent",
+    "reduceMotion",
+    "sendWith",
+    "escapeStops",
+    "hiddenFiles",
+];
+
+/// The switches of Settings → Notifications (all default to on), and the choices of Settings ›
+/// Appearance and General (today's look and behaviour by default).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Prefs {
     /// Banners at all.
@@ -20,6 +130,15 @@ pub(crate) struct Prefs {
     pub(crate) finished: bool,
     /// The Dock badge.
     pub(crate) dock_badge: bool,
+    pub(crate) mode: Mode,
+    pub(crate) theme: ThemeName,
+    pub(crate) accent: AccentName,
+    pub(crate) reduce_motion: Motion,
+    pub(crate) send_with: SendWith,
+    /// Escape in a running thread stops it.
+    pub(crate) escape_stops: bool,
+    /// The Files tab lists dotfiles.
+    pub(crate) hidden_files: bool,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -31,6 +150,13 @@ impl Default for Prefs {
             background_only: true,
             finished: true,
             dock_badge: true,
+            mode: Mode::System,
+            theme: ThemeName::Reno,
+            accent: AccentName::Teal,
+            reduce_motion: Motion::System,
+            send_with: SendWith::Enter,
+            escape_stops: false,
+            hidden_files: true,
             rest: Map::new(),
         }
     }
@@ -95,9 +221,21 @@ impl Prefs {
                 prefs.set(pref, on);
             }
         }
+        let word = |key: &str| map.get(key).and_then(Value::as_str);
+        let flag =
+            |key: &str, default: bool| map.get(key).and_then(Value::as_bool).unwrap_or(default);
+        prefs.mode = Mode::from_word(word("mode"));
+        prefs.theme = ThemeName::from_word(word("theme"));
+        prefs.accent = AccentName::from_word(word("accent"));
+        prefs.reduce_motion = Motion::from_word(word("reduceMotion"));
+        prefs.send_with = SendWith::from_word(word("sendWith"));
+        prefs.escape_stops = flag("escapeStops", prefs.escape_stops);
+        prefs.hidden_files = flag("hiddenFiles", prefs.hidden_files);
         prefs.rest = map
             .into_iter()
-            .filter(|(key, _)| !Pref::ALL.iter().any(|p| p.key() == key))
+            .filter(|(key, _)| {
+                !Pref::ALL.iter().any(|p| p.key() == key) && !KEYS.contains(&key.as_str())
+            })
             .collect();
         prefs
     }
@@ -107,6 +245,16 @@ impl Prefs {
         for pref in Pref::ALL {
             map.insert(pref.key().to_owned(), Value::Bool(self.get(pref)));
         }
+        let mut put = |key: &str, value: Value| {
+            map.insert(key.to_owned(), value);
+        };
+        put("mode", self.mode.word().into());
+        put("theme", self.theme.word().into());
+        put("accent", self.accent.word().into());
+        put("reduceMotion", self.reduce_motion.word().into());
+        put("sendWith", self.send_with.word().into());
+        put("escapeStops", self.escape_stops.into());
+        put("hiddenFiles", self.hidden_files.into());
         serde_json::to_vec_pretty(&Value::Object(map)).unwrap_or_default()
     }
 }
@@ -141,10 +289,23 @@ impl PrefStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn prefs(&self) -> &Prefs {
         &self.prefs
     }
 
+    /// Applies `change`; writes the file when something changed.
+    pub(crate) fn update(&mut self, change: impl FnOnce(&mut Prefs)) {
+        let before = self.prefs.clone();
+        change(&mut self.prefs);
+        if self.prefs != before
+            && let Some(path) = &self.path
+        {
+            save(path, &self.prefs);
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn set(&mut self, pref: Pref, on: bool) {
         if self.prefs.get(pref) == on {
             return;
@@ -154,6 +315,20 @@ impl PrefStore {
             save(path, &self.prefs);
         }
     }
+}
+
+impl gpui::Global for PrefStore {}
+
+/// The preferences in force: the installed store's, else the defaults (a test window).
+pub(crate) fn current(cx: &gpui::App) -> Prefs {
+    cx.try_global::<PrefStore>()
+        .map_or_else(Prefs::default, |store| store.prefs.clone())
+}
+
+/// Changes the preferences in force and redraws; installs an in-memory store when none is.
+pub(crate) fn update(cx: &mut gpui::App, change: impl FnOnce(&mut Prefs)) {
+    cx.default_global::<PrefStore>().update(change);
+    cx.refresh_windows();
 }
 
 /// Writes through a temporary file, so a crash never leaves half a file. A failure only costs the
@@ -214,6 +389,70 @@ mod tests {
         assert_eq!(json["someFutureKey"]["a"], 1);
         assert_eq!(json["backgroundOnly"], false);
         assert_eq!(json["notifications"], true, "the file is camelCase");
+    }
+
+    #[test]
+    fn the_new_choices_default_to_todays_look_and_behaviour() {
+        let p = Prefs::default();
+        assert_eq!(p.mode, Mode::System);
+        assert_eq!(p.theme, ThemeName::Reno);
+        assert_eq!(p.accent, AccentName::Teal);
+        assert_eq!(p.reduce_motion, Motion::System);
+        assert_eq!(p.send_with, SendWith::Enter);
+        assert!(!p.escape_stops, "Escape does not stop a run today");
+        assert!(p.hidden_files, "dotfiles are listed today");
+    }
+
+    #[test]
+    fn the_new_choices_are_written_and_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        store.update(|p| {
+            p.mode = Mode::Dark;
+            p.theme = ThemeName::Slate;
+            p.accent = AccentName::Violet;
+            p.reduce_motion = Motion::On;
+            p.send_with = SendWith::CommandEnter;
+            p.escape_stops = true;
+            p.hidden_files = false;
+        });
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["mode"], "dark");
+        assert_eq!(json["theme"], "slate");
+        assert_eq!(json["accent"], "violet");
+        assert_eq!(json["reduceMotion"], "on");
+        assert_eq!(json["sendWith"], "cmdEnter");
+        assert_eq!(json["escapeStops"], true);
+        let again = PrefStore::at(path).prefs().clone();
+        assert_eq!(again.mode, Mode::Dark);
+        assert_eq!(again.theme, ThemeName::Slate);
+        assert_eq!(again.accent, AccentName::Violet);
+        assert_eq!(again.reduce_motion, Motion::On);
+        assert_eq!(again.send_with, SendWith::CommandEnter);
+        assert!(again.escape_stops && !again.hidden_files);
+    }
+
+    #[test]
+    fn an_unknown_value_is_the_default_and_kept_out_of_the_rest() {
+        let p = Prefs::from_json(br#"{"theme": "graphite", "accent": 3, "mode": "light"}"#);
+        assert_eq!(p.theme, ThemeName::Reno);
+        assert_eq!(p.accent, AccentName::Teal);
+        assert_eq!(p.mode, Mode::Light);
+        let json: Value = serde_json::from_slice(&p.to_json()).unwrap();
+        assert_eq!(
+            json["theme"], "reno",
+            "a known key is rewritten, not carried as unknown"
+        );
+    }
+
+    #[gpui::test]
+    fn the_app_reads_one_store_and_a_change_reaches_it(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert_eq!(current(cx), Prefs::default(), "no store yet: the defaults");
+            update(cx, |p| p.theme = ThemeName::Slate);
+            assert_eq!(current(cx).theme, ThemeName::Slate);
+        });
     }
 
     #[test]

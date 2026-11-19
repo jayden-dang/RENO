@@ -399,6 +399,8 @@ impl Live {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FilesModel {
+    /// Settings › General › Show hidden files is off: dotfiles are left out of the tree.
+    hide_hidden: bool,
     dirs: BTreeMap<String, Dir>,
     expanded: BTreeSet<String>,
     selected: Option<String>,
@@ -589,6 +591,11 @@ impl FilesModel {
         }
     }
 
+    /// Settings › General › Show hidden files.
+    pub(crate) fn set_show_hidden(&mut self, show: bool) {
+        self.hide_hidden = !show;
+    }
+
     /// The tree as drawn: the root's entries and what is open under them, in order.
     pub(crate) fn rows(&self) -> Vec<Row> {
         let mut out = Vec::new();
@@ -622,6 +629,9 @@ impl FilesModel {
             return;
         }
         for entry in &node.entries {
+            if self.hide_hidden && entry.name.starts_with('.') {
+                continue;
+            }
             let is_dir = entry.kind == FsEntryKind::Dir;
             let expanded = is_dir && self.expanded.contains(&entry.path);
             out.push(Row::Entry(EntryRow {
@@ -1188,6 +1198,35 @@ mod tests {
                 Row::Note { note, depth, .. } => format!("{}<{note:?}>", "  ".repeat(depth)),
             })
             .collect()
+    }
+
+    #[test]
+    fn hidden_files_are_listed_unless_settings_hide_them() {
+        let mut m = FilesModel::new();
+        let reqs = m.start();
+        let (_, _, ticket) = list_of(&reqs).remove(0);
+        m.apply_list(
+            "",
+            ticket,
+            None,
+            Ok(page(
+                vec![
+                    entry(".env.example", FsEntryKind::File),
+                    entry(".github", FsEntryKind::Dir),
+                    entry("a.rs", FsEntryKind::File),
+                ],
+                None,
+            )),
+        );
+        assert_eq!(
+            names(&m),
+            [".github", ".env.example", "a.rs"],
+            "listed by default"
+        );
+        m.set_show_hidden(false);
+        assert_eq!(names(&m), ["a.rs"]);
+        m.set_show_hidden(true);
+        assert_eq!(names(&m).len(), 3);
     }
 
     #[test]

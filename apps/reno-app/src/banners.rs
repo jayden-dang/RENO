@@ -13,7 +13,7 @@ use reno_proto::RunId;
 use crate::app::RootView;
 use crate::desktop::Desktop;
 use crate::notify::{Effect, Notifier, Snapshot};
-use crate::prefs::{Pref, PrefStore, Prefs};
+use crate::prefs::{self, Pref, Prefs};
 use crate::store::Store;
 
 /// The shortest wait before a pending banner is looked at again.
@@ -22,7 +22,6 @@ const MIN_WAKE: Duration = Duration::from_millis(1);
 pub(crate) struct Banners {
     store: Entity<Store>,
     desktop: Rc<dyn Desktop>,
-    prefs: PrefStore,
     notifier: Notifier,
     /// The Reno windows that are the active window (at most one in practice).
     active: HashSet<WindowId>,
@@ -38,18 +37,17 @@ pub(crate) struct Banners {
 impl Banners {
     /// The notifier for `store`, installed for the whole app: it watches every Reno window's
     /// activation (so "only when in the background" knows), and starts with a first pass.
+    /// Its switches are read from the app's preference store (`prefs::current`).
     pub(crate) fn install(
         cx: &mut App,
         store: Entity<Store>,
         desktop: Rc<dyn Desktop>,
-        prefs: PrefStore,
     ) -> Entity<Self> {
         let now = cx.background_executor().now();
         let banners = cx.new(|cx| Self {
             _store: cx.observe(&store, |this: &mut Self, _, cx| this.on_store(cx)),
             store,
             desktop,
-            prefs,
             notifier: Notifier::new(now),
             active: HashSet::new(),
             badge: None,
@@ -96,8 +94,9 @@ impl Banners {
             .ok();
     }
 
-    pub(crate) fn prefs(&self) -> &Prefs {
-        self.prefs.prefs()
+    /// The switches in force (the app's preference store).
+    pub(crate) fn prefs(&self, cx: &App) -> Prefs {
+        prefs::current(cx)
     }
 
     pub(crate) fn delivery(&self) -> Delivery {
@@ -105,7 +104,7 @@ impl Banners {
     }
 
     pub(crate) fn set_pref(&mut self, pref: Pref, on: bool, cx: &mut Context<Self>) {
-        self.prefs.set(pref, on);
+        prefs::update(cx, |p| p.set(pref, on));
         self.pass(cx);
         cx.notify();
     }
@@ -142,9 +141,10 @@ impl Banners {
     fn pass(&mut self, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
         let snapshot = Snapshot::from_state(self.store.read(cx).state());
-        let outcome =
-            self.notifier
-                .step(&snapshot, now, !self.active.is_empty(), self.prefs.prefs());
+        let prefs = prefs::current(cx);
+        let outcome = self
+            .notifier
+            .step(&snapshot, now, !self.active.is_empty(), &prefs);
         if trace_on() {
             trace(
                 &snapshot,

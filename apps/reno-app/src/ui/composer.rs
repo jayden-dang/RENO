@@ -95,6 +95,8 @@ actions!(
         Undo,
         Redo,
         Submit,
+        /// ⌘ Enter: sends whatever Settings › General says Enter does.
+        SendNow,
         Cancel,
         Newline,
         ShowCharacterPalette,
@@ -151,6 +153,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, ctx),
         KeyBinding::new("cmd-shift-z", Redo, ctx),
         KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("cmd-enter", SendNow, ctx),
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
@@ -1130,7 +1133,19 @@ impl Composer {
         cx.notify();
     }
 
+    /// Enter: sends, or starts a new line when Settings › General says ⌘ Enter sends.
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        // A reason input (a deny note) is one answer: Enter always gives it.
+        if self.mode != Mode::Reason
+            && crate::prefs::current(cx).send_with == crate::prefs::SendWith::CommandEnter
+        {
+            self.on_newline(&Newline, window, cx);
+        } else {
+            self.submit(window, cx);
+        }
+    }
+
+    fn on_send_now(&mut self, _: &SendNow, window: &mut Window, cx: &mut Context<Self>) {
         self.submit(window, cx);
     }
 
@@ -1145,6 +1160,13 @@ impl Composer {
             self.model.set_text("");
             cx.emit(ReasonEvent::Cancelled);
             cx.notify();
+        } else if let Mode::Steer(run) = &self.mode
+            && crate::prefs::current(cx).escape_stops
+            && dock_action(self.stoppable(cx), self.model.can_submit()) == DockAction::Stop
+        {
+            // Settings › General: Escape stops the run, exactly when the Stop button shows.
+            let run = run.clone();
+            self.store.update(cx, |store, cx| store.cancel_run(run, cx));
         } else {
             // Escape is somebody else's outside a reason input.
             cx.propagate();
@@ -2036,6 +2058,7 @@ impl Render for Composer {
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_send_now))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_backspace))

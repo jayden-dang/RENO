@@ -13,6 +13,9 @@ use reno_client::ConnectionStatus;
 use reno_notify::Delivery;
 use reno_proto::defs::DefKind;
 
+#[path = "settings_pages.rs"]
+pub(crate) mod pages;
+
 use crate::lifecycle;
 use crate::prefs::{Pref, Prefs};
 use crate::screens::executors::{ExecutorsScreen, Part};
@@ -131,7 +134,11 @@ impl SettingsScreen {
                     screen.shown(cx);
                 });
             }
-            Category::Definitions | Category::Notifications => {}
+            Category::Definitions
+            | Category::Notifications
+            | Category::Accounts
+            | Category::General
+            | Category::Appearance => {}
         }
     }
 
@@ -286,6 +293,9 @@ impl SettingsScreen {
             Category::Policy => Icon::Shield,
             Category::Notifications => Icon::Bell,
             Category::Daemon => Icon::Server,
+            Category::Accounts => Icon::Team,
+            Category::General => Icon::Settings,
+            Category::Appearance => Icon::Eye,
         };
         let key = category.key();
         let trailing: Option<AnyElement> = match category {
@@ -838,7 +848,7 @@ impl SettingsScreen {
             || (Prefs::default(), Delivery::None),
             |b| {
                 let b = b.read(cx);
-                (b.prefs().clone(), b.delivery())
+                (b.prefs(cx), b.delivery())
             },
         );
         let rows = NOTIFICATION_SWITCHES.map(|(pref, label, help)| {
@@ -941,6 +951,9 @@ impl Render for SettingsScreen {
             Category::Definitions | Category::Executors | Category::Registry => {
                 self.definitions(&defs, &theme, cx)
             }
+            Category::Accounts => self.accounts_page(&theme, cx),
+            Category::General => self.general_page(&theme, cx),
+            Category::Appearance => self.appearance_page(&theme, cx),
         };
         let body = page::content(page::SETTINGS)
             .gap(px(30.0))

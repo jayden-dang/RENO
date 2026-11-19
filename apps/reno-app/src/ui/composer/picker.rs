@@ -94,6 +94,8 @@ impl Composer {
         let harnesses: Vec<_> = models::harnesses(store.state())
             .into_iter()
             .filter(|h| live.as_ref().is_none_or(|l| &h.id == l))
+            // Settings › General › In the composer; a run keeps its agent.
+            .filter(|h| live.is_some() || store.composer_prefs().offered(h.id.as_str()))
             .collect();
         let shown = self.shown_pick(cx);
         let tabs = picker::tabs(&harnesses, live.as_ref(), self.mode == Mode::Home);

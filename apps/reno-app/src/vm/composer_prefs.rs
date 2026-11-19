@@ -32,9 +32,24 @@ pub(crate) struct ComposerPrefs {
     pub(crate) effort: BTreeMap<String, BTreeMap<String, Effort>>,
     /// The options last chosen, by harness then model id.
     pub(crate) model_options: BTreeMap<String, BTreeMap<String, Options>>,
+    /// Agents switched off in Settings › General › In the composer.
+    pub(crate) not_offered: Vec<String>,
 }
 
 impl ComposerPrefs {
+    /// Whether the composer offers `harness`: every agent is, until switched off.
+    pub(crate) fn offered(&self, harness: &str) -> bool {
+        !self.not_offered.iter().any(|h| h == harness)
+    }
+
+    /// Switches `harness` on or off in the composer.
+    pub(crate) fn set_offered(&mut self, harness: &str, on: bool) {
+        self.not_offered.retain(|h| h != harness);
+        if !on {
+            self.not_offered.push(harness.to_owned());
+        }
+    }
+
     pub(crate) fn is_favourite(&self, harness: &ExecutorId, model: &str) -> bool {
         self.favourites
             .iter()
@@ -181,6 +196,21 @@ mod tests {
                 .map(String::as_str),
             None
         );
+    }
+
+    #[test]
+    fn an_agent_switched_off_leaves_the_composer_and_is_remembered() {
+        let mut p = ComposerPrefs::default();
+        assert!(p.offered("codex"), "every agent is offered by default");
+        p.set_offered("codex", false);
+        assert!(!p.offered("codex"));
+        assert!(p.offered("claude-code"));
+        let back: ComposerPrefs = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert!(!back.offered("codex"));
+        p.set_offered("codex", true);
+        assert!(p.offered("codex"));
+        let old: ComposerPrefs = serde_json::from_slice(br#"{"favourites": []}"#).unwrap();
+        assert!(old.offered("codex"), "an older file offers everything");
     }
 
     #[test]

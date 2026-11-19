@@ -41,6 +41,8 @@ mod question_tests;
 #[cfg(test)]
 mod screen_tests;
 #[cfg(test)]
+mod settings_pages_tests;
+#[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
 mod tests;
