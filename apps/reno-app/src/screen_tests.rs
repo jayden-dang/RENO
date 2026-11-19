@@ -2053,3 +2053,11 @@ fn the_registry_failing_says_so_with_retry_and_offline_keeps_the_copy(cx: &mut T
     assert!(checked.starts_with("offline \u{b7} showing the copy from"));
     assert!(painted(vcx, "registry-agent-goose"), "the copy still lists");
 }
+
+#[gpui::test]
+fn the_sidebar_wears_the_reno_mark(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    assert!(painted(vcx, "reno-mark"));
+}

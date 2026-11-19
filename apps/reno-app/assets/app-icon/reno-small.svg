@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Reno app icon for the 16 and 32 px slots: the same drawing with the mark larger, so the gutters survive. macOS icon grid: an 824 px rounded square centred on the 1024 canvas.
+       Flat ink plate, paper mark: the Klynt mark's palette and construction (solid pieces, edges at
+       0/45/90 degrees, one even gutter). The mark is assets/icons/mark.svg scaled to 540 px. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#1d1c1a"/>
+  <rect x="101" y="101" width="822" height="822" rx="184" ry="184" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+  <g fill="#ecebe6">
+    <!-- stem, upper triangle -->
+    <polygon points="243.5 242.0 369.5 368.0 243.5 494.0"/>
+    <!-- bowl -->
+    <polygon points="294.5 242.0 528.5 242.0 654.5 368.0 528.5 494.0 294.5 494.0 420.5 368.0"/>
+    <!-- stem, lower triangle -->
+    <polygon points="243.5 530.0 369.5 656.0 243.5 782.0"/>
+    <!-- leg -->
+    <polygon points="294.5 530.0 528.5 530.0 780.5 782.0 546.5 782.0"/>
+  </g>
+</svg>

@@ -1021,7 +1021,7 @@ impl RootView {
             .flex_none()
             .flex()
             .items_center()
-            .pl(px(84.0))
+            .pl(px(sidebar::MARK_INSET))
             .window_control_area(WindowControlArea::Drag)
             .child(
                 kit::icon_button(theme, "show-sidebar", Icon::Sidebar, 28.0).on_click(
