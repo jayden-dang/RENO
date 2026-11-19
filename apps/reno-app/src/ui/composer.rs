@@ -326,6 +326,9 @@ pub(crate) struct Composer {
     sent_note: Option<Task<()>>,
     /// A [`Mode::Reason`] field's own placeholder and hint, when it is not a denial's reason.
     labels: Option<(SharedString, SharedString)>,
+    /// A [`Mode::Reason`] line drawn with no box of its own (the question panel's "write your
+    /// own response").
+    bare: bool,
     /// The harness · model chosen for the next task (`None`: Auto). On a live run's steer box
     /// it is unused: a live run's model is changed on the daemon (`run.set_model`).
     pick: Option<models::Pick>,
@@ -420,6 +423,7 @@ impl Composer {
             thread_gone: false,
             sent_note: None,
             labels: None,
+            bare: false,
             pick: None,
             picker_open: false,
             picker_tab: Tab::Favourites,
@@ -489,6 +493,18 @@ impl Composer {
         let mut field = Self::with_mode(store, Mode::Reason, cx);
         field.labels = Some((placeholder.into(), hint.into()));
         field
+    }
+
+    /// A one-line field with no box or hint of its own: Enter emits [`ReasonEvent::Submitted`],
+    /// Escape emits [`ReasonEvent::Cancelled`].
+    pub(crate) fn line(
+        store: Entity<Store>,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut line = Self::field(store, placeholder, "", cx);
+        line.bare = true;
+        line
     }
 
     /// Empties the field.
@@ -1817,6 +1833,7 @@ impl Render for Composer {
         let focused = self.focus_handle.is_focused(window);
         let entity = cx.entity();
         let reason = self.mode == Mode::Reason;
+        let bare = self.bare;
         let enabled = self.input_enabled(cx);
         let connected = self.connected(cx);
         let sending = self.store.read(cx).is_sending();
@@ -2067,9 +2084,11 @@ impl Render for Composer {
             .flex_col()
             .gap(px(if reason { 4.0 } else { 10.0 }))
             .rounded(px(if reason { 12.0 } else { 26.0 }))
-            .bg(theme.surface)
+            .when(!bare, |d| d.bg(theme.surface))
             .border_1()
-            .border_color(if focused {
+            .border_color(if bare {
+                gpui::transparent_black()
+            } else if focused {
                 theme.text.opacity(0.2)
             } else {
                 theme.hairline
@@ -2077,7 +2096,7 @@ impl Render for Composer {
             .opacity(if enabled { 1.0 } else { 0.72 })
             .child(text_area)
             .children(self.attachment_row(&theme, cx))
-            .child(foot)
+            .when(!bare, |d| d.child(foot))
             .when(home && self.why_open, |c| {
                 c.child(self.why_panel(&theme, connected))
             })

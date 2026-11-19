@@ -41,6 +41,7 @@ mod files;
 mod history;
 mod output;
 mod panel;
+mod question;
 mod session;
 mod syntax;
 mod terminal;
@@ -147,6 +148,11 @@ pub(crate) struct RunScreen {
     /// The dock was drawn at least once: a panel already waiting when the screen opened is not
     /// one the owner was interrupted by.
     dock_drawn: bool,
+    /// The open question's panel state, and whether a focus on the panel is owed (Esc in its
+    /// line hands the keyboard back to the panel).
+    question: Option<question::QuestionState>,
+    question_focus: FocusHandle,
+    pending_focus_panel: bool,
     /// The held action whose ▾ menu is open.
     menu_open: Option<ApprovalId>,
     /// "Deny with a note…" was chosen: the approval, its one-line field and the field's events.
@@ -225,6 +231,9 @@ impl RunScreen {
             panel_for: None,
             keep_composer: false,
             dock_drawn: false,
+            question: None,
+            question_focus: cx.focus_handle(),
+            pending_focus_panel: false,
             menu_open: None,
             note: None,
         };
@@ -239,19 +248,26 @@ impl RunScreen {
     /// The "write your own" line of the question panel, while it shows.
     #[cfg(test)]
     pub(crate) fn question_input(&self) -> Option<&Entity<Composer>> {
-        None
+        self.question.as_ref().map(|q| &q.input)
     }
 
     /// The inline refusal under the question panel.
     #[cfg(test)]
-    pub(crate) fn question_refusal(&self) -> Option<String> {
-        None
+    pub(crate) fn question_refusal(&self, cx: &gpui::App) -> Option<String> {
+        let q = self.question.as_ref()?;
+        let agent = self
+            .store
+            .read(cx)
+            .state()
+            .run(&self.run)
+            .map(|r| summary::executor_name(r.executor.as_str()))?;
+        q.refusal.as_ref().map(|r| r.message(&agent))
     }
 
     /// The question panel's page.
     #[cfg(test)]
     pub(crate) fn question_page(&self) -> Option<usize> {
-        None
+        self.question.as_ref().map(|q| q.draft.page)
     }
 
     pub(crate) fn steer_input(&self) -> &Entity<Composer> {

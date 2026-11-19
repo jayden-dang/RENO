@@ -82,7 +82,7 @@ fn a_single_choice_sends_on_click_and_the_transcript_shows_the_answered_bubble(
     let (_root, vcx) = open_run(cx, &store, "asker1");
     assert!(painted(vcx, "composer"), "the panel sits above the composer");
     assert!(painted(vcx, "question-option-2") && painted(vcx, "question-skip"));
-    assert!(!painted(vcx, "question-send"), "a single choice has no Send of its own to press first");
+    assert!(painted(vcx, "question-send"), "Send is there for typed text");
     click(vcx, "question-option-2");
     wait_drawn(vcx, |vcx| painted(vcx, "question-answered"));
     assert!(has_answer(&store, vcx, "asker1"));
@@ -102,7 +102,7 @@ fn typed_text_to_the_grok_question_is_refused_inline_and_nothing_is_sent(cx: &mu
     click(vcx, "question-send");
     wait_drawn(vcx, |vcx| painted(vcx, "question-refusal"));
     assert_eq!(
-        run.read_with(vcx, |r, _| r.question_refusal()),
+        run.read_with(vcx, |r, cx| r.question_refusal(cx)),
         Some("Grok takes only one of: JSON lines, Plain text".to_owned())
     );
     assert!(!has_answer(&store, vcx, "grok1"));
@@ -192,4 +192,34 @@ fn with_the_real_capabilities_the_panel_is_read_only(cx: &mut TestAppContext) {
     }
     assert!(painted(vcx, "composer"));
     assert_eq!(status(&store, vcx, "asker1"), RunStatus::WaitingInput);
+}
+
+#[gpui::test]
+fn digits_typed_into_the_write_your_own_line_are_text_not_picks(cx: &mut TestAppContext) {
+    let store = asking(cx);
+    let (root, vcx) = open_run(cx, &store, "asker1");
+    let run = screen(&root, vcx);
+    click(vcx, "question-write-own");
+    vcx.simulate_keystrokes("1");
+    draw(vcx);
+    let input = run.read_with(vcx, |r, _| r.question_input().unwrap().clone());
+    assert_eq!(input.read_with(vcx, |c, _| c.text().to_owned()), "1");
+    assert!(!has_answer(&store, vcx, "asker1"));
+    // Esc in the line leaves it (the panel keeps the keys); a second Esc closes the panel.
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(painted(vcx, "question-panel"));
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(painted(vcx, "question-chip"));
+}
+
+#[gpui::test]
+fn skip_declines_the_question(cx: &mut TestAppContext) {
+    let store = asking(cx);
+    let (_root, vcx) = open_run(cx, &store, "asker1");
+    click(vcx, "question-skip");
+    wait_drawn(vcx, |vcx| !painted(vcx, "question-panel"));
+    assert!(!has_answer(&store, vcx, "asker1"));
+    assert_eq!(status(&store, vcx, "asker1"), RunStatus::Running);
 }

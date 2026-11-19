@@ -31,6 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use gpui::{AppContext as _, Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
+use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::{
@@ -468,6 +469,37 @@ impl Store {
     pub(crate) fn set_capabilities(&mut self, capabilities: Capabilities, cx: &mut Context<Self>) {
         self.capabilities = capabilities;
         cx.notify();
+    }
+
+    /// The ONE seam to the answer contract. Today it is the fake daemon's mocked ROAD-1 contract,
+    /// and only where [`Capabilities::answer_questions`] is on; ROAD-1 replaces what this returns
+    /// with the real daemon's `question.answer`, and nothing else in the app changes.
+    fn question_desk(&self) -> Option<&dyn QuestionDesk> {
+        if !self.capabilities.answer_questions {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn QuestionDesk)
+    }
+
+    /// What the question `request` of `run` takes (typed text, its length).
+    pub(crate) fn question_rules(&self, run: &RunId, request: &str) -> QuestionRules {
+        self.question_desk()
+            .map_or_else(QuestionRules::default, |desk| desk.rules(run, request))
+    }
+
+    /// Sends an answer. `Err(QuestionNotPending)` when this connection cannot answer at all.
+    pub(crate) fn answer_question(
+        &mut self,
+        run: &RunId,
+        request: AnswerRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<(), AnswerError> {
+        let result = self
+            .question_desk()
+            .ok_or(AnswerError::QuestionNotPending)
+            .and_then(|desk| desk.answer(run, request));
+        cx.notify();
+        result
     }
 
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {

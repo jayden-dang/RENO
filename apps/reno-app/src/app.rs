@@ -1405,7 +1405,7 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &JumpToPanel, w, cx| {
                 if let Screen::Run(run) = &this.screen {
-                    run.update(cx, |run, cx| run.jump_to_approval(w, cx));
+                    run.update(cx, |run, cx| run.jump_to_panel(w, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &NewPanelTab, w, cx| {

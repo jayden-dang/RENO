@@ -38,6 +38,7 @@ pub(crate) fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("escape", DenyHeld, Some(CONTEXT)),
         KeyBinding::new("enter", AllowHeld, Some(CONTEXT)),
     ]);
+    super::question::bind_keys(cx);
 }
 
 impl RunScreen {
@@ -53,8 +54,11 @@ impl RunScreen {
             self.panel_for = None;
             self.keep_composer = false;
             self.dock_drawn = true;
+            let question = self.question_dock(window, cx);
             return self
                 .dock_frame()
+                .gap(px(8.0))
+                .children(question)
                 .child(self.steer.clone())
                 .into_any_element();
         };
@@ -93,11 +97,14 @@ impl RunScreen {
             .flex_col()
     }
 
-    /// ⌘J: gives the panel the keyboard, when a panel is waiting.
-    pub(crate) fn jump_to_approval(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// ⌘J: gives whichever panel is waiting the keyboard: the held action first, else the
+    /// question (reopening it if it was closed).
+    pub(crate) fn jump_to_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel_for.is_some() {
             window.focus(&self.approval_focus, cx);
             cx.notify();
+        } else {
+            self.jump_to_question(window, cx);
         }
     }
 
