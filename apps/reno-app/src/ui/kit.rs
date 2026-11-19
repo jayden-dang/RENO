@@ -20,8 +20,8 @@ pub(crate) const MONO: &str = "Geist Mono";
 /// The UI family bundled in `assets/fonts`.
 pub(crate) const SANS: &str = "Geist";
 
-/// A pill with a hairline border: context chips, corner chips, suggestions.
-pub(crate) fn chip(theme: &Theme, label: impl Into<SharedString>) -> Div {
+/// The pill shared by [`chip`] and [`icon_chip`]: a hairline border, no content yet.
+fn chip_frame(theme: &Theme) -> Div {
     div()
         .flex()
         .items_center()
@@ -34,12 +34,16 @@ pub(crate) fn chip(theme: &Theme, label: impl Into<SharedString>) -> Div {
         .border_color(theme.hairline)
         .text_size(px(12.5))
         .text_color(theme.text)
-        .child(label.into())
+}
+
+/// A pill with a hairline border: context chips, corner chips, suggestions.
+pub(crate) fn chip(theme: &Theme, label: impl Into<SharedString>) -> Div {
+    chip_frame(theme).child(label.into())
 }
 
 /// A [`chip`] that starts with a muted icon.
 pub(crate) fn icon_chip(theme: &Theme, glyph: Icon, label: impl Into<SharedString>) -> Div {
-    chip(theme, "")
+    chip_frame(theme)
         .child(icon(glyph, 13.0, theme.muted))
         .child(label.into())
 }

@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use gpui::{Entity, TestAppContext, VisualTestContext, px};
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px};
 use reno_client::{Feed, FeedState};
 
 use crate::app::RootView;
@@ -343,5 +343,39 @@ fn a_live_lane_shows_what_the_run_is_doing_now(cx: &mut TestAppContext) {
         root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx))
             .iter()
             .any(|l| l.tail.is_some())
+    });
+}
+
+#[gpui::test]
+fn a_run_asking_a_question_has_a_needs_input_badge_and_a_lane_with_its_question(
+    cx: &mut TestAppContext,
+) {
+    crate::tests::one_window_test_at_a_time();
+    cx.update(gpui_tokio::init);
+    let store = cx.new(|cx| {
+        let mut store = crate::store::Store::connecting();
+        store.start_fake_with(
+            reno_client::fake::FakeConfig {
+                step: std::time::Duration::ZERO,
+                question_run: true,
+                ..reno_client::fake::FakeConfig::default()
+            },
+            cx,
+        );
+        store
+    });
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    wait_drawn(vcx, |vcx| painted(vcx, "badge-run_asker1"));
+    click(vcx, "bar-live");
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx))
+            .iter()
+            .any(|l| {
+                l.run.to_string() == "run_asker1"
+                    && l.asks == Some(crate::vm::projects::Badge::NeedsInput)
+                    && l.tail.as_deref()
+                        == Some("Which retry policy should the webhook trigger use?")
+            })
     });
 }

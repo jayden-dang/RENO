@@ -601,6 +601,7 @@ impl Store {
         self.start_fake_with(
             FakeConfig {
                 registry_agents: true,
+                question_run: true,
                 ..FakeConfig::default()
             },
             cx,

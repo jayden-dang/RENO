@@ -12,7 +12,6 @@ use reno_proto::RunId;
 
 use super::icon::{Icon, icon};
 use super::kit;
-use super::page::{self, CountTone};
 use super::theme::Theme;
 use crate::nav::Nav;
 use crate::store::Store;
@@ -93,9 +92,12 @@ fn thread_row(
     let run_id = row.run.clone();
     let is_selected = selected.is_some_and(|run| row.members.contains(run));
     let hover = theme.row_selected().opacity(0.6);
+    // A run's title may carry its bot and repository ("builder \u{b7} atlas-api: ..."); the
+    // folder already says the repository.
+    let title = crate::summary::parse_title(&row.title).what.to_owned();
     let spoken = match row.badge {
-        Some(badge) => format!("{}, {}", row.title, badge.label()),
-        None => row.title.clone(),
+        Some(badge) => format!("{title}, {}", badge.label()),
+        None => title.clone(),
     };
     div()
         .id(SharedString::from(format!("recent-{}", row.run)))
@@ -130,7 +132,7 @@ fn thread_row(
         } else {
             run_dot(theme, row.dot, 7.0)
         })
-        .child(div().flex_1().min_w_0().truncate().child(row.title.clone()))
+        .child(div().flex_1().min_w_0().truncate().child(title))
         .children(row.badge.map(|b| {
             let id = format!("badge-{}", row.run);
             badge_tag(theme, b)
@@ -292,10 +294,25 @@ pub(crate) fn settings_row(
         .child(gear)
         .child(div().flex_1().child("Settings"))
         .when(needing > 0, |r| {
+            // A tinted count, not a saturated disc: how many agents cannot take runs.
             r.child(
-                page::count(theme, needing, CountTone::Danger)
+                div()
                     .id("settings-count")
-                    .debug_selector(|| "settings-count".to_owned()),
+                    .debug_selector(|| "settings-count".to_owned())
+                    .flex_none()
+                    .min_w(px(18.0))
+                    .h(px(18.0))
+                    .px(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .bg(theme.danger.opacity(0.18))
+                    .text_color(theme.danger)
+                    .font_family(kit::MONO)
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(needing.to_string()),
             )
         })
 }
