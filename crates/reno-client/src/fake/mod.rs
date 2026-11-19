@@ -43,6 +43,7 @@ mod extras;
 pub mod files;
 mod history;
 mod jobs;
+mod questions;
 mod registry;
 mod script;
 mod signin;
@@ -240,8 +241,10 @@ impl FakeDaemon {
             data::seed().map_err(|e| ClientError::Protocol(e.to_string()))?
         };
         if config.question_run && !config.empty {
-            seed.runs
-                .push(data::question_run().map_err(|e| ClientError::Protocol(e.to_string()))?);
+            let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
+            seed.runs.push(data::question_run().map_err(proto)?);
+            seed.runs.push(data::grok_question_run().map_err(proto)?);
+            seed.runs.push(data::paged_question_run().map_err(proto)?);
         }
         let mut world = World::from_seed(seed, &cancel);
         if config.registry_agents {
