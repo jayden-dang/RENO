@@ -154,13 +154,9 @@ fn a_long_user_message_collapses_and_opens(cx: &mut TestAppContext) {
 }
 
 /// A thread of two runs whose first is long enough that the transcript scrolls.
-fn long_thread<'a>(
-    cx: &'a mut TestAppContext,
-) -> (
-    Entity<RootView>,
-    &'a mut VisualTestContext,
-    Entity<RunScreen>,
-) {
+fn long_thread(
+    cx: &mut TestAppContext,
+) -> (Entity<RootView>, &mut VisualTestContext, Entity<RunScreen>) {
     use crate::tests::{run_status, send_from_home};
     let current_run_of = |vcx: &mut VisualTestContext, root: &Entity<RootView>| {
         let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
