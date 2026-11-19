@@ -59,9 +59,13 @@ reduce; Accounts — account, usage, plan, limit, session, week, signed in.
     - System follows macOS.
     - The Toggle theme command (⌘K, the bar's "…" menu) writes Light or Dark into Mode, so the
       page always says what is in force.
-    - `RENO_APPEARANCE` stays a launch-only preview that is never saved.
-  - Reduce motion: System reads the macOS setting (gap D11). On and Off pin it. Pausing
-    animations in the background already happens and has no switch.
+    - `RENO_APPEARANCE` stays a launch-only preview that is never saved; it shows only while
+      Mode is System.
+  - Reduce motion: On and Off pin it, from the first frame of a launch. System will follow
+    macOS once gap D11 is built (the app does not read the macOS setting yet, so System means
+    motion on, or `RENO_REDUCE_MOTION`). There is no background-pause switch; today animations
+    keep running while Reno is in the background (found while building: the motion engine
+    starts with background pause off).
 - **Type & color:** the swatches and dots spend each theme's own colours; nothing else on the
   page uses the accent except the selected category.
 - **A11y:** segments are toggle buttons; each accent dot is a button labelled with its name
@@ -74,8 +78,13 @@ reduce; Accounts — account, usage, plan, limit, session, week, signed in.
   1. **Conversation:**
      - "Send messages with": Enter / ⌘ Enter. The help line says the other key: "⇧ Enter
        starts a new line." or "Enter starts a new line; ⌘ Enter sends."
-     - "Escape stops the agent": a switch.
-  2. **Files tab:** "Wrap long lines" (switch) and "Show hidden files" (switch).
+     - "Escape stops the agent": a switch. On, Escape stops a live run exactly when the
+       Stop button shows (the run is live and the message box is empty), so a half-typed
+       message is never lost to it. A deny note keeps Enter and Escape as they are.
+  2. **Files tab:** "Show hidden files" (switch). "Wrap long lines" is not shown: the file
+     viewer draws fixed-height, virtualised lines sized to the longest one, and wrapping needs
+     a variable-height viewer first (found while building; no control is shown that does
+     nothing).
   3. **In the composer:** one row per built-in agent that is installed: logo, name, and a switch.
      A switched-off agent leaves the composer's agent picker. A run already going keeps its
      agent.
@@ -84,7 +93,6 @@ reduce; Accounts — account, usage, plan, limit, session, week, signed in.
 - **States:** the defaults are today's behaviour:
   - Enter sends;
   - Escape does not stop a run;
-  - the Files tab does not wrap;
   - dotfiles are listed;
   - every agent is offered.
 - This page closes ROAD-34's A42 (send behaviour) and A43 (Escape stops the agent).
@@ -142,9 +150,10 @@ Contrast, checked on every theme and mode:
 
 ## Where each choice is saved
 
-- **`app-settings.json`** (beside the socket, with the notification switches): mode, theme,
-  accent, reduce motion, send-with, Escape stops, wrap, hidden files.
-- **`app-composer.json`:** the agents switched off in the composer.
+- **`app-settings.json`** (beside the socket, with the notification switches): `mode`,
+  `theme`, `accent`, `reduceMotion`, `sendWith`, `escapeStops`, `hiddenFiles`. One store for
+  the whole app; the notifier reads its switches from it.
+- **`app-composer.json`:** `notOffered`, the agents switched off in the composer.
 - **With `--fake`:** both live in memory only, as today.
 
 ## Signature
@@ -165,6 +174,13 @@ its title.
    - The composer switches are real.
    - Every default is today's behaviour.
    - Accounts shows usage only.
+
+## Built differently from the lock (2026-11-19)
+
+- No "Wrap long lines" switch yet: the viewer cannot wrap (see General).
+- No background-pause switch, and animations keep running in the background as today: the
+  advisor's premise that pausing "already happens" was wrong.
+- Escape stops a run only when the Stop button shows.
 
 ## Not in this brief
 
