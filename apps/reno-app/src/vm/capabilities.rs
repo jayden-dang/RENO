@@ -24,6 +24,24 @@ pub(crate) enum PlusItem {
     Goal,
 }
 
+/// One item of the approval panel's ▾ menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovalItem {
+    /// Deny, with a note that reaches the harness (`approval.message`): real.
+    DenyWithNote,
+    /// The scopes that keep the answer as a rule (ROAD-5): not built, fake only.
+    AllowSimilar,
+}
+
+impl ApprovalItem {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::DenyWithNote => "Deny with a note\u{2026}",
+            Self::AllowSimilar => "Allow similar commands",
+        }
+    }
+}
+
 impl PlusItem {
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -50,6 +68,19 @@ impl Capabilities {
         permission_modes: true,
         allow_similar: true,
     };
+
+    /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
+    /// scopes need the not-yet capability and a daemon that keeps standing rules.
+    pub(crate) fn approval_menu(self, takes_note: bool, keeps_rules: bool) -> Vec<ApprovalItem> {
+        let mut items = Vec::new();
+        if takes_note {
+            items.push(ApprovalItem::DenyWithNote);
+        }
+        if self.allow_similar && keeps_rules {
+            items.push(ApprovalItem::AllowSimilar);
+        }
+        items
+    }
 
     /// The "+" menu's rows. `files` says whether this box takes attachments (a new task does; a
     /// live run's steer does not).
@@ -78,6 +109,18 @@ mod tests {
         assert_eq!(Capabilities::REAL.plus_items(true), [PlusItem::Files]);
         let real = Capabilities::REAL;
         assert!(!real.permission_modes && !real.allow_similar);
+    }
+
+    #[test]
+    fn the_approval_menu_depends_on_the_capabilities() {
+        use ApprovalItem::{AllowSimilar, DenyWithNote};
+        assert_eq!(Capabilities::REAL.approval_menu(true, true), [DenyWithNote]);
+        assert_eq!(
+            Capabilities::FAKE.approval_menu(true, true),
+            [DenyWithNote, AllowSimilar]
+        );
+        assert_eq!(Capabilities::FAKE.approval_menu(true, false), [DenyWithNote]);
+        assert_eq!(Capabilities::FAKE.approval_menu(false, false), []);
     }
 
     #[test]

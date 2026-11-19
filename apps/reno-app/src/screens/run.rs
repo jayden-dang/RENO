@@ -149,6 +149,8 @@ pub(crate) struct RunScreen {
     dock_drawn: bool,
     /// The held action whose ▾ menu is open.
     menu_open: Option<ApprovalId>,
+    /// "Deny with a note…" was chosen: the approval, its one-line field and the field's events.
+    note: Option<(ApprovalId, Entity<Composer>, Subscription)>,
     _store: Subscription,
 }
 
@@ -224,6 +226,7 @@ impl RunScreen {
             keep_composer: false,
             dock_drawn: false,
             menu_open: None,
+            note: None,
         };
         screen.refresh(cx);
         screen
@@ -240,6 +243,11 @@ impl RunScreen {
     pub(crate) fn focus_handle(&self, cx: &gpui::App) -> FocusHandle {
         use gpui::Focusable as _;
         self.steer.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_input(&self) -> Option<&Entity<Composer>> {
+        self.note.as_ref().map(|(_, input, _)| input)
     }
 
     #[cfg(test)]
@@ -651,6 +659,13 @@ impl RunScreen {
             .is_some_and(|id| !pending.iter().any(|approval| &approval.id == id))
         {
             self.menu_open = None;
+        }
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|(id, ..)| !pending.iter().any(|approval| &approval.id == id))
+        {
+            self.note = None;
         }
     }
 

@@ -146,18 +146,6 @@ fn a_click_on_the_panel_also_hands_it_the_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_split_menu_is_on_the_fake_only(cx: &mut TestAppContext) {
-    let store = held(cx);
-    let (_root, vcx) = open_run(cx, &store, "keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
-    store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
-    wait_drawn(vcx, |vcx| {
-        painted(vcx, "approval-panel") && !painted(vcx, "approve-more")
-    });
-    assert!(painted(vcx, "approve") && painted(vcx, "deny"));
-}
-
-#[gpui::test]
 fn the_permission_chip_and_plus_rows_are_on_the_fake_only(cx: &mut TestAppContext) {
     let store = held(cx);
     let (_root, vcx) = open_run(cx, &store, "keeper1");
@@ -274,4 +262,95 @@ fn the_box_on_a_run_says_work_with_the_executor(cx: &mut TestAppContext) {
         composer.read_with(vcx, |c, cx| c.placeholder_text(cx).to_string()),
         "Work with Codex"
     );
+}
+
+fn open_note(vcx: &mut VisualTestContext) {
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
+    click(vcx, "approve-more");
+    wait_drawn(vcx, |vcx| painted(vcx, "approval-menu-note"));
+    click(vcx, "approval-menu-note");
+    wait_drawn(vcx, |vcx| painted(vcx, "deny-note"));
+}
+
+fn note_field(vcx: &VisualTestContext, root: &Entity<RootView>) -> Entity<Composer> {
+    root.read_with(vcx, |r, cx| {
+        r.run_screen().unwrap().read(cx).note_input().unwrap().clone()
+    })
+}
+
+fn message_of(
+    store: &Entity<Store>,
+    vcx: &VisualTestContext,
+    approval: &str,
+) -> Option<Option<String>> {
+    store.read_with(vcx, |s, _| {
+        s.state()
+            .approval_history()
+            .iter()
+            .find(|r| r.id.as_str() == approval)
+            .map(|r| r.message.clone())
+    })
+}
+
+#[gpui::test]
+fn the_split_menu_holds_the_note_on_every_daemon_and_the_scopes_on_the_fake(
+    cx: &mut TestAppContext,
+) {
+    let store = held(cx);
+    let (_root, vcx) = open_run(cx, &store, "keeper1");
+    wait_drawn(vcx, |vcx| painted(vcx, "approve-more"));
+    click(vcx, "approve-more");
+    wait_drawn(vcx, |vcx| painted(vcx, "approval-menu-note"));
+    assert!(painted(vcx, "approve-scope-1"), "the fake has the scopes");
+    store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
+    draw(vcx);
+    assert!(painted(vcx, "approve-more") && painted(vcx, "approval-menu-note"));
+    assert!(!painted(vcx, "approve-scope-1"), "the real daemon has not");
+}
+
+#[gpui::test]
+fn a_note_goes_to_the_daemon_as_the_denial_message_and_shows_in_the_transcript(
+    cx: &mut TestAppContext,
+) {
+    let store = held(cx);
+    let (root, vcx) = open_run(cx, &store, "scout1");
+    open_note(vcx);
+    assert!(!painted(vcx, "approval-detail"), "the note replaces the detail");
+    note_field(vcx, &root).update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
+    vcx.simulate_keystrokes("enter");
+    wait_until(vcx, |cx| approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        store.update(vcx, |s, cx| s.load_history(cx));
+        message_of(&store, vcx, "appr_scoutfetch") == Some(Some("use the mirror".to_owned()))
+    });
+    assert_eq!(
+        status_of(&store, vcx, "appr_scoutfetch"),
+        Some(ApprovalStatus::Denied)
+    );
+}
+
+#[gpui::test]
+fn esc_in_the_note_cancels_without_deciding(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (root, vcx) = open_run(cx, &store, "scout1");
+    open_note(vcx);
+    note_field(vcx, &root).update_in(vcx, |c, window, cx| c.fill("never mind", window, cx));
+    vcx.simulate_keystrokes("escape");
+    wait_drawn(vcx, |vcx| painted(vcx, "approval-detail") && !painted(vcx, "deny-note"));
+    assert_eq!(approvals(vcx, &store), 2, "nothing was decided");
+    assert!(painted(vcx, "approve") && painted(vcx, "deny"));
+}
+
+#[gpui::test]
+fn an_empty_note_is_a_plain_deny(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (_root, vcx) = open_run(cx, &store, "scout1");
+    open_note(vcx);
+    click(vcx, "note-deny");
+    wait_until(vcx, |cx| approvals(cx, &store) == 1);
+    wait_drawn(vcx, |vcx| {
+        store.update(vcx, |s, cx| s.load_history(cx));
+        status_of(&store, vcx, "appr_scoutfetch") == Some(ApprovalStatus::Denied)
+    });
+    assert_eq!(message_of(&store, vcx, "appr_scoutfetch"), Some(None));
 }
