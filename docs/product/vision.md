@@ -18,7 +18,7 @@ A developer on their own Mac who already uses several agent CLIs and wants them 
 - **GOAL-3** Several bots work one goal in parallel, each in its own worktree, coordinating through boards and messages, and a flow survives a daemon restart.
 - **GOAL-4** When a bot or flow asks for it, work is checked before it is called done: tests first, then a verifier on a different harness, then the owner's verdict.
 - **GOAL-5** Definitions improve only under a gate: a proposal is replay-tested, needs the owner's approval, and reverts itself if it does worse.
-- **GOAL-6** Everything runs on the owner's machine with the logins they already have: no Reno account and no cloud service. Reno never touches a harness's auth or Keychain, and writes a harness allow rule only when the owner clicks.
+- **GOAL-6** Everything runs on the owner's machine with the logins they already have: no Reno account and no cloud service. Reno never writes or refreshes a harness's auth or Keychain (it may read a login, read-only, to show plan usage), and writes a harness setting only for an explicit owner action: an allow rule the owner clicks, or switching a CLI's own updater off and back on.
 - **GOAL-7** A lead agent breaks work down and hands the parts to the right running harnesses through Reno's MCP or ACP, so one workflow combines several harnesses. The lead can be any harness, including the owner's own terminal session.
 - **GOAL-8** A run the owner starts behaves as the same harness started in a terminal in the same directory: same settings, allow-list, hooks, MCP servers and features. A conformance check proves it for each driver.
 - **GOAL-9** The owner creates or changes a bot by chatting with Reno. The change lands as a diff in the definitions repo and takes effect only after the owner accepts it.
@@ -35,6 +35,6 @@ A developer on their own Mac who already uses several agent CLIs and wants them 
 - Local-first on macOS. The kernel keeps no macOS-only code outside `renod` lifecycle and the Keychain, so Linux stays reachable.
 - Owner-started runs, and the tasks a lead the owner started hands out, load the harness's own config like a terminal. Unattended runs (triggers and schedules with no owner session) are isolated from it.
 - Reno adds no permission layer, and guards only its own definitions repo and data dir (including its store), so definitions change only through GOAL-5 and GOAL-9.
-- Reno never touches a harness's auth or Keychain and writes an allow rule only on the owner's click.
+- Reno never writes or refreshes a harness's auth or Keychain, and writes a harness setting only for an explicit owner action (an allow rule, the updater switch).
 - Unattended use under each harness's subscription terms is an open question; API-key auth is the documented path for unattended runs.
 - How the GOAL-7 lead is built (a lead bot on an existing harness, or a loop borrowed into Reno) stays open until a spike.
