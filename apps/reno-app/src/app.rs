@@ -54,7 +54,7 @@ use crate::vm::shell::{self, Chip, History, Place};
 pub(crate) struct Options {
     /// `--fake`: run `FakeDaemon` in-process.
     pub(crate) fake: bool,
-    /// `--draft35` (with `--fake`): the ROAD-35 design draft, with `RENO_DRAFT35=a|b|c` and
+    /// `--draft35` (with `--fake`): the ROAD-35 design draft, with `RENO_DRAFT35=d|a|b` (default d) and
     /// `RENO_DRAFT35_STATE=busy|empty` choosing where it starts.
     pub(crate) draft35: Option<(crate::draft35::Variant, crate::draft35::Mode)>,
     /// `RENO_APPEARANCE=light|dark`: preview a palette without touching system settings.
@@ -141,7 +141,7 @@ impl Options {
             options.draft35 = Some((
                 env("RENO_DRAFT35")
                     .and_then(|v| crate::draft35::Variant::parse(&v))
-                    .unwrap_or(crate::draft35::Variant::A),
+                    .unwrap_or(crate::draft35::Variant::D),
                 env("RENO_DRAFT35_STATE")
                     .and_then(|v| crate::draft35::Mode::parse(&v))
                     .unwrap_or(crate::draft35::Mode::Busy),
@@ -227,7 +227,7 @@ impl Options {
     }
 }
 
-/// `RENO_DRAFT35_OPEN=plan,tasks,sheet:agents`: which trays the draft starts open (screenshots).
+/// `RENO_DRAFT35_OPEN=plan,tasks,stop:dev`: which trays the draft starts open (screenshots).
 fn env_open() -> Option<String> {
     std::env::var("RENO_DRAFT35_OPEN").ok()
 }

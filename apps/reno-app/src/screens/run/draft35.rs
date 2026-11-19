@@ -4,7 +4,7 @@
 //!
 //! A Trays: a plan tray and a background tray over the composer, subagent chips in the transcript.
 //! B Session cockpit: the Session tab's Plan / Running / Agents sections and a bar count chip.
-//! C Activity island: an island at the top of the column that opens a three-segment sheet.
+//! D Trays + cockpit: A and B together (the default).
 
 use gpui::{AnyElement, Context, FontWeight, Role, SharedString, Window, div, prelude::*, px};
 use reno_client::fake::draft35::{
@@ -14,7 +14,7 @@ use reno_client::fake::draft35::{
 use reno_proto::RunId;
 
 use super::RunScreen;
-use crate::draft35::{Draft35, Segment, Variant};
+use crate::draft35::{Draft35, Variant};
 use crate::panel::surface::Surface;
 use crate::transcript::Row;
 use crate::ui::icon::{Icon, icon};
@@ -27,8 +27,6 @@ struct Snap {
     a: DraftActivity,
     plan_open: bool,
     tasks_open: bool,
-    sheet_open: bool,
-    segment: Segment,
     output_of: Option<&'static str>,
 }
 
@@ -40,8 +38,6 @@ fn snap(cx: &gpui::App) -> Option<Snap> {
         a: d.activity.clone(),
         plan_open: d.plan_open,
         tasks_open: d.tasks_open,
-        sheet_open: d.sheet_open,
-        segment: d.segment,
         output_of: d.output_of,
     })
 }
@@ -399,7 +395,7 @@ impl RunScreen {
 
     /// The plan tray and the background chip (and its tray), over the composer.
     pub(super) fn draft_trays(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(s) = snap(cx).filter(|s| s.variant == Variant::A) else {
+        let Some(s) = snap(cx).filter(|s| matches!(s.variant, Variant::A | Variant::D)) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -505,6 +501,33 @@ impl RunScreen {
                     13.0,
                     theme.muted,
                 ));
+            // "Output ›": the Session tab has the full output; the composer keeps the keyboard.
+            let links: Vec<AnyElement> =
+                s.a.tasks
+                    .iter()
+                    .map(|t| {
+                        let id = t.id;
+                        div()
+                            .id(SharedString::from(format!("draft35-open-output-{id}")))
+                            .debug_selector(move || format!("draft35-open-output-{id}"))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_size(px(12.5))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .role(Role::Button)
+                            .aria_label("Open output in Session")
+                            .focusable()
+                            .tab_stop(true)
+                            .focus_visible(kit::focus_ring(theme))
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_surface(Surface::Session, window, cx);
+                            }))
+                            .child("Output \u{203a}")
+                            .into_any_element()
+                    })
+                    .collect();
             if s.tasks_open {
                 out.push(
                     div()
@@ -518,11 +541,19 @@ impl RunScreen {
                         .bg(theme.surface)
                         .border_1()
                         .border_color(theme.hairline)
-                        .children(s.a.tasks.iter().enumerate().map(|(n, t)| {
-                            div()
-                                .when(n > 0, |d| d.border_t_1().border_color(theme.hairline))
-                                .child(self.task_row(theme, t, 0, 12.5, None, cx))
-                        }))
+                        .children(
+                            s.a.tasks
+                                .iter()
+                                .zip(links)
+                                .enumerate()
+                                .map(|(n, (t, link))| {
+                                    div()
+                                        .when(n > 0, |d| {
+                                            d.border_t_1().border_color(theme.hairline)
+                                        })
+                                        .child(self.task_row(theme, t, 0, 12.5, Some(link), cx))
+                                }),
+                        )
                         .into_any_element(),
                 );
             }
@@ -538,7 +569,7 @@ impl RunScreen {
         ix: usize,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| s.variant == Variant::A)?;
+        let s = snap(cx).filter(|s| matches!(s.variant, Variant::A | Variant::D))?;
         let prose_at = self.rows[..=ix.min(self.rows.len().saturating_sub(1))]
             .iter()
             .filter(|r| matches!(r, Row::Prose { .. }))
@@ -601,7 +632,7 @@ impl RunScreen {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| s.variant == Variant::B)?;
+        let s = snap(cx).filter(|s| matches!(s.variant, Variant::B | Variant::D))?;
         let heading = |text: &str, count: Option<String>| {
             div()
                 .pt(px(14.0))
@@ -628,7 +659,10 @@ impl RunScreen {
             .pb(px(6.0))
             .border_b_1()
             .border_color(theme.hairline)
-            .children(self.finding_line(theme, &s.a, 12.5));
+            .children(
+                self.finding_line(theme, &s.a, 12.5)
+                    .filter(|_| s.variant == Variant::B),
+            );
         if !s.a.plan.is_empty() {
             body = body
                 .child(heading(
@@ -685,193 +719,6 @@ impl RunScreen {
                 );
         }
         Some(body.into_any_element())
-    }
-
-    // --- C: the activity island -------------------------------------------------------------
-
-    /// The island and the finding under it, in the column above the transcript.
-    pub(super) fn draft_island(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| s.variant == Variant::C)?;
-        let mut parts: Vec<AnyElement> = Vec::new();
-        if !s.a.plan.is_empty() {
-            parts.push(
-                div()
-                    .text_color(theme.accent)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(SharedString::from(format!(
-                        "Plan {}/{}",
-                        s.a.plan_done(),
-                        s.a.plan.len()
-                    )))
-                    .into_any_element(),
-            );
-        }
-        let subs =
-            s.a.agents
-                .iter()
-                .filter(|a| a.kind == AgentKind::Subagent && a.state == AgentState::Running)
-                .count();
-        for text in [
-            (!s.a.tasks.is_empty()).then(|| format!("{} running", s.a.running_tasks())),
-            (subs > 0).then(|| count_label(subs, "agent", "agents")),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            parts.push(div().child(SharedString::from(text)).into_any_element());
-        }
-        let mut row = div().flex().items_center().gap(px(8.0));
-        for (n, part) in parts.into_iter().enumerate() {
-            if n > 0 {
-                row = row.child(div().text_color(theme.faint).child("\u{b7}"));
-            }
-            row = row.child(part);
-        }
-        let island = div()
-            .id("draft35-island")
-            .debug_selector(|| "draft35-island".to_owned())
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .h(px(34.0))
-            .pl(px(14.0))
-            .pr(px(10.0))
-            .rounded(px(999.0))
-            .bg(theme.card)
-            .border_1()
-            .border_color(if s.sheet_open {
-                theme.accent.opacity(0.6)
-            } else {
-                theme.hairline
-            })
-            .shadow_md()
-            .text_size(px(14.0))
-            .cursor_pointer()
-            .role(Role::Button)
-            .aria_label("Run activity")
-            .focusable()
-            .tab_stop(true)
-            .focus_visible(kit::focus_ring(theme))
-            .on_click(cx.listener(|_, _, _, cx| edit(cx, |d| d.sheet_open = !d.sheet_open)))
-            .child(kit::dot(theme.accent, 7.0))
-            .child(row)
-            .child(icon(
-                if s.sheet_open {
-                    Icon::ChevUp
-                } else {
-                    Icon::ChevDown
-                },
-                14.0,
-                theme.muted,
-            ));
-        Some(
-            div()
-                .flex_none()
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(8.0))
-                .pt(px(12.0))
-                .pb(px(2.0))
-                .px(px(24.0))
-                .child(island)
-                .when(!s.sheet_open, |d| {
-                    d.child(
-                        div()
-                            .max_w(px(640.0))
-                            .text_align_center_line(theme, self.finding_line(theme, &s.a, 14.0)),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-
-    /// The sheet under the island: Plan / Running / Agents.
-    pub(super) fn draft_sheet(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let s = snap(cx).filter(|s| s.variant == Variant::C && s.sheet_open)?;
-        let seg = |id: &'static str, label: String, this: Segment| {
-            kit::segment(theme, id, label, s.segment == this)
-                .on_click(cx.listener(move |_, _, _, cx| edit(cx, |d| d.segment = this)))
-        };
-        let seg_plan = seg(
-            "draft35-seg-plan",
-            format!("Plan {}/{}", s.a.plan_done(), s.a.plan.len()),
-            Segment::Plan,
-        );
-        let seg_running = seg(
-            "draft35-seg-running",
-            format!("Running {}", s.a.running_tasks()),
-            Segment::Running,
-        );
-        let seg_agents = seg(
-            "draft35-seg-agents",
-            format!("Agents {}", s.a.agents.len()),
-            Segment::Agents,
-        );
-        let body: AnyElement = match s.segment {
-            Segment::Plan => div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .children(s.a.plan.iter().map(|i| plan_row(theme, i, 14.0, 8.0, true)))
-                .into_any_element(),
-            Segment::Running => div()
-                .flex()
-                .flex_col()
-                .children(s.a.tasks.iter().enumerate().map(|(n, t)| {
-                    div()
-                        .when(n > 0, |d| d.border_t_1().border_color(theme.hairline))
-                        .child(self.task_row(theme, t, 2, 13.0, None, cx))
-                }))
-                .into_any_element(),
-            Segment::Agents => div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .children(
-                    s.a.agents
-                        .iter()
-                        .map(|l| self.agent_lane(theme, l, 14.0, true, cx)),
-                )
-                .into_any_element(),
-        };
-        Some(
-            div()
-                .id("draft35-sheet")
-                .debug_selector(|| "draft35-sheet".to_owned())
-                .absolute()
-                .top(px(52.0))
-                .left_0()
-                .right_0()
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .occlude()
-                        .w(px(600.0))
-                        .max_w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(12.0))
-                        .p(px(16.0))
-                        .rounded(px(14.0))
-                        .bg(theme.card)
-                        .border_1()
-                        .border_color(theme.hairline)
-                        .shadow_lg()
-                        .children(self.finding_line(theme, &s.a, 14.0))
-                        .child(
-                            kit::segmented(theme)
-                                .self_start()
-                                .child(seg_plan)
-                                .child(seg_running)
-                                .child(seg_agents),
-                        )
-                        .child(div().max_h(px(360.0)).overflow_hidden().child(body)),
-                )
-                .into_any_element(),
-        )
     }
 
     // --- the subagent / side-chat tab ---------------------------------------------------------
@@ -979,16 +826,5 @@ impl RunScreen {
             );
         }
         Some(col.into_any_element())
-    }
-}
-
-/// `div().text_align_center_line(...)`: centres one line of text in a block.
-trait CenterLine {
-    fn text_align_center_line(self, theme: &Theme, line: Option<AnyElement>) -> Self;
-}
-
-impl CenterLine for gpui::Div {
-    fn text_align_center_line(self, _theme: &Theme, line: Option<AnyElement>) -> Self {
-        self.w_full().text_center().children(line)
     }
 }

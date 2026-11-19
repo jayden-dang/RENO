@@ -795,8 +795,6 @@ impl Render for RunScreen {
             )
             // After the list, so it is on top of it and takes the clicks.
             .children(self.tick_rail(&theme, &ticks, cx));
-        let island = self.draft_island(&theme, cx);
-        let sheet = self.draft_sheet(&theme, cx);
         let chat = div()
             .id("chat-canvas")
             .relative()
@@ -811,7 +809,6 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
-            .children(island)
             .child(
                 div()
                     .flex_1()
@@ -822,8 +819,7 @@ impl Render for RunScreen {
                     .px(px(24.0))
                     .child(transcript)
                     .child(self.dock(window, cx)),
-            )
-            .children(sheet);
+            );
 
         let stage = div()
             .id("run")

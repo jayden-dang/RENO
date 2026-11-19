@@ -26,28 +26,28 @@ const TICK: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Variant {
+    D,
     A,
     B,
-    C,
 }
 
 impl Variant {
-    const ALL: [Self; 3] = [Self::A, Self::B, Self::C];
+    const ALL: [Self; 3] = [Self::D, Self::A, Self::B];
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
+            "d" => Some(Self::D),
             "a" => Some(Self::A),
             "b" => Some(Self::B),
-            "c" => Some(Self::C),
             _ => None,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
+            Self::D => "D \u{2014} Trays + cockpit",
             Self::A => "A \u{2014} Trays",
             Self::B => "B \u{2014} Session cockpit",
-            Self::C => "C \u{2014} Activity island",
         }
     }
 
@@ -80,14 +80,6 @@ impl Mode {
     }
 }
 
-/// The sheet's segments in variant C, and what a tray or section shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Segment {
-    Plan,
-    Running,
-    Agents,
-}
-
 pub(crate) struct Draft35 {
     pub(crate) variant: Variant,
     pub(crate) mode: Mode,
@@ -95,9 +87,6 @@ pub(crate) struct Draft35 {
     /// A: the plan tray and the background tray are open.
     pub(crate) plan_open: bool,
     pub(crate) tasks_open: bool,
-    /// C: the sheet is open, and on which segment.
-    pub(crate) sheet_open: bool,
-    pub(crate) segment: Segment,
     /// B: the task whose full output shows.
     pub(crate) output_of: Option<&'static str>,
 }
@@ -137,17 +126,13 @@ pub(crate) fn install(variant: Variant, mode: Mode, open: Option<&str>, cx: &mut
         activity: mode.activity(),
         plan_open: false,
         tasks_open: false,
-        sheet_open: false,
-        segment: Segment::Plan,
         output_of: None,
     });
     for part in open.unwrap_or_default().split(',') {
         draft.update(cx, |d, _| match part {
             "plan" => d.plan_open = true,
             "tasks" => d.tasks_open = true,
-            "sheet" | "sheet:plan" => d.sheet_open = true,
-            "sheet:running" => (d.sheet_open, d.segment) = (true, Segment::Running),
-            "sheet:agents" => (d.sheet_open, d.segment) = (true, Segment::Agents),
+            "stop:dev" => d.activity.stop_task("dev"),
             _ => {}
         });
     }
