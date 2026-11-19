@@ -117,7 +117,7 @@ Once a week, on a Monday say, with the CLIs up to date on the machine that runs 
    it is Codex.
 7. **If it is red, do not bump.** Fix the driver, or, when the CLI took away something Reno
    relied on, say so in the descriptor (never claim more than was verified; see ARCH-15 in
-   `docs/INVARIANTS.md`) and narrow what the driver declares until it is fixed.
+   `docs/architecture/runtime.md`) and narrow what the driver declares until it is fixed.
 
 ## Regenerate the Codex schema
 

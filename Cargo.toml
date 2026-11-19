@@ -11,7 +11,7 @@ license = "MIT"
 publish = false
 
 # Internal crates are listed here so members write `reno-proto.workspace = true`.
-# External dependencies are added here as tasks introduce them (see docs/INVARIANTS.md ARCH-17).
+# External dependencies are added here as tasks introduce them (see ARCH-17 in docs/architecture/INDEX.md).
 [workspace.dependencies]
 reno-proto = { path = "crates/reno-proto" }
 reno-store = { path = "crates/reno-store" }

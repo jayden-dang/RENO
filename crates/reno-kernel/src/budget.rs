@@ -24,7 +24,7 @@
 //! sleeps: a run that was live across a night asleep has not used the night, because the machine
 //! did no work for it. Everything else with a time limit is wall clock and is re-read when the
 //! system wakes: approvals, run tokens (a safety net only), leases and cron (see ARCH-10 in
-//! `docs/INVARIANTS.md`). The budget day is the one wall-clock figure a budget has, and the
+//! `docs/architecture/runtime.md`). The budget day is the one wall-clock figure a budget has, and the
 //! dispatcher looks again on a wake.
 //!
 //! # The kill switch
