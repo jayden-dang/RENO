@@ -284,7 +284,7 @@ fn a_projects_plus_opens_a_new_thread_there_and_start_a_task_has_no_project(
     assert!(painted(vcx, "new-thread-title"));
     click(vcx, "new-task");
     draw(vcx);
-    assert!(!painted(vcx, "new-thread-title"));
+    assert!(!painted(vcx, "new-thread-chip-project"));
     assert!(root.read_with(vcx, |r, _| r.home_folder().is_none()));
 }
 

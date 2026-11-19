@@ -17,6 +17,7 @@
 //!   connect-or-start), the restart backoff, the LaunchAgent plist and the daemon's log files.
 //! - `fake` (cargo feature `fake`): an in-process fake daemon over the in-memory transport.
 
+pub mod answers;
 pub mod client;
 pub mod error;
 pub mod launcher;

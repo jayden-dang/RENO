@@ -31,6 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use gpui::{AppContext as _, Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
+use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::{
@@ -60,8 +61,6 @@ pub(crate) const RUNS_PAGE: u32 = 20;
 #[derive(Clone, Debug)]
 pub(crate) enum StoreEvent {
     RunStarted(RunId),
-    /// Show this run: what needs you is answered inside it (ui-brief 2026-11-17).
-    ShowRun(RunId),
     /// A trigger was fired by hand: what became of it.
     TriggerFired {
         name: String,
@@ -368,11 +367,6 @@ impl Store {
         }
     }
 
-    /// Asks the shell to show `run`.
-    pub(crate) fn show_run(&mut self, run: RunId, cx: &mut Context<Self>) {
-        cx.emit(StoreEvent::ShowRun(run));
-    }
-
     /// The canonical repository root `dir` is in, if any.
     pub(crate) fn root_of(&self, dir: &std::path::Path) -> Option<PathBuf> {
         self.roots.root_of(dir)
@@ -464,10 +458,41 @@ impl Store {
         self.capabilities
     }
 
-    #[cfg(test)]
+    /// Tests and `RENO_DEMO_MENU=question-readonly` look at the app as a real daemon shows it.
     pub(crate) fn set_capabilities(&mut self, capabilities: Capabilities, cx: &mut Context<Self>) {
         self.capabilities = capabilities;
         cx.notify();
+    }
+
+    /// The ONE seam to the answer contract. Today it is the fake daemon's mocked ROAD-1 contract,
+    /// and only where [`Capabilities::answer_questions`] is on; ROAD-1 replaces what this returns
+    /// with the real daemon's `question.answer`, and nothing else in the app changes.
+    fn question_desk(&self) -> Option<&dyn QuestionDesk> {
+        if !self.capabilities.answer_questions {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn QuestionDesk)
+    }
+
+    /// What the question `request` of `run` takes (typed text, its length).
+    pub(crate) fn question_rules(&self, run: &RunId, request: &str) -> QuestionRules {
+        self.question_desk()
+            .map_or_else(QuestionRules::default, |desk| desk.rules(run, request))
+    }
+
+    /// Sends an answer. `Err(QuestionNotPending)` when this connection cannot answer at all.
+    pub(crate) fn answer_question(
+        &mut self,
+        run: &RunId,
+        request: AnswerRequest,
+        cx: &mut Context<Self>,
+    ) -> Result<(), AnswerError> {
+        let result = self
+            .question_desk()
+            .ok_or(AnswerError::QuestionNotPending)
+            .and_then(|desk| desk.answer(run, request));
+        cx.notify();
+        result
     }
 
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
@@ -1343,6 +1368,7 @@ impl Store {
     }
 
     /// Answers a held action. The card leaves when the daemon reports the new list.
+    #[cfg(test)]
     pub(crate) fn decide(
         &mut self,
         id: ApprovalId,

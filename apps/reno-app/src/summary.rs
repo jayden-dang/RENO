@@ -2,14 +2,11 @@
 //! counts, the approval card text. No GPUI, no clock (callers pass `now_ms`), so every case is
 //! a plain unit test.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use reno_client::State;
-use reno_proto::defs::DefKind;
 use reno_proto::{
-    ActionClass, Approval, ApprovalSubject, CancelledBy, ReportStatus, RunId, RunStatus,
-    RunSummary, StopDetail,
+    ActionClass, ApprovalSubject, CancelledBy, ReportStatus, RunStatus, RunSummary, StopDetail,
 };
 
 /// A run title is `"<bot> · <repo>: <what>"` (the protocol has no bot or repository field yet).
@@ -107,28 +104,6 @@ fn run_repo_in(run: &RunSummary, data_dir: Option<&Path>) -> Option<RunRepo> {
     })
 }
 
-/// The counts on the attention pill and in the sidebar.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Attention {
-    /// Held actions waiting for a human.
-    pub(crate) need: u32,
-    /// Runs waiting on a harness question. The app cannot answer yet, but the person is who the
-    /// run waits for, so they count toward [`Attention::needs_you`].
-    pub(crate) questions: u32,
-    /// Runs that are moving on their own.
-    pub(crate) running: u32,
-    /// Distinct bots the daemon has defined; a run pinned to a deleted bot does not count. Only
-    /// when no definitions are known (the fake daemon defines none) the bots the runs name.
-    pub(crate) bots: u32,
-}
-
-impl Attention {
-    /// Everything a run waits on the person for: held actions and questions.
-    pub(crate) const fn needs_you(&self) -> u32 {
-        self.need.saturating_add(self.questions)
-    }
-}
-
 /// The bot a run belongs to: the daemon's `bot` pin; only for a run without one (the fake
 /// daemon) the bot its title names.
 pub(crate) fn run_bot(run: &RunSummary) -> Option<&str> {
@@ -138,14 +113,6 @@ pub(crate) fn run_bot(run: &RunSummary) -> Option<&str> {
         .or_else(|| parse_title(&run.title).bot)
 }
 
-/// Whether a run counts as "running": the executor is working or about to be.
-pub(crate) fn is_live(status: RunStatus) -> bool {
-    matches!(
-        status,
-        RunStatus::Leased | RunStatus::Running | RunStatus::Evaluating
-    )
-}
-
 /// The runs waiting on a harness question.
 pub(crate) fn waiting_questions(state: &State) -> Vec<&RunSummary> {
     state
@@ -153,36 +120,6 @@ pub(crate) fn waiting_questions(state: &State) -> Vec<&RunSummary> {
         .into_iter()
         .filter(|run| run.status == RunStatus::WaitingInput)
         .collect()
-}
-
-pub(crate) fn attention(state: &State) -> Attention {
-    let runs = state.runs();
-    let mut bots: BTreeSet<&str> = state
-        .defs()
-        .defs
-        .iter()
-        .filter(|def| def.kind == DefKind::Bot)
-        .map(|def| def.name.as_str())
-        .collect();
-    if bots.is_empty() {
-        // No definitions (the `--fake` demo, or a daemon not yet heard from): the runs are
-        // all there is to go on.
-        bots = runs.iter().filter_map(|run| run_bot(run)).collect();
-    }
-    Attention {
-        need: count(state.approvals().len()),
-        questions: count(
-            runs.iter()
-                .filter(|run| run.status == RunStatus::WaitingInput)
-                .count(),
-        ),
-        running: count(runs.iter().filter(|run| is_live(run.status)).count()),
-        bots: count(bots.len()),
-    }
-}
-
-fn count(n: usize) -> u32 {
-    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// "now" for ages: the system clock for a real daemon; for the fake, whose data uses a fixed
@@ -482,114 +419,11 @@ pub(crate) fn subject_line(subject: &ApprovalSubject) -> String {
     }
 }
 
-/// What a held action asks, after its bot's name: "wants to push to atlas-api", "wants network
-/// access", "wants to run a command". Home's approval card and the palette word it alike.
-pub(crate) fn approval_what(state: &State, approval: &Approval) -> String {
-    let repo = state
-        .run(&approval.run_id)
-        .and_then(|run| parse_title(&run.title).repo.map(str::to_owned));
-    match (action_word(&approval.subject), repo) {
-        ("push", Some(repo)) => format!("wants to push to {repo}"),
-        ("network request", _) => "wants network access".to_owned(),
-        (word, _) => format!("wants to run a {word}"),
-    }
-}
-
-/// The bot that owns an approval's run, when its title names one.
-pub(crate) fn approval_bot<'a>(state: &'a State, approval: &Approval) -> Option<&'a str> {
-    state.run(&approval.run_id).and_then(run_bot)
-}
-
-/// The finding pill's content.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Finding {
-    /// Something is held: the bold lead, the muted detail, and the run "Open" goes to.
-    Held {
-        lead: String,
-        detail: String,
-        run: RunId,
-    },
-    /// Nothing needs the human.
-    Calm { text: String },
-}
-
-impl Finding {
-    #[cfg(test)]
-    /// The whole sentence, for tests and accessibility labels.
-    pub(crate) fn sentence(&self) -> String {
-        match self {
-            Self::Held { lead, detail, .. } => format!("{lead} {detail}"),
-            Self::Calm { text } => text.clone(),
-        }
-    }
-}
-
-pub(crate) fn finding(state: &State, now_ms: u64) -> Finding {
-    let counts = attention(state);
-    let Some(oldest) = state.approvals().first() else {
-        if let Some(asking) = state
-            .runs()
-            .into_iter()
-            .filter(|run| run.status == RunStatus::WaitingInput)
-            .min_by_key(|run| run.updated_at_ms)
-        {
-            let lead = match counts.questions {
-                1 => "1 question is waiting for you".to_owned(),
-                n => format!("{n} questions are waiting for you"),
-            };
-            let who = run_bot(asking).map_or_else(|| "a run".to_owned(), str::to_owned);
-            return Finding::Held {
-                lead,
-                detail: format!("\u{2014} {who} asks{}.", in_project(asking)),
-                run: asking.run_id.clone(),
-            };
-        }
-        let text = match counts.running {
-            0 => "Nothing needs you — all quiet.".to_owned(),
-            1 => "Nothing needs you — 1 run is moving on its own.".to_owned(),
-            n => format!("Nothing needs you — {n} runs are moving on their own."),
-        };
-        return Finding::Calm { text };
-    };
-    let lead = if counts.need == 1 {
-        "1 action is held for you".to_owned()
-    } else {
-        format!("{} actions are held for you", counts.need)
-    };
-    let who = approval_bot(state, oldest)
-        .map_or_else(|| "the oldest".to_owned(), |bot| format!("{bot}'s"));
-    let what = action_word(&oldest.subject);
-    let waited = age_label(now_ms.saturating_sub(oldest.requested_at_ms));
-    let place = state
-        .run(&oldest.run_id)
-        .map_or_else(String::new, in_project);
-    let detail = if waited == "just now" {
-        format!("— {who} {what}{place} was just held.")
-    } else {
-        format!("— {who} {what}{place} has waited {waited}.")
-    };
-    Finding::Held {
-        lead,
-        detail,
-        run: oldest.run_id.clone(),
-    }
-}
-
-/// " in porch": the folder the run was sent in, by name (no disk read); empty without one.
-fn in_project(run: &RunSummary) -> String {
-    run.cwd
-        .as_deref()
-        .and_then(|cwd| cwd.file_name())
-        .map_or_else(String::new, |name| {
-            format!(" in {}", name.to_string_lossy())
-        })
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use reno_client::Update;
-    use reno_proto::{ApprovalId, RunId, RunSummary, TaskId};
+    use reno_proto::{Approval, ApprovalId, RunId, RunSummary, TaskId};
     use serde_json::json;
 
     use super::*;
@@ -887,105 +721,6 @@ mod tests {
         assert_eq!(age_label(50 * HOUR), "2d");
     }
 
-    #[test]
-    fn finding_two_held_names_the_oldest() {
-        let state = state_with(
-            vec![
-                run("k1", RunStatus::WaitingApproval, "keeper · atlas-api: bump"),
-                run(
-                    "s1",
-                    RunStatus::WaitingApproval,
-                    "scout · web-console: fetch",
-                ),
-            ],
-            vec![
-                approval("a1", "k1", 6 * HOUR, Some("git push -u origin x")),
-                approval("a2", "s1", 2 * HOUR, None),
-            ],
-        );
-        let f = finding(&state, NOW);
-        assert_eq!(
-            f.sentence(),
-            "2 actions are held for you — keeper's push has waited 6h."
-        );
-        assert!(matches!(f, Finding::Held { .. }));
-    }
-
-    #[test]
-    fn finding_names_the_project_and_the_run_to_open() {
-        let mut keeper = run("k1", RunStatus::WaitingApproval, "keeper · porch: bump");
-        keeper.cwd = Some(std::path::PathBuf::from("/w/porch"));
-        let state = state_with(
-            vec![keeper],
-            vec![approval(
-                "a1",
-                "k1",
-                3 * 60_000,
-                Some("git push -u origin HEAD"),
-            )],
-        );
-        let f = finding(&state, NOW);
-        assert_eq!(
-            f.sentence(),
-            "1 action is held for you — keeper's push in porch has waited 3m."
-        );
-        let Finding::Held { run, .. } = f else {
-            panic!("held")
-        };
-        assert_eq!(run.to_string(), "run_k1");
-    }
-
-    #[test]
-    fn finding_one_held_is_singular_and_names_the_kind() {
-        let state = state_with(
-            vec![run("s1", RunStatus::WaitingApproval, "scout · web: fetch")],
-            vec![approval("a2", "s1", 14 * 60_000, None)],
-        );
-        assert_eq!(
-            finding(&state, NOW).sentence(),
-            "1 action is held for you — scout's network request has waited 14m."
-        );
-    }
-
-    #[test]
-    fn finding_unknown_run_and_fresh_hold() {
-        let state = state_with(vec![], vec![approval("a1", "gone", 5_000, Some("ls"))]);
-        assert_eq!(
-            finding(&state, NOW).sentence(),
-            "1 action is held for you — the oldest command was just held."
-        );
-    }
-
-    #[test]
-    fn finding_calm_variants() {
-        assert_eq!(
-            finding(&State::new(), NOW).sentence(),
-            "Nothing needs you — all quiet."
-        );
-        let one = state_with(
-            vec![run("b1", RunStatus::Running, "builder · reno: x")],
-            vec![],
-        );
-        assert_eq!(
-            finding(&one, NOW).sentence(),
-            "Nothing needs you — 1 run is moving on its own."
-        );
-        let two = state_with(
-            vec![
-                run("b1", RunStatus::Running, "builder · reno: x"),
-                run("b2", RunStatus::Evaluating, "builder · reno: y"),
-                run("b3", RunStatus::Succeeded, "builder · reno: z"),
-            ],
-            vec![],
-        );
-        let f = finding(&two, NOW);
-        assert_eq!(
-            f.sentence(),
-            "Nothing needs you — 2 runs are moving on their own."
-        );
-        assert!(matches!(f, Finding::Calm { .. }));
-    }
-
     fn pinned(name: &str, status: RunStatus, title: &str, bot: &str) -> RunSummary {
         let mut r = run(name, status, title);
         r.bot = Some(reno_proto::defs::BotPin {
@@ -1014,94 +749,6 @@ mod tests {
             run_bot(&run("n1", RunStatus::Running, "plain: title")),
             None
         );
-    }
-
-    #[test]
-    fn attention_bots_are_the_defined_ones_once_definitions_are_known() {
-        let mut state = state_with(
-            vec![pinned("s1", RunStatus::Running, "dogfood: hi", "scout")],
-            vec![],
-        );
-        assert_eq!(attention(&state).bots, 1);
-        let def = |name: &str| reno_proto::defs::DefSummary {
-            kind: reno_proto::defs::DefKind::Bot,
-            name: name.to_owned(),
-            version: 1,
-            hash: "0".repeat(64),
-            created_at_ms: 0,
-        };
-        state.apply(Update::Defs(reno_proto::defs::DefsSnapshot {
-            defs: vec![def("scout"), def("reviewer"), def("keeper")],
-            errors: vec![],
-        }));
-        // Three defined, one of them already running: three.
-        assert_eq!(attention(&state).bots, 3);
-        // An old run pinned to a deleted bot does not count.
-        state.apply(Update::Runs(vec![
-            pinned("s1", RunStatus::Running, "dogfood: hi", "scout"),
-            pinned("s2", RunStatus::Succeeded, "old: x", "builder"),
-        ]));
-        assert_eq!(attention(&state).bots, 3);
-    }
-
-    #[test]
-    fn approval_bot_uses_the_pin() {
-        let state = state_with(
-            vec![pinned(
-                "s1",
-                RunStatus::WaitingApproval,
-                "dogfood: hi",
-                "scout",
-            )],
-            vec![approval("a1", "s1", HOUR, Some("ls"))],
-        );
-        assert_eq!(approval_bot(&state, &state.approvals()[0]), Some("scout"));
-    }
-
-    #[test]
-    fn a_waiting_question_is_counted_and_not_called_running() {
-        let state = state_with(
-            vec![
-                run(
-                    "q1",
-                    RunStatus::WaitingInput,
-                    "keeper \u{b7} atlas-api: ask",
-                ),
-                run("b1", RunStatus::Running, "builder \u{b7} reno: b"),
-            ],
-            vec![],
-        );
-        let counts = attention(&state);
-        assert_eq!((counts.need, counts.questions, counts.running), (0, 1, 1));
-        assert_eq!(counts.needs_you(), 1);
-        assert_eq!(
-            finding(&state, NOW).sentence(),
-            "1 question is waiting for you \u{2014} keeper asks."
-        );
-    }
-
-    #[test]
-    fn attention_counts() {
-        let state = state_with(
-            vec![
-                run("k1", RunStatus::WaitingApproval, "keeper · atlas-api: a"),
-                run("b1", RunStatus::Running, "builder · reno: b"),
-                run("b2", RunStatus::Leased, "builder · reno: c"),
-                run("r1", RunStatus::Succeeded, "reviewer · web: d"),
-                run("q1", RunStatus::Queued, "no bot here"),
-            ],
-            vec![approval("a1", "k1", HOUR, Some("git push"))],
-        );
-        assert_eq!(
-            attention(&state),
-            Attention {
-                need: 1,
-                questions: 0,
-                running: 2,
-                bots: 3
-            }
-        );
-        assert_eq!(attention(&State::new()), Attention::default());
     }
 
     #[test]

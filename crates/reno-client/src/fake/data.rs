@@ -293,6 +293,70 @@ pub(super) fn question_run() -> Ids<SeedRun> {
     })
 }
 
+/// A run on an ACP agent (Grok) that asked a pick-one question: it takes no typed answer.
+pub(super) fn grok_question_run() -> Ids<SeedRun> {
+    Ok(SeedRun {
+        summary: summary(
+            "grok1",
+            "grok",
+            RunStatus::WaitingInput,
+            None,
+            "scout \u{b7} atlas-api: choose the log format",
+            35 * MINUTE,
+            2 * MINUTE,
+        )?,
+        journal: vec![
+            started(),
+            text("Two log formats are in use. I need you to choose one."),
+            ExecEvent::NeedsInput {
+                request_id: "req-grok-format".to_owned(),
+                questions: vec![reno_proto::Question {
+                    id: "format".to_owned(),
+                    prompt: "Which log format should the daemon use?".to_owned(),
+                    options: vec!["JSON lines".to_owned(), "Plain text".to_owned()],
+                    multi_select: false,
+                }],
+            },
+        ],
+    })
+}
+
+/// A run that asked two questions at once, the second a multi-select: the card pages.
+pub(super) fn paged_question_run() -> Ids<SeedRun> {
+    Ok(SeedRun {
+        summary: summary(
+            "pager1",
+            "claude-code",
+            RunStatus::WaitingInput,
+            None,
+            "builder \u{b7} web-console: set up the release",
+            30 * MINUTE,
+            MINUTE,
+        )?,
+        journal: vec![
+            started(),
+            text("Before I cut the release I need two answers."),
+            ExecEvent::NeedsInput {
+                request_id: "req-pager-release".to_owned(),
+                questions: vec![
+                    reno_proto::Question {
+                        id: "channel".to_owned(),
+                        prompt: "Which channel should it ship to?".to_owned(),
+                        options: vec!["Stable".to_owned(), "Beta".to_owned()],
+                        multi_select: false,
+                    },
+                    reno_proto::Question {
+                        id: "targets".to_owned(),
+                        prompt: "Which platforms should it build for?".to_owned(),
+                        options: vec!["macOS".to_owned(), "Linux".to_owned(), "Windows".to_owned()],
+                        multi_select: true,
+                    },
+                ],
+            },
+        ],
+    })
+}
+
 /// What the reviewer's run fetched.
 const CACHE_DOC_URL: &str = "https://docs.example/cache-control";
 
