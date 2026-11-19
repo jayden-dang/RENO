@@ -944,6 +944,87 @@ pub(crate) fn needing_count(
         .count()
 }
 
+/// One executor with a newer version the person can take, for the status bar's updates island.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentUpdate {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    /// The installed version.
+    pub(crate) from: String,
+    /// The newer one.
+    pub(crate) to: String,
+    /// An update job of this executor is running.
+    pub(crate) updating: bool,
+}
+
+/// The executors that really have an update to take: a newer version is known, and the person
+/// can run it (auto-update is off) or it is running now. Sorted by name.
+pub(crate) fn agent_updates(
+    state: &State,
+    now_ms: u64,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> Vec<AgentUpdate> {
+    let mut out: Vec<AgentUpdate> = rows_of(state, now_ms, listing)
+        .into_iter()
+        .filter_map(|r| {
+            let updating = r
+                .job
+                .as_ref()
+                .is_some_and(|j| j.kind == JobKind::Update && !j.failed());
+            let (to, from) = r.available.zip(r.version_text)?;
+            (r.update || updating).then_some(AgentUpdate {
+                id: r.id,
+                name: r.name,
+                from,
+                to,
+                updating,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// Where an agent stands in the updates list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpdatePhase {
+    Available,
+    Updating,
+    /// Its update ran and finished while the list was open.
+    UpToDate,
+}
+
+/// The rows of the updates list: what is available now, and what was updating in `remembered`
+/// (the rows last shown while the list was open) and has finished since, as "Up to date".
+pub(crate) fn island_rows(
+    current: &[AgentUpdate],
+    remembered: &[AgentUpdate],
+) -> Vec<(AgentUpdate, UpdatePhase)> {
+    let mut rows: Vec<(AgentUpdate, UpdatePhase)> = current
+        .iter()
+        .map(|u| {
+            let phase = if u.updating {
+                UpdatePhase::Updating
+            } else {
+                UpdatePhase::Available
+            };
+            (u.clone(), phase)
+        })
+        .collect();
+    for gone in remembered
+        .iter()
+        .filter(|r| r.updating && !current.iter().any(|c| c.id == r.id))
+    {
+        rows.push((gone.clone(), UpdatePhase::UpToDate));
+    }
+    rows
+}
+
 /// [`build`] with the registry's last answer: the names of added agents, which are delisted or
 /// the person's own, and which are still being added (those are on the registry group).
 pub(crate) fn build_with(
@@ -1674,6 +1755,10 @@ mod roster_tests {
     }
 
     fn view_with(list: Vec<ExecutorInfo>, features: &[&str], now: u64) -> ExecutorsView {
+        build(&state_with(list, features), now)
+    }
+
+    fn state_with(list: Vec<ExecutorInfo>, features: &[&str]) -> State {
         let mut state = State::new();
         state.apply(Update::Executors(list));
         state.apply(Update::Daemon(reno_client::DaemonInfo {
@@ -1685,7 +1770,7 @@ mod roster_tests {
             },
             status: None,
         }));
-        build(&state, now)
+        state
     }
 
     const MAINTAIN: &[&str] = &["executors", "executor.install", "executor.maintain"];
@@ -2483,5 +2568,88 @@ mod roster_tests {
                     .remove_blocked
             );
         }
+    }
+
+    #[test]
+    fn the_updates_island_lists_only_executors_with_an_update_a_person_can_take() {
+        let codex = |auto: bool, latest: Option<&str>, job: Option<ExecutorJob>| {
+            info(
+                "codex",
+                Some(health("0.170.0", ok_in("a@b.c"), VersionGate::Ok)),
+                Some(maint(
+                    Some(updater("codex update", false, false, latest)),
+                    auto,
+                )),
+                job,
+            )
+        };
+        let ids = |list: Vec<ExecutorInfo>| {
+            agent_updates(&state_with(list, MAINTAIN), NOW, None)
+                .into_iter()
+                .map(|u| (u.id, u.from, u.to, u.updating))
+                .collect::<Vec<_>>()
+        };
+        // A newer version, auto-update off: offered, "current -> new".
+        assert_eq!(
+            ids(vec![codex(false, Some("0.171.0"), None)]),
+            [("codex".into(), "0.170.0".into(), "0.171.0".into(), false)]
+        );
+        // Nothing newer, or auto-update will do it itself: not offered.
+        assert!(ids(vec![codex(false, Some("0.170.0"), None)]).is_empty());
+        assert!(ids(vec![codex(false, None, None)]).is_empty());
+        assert!(ids(vec![codex(true, Some("0.171.0"), None)]).is_empty());
+        // An update in progress stays, as updating.
+        assert_eq!(
+            ids(vec![codex(
+                false,
+                Some("0.171.0"),
+                Some(job(JobKind::Update, running(1, 2)))
+            )]),
+            [("codex".into(), "0.170.0".into(), "0.171.0".into(), true)]
+        );
+        // A daemon without maintenance has no update to run.
+        assert!(
+            agent_updates(
+                &state_with(vec![codex(false, Some("0.171.0"), None)], &["executors"]),
+                NOW,
+                None
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_island_keeps_an_updated_agent_as_up_to_date_while_the_list_is_open() {
+        let au = |id: &str, updating: bool| AgentUpdate {
+            id: id.into(),
+            name: id.into(),
+            from: "1".into(),
+            to: "2".into(),
+            updating,
+        };
+        // Nothing remembered: just what is available.
+        assert_eq!(
+            island_rows(&[au("codex", false)], &[]),
+            [(au("codex", false), UpdatePhase::Available)]
+        );
+        // An update that was running and is gone from the list has finished.
+        let rows = island_rows(
+            &[au("claude", false)],
+            &[au("codex", true), au("claude", false)],
+        );
+        assert_eq!(
+            rows,
+            [
+                (au("claude", false), UpdatePhase::Available),
+                (au("codex", true), UpdatePhase::UpToDate),
+            ]
+        );
+        // One that was only offered and has gone (taken elsewhere) is dropped, not claimed.
+        assert!(island_rows(&[], &[au("codex", false)]).is_empty());
+        // A running one shows as updating.
+        assert_eq!(
+            island_rows(&[au("codex", true)], &[]),
+            [(au("codex", true), UpdatePhase::Updating)]
+        );
     }
 }

@@ -123,6 +123,33 @@ impl FolderKey {
     }
 }
 
+/// What a thread row says in words it is waiting for (the sidebar's text badge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Badge {
+    /// The agent asked a question.
+    NeedsInput,
+    /// A harness action is held for the person.
+    NeedsApproval,
+}
+
+impl Badge {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::NeedsInput => "Needs input",
+            Self::NeedsApproval => "Needs approval",
+        }
+    }
+}
+
+/// The badge of a run, from its real status.
+pub(crate) fn badge(run: &RunSummary) -> Option<Badge> {
+    match run.status {
+        RunStatus::WaitingInput => Some(Badge::NeedsInput),
+        RunStatus::WaitingApproval => Some(Badge::NeedsApproval),
+        _ => None,
+    }
+}
+
 /// One thread under a folder (a run of its own on a daemon without threads).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThreadRow {
@@ -137,6 +164,8 @@ pub(crate) struct ThreadRow {
     pub(crate) executor: ExecutorId,
     /// The latest run's dot.
     pub(crate) dot: Dot,
+    /// What the latest run waits for, in words.
+    pub(crate) badge: Option<Badge>,
     /// "2m", "1h", "1d": since the latest run started.
     pub(crate) age: String,
 }
@@ -269,6 +298,7 @@ pub(crate) fn folders(
                         title: entry.first().title.clone(),
                         executor: latest.executor.clone(),
                         dot: dot(latest, inputs.seen, looking),
+                        badge: badge(latest),
                         age: summary::age_label(inputs.now_ms.saturating_sub(latest.created_at_ms)),
                     }
                 })
@@ -539,5 +569,50 @@ mod tests {
         assert_eq!(FolderKey::Repo(PathBuf::from("/w/porch")).name(), "porch");
         assert_eq!(FolderKey::NoProject.name(), "No project");
         assert!(!FolderKey::NoProject.open_by_default());
+    }
+
+    #[test]
+    fn a_thread_row_says_in_words_what_it_waits_for() {
+        let question = run("q", RunStatus::WaitingInput, Some("/w/porch"), 50);
+        let held = run("h", RunStatus::WaitingApproval, Some("/w/porch"), 40);
+        let busy = run("b", RunStatus::Running, Some("/w/porch"), 30);
+        let done = run("d", RunStatus::Succeeded, Some("/w/porch"), 20);
+        let runs = vec![&question, &held, &busy, &done];
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let rows = &folders(&runs, roots, &inputs(&seen, &toggled))[0].rows;
+        let badge = |id: &str| {
+            rows.iter()
+                .find(|r| r.run.to_string() == format!("run_{id}"))
+                .map(|r| r.badge)
+                .unwrap()
+        };
+        assert_eq!(badge("q"), Some(Badge::NeedsInput));
+        assert_eq!(badge("h"), Some(Badge::NeedsApproval));
+        assert_eq!(badge("b"), None, "running shows a spinner, not a badge");
+        assert_eq!(badge("d"), None);
+        assert_eq!(Badge::NeedsInput.label(), "Needs input");
+        assert_eq!(Badge::NeedsApproval.label(), "Needs approval");
+    }
+
+    #[test]
+    fn a_thread_waits_on_its_latest_run_only() {
+        let first = run("a1", RunStatus::WaitingInput, Some("/w/porch"), 10);
+        let second = run("a2", RunStatus::Succeeded, Some("/w/porch"), 20);
+        let runs = vec![&first, &second];
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let table = [("a1", "t1"), ("a2", "t1")];
+        let of = thread_named(&table);
+        let f = &folders(
+            &runs,
+            roots,
+            &Inputs {
+                thread_of: &of,
+                ..inputs(&seen, &toggled)
+            },
+        )[0];
+        assert_eq!(f.rows.len(), 1);
+        assert_eq!(f.rows[0].badge, None);
     }
 }

@@ -33,6 +33,8 @@ mod notify_tests;
 #[cfg(test)]
 mod screen_tests;
 #[cfg(test)]
+mod shell_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod thread_tests;

@@ -1,6 +1,7 @@
 //! Views and the small design-system pieces they use.
 
 pub(crate) mod attention;
+pub(crate) mod bar;
 pub(crate) mod composer;
 pub(crate) mod field;
 pub(crate) mod icon;

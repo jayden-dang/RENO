@@ -5,7 +5,8 @@
 //! surfaces (composer, cards) use `raised` or `card` with a hairline. There are no
 //! alpha-over-desktop tokens: no window tint, no glass, no translucent surface.
 //!
-//! Palette values are the locked brief's Grounding values (`reno_dark`, `reno_light`).
+//! Palette values are the token table of the app-shell brief (docs/design/2026-11-19-app-shell-ui-brief.md,
+//! `reno_dark`, `reno_light`); it replaced the deleted brief's palette.
 
 // Tokens are consumed screen by screen; the unreached ones are listed in the brief.
 #![allow(dead_code)]
@@ -45,6 +46,9 @@ impl From<WindowAppearance> for Appearance {
 /// Hairline strength: the text colour at 9% (the brief allows 9 to 10%).
 pub(crate) const HAIRLINE_ALPHA: f32 = 0.09;
 
+/// The ink on a light fill: the dark theme's `shell`.
+const DARK_INK: u32 = 0x080a0c;
+
 /// A palette as `0xRRGGBB` values, so the data is checkable without a renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Palette {
@@ -74,43 +78,42 @@ pub(crate) struct Palette {
 /// The dark palette.
 pub(crate) const fn reno_dark() -> Palette {
     Palette {
-        canvas: 0x060606,
-        shell: 0x0d0d0d,
-        raised: 0x343438,
-        card: 0x0e0e0e,
-        surface: 0x161618,
-        text: 0xe8e8ea,
-        muted: 0xa9a9ae,
-        faint: 0x85858a,
-        accent: 0x8b7cf6,
+        shell: 0x080a0c,
+        canvas: 0x0b0e11,
+        card: 0x0e1216,
+        surface: 0x141a1f,
+        raised: 0x262c33,
+        text: 0xdfe5ea,
+        muted: 0x98a3ad,
+        faint: 0x6f7a85,
+        accent: 0x2dd4bf,
+        warning: 0xfbbf24,
         danger: 0xf87171,
-        warning: 0xfacc15,
         success: 0x34d399,
         ansi: [
-            0x3b3b41, 0xf87171, 0x34d399, 0xfacc15, 0x7aa2f7, 0xc084fc, 0x22d3ee, 0xd4d4d8,
+            0x3b3b41, 0xf87171, 0x34d399, 0xfbbf24, 0x7aa2f7, 0xc084fc, 0x22d3ee, 0xd4d4d8,
             0x71717a, 0xfca5a5, 0x6ee7b7, 0xfde047, 0x93c5fd, 0xd8b4fe, 0x67e8f9, 0xfafafa,
         ],
     }
 }
 
-/// The light palette. The brief lists no light `card`; it is `#ffffff`, the value the source
-/// palette uses.
+/// The light palette.
 pub(crate) const fn reno_light() -> Palette {
     Palette {
-        canvas: 0xffffff,
-        shell: 0xf3f3f5,
-        raised: 0xededf0,
+        shell: 0xe6edef,
+        canvas: 0xf4f7f8,
         card: 0xffffff,
         surface: 0xffffff,
-        text: 0x303035,
-        muted: 0x62626a,
-        faint: 0x797981,
-        accent: 0x5b43e8,
+        raised: 0xd8e1e4,
+        text: 0x16232b,
+        muted: 0x4b5b66,
+        faint: 0x6b7b86,
+        accent: 0x0f766e,
+        warning: 0xb45309,
         danger: 0xdc2626,
-        warning: 0xa16207,
         success: 0x15803d,
         ansi: [
-            0x303035, 0xdc2626, 0x15803d, 0xa16207, 0x1d4ed8, 0x7e22ce, 0x0e7490, 0x62626a,
+            0x303035, 0xdc2626, 0x15803d, 0xb45309, 0x1d4ed8, 0x7e22ce, 0x0e7490, 0x62626a,
             0x52525b, 0xb91c1c, 0x166534, 0x854d0e, 0x1e40af, 0x6b21a8, 0x155e75, 0x3f3f46,
         ],
     }
@@ -172,6 +175,19 @@ impl Theme {
         }
     }
 
+    /// The text colour for something drawn on `fill` (an accent or semantic fill): whichever of
+    /// the shell's dark ink and white contrasts more, never white on light teal.
+    pub(crate) fn on_fill(&self, fill: Hsla) -> Hsla {
+        use crate::vm::terminal::contrast_ratio;
+        let dark: Hsla = rgb(DARK_INK).into();
+        let white: Hsla = rgb(0xffffff).into();
+        if contrast_ratio(dark, fill) >= contrast_ratio(white, fill) {
+            dark
+        } else {
+            white
+        }
+    }
+
     /// The selected sidebar row: `raised` pulled halfway toward `shell`, still opaque.
     pub(crate) fn row_selected(&self) -> Hsla {
         mix(self.shell, self.raised, 0.45)
@@ -217,23 +233,56 @@ mod tests {
     #[test]
     fn palettes_match_the_brief() {
         let d = reno_dark();
+        // The app-shell brief's token table (docs/design/2026-11-19-app-shell-ui-brief.md).
         assert_eq!(
-            [d.canvas, d.shell, d.raised, d.card, d.text, d.muted],
-            [0x060606, 0x0d0d0d, 0x343438, 0x0e0e0e, 0xe8e8ea, 0xa9a9ae]
+            [d.shell, d.canvas, d.card, d.surface, d.raised, d.text],
+            [0x080a0c, 0x0b0e11, 0x0e1216, 0x141a1f, 0x262c33, 0xdfe5ea]
         );
         assert_eq!(
-            [d.faint, d.accent, d.danger, d.warning, d.success],
-            [0x85858a, 0x8b7cf6, 0xf87171, 0xfacc15, 0x34d399]
+            [d.muted, d.faint, d.accent, d.warning, d.danger, d.success],
+            [0x98a3ad, 0x6f7a85, 0x2dd4bf, 0xfbbf24, 0xf87171, 0x34d399]
         );
         let l = reno_light();
         assert_eq!(
-            [l.canvas, l.shell, l.raised, l.card, l.text, l.muted],
-            [0xffffff, 0xf3f3f5, 0xededf0, 0xffffff, 0x303035, 0x62626a]
+            [l.shell, l.canvas, l.card, l.surface, l.raised, l.text],
+            [0xe6edef, 0xf4f7f8, 0xffffff, 0xffffff, 0xd8e1e4, 0x16232b]
         );
         assert_eq!(
-            [l.faint, l.accent, l.danger, l.warning, l.success],
-            [0x797981, 0x5b43e8, 0xdc2626, 0xa16207, 0x15803d]
+            [l.muted, l.faint, l.accent, l.warning, l.danger, l.success],
+            [0x4b5b66, 0x6b7b86, 0x0f766e, 0xb45309, 0xdc2626, 0x15803d]
         );
+    }
+
+    #[test]
+    fn text_on_a_fill_is_picked_by_contrast_never_white_on_light_teal() {
+        use crate::vm::terminal::contrast_ratio;
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let theme = Theme::for_appearance(appearance);
+            for fill in [theme.accent, theme.warning, theme.danger, theme.success] {
+                let ink = theme.on_fill(fill);
+                let other = if hex(ink) == 0xffffff {
+                    rgb(0x080a0c).into()
+                } else {
+                    rgb(0xffffff).into()
+                };
+                assert!(
+                    contrast_ratio(ink, fill) >= contrast_ratio(other, fill),
+                    "{appearance:?} {:#08x}",
+                    hex(fill)
+                );
+                assert!(
+                    contrast_ratio(ink, fill) >= 4.5,
+                    "readable on {:#08x}",
+                    hex(fill)
+                );
+            }
+        }
+        // The dark theme's teal is light: its text is dark, not white.
+        let dark = Theme::for_appearance(Appearance::Dark);
+        assert_eq!(hex(dark.on_fill(dark.accent)), 0x080a0c);
+        // The light theme's teal is deep: its text is white.
+        let light = Theme::for_appearance(Appearance::Light);
+        assert_eq!(hex(light.on_fill(light.accent)), 0xffffff);
     }
 
     #[test]

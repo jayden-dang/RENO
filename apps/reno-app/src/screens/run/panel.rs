@@ -200,10 +200,6 @@ impl RunScreen {
                 self.persist_panel(cx);
             }
             Cmd::NewTab => return self.open_surface(Surface::Home, window, cx),
-            Cmd::Hide => {
-                self.set_panel_open(false, cx);
-                self.give_back_focus(window, cx);
-            }
             Cmd::Reorder { from, to } => {
                 self.panel.reorder(from, to);
                 self.persist_panel(cx);

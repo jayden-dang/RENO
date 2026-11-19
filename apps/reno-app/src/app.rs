@@ -6,14 +6,15 @@
 //! appearance unless `RENO_APPEARANCE` or the palette's "Toggle theme" says otherwise.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
-    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowOptions, div, point, prelude::*, px, size,
+    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
@@ -24,6 +25,7 @@ use crate::actions::{
 };
 use crate::lifecycle;
 use crate::nav::Nav;
+use crate::panel::layout::GUTTER;
 use crate::panel::surface::Surface;
 use crate::screens::ScreenEvent;
 use crate::screens::executors::ExecutorsScreen;
@@ -33,16 +35,19 @@ use crate::screens::runs::RunsScreen;
 use crate::screens::settings::{NavActions, SettingsScreen};
 use crate::screens::triggers::TriggersScreen;
 use crate::store::{Store, StoreEvent};
+use crate::ui::bar::{self, Anchor_, Bar};
 use crate::ui::composer;
-use crate::ui::icon::{Assets, Icon};
-use crate::ui::kit::{self, SANS};
+use crate::ui::icon::Assets;
+use crate::ui::kit::SANS;
 use crate::ui::motion::{self, ReduceMotion};
 use crate::ui::overlay;
 use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
+use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
+use crate::vm::shell::{self, Chip, History, Place};
 
 /// How the app was launched.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -490,6 +495,18 @@ pub(crate) struct RootView {
     /// What Settings opened over: "Back to app" returns to it.
     before_settings: Option<Screen>,
     sidebar_hidden: bool,
+    /// Where the person has been, for the bar's back and forward.
+    history: History,
+    /// The project a new thread is for ("+" on a project), or none.
+    home_folder: Option<crate::vm::projects::FolderKey>,
+    /// The bar's "…" menu and the agents-updates list are open.
+    more_open: bool,
+    updates_open: bool,
+    /// The updates list's rows as last shown while it is open, so an update that finished can
+    /// say "Up to date" before the row goes.
+    updates_shown: Vec<AgentUpdate>,
+    more_at: Anchor_,
+    updates_at: Anchor_,
     /// Project folders opened or closed against their default.
     folders_toggled: std::collections::HashSet<crate::vm::projects::FolderKey>,
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
@@ -525,7 +542,10 @@ impl RootView {
             cx.subscribe_in(&runs, window, Self::on_screen_event),
             cx.subscribe_in(&triggers, window, Self::on_screen_event),
             cx.subscribe_in(&executors, window, Self::on_screen_event),
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&store, |this, _, cx| {
+                this.remember_updates(cx);
+                cx.notify();
+            }),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             // Back from a sign-in in Terminal: look at the executor again.
@@ -644,6 +664,13 @@ impl RootView {
             screen: Screen::Home,
             before_settings: None,
             sidebar_hidden: false,
+            history: History::new(Place::NewThread(None)),
+            home_folder: None,
+            more_open: false,
+            updates_open: false,
+            updates_shown: Vec::new(),
+            more_at: Rc::new(Cell::new(None)),
+            updates_at: Rc::new(Cell::new(None)),
             folders_toggled: std::collections::HashSet::new(),
             appearance_override,
             palette: None,
@@ -716,6 +743,16 @@ impl RootView {
     }
 
     #[cfg(test)]
+    pub(crate) fn appearance_override_for_test(&self) -> Option<Appearance> {
+        self.appearance_override
+    }
+
+    #[cfg(test)]
+    pub(crate) fn home_folder(&self) -> Option<&crate::vm::projects::FolderKey> {
+        self.home_folder.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn sidebar_hidden(&self) -> bool {
         self.sidebar_hidden
     }
@@ -757,8 +794,30 @@ impl RootView {
 
     /// Shows a built destination; the others say they are not built yet.
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_nav(nav, None, window, cx);
+    }
+
+    /// The new-thread state ("Start a task"), working in `folder`'s repository when one is given
+    /// (a project's "+").
+    pub(crate) fn new_thread(
+        &mut self,
+        folder: Option<crate::vm::projects::FolderKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_nav(Nav::Home, folder, window, cx);
+    }
+
+    fn show_nav(
+        &mut self,
+        nav: Nav,
+        folder: Option<crate::vm::projects::FolderKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
         self.leave_home(cx);
+        self.close_menus(cx);
         let into_settings = matches!(nav, Nav::Settings | Nav::Executors);
         if !into_settings {
             self.before_settings = None;
@@ -783,10 +842,152 @@ impl RootView {
                 self.settings.update(cx, |screen, cx| screen.shown(cx));
                 Screen::Settings
             }
-            Nav::Home => Screen::Home,
+            Nav::Home => {
+                self.set_home_folder(folder, cx);
+                Screen::Home
+            }
         };
         self.focus_composer(window, cx);
+        self.record(cx);
         cx.notify();
+    }
+
+    fn set_home_folder(
+        &mut self,
+        folder: Option<crate::vm::projects::FolderKey>,
+        cx: &mut Context<Self>,
+    ) {
+        let root = folder
+            .as_ref()
+            .and_then(|k| k.root())
+            .map(std::path::Path::to_path_buf);
+        let name = folder.as_ref().map(crate::vm::projects::FolderKey::name);
+        self.home_folder = folder;
+        self.home.update(cx, |home, cx| {
+            home.set_project(name, cx);
+            home.composer()
+                .update(cx, |composer, cx| composer.set_folder(root, cx));
+        });
+    }
+
+    /// Where the person is, for the bar's history; Settings is not a place.
+    fn place(&self, cx: &App) -> Option<Place> {
+        Some(match &self.screen {
+            Screen::Home => Place::NewThread(self.home_folder.clone()),
+            Screen::Runs => Place::AllRuns,
+            Screen::Run(run) => Place::Run(run.read(cx).run_id().clone()),
+            Screen::Project(project) => Place::Project(project.read(cx).key().clone()),
+            Screen::Triggers => Place::Triggers,
+            Screen::Settings => return None,
+        })
+    }
+
+    /// The one place the history hears of where the person went. Stepping back or forward
+    /// arrives at a place the history is already on, which records nothing.
+    fn record(&mut self, cx: &App) {
+        if let Some(place) = self.place(cx) {
+            self.history.visit(place);
+        }
+    }
+
+    /// The bar's back and forward. Settings has its own "Back to app", so they rest there.
+    pub(crate) fn step_history(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.screen, Screen::Settings) {
+            return;
+        }
+        let place = if back {
+            self.history.back()
+        } else {
+            self.history.forward()
+        };
+        match place {
+            Some(Place::NewThread(folder)) => self.new_thread(folder, window, cx),
+            Some(Place::AllRuns) => self.navigate(Nav::Runs, window, cx),
+            Some(Place::Run(run)) => self.open_run(run, window, cx),
+            Some(Place::Project(key)) => self.open_project(key, window, cx),
+            Some(Place::Triggers) => self.navigate(Nav::Triggers, window, cx),
+            None => {}
+        }
+    }
+
+    /// The chip of a run opens that run's project page.
+    pub(crate) fn open_current_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Screen::Run(run) = &self.screen else {
+            return;
+        };
+        let id = run.read(cx).run_id().clone();
+        let key = {
+            let store = self.store.read(cx);
+            crate::vm::projects::key_of(store.state().run(&id), |dir| store.root_of(dir))
+        };
+        self.open_project(key, window, cx);
+    }
+
+    pub(crate) fn toggle_more(&mut self, cx: &mut Context<Self>) {
+        self.more_open = !self.more_open;
+        self.updates_open = false;
+        self.updates_shown.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_updates(&mut self, cx: &mut Context<Self>) {
+        self.updates_open = !self.updates_open;
+        self.more_open = false;
+        self.updates_shown.clear();
+        self.remember_updates(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_menus(&mut self, cx: &mut Context<Self>) {
+        if self.more_open || self.updates_open {
+            self.more_open = false;
+            self.updates_open = false;
+            self.updates_shown.clear();
+            cx.notify();
+        }
+    }
+
+    /// The agents with an update to take, as the bar lists them.
+    fn agent_updates(&self, cx: &App) -> Vec<AgentUpdate> {
+        let store = self.store.read(cx);
+        executors::agent_updates(
+            store.state(),
+            store.now_ms(),
+            store.registry().listing.as_ref(),
+        )
+    }
+
+    /// While the list is open, keeps its rows so one that finishes reads "Up to date".
+    fn remember_updates(&mut self, cx: &App) {
+        if self.updates_open {
+            let rows = executors::island_rows(&self.agent_updates(cx), &self.updates_shown);
+            self.updates_shown = rows.into_iter().map(|(u, _)| u).collect();
+        }
+    }
+
+    /// "Update" on one agent: the daemon's update job, as on Settings › Executors.
+    pub(crate) fn update_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A job that ends before the list is drawn again still reads "Up to date".
+        if let Some(shown) = self.updates_shown.iter_mut().find(|u| u.id == id) {
+            shown.updating = true;
+        }
+        if let Ok(id) = id.parse::<reno_proto::ExecutorId>() {
+            self.store.update(cx, |store, cx| {
+                store.start_executor_job(id, reno_proto::JobKind::Update, false, cx);
+            });
+        }
+    }
+
+    pub(crate) fn update_all_agents(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .agent_updates(cx)
+            .into_iter()
+            .filter(|u| !u.updating)
+            .map(|u| u.id)
+            .collect();
+        for id in ids {
+            self.update_agent(&id, cx);
+        }
     }
 
     /// Shows one page of Settings.
@@ -811,11 +1012,13 @@ impl RootView {
                     .update(cx, |store, cx| store.look_at(Some(id), cx));
                 self.screen = Screen::Run(run);
                 self.focus_composer(window, cx);
+                self.record(cx);
                 cx.notify();
             }
             Some(Screen::Project(project)) => {
                 self.screen = Screen::Project(project);
                 self.focus_composer(window, cx);
+                self.record(cx);
                 cx.notify();
             }
             Some(Screen::Runs) => self.navigate(Nav::Runs, window, cx),
@@ -842,8 +1045,10 @@ impl RootView {
             cx.subscribe_in(&steer, window, Self::on_open_executors),
         ];
         self.leave_home(cx);
+        self.close_menus(cx);
         self.screen = Screen::Run(screen);
         self.focus_composer(window, cx);
+        self.record(cx);
         cx.notify();
     }
 
@@ -890,8 +1095,10 @@ impl RootView {
         let store = self.store.clone();
         let screen = cx.new(|cx| crate::screens::project::ProjectScreen::new(store, key, cx));
         self.leave_home(cx);
+        self.close_menus(cx);
         self.screen = Screen::Project(screen);
         self.focus_composer(window, cx);
+        self.record(cx);
         cx.notify();
     }
 
@@ -977,15 +1184,18 @@ impl RootView {
                 this.update(cx, |root, cx| root.navigate(nav, window, cx));
             })
         };
-        let hide = {
-            let this = this.clone();
-            Rc::new(move |_: &mut Window, cx: &mut App| {
-                this.update(cx, |root, cx| root.toggle_sidebar(cx));
-            })
-        };
         SidebarHandlers {
             navigate,
-            hide,
+            new_thread: {
+                let this = this.clone();
+                Rc::new(
+                    move |key: crate::vm::projects::FolderKey,
+                          window: &mut Window,
+                          cx: &mut App| {
+                        this.update(cx, |root, cx| root.new_thread(Some(key), window, cx));
+                    },
+                )
+            },
             recent_run: {
                 let this = this.clone();
                 Rc::new(move |run: RunId, window: &mut Window, cx: &mut App| {
@@ -1012,25 +1222,6 @@ impl RootView {
             },
         }
     }
-
-    fn titlebar_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // Shown only while the sidebar is hidden: a band for the traffic lights and the toggle.
-        let this = cx.entity();
-        div()
-            .h(px(sidebar::TITLEBAR))
-            .flex_none()
-            .flex()
-            .items_center()
-            .pl(px(sidebar::MARK_INSET))
-            .window_control_area(WindowControlArea::Drag)
-            .child(
-                kit::icon_button(theme, "show-sidebar", Icon::Sidebar, 28.0).on_click(
-                    move |_, _, cx| {
-                        this.update(cx, |root, cx| root.toggle_sidebar(cx));
-                    },
-                ),
-            )
-    }
 }
 
 impl Focusable for RootView {
@@ -1047,11 +1238,10 @@ impl Render for RootView {
         // What the run screen's panel needs to fit itself on its first frame: the sidebar and
         // the insets around the canvas.
         cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
-            16.0
+            2.0 * GUTTER
         } else {
-            sidebar::WIDTH + 8.0
+            sidebar::WIDTH + GUTTER
         }));
-        let on_run = matches!(self.screen, Screen::Run(_));
         let in_settings = matches!(self.screen, Screen::Settings);
         let (needing, connection) = {
             let store = self.store.read(cx);
@@ -1069,28 +1259,27 @@ impl Render for RootView {
             let this = cx.entity();
             let actions = NavActions {
                 back: {
-                    let this = this.clone();
                     Rc::new(move |window: &mut Window, cx: &mut App| {
                         this.update(cx, |root, cx| root.leave_settings(window, cx));
                     })
                 },
-                hide: Rc::new(move |_: &mut Window, cx: &mut App| {
-                    this.update(cx, |root, cx| root.toggle_sidebar(cx));
-                }),
             };
             self.settings.update(cx, |screen, cx| {
                 screen.nav_column(&theme, needing, connection, &actions, cx)
             })
         });
 
+        let on_run = matches!(self.screen, Screen::Run(_));
         let panel = div()
             .id("canvas-panel")
+            .debug_selector(|| "canvas-panel".to_owned())
             .flex_1()
             .min_h_0()
-            .mb(px(8.0))
-            .mr(px(8.0))
-            .when(self.sidebar_hidden, |p| p.ml(px(8.0)))
-            .when(!self.sidebar_hidden, |p| p.mt(px(8.0)))
+            // One gutter under the bar's controls, as between and around the canvases.
+            .mt(px(shell::canvas_top_margin()))
+            .mb(px(GUTTER))
+            .mr(px(GUTTER))
+            .when(self.sidebar_hidden, |p| p.ml(px(GUTTER)))
             // A run draws its own two canvases; every other screen sits on this one.
             .when(!on_run, |p| {
                 p.rounded(px(14.0))
@@ -1114,10 +1303,49 @@ impl Render for RootView {
             .h_full()
             .flex()
             .flex_col()
-            .when(self.sidebar_hidden, |m| {
-                m.child(self.titlebar_toggle(&theme, cx))
-            })
             .child(panel);
+
+        let bar_state = {
+            let place = self.place(cx);
+            let store = self.store.read(cx);
+            let chip = match &place {
+                Some(place) => shell::chip(place, store.state(), |dir| store.root_of(dir)),
+                None => Chip {
+                    initial: "S".to_owned(),
+                    title: "Settings".to_owned(),
+                },
+            };
+            let current = self.agent_updates(cx);
+            let remembered = if self.updates_open {
+                self.updates_shown.as_slice()
+            } else {
+                &[]
+            };
+            (
+                chip,
+                shell::live_runs(store.state()).len(),
+                executors::island_rows(&current, remembered),
+            )
+        };
+        let (chip, live, updates) = bar_state;
+        let bar = Bar {
+            theme: &theme,
+            chip,
+            chip_opens_project: on_run,
+            can_back: self.history.can_back() && !in_settings,
+            can_forward: self.history.can_forward() && !in_settings,
+            live,
+            connection,
+            updates: &updates,
+            updates_open: self.updates_open,
+            more_open: self.more_open,
+            on_run,
+            more_at: self.more_at.clone(),
+            updates_at: self.updates_at.clone(),
+        };
+        let this = cx.entity();
+        let status_bar = bar::status_bar(&this, &bar);
+        let popovers = bar::popovers(&this, &bar);
 
         div()
             .id("root")
@@ -1154,26 +1382,35 @@ impl Render for RootView {
             .relative()
             .size_full()
             .flex()
-            .flex_row()
+            .flex_col()
             .bg(theme.shell)
             .text_color(theme.text)
             .font_family(SANS)
             .text_size(px(13.5))
-            .when(!self.sidebar_hidden, |root| {
-                if let Some(nav) = settings_nav {
-                    root.child(nav)
-                } else {
-                    root.child(sidebar::sidebar(
-                        &theme,
-                        self.store.read(cx),
-                        self.nav(),
-                        needing,
-                        &self.folders_toggled,
-                        &handlers,
-                    ))
-                }
-            })
-            .child(main)
+            .child(status_bar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .when(!self.sidebar_hidden, |body| {
+                        if let Some(nav) = settings_nav {
+                            body.child(nav)
+                        } else {
+                            body.child(sidebar::sidebar(
+                                &theme,
+                                self.store.read(cx),
+                                self.nav(),
+                                needing,
+                                &self.folders_toggled,
+                                &handlers,
+                            ))
+                        }
+                    })
+                    .child(main),
+            )
+            .children(popovers)
             .children(self.palette.clone())
             .child(self.toasts.clone())
     }

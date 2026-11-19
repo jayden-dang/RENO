@@ -288,14 +288,15 @@ struct CountBadge {
 const BADGE_PAD: f32 = 3.0;
 
 impl RenderOnce for CountBadge {
-    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let font_size = px(9.0);
+        let ink = super::theme::current(cx).on_fill(self.tone);
         let line = shape_count(
             window,
             self.count,
             &self.family,
             gpui::FontWeight::SEMIBOLD,
-            gpui::white(),
+            ink,
             font_size,
         );
         let capped = is_capped(self.count);

@@ -1,24 +1,29 @@
-//! Runs: the live window from `runs.watch` plus older pages from `run.list`, narrowed by a
-//! status filter. Choosing a row opens the run's transcript.
+//! All runs: one lane per live run, opened from the bar's "N live" and from ⌘K (app-shell brief,
+//! "Side panel and All runs"). A lane has a status stripe at its edge, the executor, the title, a
+//! live one-line tail, an "asks" badge when the run waits for you, and its state and age, which
+//! never wrap. Choosing a lane opens the run.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, Role, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
 
 use super::ScreenEvent;
 use crate::store::Store;
-use crate::summary;
-use crate::ui::kit::{self, Tone};
+use crate::ui::kit::{self, MONO};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
-use crate::vm::runs::{self, More, RunFilter, RunRow, RunsView};
+use crate::vm::lanes::{self, Lane};
+
+/// The lane's fixed columns: the title, the state in words and the age.
+const TITLE_W: f32 = 230.0;
+const STATUS_W: f32 = 96.0;
+const TIME_W: f32 = 44.0;
 
 pub(crate) struct RunsScreen {
     store: Entity<Store>,
-    filter: RunFilter,
     _store: Subscription,
 }
 
@@ -29,139 +34,111 @@ impl RunsScreen {
         Self {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
-            filter: RunFilter::All,
         }
     }
 
-    /// Called when the screen is shown: reads the first page of the current filter.
-    pub(crate) fn shown(&self, cx: &mut Context<Self>) {
-        self.load_more(cx);
-    }
+    /// Called when the screen is shown.
+    pub(crate) fn shown(&self, _cx: &mut Context<Self>) {}
 
-    pub(crate) fn set_filter(&mut self, filter: RunFilter, cx: &mut Context<Self>) {
-        self.filter = filter;
-        cx.notify();
-        self.load_more(cx);
-    }
-
-    /// Reads the next page (the first, when none was read) for the current filter.
-    pub(crate) fn load_more(&self, cx: &mut Context<Self>) {
-        let statuses = self.filter.statuses();
-        self.store
-            .update(cx, |store, cx| store.load_runs_page(statuses, cx));
-    }
-
-    pub(crate) fn view(&self, cx: &gpui::App) -> RunsView {
+    #[cfg(test)]
+    pub(crate) fn lanes(&self, cx: &gpui::App) -> Vec<Lane> {
         let store = self.store.read(cx);
-        runs::build(
-            store.state(),
-            self.filter,
-            store.is_paging(self.filter.statuses()),
-            store.now_ms(),
-        )
+        lanes::lanes(store.state(), store.now_ms())
     }
 
-    fn chips(&self, view: &RunsView, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn lane(lane: &Lane, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let run = lane.run.clone();
+        let stripe = kit::run_color(theme, lane.status, None);
+        let hover = theme.raised.opacity(0.4);
+        let spoken = match lane.asks {
+            Some(asks) => format!("{}, {}", lane.title, asks.label()),
+            None => format!("{}, {}", lane.title, lane.status_label),
+        };
         div()
-            .flex()
-            .flex_wrap()
-            .gap(px(8.0))
-            .children(view.counts.iter().map(|(filter, n)| {
-                let filter = *filter;
-                let on = filter == view.filter;
-                kit::chip(theme, format!("{} {n}", filter.label()))
-                    .id(SharedString::from(format!("filter-{}", filter.label())))
-                    .debug_selector(move || format!("filter-{}", filter.label()))
-                    .cursor_pointer()
-                    .when(on, |c| c.bg(theme.raised).font_weight(FontWeight::MEDIUM))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
-            }))
-            .into_any_element()
-    }
-
-    fn row(row: &RunRow, last: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let run = row.run.clone();
-        let open = cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone())));
-        let sub = [row.repo.clone(), Some(row.run.to_string())]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ");
-        page::table_row(theme, last)
-            .id(SharedString::from(format!("run-row-{}", row.run)))
+            .id(SharedString::from(format!("lane-{}", lane.run)))
             .debug_selector({
-                let id = format!("run-row-{}", row.run);
+                let id = format!("lane-{}", lane.run);
                 move || id.clone()
             })
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(36.0))
+            .pr(px(12.0))
+            .rounded(px(7.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.hairline)
+            .overflow_hidden()
             .cursor_pointer()
-            .hover({
-                let hover = theme.raised.opacity(0.4);
-                move |s| s.bg(hover)
-            })
-            .on_click(open)
+            .role(Role::Button)
+            .aria_label(SharedString::from(spoken))
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(kit::focus_ring(theme))
+            .hover(move |s| s.bg(hover))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone()))))
             .child(
                 div()
-                    .map(|d| page::cell(d, None))
+                    .id(SharedString::from(format!("lane-stripe-{}", lane.run)))
+                    .debug_selector({
+                        let id = format!("lane-stripe-{}", lane.run);
+                        move || id.clone()
+                    })
+                    .w(px(3.0))
+                    .h_full()
+                    .flex_none()
+                    .bg(stripe),
+            )
+            .child(kit::exec_glyph(theme, &lane.executor, 14.0))
+            .child(
+                div()
+                    .w(px(TITLE_W))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(lane.title.clone()),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("lane-tail-{}", lane.run)))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .whitespace_nowrap()
+                    .font_family(MONO)
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .child(lane.tail.clone().unwrap_or_default()),
+            )
+            .children(lane.asks.map(|asks| {
+                let tone = match asks {
+                    crate::vm::projects::Badge::NeedsInput => theme.warning,
+                    crate::vm::projects::Badge::NeedsApproval => theme.success,
+                };
+                kit::tag(tone, asks.label()).whitespace_nowrap()
+            }))
+            .child(
+                div()
+                    .w(px(STATUS_W))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(12.5))
+                    .text_color(kit::run_color(theme, lane.status, None))
+                    .child(lane.status_label),
+            )
+            .child(
+                div()
+                    .w(px(TIME_W))
+                    .flex_none()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(row.what.clone()),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(11.5))
-                            .text_color(theme.faint)
-                            .child(sub),
-                    ),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(110.0)))
-                    .truncate()
-                    .text_color(theme.muted)
-                    .child(row.bot.clone().unwrap_or_default()),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(130.0)))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .overflow_hidden()
-                    .child(kit::exec_glyph(theme, &row.executor, 14.0))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(summary::executor_name(&row.executor).to_owned()),
-                    ),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(120.0)))
-                    .child(kit::status_pill_worded(
-                        kit::run_color(theme, row.status, row.problem),
-                        row.status_label,
-                    )),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(90.0)))
-                    .truncate()
-                    .text_color(theme.muted)
-                    .child(row.started.clone()),
-            )
-            .child(
-                div()
-                    .map(|d| page::cell(d, Some(70.0)))
-                    .truncate()
-                    .text_color(theme.muted)
-                    .child(row.took.clone()),
+                    .justify_end()
+                    .whitespace_nowrap()
+                    .font_family(MONO)
+                    .text_size(px(12.0))
+                    .text_color(theme.faint)
+                    .child(lane.time.clone()),
             )
             .into_any_element()
     }
@@ -170,79 +147,60 @@ impl RunsScreen {
 impl Render for RunsScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
-        let view = self.view(cx);
+        let (banner, lanes) = {
+            let store = self.store.read(cx);
+            (
+                crate::vm::banner(store.state()),
+                lanes::lanes(store.state(), store.now_ms()),
+            )
+        };
         let retry: page::Action = {
             let store = self.store.clone();
             Rc::new(move |_, cx| store.update(cx, |s, _| s.retry_now()))
         };
-        let detail = view.detail.clone();
-
-        let rows = view.rows.rows();
-        let table_rows: Vec<AnyElement> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| Self::row(r, i + 1 == rows.len(), &theme, cx))
-            .collect();
-        let empty = match view.filter {
-            RunFilter::All => "No runs yet. Start one from Home.",
-            _ => "No runs match this filter.",
+        let detail = match lanes.len() {
+            0 => "Nothing is running.".to_owned(),
+            1 => "1 live".to_owned(),
+            n => format!("{n} live"),
         };
-
-        let more = match view.more {
-            More::None if !rows.is_empty() => Some(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme.faint)
-                    .child("That is every run.")
-                    .into_any_element(),
-            ),
-            More::Available => Some(
-                kit::pill_button(&theme, "load-older", "Load older runs", Tone::Quiet)
-                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx)))
-                    .into_any_element(),
-            ),
-            More::Loading => Some(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(theme.muted)
-                    .child("Loading older runs…")
-                    .into_any_element(),
-            ),
-            More::None | More::Offline => None,
+        let asking = lanes.iter().filter(|l| l.asks.is_some()).count();
+        let detail = if asking > 0 {
+            format!("{detail}, {asking} waiting for you")
+        } else {
+            detail
         };
+        let empty = lanes.is_empty() && banner.is_none();
 
         let body = page::content(page::WIDE)
-            .when_some(view.banner.as_ref(), |c, b| {
+            .when_some(banner.as_ref(), |c, b| {
                 c.child(page::banner(&theme, b, Some(retry)))
             })
-            .child(page::lede(&theme, "Runs", detail))
-            .child(self.chips(&view, &theme, cx))
-            .when_some(page::note(&theme, &view.rows, empty), ParentElement::child)
-            .when(!table_rows.is_empty(), |c| {
+            .child(page::lede(&theme, "All runs", detail))
+            .when(empty, |c| {
                 c.child(
-                    page::table_frame(&theme, page::table())
-                        .child(page::table_head(
-                            &theme,
-                            &[
-                                ("Run", None),
-                                ("Bot", Some(110.0)),
-                                ("Executor", Some(130.0)),
-                                ("State", Some(120.0)),
-                                ("Started", Some(90.0)),
-                                ("Took", Some(70.0)),
-                            ],
-                        ))
-                        .children(table_rows),
+                    div()
+                        .id("no-live-runs")
+                        .debug_selector(|| "no-live-runs".to_owned())
+                        .text_size(px(13.0))
+                        .text_color(theme.faint)
+                        .child("No live runs. Start a task from the sidebar."),
                 )
             })
-            .when_some(more, ParentElement::child);
+            .child(
+                div()
+                    .id("lanes")
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .children(lanes.iter().map(|l| Self::lane(l, &theme, cx))),
+            );
 
         div()
             .id("runs")
             .size_full()
             .flex()
             .flex_col()
-            .child(page::header(&theme, "Runs", div()))
+            .child(page::header(&theme, "All runs", div()))
             .child(page::column("runs-scroll").child(body))
     }
 }

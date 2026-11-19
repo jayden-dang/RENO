@@ -25,8 +25,6 @@ pub(crate) enum Cmd {
     Close(Surface),
     /// `+`: a New tab showing the home.
     NewTab,
-    /// The hide button.
-    Hide,
     /// A drag dropped the tab at `from` onto the one at `to`.
     Reorder {
         from: usize,
@@ -141,11 +139,6 @@ pub(crate) fn tab_strip(
         kit::icon_button(theme, "panel-new-tab", Icon::Plus, 28.0)
             .on_click(move |_, window, cx| emit(Cmd::NewTab, window, cx))
     };
-    let hide = {
-        let emit = emit.clone();
-        kit::icon_button(theme, "panel-hide", Icon::Sidebar, 28.0)
-            .on_click(move |_, window, cx| emit(Cmd::Hide, window, cx))
-    };
     div()
         .id("panel-tabs")
         .debug_selector(|| "panel-tabs".to_owned())
@@ -168,7 +161,6 @@ pub(crate) fn tab_strip(
         )
         .child(new_tab)
         .child(div().flex_1())
-        .child(hide)
 }
 
 fn tab(

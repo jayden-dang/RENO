@@ -7,9 +7,9 @@ use std::rc::Rc;
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use reno_client::fake::{FakeConfig, FakeDaemon};
-use reno_client::{ConnectionStatus, Feed, FeedState, RunPage};
+use reno_client::{ConnectionStatus, Feed, FeedState};
 use reno_proto::defs::{DefError, DefsSnapshot};
-use reno_proto::{ErrorCode, ErrorObject, RunStatus};
+use reno_proto::{ErrorCode, ErrorObject};
 
 use crate::app::RootView;
 use crate::nav::Nav;
@@ -17,7 +17,6 @@ use crate::store::Store;
 use crate::tests::{click, draw, fake_store, painted, wait_drawn, wait_until, window};
 use crate::ui::theme::Appearance;
 use crate::vm::executors::Group;
-use crate::vm::runs::RunFilter;
 use crate::vm::settings_nav::Category;
 use crate::vm::{Section, settings, triggers};
 
@@ -57,38 +56,35 @@ fn connected(cx: &mut TestAppContext, store: &Entity<Store>) {
 }
 
 #[gpui::test]
-fn runs_filter_page_and_open(cx: &mut TestAppContext) {
+fn all_runs_has_a_lane_per_live_run_and_a_lane_opens_its_run(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     go(vcx, &root, Nav::Runs);
-    wait_drawn(vcx, |vcx| painted(vcx, "run-row-run_keeper1"));
-    let view = root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx));
-    assert_eq!(view.rows.rows().len(), 6);
+    wait_drawn(vcx, |vcx| painted(vcx, "lane-run_keeper1"));
+    let lanes = root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx));
+    let live = store.read_with(vcx, |s, _| crate::vm::shell::live_runs(s.state()).len());
+    assert_eq!(lanes.len(), live, "one lane per live run");
+    assert!(lanes.len() >= 3, "the demo has a running run and two held");
+    // A held run's lane has its stripe and says what it waits for.
+    let held = lanes
+        .iter()
+        .find(|l| l.run.to_string() == "run_keeper1")
+        .unwrap();
+    assert_eq!(held.status_label, "held for you");
+    assert!(held.asks.is_some());
+    assert!(painted(vcx, "lane-stripe-run_keeper1"));
+    // Finished runs are not lanes.
+    assert!(lanes.iter().all(|l| !l.status.is_terminal()));
 
-    // The first page for All was read when the screen opened; the daemon has no more.
-    wait_drawn(vcx, |vcx| {
-        store.read_with(vcx, |s, _| s.state().run_page(&[]) == RunPage::Done)
-    });
-
-    click(vcx, "filter-Failed");
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx));
-        v.filter == RunFilter::Failed && v.rows.rows().len() == 1
-    });
-    assert!(!painted(vcx, "run-row-run_keeper1"));
-    click(vcx, "filter-Held");
-    wait_drawn(vcx, |vcx| painted(vcx, "run-row-run_keeper1"));
-
-    click(vcx, "run-row-run_keeper1");
+    click(vcx, "lane-run_keeper1");
     wait_drawn(vcx, |vcx| {
         root.read_with(vcx, |r, _| r.run_screen().is_some())
     });
-    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
 }
 
 #[gpui::test]
-fn runs_empty_and_live(cx: &mut TestAppContext) {
+fn all_runs_says_when_nothing_is_live(cx: &mut TestAppContext) {
     let store = store_with(
         cx,
         FakeConfig {
@@ -99,21 +95,11 @@ fn runs_empty_and_live(cx: &mut TestAppContext) {
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     go(vcx, &root, Nav::Runs);
-    wait_drawn(vcx, |vcx| {
-        root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx)).rows == Section::Empty
-    });
-    store.update(vcx, |s, cx| s.run_task("hello".into(), "claude-code", cx));
-    wait_drawn(vcx, |vcx| {
-        root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx))
-            .rows
-            .rows()
-            .len()
-            == 1
-    });
-    wait_drawn(vcx, |vcx| {
-        let v = root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx));
-        v.rows.rows()[0].status == RunStatus::Succeeded
-    });
+    wait_drawn(vcx, |vcx| painted(vcx, "no-live-runs"));
+    assert!(
+        root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx))
+            .is_empty()
+    );
 }
 
 #[gpui::test]
@@ -213,7 +199,7 @@ fn the_settings_row_opens_settings_in_the_sidebars_place_and_back_returns(cx: &m
     let store = fake_store(cx);
     executors_live(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
-    click(vcx, "nav-Runs");
+    go(vcx, &root, Nav::Runs);
     assert!(painted(vcx, "sidebar"));
     // Executors and Settings are no longer top rows; Settings is the footer row.
     assert!(!painted(vcx, "nav-Executors"));
@@ -343,7 +329,7 @@ fn settings_opened_again_from_elsewhere_starts_with_an_empty_search(cx: &mut Tes
 fn while_the_daemon_connects_the_gear_is_marked_and_settings_says_why(cx: &mut TestAppContext) {
     let store = cx.new(|_| Store::connecting());
     let (root, vcx) = window(cx, &store, Appearance::Light);
-    click(vcx, "nav-Runs");
+    draw(vcx);
     assert!(painted(vcx, "settings-pip"));
     assert!(
         !painted(vcx, "settings-count"),
@@ -480,25 +466,25 @@ fn the_app_reconnects_after_the_daemon_drops(cx: &mut TestAppContext) {
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     go(vcx, &root, Nav::Runs);
-    let before = store.read_with(vcx, |s, _| s.state().runs().len());
+    wait_drawn(vcx, |vcx| painted(vcx, "lane-run_keeper1"));
+    let before = root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx).len());
 
     daemon(vcx, &store).sever();
     wait_drawn(vcx, |vcx| {
         store.read_with(vcx, |s, _| s.connection() != ConnectionStatus::Connected)
     });
-    let view = root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx));
-    assert!(view.banner.is_some(), "the screen says it is offline");
-    assert_eq!(view.rows.rows().len(), before, "stale rows stay on screen");
+    wait_drawn(vcx, |vcx| painted(vcx, "daemon-banner"));
+    assert_eq!(
+        root.read_with(vcx, |r, cx| r.runs().read(cx).lanes(cx).len()),
+        before,
+        "stale lanes stay on screen"
+    );
 
     // It reconnects by itself, with the backoff, and the banner goes away.
     wait_drawn(vcx, |vcx| {
         store.read_with(vcx, |s, _| s.connection() == ConnectionStatus::Connected)
     });
-    wait_drawn(vcx, |vcx| {
-        root.read_with(vcx, |r, cx| r.runs().read(cx).view(cx))
-            .banner
-            .is_none()
-    });
+    wait_drawn(vcx, |vcx| !painted(vcx, "daemon-banner"));
 }
 
 // --- Executors -------------------------------------------------------------------------------
@@ -2052,12 +2038,4 @@ fn the_registry_failing_says_so_with_retry_and_offline_keeps_the_copy(cx: &mut T
     let checked = registry_of(vcx, &root).unwrap().checked.unwrap();
     assert!(checked.starts_with("offline \u{b7} showing the copy from"));
     assert!(painted(vcx, "registry-agent-goose"), "the copy still lists");
-}
-
-#[gpui::test]
-fn the_sidebar_wears_the_reno_mark(cx: &mut TestAppContext) {
-    let store = fake_store(cx);
-    let (_root, vcx) = window(cx, &store, Appearance::Dark);
-    draw(vcx);
-    assert!(painted(vcx, "reno-mark"));
 }

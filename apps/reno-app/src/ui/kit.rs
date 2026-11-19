@@ -233,7 +233,7 @@ fn pill(
     let selector = id.clone();
     let spoken = label.clone();
     let ink = match tone {
-        Tone::Primary => gpui::white(),
+        Tone::Primary => theme.on_fill(theme.accent),
         Tone::Danger => theme.danger,
         Tone::Quiet => theme.text,
     };
@@ -272,7 +272,7 @@ fn pill(
             .border_1()
             .border_color(gpui::transparent_black())
             .bg(theme.accent)
-            .text_color(gpui::white()),
+            .text_color(theme.on_fill(theme.accent)),
         Tone::Danger => base
             .border_1()
             .border_color(theme.danger.opacity(0.5))
@@ -359,7 +359,7 @@ pub(crate) fn checkbox(
                 .border_color(if checked { theme.accent } else { theme.faint })
                 .when(checked, |d| d.bg(theme.accent))
                 .when(checked, |d| {
-                    d.child(icon(Icon::PhCheck, 11.0, gpui::white()))
+                    d.child(icon(Icon::PhCheck, 11.0, theme.on_fill(theme.accent)))
                 }),
         )
         .child(label.into())

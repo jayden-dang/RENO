@@ -351,7 +351,7 @@ fn the_sidebar_lists_a_thread_once_and_a_click_opens_its_latest_run(cx: &mut Tes
         "the first run is not a row of its own"
     );
     // Leave the thread, then come back through its row.
-    click(vcx, "nav-Home");
+    click(vcx, "new-task");
     draw(vcx);
     click(vcx, &format!("recent-{second}"));
     wait_drawn(vcx, |vcx| {

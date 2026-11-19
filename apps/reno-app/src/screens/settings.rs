@@ -43,10 +43,9 @@ const SEARCH: Look = Look {
     width: None,
 };
 
-/// What the navigation column needs from the root: the way back, and hiding it like the sidebar.
+/// What the navigation column needs from the root: the way back.
 pub(crate) struct NavActions {
     pub(crate) back: page::Action,
-    pub(crate) hide: page::Action,
 }
 
 pub(crate) struct SettingsScreen {
@@ -176,20 +175,8 @@ impl SettingsScreen {
         actions: &NavActions,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hide = Rc::clone(&actions.hide);
         let back = Rc::clone(&actions.back);
         let hover = theme.row_selected();
-        let top = div()
-            .h(px(sidebar::TITLEBAR))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_end()
-            .pr(px(10.0))
-            .child(
-                kit::icon_button(theme, "hide-sidebar", Icon::Sidebar, 28.0)
-                    .on_click(move |_, window, cx| hide(window, cx)),
-            );
         let back_row = div()
             .id("settings-back")
             .debug_selector(|| "settings-back".to_owned())
@@ -261,7 +248,6 @@ impl SettingsScreen {
             .flex()
             .flex_col()
             .bg(theme.shell)
-            .child(top)
             .child(
                 div()
                     .id("settings-nav-scroll")
