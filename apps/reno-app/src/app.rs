@@ -66,6 +66,8 @@ pub(crate) struct Options {
     pub(crate) open_run: Option<RunId>,
     /// `RENO_OPEN=project:<root>`: open on that project's page (screenshots, reviews).
     pub(crate) open_project: Option<PathBuf>,
+    /// `RENO_OPEN=newthread:<root>`: open on the new-thread state for that project (screenshots).
+    pub(crate) open_new_thread: Option<PathBuf>,
     /// `RENO_SPLIT=1`: draw diffs side by side from the start (screenshots, reviews).
     pub(crate) split: bool,
     /// `RENO_PANEL=home|session|review|history|commit:<sha>|file:<path>`: with `RENO_OPEN=run_<id>`, put that tab of the side
@@ -154,6 +156,10 @@ impl Options {
                 options.open_project = Some(PathBuf::from(&other["project:".len()..]));
                 None
             }
+            Some(other) if other.starts_with("newthread:") => {
+                options.open_new_thread = Some(PathBuf::from(&other["newthread:".len()..]));
+                None
+            }
             Some(other) if other.starts_with("run_") => {
                 options.open_run = Some(
                     other
@@ -219,6 +225,7 @@ pub(crate) struct Start {
     pub(crate) open: Option<Nav>,
     pub(crate) open_run: Option<RunId>,
     pub(crate) open_project: Option<PathBuf>,
+    pub(crate) open_new_thread: Option<PathBuf>,
     /// A panel tab to put in front once `open_run` is open.
     pub(crate) panel: Option<Surface>,
     /// A file to open in the Files tab, as `path` or `path:line`, and a search to type there.
@@ -288,6 +295,7 @@ pub(crate) fn run(options: Options) {
             open: options.open,
             open_run: options.open_run.clone(),
             open_project: options.open_project.clone(),
+            open_new_thread: options.open_new_thread.clone(),
             panel: options.panel.clone(),
             files_open: options.files_open.clone(),
             files_search: options.files_search.clone(),
@@ -336,6 +344,7 @@ pub(crate) fn open_window(
         open,
         open_run,
         open_project,
+        open_new_thread,
         panel,
         files_open,
         files_search,
@@ -378,6 +387,22 @@ pub(crate) fn open_window(
                             root.open_settings(Category::Registry, window, cx);
                             root.executors
                                 .update(cx, |screen, cx| screen.registry_demo(&script, cx));
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                if let Some(dir) = open_new_thread {
+                    cx.spawn_in(window, async move |view, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        view.update_in(cx, |view, window, cx| {
+                            view.new_thread(
+                                Some(crate::vm::projects::FolderKey::Repo(dir)),
+                                window,
+                                cx,
+                            );
                         })
                         .ok();
                     })
@@ -1520,6 +1545,7 @@ mod tests {
                 open: Some(Nav::Executors),
                 open_run: None,
                 open_project: None,
+                open_new_thread: None,
                 panel: None,
                 files_open: None,
                 files_search: None,
@@ -1531,6 +1557,11 @@ mod tests {
                 open_settings: None,
                 data_dir: None,
             })
+        );
+        let thread = parse(&[], &[("RENO_OPEN", "newthread:/work/atlas-api")]).unwrap();
+        assert_eq!(
+            thread.open_new_thread,
+            Some(PathBuf::from("/work/atlas-api"))
         );
         let policy = parse(&[], &[("RENO_OPEN", "settings:policy")]).unwrap();
         assert_eq!(policy.open, Some(Nav::Settings));

@@ -189,6 +189,38 @@ impl RunScreen {
         cx.notify();
     }
 
+    /// `RENO_DEMO_MENU=question-*`: puts the panel in a state for a screenshot.
+    pub(crate) fn demo_question(
+        &mut self,
+        menu: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match menu {
+            "question-readonly" => {
+                let real = crate::vm::capabilities::Capabilities::REAL;
+                self.store.update(cx, |s, cx| s.set_capabilities(real, cx));
+            }
+            "question-typed" => {
+                if let Some(input) = self.question.as_ref().map(|q| q.input.clone()) {
+                    input.update(cx, |c, cx| c.fill("yaml please", window, cx));
+                    self.send_question(cx);
+                }
+            }
+            "question-answer" => self.pick_question(0, cx),
+            "question-page2" => {
+                self.pick_question(0, cx);
+                if let Some(q) = self.question.as_mut() {
+                    q.draft.next(&q.model);
+                    q.draft.pick(&q.model, 0);
+                    q.draft.pick(&q.model, 2);
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
     /// ⌘J with a question waiting: reopens it if it was closed and gives it the keyboard.
     pub(super) fn jump_to_question(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(q) = self.question.as_mut() else {

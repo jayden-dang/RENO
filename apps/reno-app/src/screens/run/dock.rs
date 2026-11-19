@@ -119,6 +119,8 @@ impl RunScreen {
             if let Some(id) = self.panel_for.clone() {
                 self.start_note(id, window, cx);
             }
+        } else if menu.starts_with("question-") {
+            self.demo_question(menu, window, cx);
         } else if menu == "approval-more" {
             self.menu_open = self.panel_for.clone();
             cx.notify();

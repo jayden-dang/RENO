@@ -458,7 +458,7 @@ impl Store {
         self.capabilities
     }
 
-    #[cfg(test)]
+    /// Tests and `RENO_DEMO_MENU=question-readonly` look at the app as a real daemon shows it.
     pub(crate) fn set_capabilities(&mut self, capabilities: Capabilities, cx: &mut Context<Self>) {
         self.capabilities = capabilities;
         cx.notify();
