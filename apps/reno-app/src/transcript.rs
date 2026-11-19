@@ -55,6 +55,11 @@ impl Key {
         }
     }
 
+    /// The key of the fold that holds the rows from `first` on: `first` with a bit no seq reaches.
+    pub(crate) fn fold(first: Self) -> Self {
+        Self(first.0 | (1 << 39))
+    }
+
     /// The key of a divider before the `segment`th run.
     pub(crate) fn divider(segment: usize) -> Self {
         Self((u64::try_from(segment).unwrap_or(0) << 40) | 0xff_ffff_ffff)
@@ -102,7 +107,13 @@ pub(crate) struct ToolEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
     /// A user bubble, right-aligned. `steer` marks a message sent mid-run.
-    User { key: Key, text: String, steer: bool },
+    User {
+        key: Key,
+        text: String,
+        steer: bool,
+        /// When it was sent, where the client knows (the prompt: the run's start).
+        at_ms: Option<u64>,
+    },
     /// Assistant prose, rendered as streaming markdown.
     Prose { key: Key, text: String },
     /// Reasoning, collapsed by default.
@@ -131,6 +142,13 @@ pub(crate) enum Row {
         executor: ExecutorId,
         model: Option<String>,
         at_ms: u64,
+    },
+    /// A finished turn's interim text and steps, folded behind "Worked for Ns ›". `secs` is the
+    /// turn's real elapsed time where the client has it.
+    Worked {
+        key: Key,
+        secs: Option<u64>,
+        rows: Vec<Row>,
     },
     /// The final status line.
     Done {
@@ -199,6 +217,7 @@ impl Row {
             | Self::Routing { key, .. }
             | Self::ModelChanged { key, .. }
             | Self::Divider { key, .. }
+            | Self::Worked { key, .. }
             | Self::Done { key, .. } => *key,
         }
     }
@@ -219,8 +238,15 @@ impl Row {
         | Self::Routing { key, .. }
         | Self::ModelChanged { key, .. }
         | Self::Divider { key, .. }
+        | Self::Worked { key, .. }
         | Self::Done { key, .. }) = &mut self;
         *key = key.in_segment(segment);
+        if let Self::Worked { rows, .. } = &mut self {
+            *rows = std::mem::take(rows)
+                .into_iter()
+                .map(|row| row.in_segment(segment))
+                .collect();
+        }
         self
     }
 }
@@ -269,6 +295,67 @@ pub(crate) fn with_routing(mut rows: Vec<Row>, routing: Option<RoutingView>) -> 
     rows
 }
 
+/// Folds a finished turn's interim text and steps into [`Row::Worked`]. A turn is finished when
+/// it has its `Done` row; the final message (the prose just before it) stays out, so it reads
+/// bare under the fold. A user message, a question or the routing line ends a stretch, so each
+/// stretch folds on its own; the time (`elapsed_ms`, the run's) goes on the fold only when the
+/// turn has one stretch, since that is the only fold the whole span belongs to.
+pub(crate) fn fold_turns(rows: Vec<Row>, elapsed_ms: Option<u64>) -> Vec<Row> {
+    let foldable = |row: &Row| {
+        matches!(
+            row,
+            Row::Prose { .. }
+                | Row::Reasoning { .. }
+                | Row::Tools { .. }
+                | Row::Asked { .. }
+                | Row::ModelChanged { .. }
+        )
+    };
+    // Which rows go behind a fold: those of a finished turn, bar its final message.
+    let mut folded = vec![false; rows.len()];
+    let mut turn_start = 0;
+    for (done, row) in rows.iter().enumerate() {
+        if !matches!(row, Row::Done { .. }) {
+            continue;
+        }
+        let last = match done.checked_sub(1) {
+            Some(at) if at >= turn_start && matches!(rows[at], Row::Prose { .. }) => at,
+            _ => done,
+        };
+        for at in turn_start..last {
+            folded[at] = foldable(&rows[at]);
+        }
+        turn_start = done + 1;
+    }
+    let stretches = (0..rows.len())
+        .filter(|&at| folded[at] && (at == 0 || !folded[at - 1]))
+        .count();
+    let secs = elapsed_ms
+        .filter(|_| stretches == 1)
+        .map(|ms| ms / 1000);
+    let mut out: Vec<Row> = Vec::with_capacity(rows.len());
+    let mut open: Option<Vec<Row>> = None;
+    let close = |out: &mut Vec<Row>, open: &mut Option<Vec<Row>>| {
+        if let Some(inner) = open.take() {
+            out.push(Row::Worked {
+                key: Key::fold(inner[0].key()),
+                secs,
+                rows: inner,
+            });
+        }
+    };
+    for (at, row) in rows.into_iter().enumerate() {
+        if folded[at] {
+            open.get_or_insert_with(Vec::new).push(row);
+        } else {
+            close(&mut out, &mut open);
+            out.push(row);
+        }
+    }
+    close(&mut out, &mut open);
+    out
+}
+
 /// The result of [`build_rows`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Built {
@@ -308,6 +395,7 @@ pub(crate) fn build_rows(
             key: Key::PROMPT,
             text: text.to_owned(),
             steer: false,
+            at_ms: None,
         });
     }
     let mut used = vec![false; pending.len()];
@@ -426,6 +514,7 @@ pub(crate) fn build_rows(
                 key,
                 text: text.clone(),
                 steer: true,
+                at_ms: None,
             }),
             ExecEvent::AgentReport {
                 status, summary, ..
@@ -1385,6 +1474,7 @@ mod tests {
                 Row::Routing { .. } => "routing",
                 Row::ModelChanged { .. } => "model",
                 Row::Divider { .. } => "divider",
+                Row::Worked { .. } => "worked",
                 Row::Done { .. } => "done",
             })
             .collect();
@@ -1408,6 +1498,138 @@ mod tests {
                 output: 2
             })
         );
+    }
+
+    fn fold_kinds(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r {
+                Row::User { .. } => "user".to_owned(),
+                Row::Prose { .. } => "prose".to_owned(),
+                Row::Reasoning { .. } => "reasoning".to_owned(),
+                Row::Tools { .. } => "tools".to_owned(),
+                Row::Question { .. } => "question".to_owned(),
+                Row::Done { .. } => "done".to_owned(),
+                Row::Worked { rows, secs, .. } => {
+                    format!("worked[{}]{secs:?}", fold_kinds(rows).join(","))
+                }
+                _ => "other".to_owned(),
+            })
+            .collect()
+    }
+
+    fn finish() -> ExecEvent {
+        ExecEvent::Done {
+            stop: StopReason::Completed,
+            result: None,
+            diagnostic: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_folds_its_interim_steps_and_leaves_the_final_message() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![
+                text("Let me look."),
+                bash("t1", "ls"),
+                result("t1", true, "ok"),
+                text("All done."),
+                finish(),
+            ]),
+            &[],
+        );
+        let rows = fold_turns(built.rows, Some(12_500));
+        assert_eq!(
+            fold_kinds(&rows),
+            ["user", "worked[prose,tools]Some(12)", "prose", "done"]
+        );
+        let Row::Prose { text, .. } = &rows[2] else {
+            panic!("the final message is bare");
+        };
+        assert_eq!(text, "All done.");
+    }
+
+    #[test]
+    fn a_turn_without_its_done_row_is_not_folded() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![text("Let me look."), bash("t1", "ls"), text("More.")]),
+            &[],
+        );
+        assert_eq!(
+            fold_kinds(&fold_turns(built.rows.clone(), Some(1))),
+            fold_kinds(&built.rows)
+        );
+    }
+
+    #[test]
+    fn a_turn_of_one_message_has_nothing_to_fold() {
+        let built = build_rows(Some("hi"), &at(vec![text("Hello."), finish()]), &[]);
+        assert_eq!(
+            fold_kinds(&fold_turns(built.rows, Some(3_000))),
+            ["user", "prose", "done"]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_a_step_folds_all_of_it() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![bash("t1", "ls"), result("t1", true, "ok"), finish()]),
+            &[],
+        );
+        assert_eq!(
+            fold_kinds(&fold_turns(built.rows, None)),
+            ["user", "worked[tools]None", "done"]
+        );
+    }
+
+    #[test]
+    fn a_question_splits_the_turn_into_folds_that_carry_no_time() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![
+                bash("t1", "ls"),
+                asks("q1", vec![pick()]),
+                ExecEvent::InputExpired {
+                    request_id: "q1".into(),
+                },
+                bash("t2", "pwd"),
+                text("Done."),
+                finish(),
+            ]),
+            &[],
+        );
+        assert_eq!(
+            fold_kinds(&fold_turns(built.rows, Some(9_000))),
+            [
+                "user",
+                "worked[tools]None",
+                "question",
+                "worked[tools]None",
+                "prose",
+                "done"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fold_has_its_own_key_and_moves_its_rows_into_the_segment() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![bash("t1", "ls"), text("Done."), finish()]),
+            &[],
+        );
+        let rows = fold_turns(built.rows, None);
+        let Row::Worked { key, rows: inner, .. } = rows[1].clone().in_segment(2) else {
+            panic!("a fold");
+        };
+        assert_ne!(key, inner[0].key());
+        assert_ne!(key, Key::fold(Key(1)), "moved into segment 2");
+        assert_eq!(inner[0].key(), Key(1).in_segment(2));
+        assert_ne!(rows[1].key(), rows[0].key());
+        assert_ne!(Key::fold(Key(5)), Key(5));
     }
 
     fn routing_view() -> RoutingView {

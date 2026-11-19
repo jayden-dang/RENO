@@ -75,6 +75,7 @@ impl RunScreen {
                     .flatten(),
                 )
                 .into_any_element(),
+            Row::Worked { .. } => div().into_any_element(),
             Row::Divider {
                 executor,
                 model,

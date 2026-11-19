@@ -397,6 +397,7 @@ pub(crate) fn kinds(rows: &[Row]) -> Vec<&'static str> {
             Row::ModelChanged { .. } => "model",
             Row::Routing { .. } => "routing",
             Row::Divider { .. } => "divider",
+            Row::Worked { .. } => "worked",
             Row::Done { .. } => "done",
         })
         .collect()
