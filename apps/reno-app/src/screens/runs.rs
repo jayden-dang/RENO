@@ -25,6 +25,8 @@ const TIME_W: f32 = 44.0;
 
 pub(crate) struct RunsScreen {
     store: Entity<Store>,
+    /// Shown at least once (the first page was asked for, or waits for the connection).
+    opened: bool,
     _store: Subscription,
 }
 
@@ -33,13 +35,24 @@ impl EventEmitter<ScreenEvent> for RunsScreen {}
 impl RunsScreen {
     pub(crate) fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         Self {
-            _store: cx.observe(&store, |_, _, cx| cx.notify()),
+            _store: cx.observe(&store, |this, store, cx| {
+                // Opened before the daemon answered: read the first page once it has (only the
+                // first: the next ones are "Show older").
+                let unread = store.read(cx).state().run_page(&finished::STATUSES)
+                    == reno_client::RunPage::NotLoaded;
+                if this.opened && unread {
+                    this.shown(cx);
+                }
+                cx.notify();
+            }),
             store,
+            opened: false,
         }
     }
 
     /// Called when the screen is shown.
-    pub(crate) fn shown(&self, cx: &mut Context<Self>) {
+    pub(crate) fn shown(&mut self, cx: &mut Context<Self>) {
+        self.opened = true;
         self.store
             .update(cx, |store, cx| store.load_finished_page(cx));
     }
