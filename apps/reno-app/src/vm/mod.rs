@@ -4,19 +4,24 @@
 //! screen can be in (loading, empty, offline, failed, live) is a unit test here, and the screens
 //! only draw what these return.
 
+pub(crate) mod approval_panel;
+pub(crate) mod capabilities;
 pub(crate) mod changes;
 pub(crate) mod composer_prefs;
 pub(crate) mod context;
 pub(crate) mod convo;
 pub(crate) mod diff_syntax;
+pub(crate) mod effort_slider;
 pub(crate) mod executors;
 pub(crate) mod files;
 pub(crate) mod finished;
+pub(crate) mod focus_guard;
 pub(crate) mod git_graph;
 pub(crate) mod history;
 pub(crate) mod lanes;
 pub(crate) mod models;
 pub(crate) mod panel_home;
+pub(crate) mod permission;
 pub(crate) mod picker;
 pub(crate) mod project;
 pub(crate) mod projects;

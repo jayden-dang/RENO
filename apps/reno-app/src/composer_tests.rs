@@ -94,7 +94,7 @@ fn choosing_a_class_previews_its_bots_route_and_why_lists_who_was_passed_over(
     );
     assert!(!painted(vcx, "why-panel"));
     // "why?" lives on Auto's row in the picker; it opens the panel and closes the picker.
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "why"));
     click(vcx, "why");
     wait_drawn(vcx, |vcx| painted(vcx, "why-panel"));
@@ -107,7 +107,7 @@ fn choosing_a_class_previews_its_bots_route_and_why_lists_who_was_passed_over(
     let view = crate::vm::routing::view(&d);
     assert_eq!(view.rejected[0].who.name, "Codex");
     assert_eq!(view.rejected[0].reason, "Signed out. Run `codex login`.");
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "why"));
     click(vcx, "why");
     draw(vcx);
@@ -248,6 +248,7 @@ const STEER_TOAST: (&str, &str) = ("Files", "Only a new task takes files. A stee
 
 #[gpui::test]
 fn a_finder_copy_pastes_as_a_chip_on_home_and_a_toast_on_a_steer(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     cx.update(bind_keys);
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
@@ -289,6 +290,7 @@ fn a_finder_copy_pastes_as_a_chip_on_home_and_a_toast_on_a_steer(cx: &mut TestAp
 
 #[gpui::test]
 fn dropping_files_on_a_steer_says_a_steer_is_text(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     cx.update(bind_keys);
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
@@ -427,6 +429,7 @@ fn a_draft_comes_back_when_the_daemon_refuses_the_task(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn a_live_run_has_one_button_that_is_stop_when_empty_and_send_with_text(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -537,6 +540,13 @@ fn the_class_chips_travel_as_bots_the_daemon_has(cx: &mut TestAppContext) {
 
 // --- The harness · model picker (2026-11-17) --------------------------------------------------
 
+/// The chip opens the small effort popover; its "model ›" row opens the full picker.
+fn open_model_picker(vcx: &mut gpui::VisualTestContext) {
+    click(vcx, "model-chip");
+    wait_drawn(vcx, |vcx| painted(vcx, "effort-model"));
+    click(vcx, "effort-model");
+}
+
 fn home_composer(
     vcx: &mut gpui::VisualTestContext,
     root: &gpui::Entity<crate::app::RootView>,
@@ -546,6 +556,7 @@ fn home_composer(
 
 #[gpui::test]
 fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -559,7 +570,7 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
         !painted(vcx, "chip-effort"),
         "Auto has no model, so no effort"
     );
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "pick-harness-auto"));
     assert!(
         painted(vcx, "picker-tab-favourites") && painted(vcx, "picker-tab-auto"),
@@ -616,6 +627,7 @@ fn a_harness_and_model_picked_on_home_go_with_the_task(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -625,7 +637,7 @@ fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "recent-run_keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     assert!(
         !painted(vcx, "picker-tab-codex")
@@ -656,6 +668,7 @@ fn a_live_claude_run_switches_model_from_its_composer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -665,7 +678,7 @@ fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext
     draw(vcx);
     click(vcx, "recent-run_scout1");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     draw(vcx);
     assert!(
         !painted(vcx, "pick-model-gpt-6-astra"),
@@ -675,6 +688,7 @@ fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext
 
 #[gpui::test]
 fn a_live_runs_picker_closes_when_the_run_ends(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     // Dogfood 2026-11-17: the run ended under an open picker, which turned into the next
     // task's picker with its pills shifted, and the click picked another model.
     let store = fake_store(cx);
@@ -686,7 +700,7 @@ fn a_live_runs_picker_closes_when_the_run_ends(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "recent-run_keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "model-picker"));
     let keeper = crate::tests::run_id("keeper1");
     store.update(vcx, |s, cx| s.cancel_run(keeper.clone(), cx));
@@ -710,7 +724,7 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
     });
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
     assert!(
         painted(vcx, "picker-effort") && !painted(vcx, "effort-cell-high"),
@@ -790,6 +804,7 @@ fn an_effort_picked_for_the_model_goes_with_the_task(cx: &mut TestAppContext) {
 fn a_live_runs_effort_is_changed_through_the_daemon_and_an_ended_runs_goes_with_the_next(
     cx: &mut TestAppContext,
 ) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -804,7 +819,7 @@ fn a_live_runs_effort_is_changed_through_the_daemon_and_an_ended_runs_goes_with_
     let composer = screen.read_with(vcx, |s, _| s.steer_input().clone());
     // The demo run reports the alias `opus-5.5`; it resolves to the listed Opus 5.5, so its
     // levels and window show before anything is switched.
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     assert!(painted(vcx, "effort-cell-high"));
     assert!(painted(vcx, "picker-context"));
@@ -837,7 +852,7 @@ fn a_live_runs_effort_is_changed_through_the_daemon_and_an_ended_runs_goes_with_
     });
     draw(vcx);
     assert!(!painted(vcx, "model-picker"), "the run ending closes it");
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "effort-cell-high"));
     click(vcx, "effort-cell-low");
     draw(vcx);
@@ -866,7 +881,7 @@ fn open_picker_on<'a>(
     });
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "picker-tab-claude-code"));
     click(vcx, &format!("picker-tab-{tab}"));
     draw(vcx);
@@ -916,7 +931,7 @@ fn escape_and_a_click_outside_close_the_picker_and_the_text_keeps_its_keyboard(
         home_composer(vcx, &root).read_with(vcx, |c, _| c.text().to_owned()),
         "hi"
     );
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "model-picker"));
     vcx.simulate_click(
         gpui::point(gpui::px(6.0), gpui::px(6.0)),
@@ -1111,6 +1126,7 @@ fn the_account_row_carries_a_usage_ring_for_a_signed_in_harness_and_its_card(
 
 #[gpui::test]
 fn a_live_run_with_a_reported_window_shows_the_context_ring(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -1126,6 +1142,7 @@ fn a_live_run_with_a_reported_window_shows_the_context_ring(cx: &mut TestAppCont
 
 #[gpui::test]
 fn a_live_runs_window_is_changed_through_the_daemon_and_says_when(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -1150,7 +1167,7 @@ fn a_live_runs_window_is_changed_through_the_daemon_and_says_when(cx: &mut TestA
                 == Some("claude-opus-5-5")
         })
     });
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "picker-context"));
     assert!(painted(vcx, "context-applies"));
     click(vcx, "picker-context");
@@ -1192,6 +1209,7 @@ fn grok_lists_its_levels_on_home_and_its_window_is_read_only(cx: &mut TestAppCon
 
 #[gpui::test]
 fn a_live_opus_runs_effort_changes_too(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -1201,7 +1219,7 @@ fn a_live_opus_runs_effort_changes_too(cx: &mut TestAppContext) {
     draw(vcx);
     click(vcx, "recent-run_keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-opus-5-5"));
     click(vcx, "pick-model-claude-opus-5-5");
     let keeper = crate::tests::run_id("keeper1");
@@ -1257,6 +1275,7 @@ fn the_overlay_signal_follows_the_palette_and_the_menus(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn a_composer_dropped_with_its_menu_open_clears_the_signal(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
@@ -1265,7 +1284,7 @@ fn a_composer_dropped_with_its_menu_open_clears_the_signal(cx: &mut TestAppConte
         r.open_run(crate::tests::run_id("keeper1"), window, cx);
     });
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     assert!(overlay_open(vcx));
     root.update_in(vcx, |r, window, cx| {
         r.navigate(crate::nav::Nav::Runs, window, cx);
@@ -1300,6 +1319,7 @@ fn a_home_composer_hidden_by_navigation_releases_the_signal_with_its_menu(cx: &m
 
 #[gpui::test]
 fn the_model_picker_and_the_context_card_raise_the_overlay_signal(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
     wait_until(cx, |cx| {
@@ -1309,7 +1329,7 @@ fn the_model_picker_and_the_context_card_raise_the_overlay_signal(cx: &mut TestA
     draw(vcx);
     click(vcx, "recent-run_keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
-    click(vcx, "model-chip");
+    open_model_picker(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "pick-model-claude-haiku-5-5"));
     assert!(overlay_open(vcx), "the model picker raises it");
     click(vcx, "model-chip");

@@ -106,7 +106,17 @@ impl RunScreen {
                 convo::QuestionView::Answered(pairs) => answered_bubble(theme, &pairs),
                 convo::QuestionView::Closed(line) => closed_line(theme, &line),
             },
-            Row::Approval { key, approval } => self.approval_card(theme, *key, approval, cx),
+            // The question itself is the approval panel's, in the composer's place; here it is
+            // only a line, so the transcript still shows where the run stopped.
+            Row::Approval { approval, .. } => event_line(
+                theme,
+                Icon::Shield,
+                theme.warning,
+                &format!(
+                    "Waiting for your approval \u{b7} {}",
+                    summary::subject_line(&approval.subject)
+                ),
+            ),
             Row::Asked { line, .. } => event_line(theme, Icon::Shield, theme.muted, line),
             Row::ModelChanged { model, .. } => {
                 let name = {
@@ -545,194 +555,6 @@ impl RunScreen {
                         .child(SharedString::from(text.to_owned())),
                 )
             })
-            .into_any_element()
-    }
-
-    /// A held action, answered where the agent asked (ui-brief 2026-11-17): who and what, the
-    /// exact command, why it waits, Approve once ▾ (how far the answer reaches), and a reason
-    /// field with Deny under it.
-    pub(super) fn approval_card(
-        &self,
-        theme: &Theme,
-        key: Key,
-        approval: &Approval,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let store = self.store.read(cx);
-        let state = store.state();
-        let busy = store.is_deciding(&approval.id);
-        let keeps_rules = state.supports(reno_proto::FEATURE_RULES);
-        let summary = state.run(&approval.run_id);
-        let bot = summary.and_then(|r| summary::run_bot(r));
-        let who = bot.unwrap_or("The run").to_owned();
-        let executor = summary.map_or("", |r| r.executor.as_str());
-        let age = summary::age_label(store.now_ms().saturating_sub(approval.requested_at_ms));
-        let command = summary::subject_line(&approval.subject);
-        let word = summary::action_word(&approval.subject);
-        // "Always in porch": only when the daemon keeps project rules and the run is in one.
-        let project = state
-            .supports(reno_proto::FEATURE_PROJECT_RULES)
-            .then(|| summary.and_then(|r| r.cwd.as_deref()))
-            .flatten()
-            .and_then(|cwd| store.root_of(cwd))
-            .and_then(|root| root.file_name().map(|n| n.to_string_lossy().into_owned()));
-        let choices = rules::approve_choices(bot, project.as_deref());
-        let menu_open = self.menu_open.as_ref() == Some(&approval.id);
-
-        let id = approval.id.clone();
-        let approve = {
-            let id = id.clone();
-            cx.listener(move |this, _, _, cx| this.approve(id.clone(), None, cx))
-        };
-        let toggle_menu = {
-            let id = id.clone();
-            cx.listener(move |this, _, _, cx| {
-                this.menu_open = if this.menu_open.as_ref() == Some(&id) {
-                    None
-                } else {
-                    Some(id.clone())
-                };
-                cx.notify();
-            })
-        };
-        let deny = {
-            let id = id.clone();
-            cx.listener(move |this, _, _, cx| {
-                let message = this
-                    .reasons
-                    .get(&id)
-                    .and_then(|(input, _)| input.read(cx).typed_reason());
-                this.deny(id.clone(), message, cx);
-            })
-        };
-
-        let approve_button = kit::pill_button(theme, "approve", "Approve once", Tone::Primary)
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.on_click(approve));
-        let more_button = keeps_rules.then(|| {
-            kit::icon_button(
-                theme,
-                "approve-more",
-                if menu_open {
-                    Icon::ChevUp
-                } else {
-                    Icon::ChevDown
-                },
-                28.0,
-            )
-            .debug_selector(|| "approve-more".to_owned())
-            .when(!busy, |b| b.on_click(toggle_menu))
-        });
-        let deny_button = kit::pill_button(theme, "deny", "Deny", Tone::Danger)
-            .when(busy, |b| b.opacity(0.4))
-            .when(!busy, |b| b.on_click(deny));
-        // What a kept answer holds, in words: exactly this action, for whom.
-        let keeps = rules::hint(
-            &approval.subject,
-            if bot.is_some() {
-                RememberScope::Bot
-            } else {
-                RememberScope::Run
-            },
-            bot,
-        );
-        let menu =
-            (menu_open && keeps_rules).then(|| {
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .text_size(px(12.0))
-                            .text_color(theme.muted)
-                            .child(keeps),
-                    )
-                    .children(choices.into_iter().enumerate().skip(1).map(
-                        |(ix, (scope, label))| {
-                            let id = id.clone();
-                            kit::pill_button(
-                                theme,
-                                format!("approve-scope-{ix}"),
-                                label,
-                                Tone::Quiet,
-                            )
-                            .debug_selector(move || format!("approve-scope-{ix}"))
-                            .when(!busy, |b| {
-                                b.on_click(cx.listener(move |this, _, _, cx| {
-                                    this.approve(id.clone(), scope, cx);
-                                }))
-                            })
-                        },
-                    ))
-            });
-        // A daemon without `approval.message` would drop the words: then there is no field.
-        let reason = self
-            .reasons
-            .get(&approval.id)
-            .filter(|_| self.shows_reason(&approval.id, cx))
-            .map(|(input, _)| input.clone());
-
-        div()
-            .id(SharedString::from(format!("approval-card-{}", key.0)))
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(16.0))
-            .rounded(px(18.0))
-            .bg(theme.surface)
-            .border_1()
-            .border_color(theme.hairline)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.5))
-                    .child(kit::exec_glyph(theme, executor, 14.0))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(who))
-                    .child(div().text_color(theme.muted).child("wants to run"))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.warning)
-                            .child(format!("held {age}")),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .px(px(14.0))
-                    .py(px(9.0))
-                    .rounded(px(10.0))
-                    .bg(theme.shell)
-                    .font_family(MONO)
-                    .text_size(px(13.0))
-                    .child(command),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(kit::tag(theme.warning, format!("{word} needs a human")))
-                    .child(div().flex_1())
-                    .child(approve_button)
-                    .children(more_button),
-            )
-            .children(menu)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(div().flex_1().min_w_0().children(reason))
-                    .child(deny_button),
-            )
             .into_any_element()
     }
 

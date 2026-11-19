@@ -49,6 +49,7 @@ pub(crate) use signin::{SigninPhase, SigninView};
 
 use crate::summary;
 use crate::vm;
+use crate::vm::capabilities::Capabilities;
 use crate::vm::changes::{Loaded, Patch, ReviewScope};
 use crate::vm::registry::RegistryData;
 
@@ -196,6 +197,8 @@ pub(crate) struct Store {
     mirror: Option<Mirror>,
     /// The fake daemon of `--fake`, kept alive for as long as the store.
     fake: Option<Arc<FakeDaemon>>,
+    /// Which not-yet controls show: set from the connection (the fake turns them on).
+    capabilities: Capabilities,
     /// Where the real daemon's socket is, shown in Settings.
     socket: Option<PathBuf>,
     /// Approvals with a decision in flight (their buttons are disabled).
@@ -313,6 +316,7 @@ impl Store {
             state: State::new(),
             mirror: None,
             fake: None,
+            capabilities: Capabilities::REAL,
             socket: None,
             deciding: BTreeSet::new(),
             firing: BTreeSet::new(),
@@ -453,6 +457,17 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn fake(&self) -> Option<&Arc<FakeDaemon>> {
         self.fake.as_ref()
+    }
+
+    /// Which composer controls are available on this connection.
+    pub(crate) fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_capabilities(&mut self, capabilities: Capabilities, cx: &mut Context<Self>) {
+        self.capabilities = capabilities;
+        cx.notify();
     }
 
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
@@ -641,6 +656,7 @@ impl Store {
             Ok(daemon) => {
                 let daemon = Arc::new(daemon);
                 self.fake = Some(Arc::clone(&daemon));
+                self.capabilities = Capabilities::FAKE;
                 let connector: Connector = Arc::new(move || {
                     let daemon = Arc::clone(&daemon);
                     Box::pin(async move { daemon.connect().await })

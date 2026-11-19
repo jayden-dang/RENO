@@ -20,8 +20,8 @@ use gpui_platform::application;
 use reno_proto::{FiringOutcome, RunId};
 
 use crate::actions::{
-    self, ClosePanelTab, GoRuns, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab, Quit,
-    ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
+    self, ClosePanelTab, GoRuns, JumpToPanel, NewPanelTab, NextPanelTab, OpenPalette, PrevPanelTab,
+    Quit, ReopenPanelTab, TogglePanel, ToggleSidebar, ToggleTheme,
 };
 use crate::lifecycle;
 use crate::nav::Nav;
@@ -85,6 +85,9 @@ pub(crate) struct Options {
     /// `RENO_OPEN_FOLDS=1`: with `RENO_OPEN=run_<id>`, open every "Worked for" fold of that run
     /// (screenshots, reviews).
     pub(crate) open_folds: bool,
+    /// `RENO_DEMO_MENU=plus|permission|effort|approval-more|approval-note`: with `RENO_OPEN=run_<id>`, open that
+    /// composer menu (screenshots, reviews).
+    pub(crate) demo_menu: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: open Settings › Add from registry and put the registry
     /// group in a state once it has loaded (screenshots, reviews). Steps on an added agent's line
@@ -183,6 +186,7 @@ impl Options {
         options.terminal_input = env("RENO_TERMINAL_INPUT").filter(|v| !v.is_empty());
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
         options.open_folds = env("RENO_OPEN_FOLDS").is_some_and(|v| v == "1");
+        options.demo_menu = env("RENO_DEMO_MENU").filter(|v| !v.is_empty());
         options.registry_demo = env("RENO_REGISTRY_DEMO").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
@@ -227,6 +231,9 @@ pub(crate) struct Start {
     pub(crate) follow_up: Option<String>,
     /// Open every fold of that run's transcript.
     pub(crate) open_folds: bool,
+    /// `RENO_DEMO_MENU=plus|permission|effort|approval-more`: with `RENO_OPEN=run_<id>`, open that
+    /// composer menu (screenshots, reviews).
+    pub(crate) demo_menu: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
     /// state once it has loaded (screenshots, reviews).
@@ -250,6 +257,7 @@ pub(crate) fn run(options: Options) {
         motion::init(preference, false, cx);
         actions::bind_keys(cx);
         composer::bind_keys(cx);
+        crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         if let Some(path) = options.panel_state_path() {
@@ -286,6 +294,7 @@ pub(crate) fn run(options: Options) {
             terminal_input: options.terminal_input.clone(),
             follow_up: options.follow_up.clone(),
             open_folds: options.open_folds,
+            demo_menu: options.demo_menu.clone(),
             registry_demo: options.registry_demo.clone(),
             open_settings: options.open_settings,
         };
@@ -333,6 +342,7 @@ pub(crate) fn open_window(
         terminal_input,
         follow_up,
         open_folds,
+        demo_menu,
         registry_demo,
         open_settings,
     } = start;
@@ -443,6 +453,17 @@ pub(crate) fn open_window(
                             root.update(cx, |root, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {
                                     screen.update(cx, |screen, cx| screen.open_all_folds(cx));
+                                }
+                            })
+                            .ok();
+                        }
+                        if let Some(menu) = demo_menu {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1200))
+                                .await;
+                            root.update_in(cx, |root, window, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |s, cx| s.open_demo_menu(&menu, window, cx));
                                 }
                             })
                             .ok();
@@ -1382,6 +1403,11 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
                 this.panel_action(PanelAction::Toggle, w, cx);
             }))
+            .on_action(cx.listener(|this, _: &JumpToPanel, w, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.jump_to_approval(w, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewPanelTab, w, cx| {
                 this.panel_action(PanelAction::NewTab, w, cx);
             }))
@@ -1498,6 +1524,7 @@ mod tests {
                 terminal_input: None,
                 follow_up: None,
                 open_folds: false,
+                demo_menu: None,
                 registry_demo: None,
                 open_settings: None,
                 data_dir: None,

@@ -201,6 +201,28 @@ pub(crate) fn hover_fill(theme: &Theme, tone: Tone, enabled: bool) -> Option<Hsl
     }
 }
 
+/// A keycap: the key a button answers to ("Esc", "\u{23ce}"), Geist Mono on a raised chip. On a
+/// filled button pass its ink so the cap stays readable.
+pub(crate) fn keycap(theme: &Theme, key: &'static str, on: Option<Hsla>) -> Div {
+    let ink = on.unwrap_or(theme.muted);
+    div()
+        .flex_none()
+        .h(px(18.0))
+        .min_w(px(18.0))
+        .px(px(5.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(ink.opacity(0.4))
+        .when(on.is_none(), |d| d.bg(theme.raised))
+        .font_family(MONO)
+        .text_size(px(11.0))
+        .text_color(ink)
+        .child(key)
+}
+
 /// A pill button. The id doubles as the accessible label and the test selector. The caller adds
 /// `on_click` (and dims it with [`Stateful::opacity`] when busy).
 pub(crate) fn pill_button(

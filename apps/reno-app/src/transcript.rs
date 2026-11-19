@@ -653,7 +653,10 @@ fn resolved_line(decision: ApprovalOutcome, by: &ResolvedBy, message: Option<&st
         ApprovalOutcome::Denied => "Denied",
     };
     match by {
-        ResolvedBy::Human => format!("{outcome} by you"),
+        ResolvedBy::Human => match message {
+            Some(note) => format!("{outcome} by you \u{b7} {note}"),
+            None => format!("{outcome} by you"),
+        },
         ResolvedBy::Rule { name } => {
             let rule = crate::summary::rule_words(name);
             match message {
@@ -1250,6 +1253,18 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_human_denial_shows_the_note_that_went_with_it() {
+        let line = |message: Option<&str>| {
+            resolved_line(ApprovalOutcome::Denied, &ResolvedBy::Human, message)
+        };
+        assert_eq!(line(None), "Denied by you");
+        assert_eq!(
+            line(Some("use the mirror")),
+            "Denied by you \u{b7} use the mirror"
+        );
     }
 
     #[test]

@@ -121,7 +121,6 @@ impl Composer {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let opens = self.chip_opens(cx);
         let shown = self.shown_pick(cx);
         let state = self.store.read(cx).state();
         let mut chip = div()
@@ -198,16 +197,14 @@ impl Composer {
                 .absolute()
                 .size_full(),
         );
-        if !opens {
-            return chip.when(self.live_run(cx).is_some(), |c| {
-                c.child(icon(Icon::Lock, 11.0, theme.faint))
-            });
-        }
+        // The chip opens the small effort popover, also where the model cannot be switched: the
+        // effort of a live run can still change, and "Model ›" is there only when it can open
+        // the picker.
         let hover = theme.raised;
         chip.cursor_pointer()
             .hover(move |s| s.bg(hover))
             .child(icon(
-                if self.picker_open {
+                if self.picker_open || self.effort_open {
                     Icon::ChevUp
                 } else {
                     Icon::ChevDown
@@ -215,18 +212,23 @@ impl Composer {
                 12.0,
                 theme.faint,
             ))
-            .on_click(cx.listener(|this, _, window, cx| {
+            .on_click(cx.listener(|this, _, _, cx| {
                 if this.picker_open {
                     this.close_picker(cx);
                 } else {
-                    this.open_picker(window, cx);
+                    let open = !this.effort_open;
+                    this.close_menus();
+                    this.class_open = false;
+                    this.effort_open = open;
+                    this.sync_overlay(cx);
+                    cx.notify();
                 }
             }))
     }
 
     /// Opens the picker on the tab of what is shown, with its search empty and the keyboard in
     /// it.
-    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (tab, live) = {
             let live = self.live_run(cx).map(|r| r.executor.clone());
             let harnesses = models::harnesses(self.store.read(cx).state());
@@ -245,6 +247,7 @@ impl Composer {
             self.store
                 .update(cx, |store, cx| store.refresh_usage(id, cx));
         }
+        self.close_menus();
         self.picker_open = true;
         self.picker_window_open = false;
         self.picker_for_live = live;
@@ -331,7 +334,7 @@ impl Composer {
 
     /// A click on an effort cell: that level, or the model's default when it was the chosen one.
     /// What is chosen is remembered for the model; on a live run the daemon changes it.
-    fn click_effort(&mut self, clicked: Effort, cx: &mut Context<Self>) {
+    pub(super) fn click_effort(&mut self, clicked: Effort, cx: &mut Context<Self>) {
         let Some(mut pick) = self.shown_pick(cx) else {
             return;
         };
@@ -964,7 +967,7 @@ impl Composer {
 
     /// Whether a live run's effort and options can be changed: the daemon has `run.configure`.
     /// Where the executor does not apply a change live, the daemon stores it for the next launch.
-    fn live_configurable(&self, cx: &App) -> bool {
+    pub(super) fn live_configurable(&self, cx: &App) -> bool {
         self.store
             .read(cx)
             .state()
