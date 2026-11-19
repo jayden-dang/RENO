@@ -14,6 +14,7 @@
 use gpui::{App, Global, Hsla, WindowAppearance, rgb};
 
 use super::motion::mix;
+use crate::prefs::{AccentName, ThemeName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Appearance {
@@ -117,6 +118,51 @@ pub(crate) const fn reno_light() -> Palette {
             0x52525b, 0xb91c1c, 0x166534, 0x854d0e, 0x1e40af, 0x6b21a8, 0x155e75, 0x3f3f46,
         ],
     }
+}
+
+/// The palette for a theme in an appearance with an accent (Settings › Appearance; values from
+/// docs/design/2026-11-19-settings-pages-ui-brief.md). Reno with Teal is today's palette. A theme
+/// changes the neutrals only: the semantic colours and the terminal's set are shared.
+pub(crate) const fn palette_for(
+    theme: ThemeName,
+    appearance: Appearance,
+    accent: AccentName,
+) -> Palette {
+    let base = Palette::for_appearance(appearance);
+    let mut p = match (theme, appearance) {
+        (ThemeName::Reno, _) => base,
+        (ThemeName::Slate, Appearance::Dark) => Palette {
+            shell: 0x0a0d14,
+            canvas: 0x0e121b,
+            card: 0x121828,
+            surface: 0x172033,
+            raised: 0x283247,
+            text: 0xe2e8f0,
+            muted: 0x94a3b8,
+            faint: 0x6f7d93,
+            ..base
+        },
+        (ThemeName::Slate, Appearance::Light) => Palette {
+            shell: 0xe2e8f0,
+            canvas: 0xf1f5f9,
+            card: 0xffffff,
+            surface: 0xffffff,
+            raised: 0xd3dbe6,
+            text: 0x0f172a,
+            muted: 0x475569,
+            faint: 0x64748b,
+            ..base
+        },
+    };
+    p.accent = match (accent, appearance) {
+        (AccentName::Teal, Appearance::Dark) => 0x2dd4bf,
+        (AccentName::Teal, Appearance::Light) => 0x0f766e,
+        (AccentName::Blue, Appearance::Dark) => 0x60a5fa,
+        (AccentName::Blue, Appearance::Light) => 0x1d4ed8,
+        (AccentName::Violet, Appearance::Dark) => 0xa78bfa,
+        (AccentName::Violet, Appearance::Light) => 0x6d28d9,
+    };
+    p
 }
 
 impl Palette {
@@ -310,6 +356,55 @@ mod tests {
             for (i, c) in theme.ansi.iter().enumerate() {
                 assert_eq!(hex(*c), p.ansi[i]);
                 assert_eq!(c.a, 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn reno_with_teal_is_todays_palette() {
+        for a in [Appearance::Dark, Appearance::Light] {
+            assert_eq!(
+                palette_for(ThemeName::Reno, a, AccentName::Teal),
+                Palette::for_appearance(a)
+            );
+        }
+    }
+
+    #[test]
+    fn slate_and_the_accents_match_the_settings_pages_brief() {
+        // docs/design/2026-11-19-settings-pages-ui-brief.md, "Themes and accents".
+        let d = palette_for(ThemeName::Slate, Appearance::Dark, AccentName::Teal);
+        assert_eq!(
+            [d.shell, d.canvas, d.card, d.surface, d.raised, d.text, d.muted, d.faint],
+            [0x0a0d14, 0x0e121b, 0x121828, 0x172033, 0x283247, 0xe2e8f0, 0x94a3b8, 0x6f7d93]
+        );
+        let l = palette_for(ThemeName::Slate, Appearance::Light, AccentName::Teal);
+        assert_eq!(
+            [l.shell, l.canvas, l.card, l.surface, l.raised, l.text, l.muted, l.faint],
+            [0xe2e8f0, 0xf1f5f9, 0xffffff, 0xffffff, 0xd3dbe6, 0x0f172a, 0x475569, 0x64748b]
+        );
+        assert_eq!(d.danger, reno_dark().danger, "semantic colours are shared");
+        assert_eq!(d.ansi, reno_dark().ansi, "so is the terminal's set");
+        let accent = |a, t| palette_for(ThemeName::Reno, a, t).accent;
+        assert_eq!(accent(Appearance::Dark, AccentName::Blue), 0x60a5fa);
+        assert_eq!(accent(Appearance::Light, AccentName::Blue), 0x1d4ed8);
+        assert_eq!(accent(Appearance::Dark, AccentName::Violet), 0xa78bfa);
+        assert_eq!(accent(Appearance::Light, AccentName::Violet), 0x6d28d9);
+    }
+
+    #[test]
+    fn every_theme_and_accent_reads_in_both_appearances() {
+        use crate::vm::terminal::contrast_ratio;
+        for name in [ThemeName::Reno, ThemeName::Slate] {
+            for a in [Appearance::Dark, Appearance::Light] {
+                for accent in [AccentName::Teal, AccentName::Blue, AccentName::Violet] {
+                    let t = Theme::from_palette(a, &palette_for(name, a, accent));
+                    let at = |fg, bg| contrast_ratio(fg, bg);
+                    assert!(at(t.text, t.canvas) >= 7.0, "{name:?} {a:?} text");
+                    assert!(at(t.muted, t.canvas) >= 4.5, "{name:?} {a:?} muted");
+                    assert!(at(t.faint, t.canvas) >= 4.0, "{name:?} {a:?} faint");
+                    assert!(at(t.accent, t.surface) >= 4.5, "{name:?} {a:?} {accent:?}");
+                }
             }
         }
     }

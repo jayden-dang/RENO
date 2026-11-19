@@ -576,6 +576,8 @@ pub(crate) struct RootView {
     folders_toggled: std::collections::HashSet<crate::vm::projects::FolderKey>,
     /// From `RENO_APPEARANCE` or "Toggle theme"; `None` follows the system.
     appearance_override: Option<Appearance>,
+    /// The saved mode (Settings › Appearance), read each frame.
+    mode: crate::prefs::Mode,
     palette: Option<Entity<Palette>>,
     /// Hears the open run screen ("Open Executors").
     _run_events: Vec<Subscription>,
@@ -739,6 +741,7 @@ impl RootView {
             updates_at: Rc::new(Cell::new(None)),
             folders_toggled: std::collections::HashSet::new(),
             appearance_override,
+            mode: crate::prefs::Mode::System,
             palette: None,
             _run_events: Vec::new(),
             focus_handle: cx.focus_handle(),
@@ -839,9 +842,16 @@ impl RootView {
         self.palette.as_ref()
     }
 
+    /// The appearance in force. Settings › Appearance's mode is the one source: Light or Dark
+    /// wins; System is the launch preview (`RENO_APPEARANCE`) when there is one, else macOS.
     pub(crate) fn appearance(&self, window: &Window) -> Appearance {
-        self.appearance_override
-            .unwrap_or_else(|| Appearance::from(window.appearance()))
+        match self.mode {
+            crate::prefs::Mode::Light => Appearance::Light,
+            crate::prefs::Mode::Dark => Appearance::Dark,
+            crate::prefs::Mode::System => self
+                .appearance_override
+                .unwrap_or_else(|| Appearance::from(window.appearance())),
+        }
     }
 
     /// Focuses the screen's text input: Home's composer or the run's steer input. A screen
@@ -1205,8 +1215,17 @@ impl RootView {
         cx.notify();
     }
 
+    /// The Toggle theme command: writes Light or Dark into the saved mode, so Settings ›
+    /// Appearance says what is in force.
     pub(crate) fn toggle_theme(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.appearance_override = Some(self.appearance(window).toggled());
+        let flipped = self.appearance(window).toggled();
+        let mode = match flipped {
+            Appearance::Light => crate::prefs::Mode::Light,
+            Appearance::Dark => crate::prefs::Mode::Dark,
+        };
+        self.mode = mode;
+        self.appearance_override = Some(flipped);
+        crate::prefs::update(cx, |p| p.mode = mode);
         cx.notify();
     }
 
@@ -1360,7 +1379,14 @@ impl Focusable for RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(self.appearance(window));
+        // Settings › Appearance: the saved mode, theme and accent.
+        let prefs = crate::prefs::current(cx);
+        self.mode = prefs.mode;
+        let appearance = self.appearance(window);
+        let theme = Theme::from_palette(
+            appearance,
+            &theme::palette_for(prefs.theme, appearance, prefs.accent),
+        );
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
         // What the run screen's panel needs to fit itself on its first frame: the sidebar and
