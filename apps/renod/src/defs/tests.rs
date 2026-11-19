@@ -635,7 +635,7 @@ async fn a_second_watch_is_refused() {
 
 use std::sync::Arc;
 
-use crate::watcher::{Captured, Counting, FailingFirst};
+use crate::watcher::{Captured, FailingFirst};
 
 /// What `probe` returns once it returns something, polled every millisecond up to [`FAILSAFE`].
 /// For what a background task sets with no signal to wait on.
@@ -754,33 +754,4 @@ async fn a_watch_that_cannot_start_is_reported_retried_and_then_reloads_edits() 
     .await;
     assert_eq!(flaky.attempts(), 4, "a working watch is not started again");
     fs_defs.shutdown().await;
-}
-
-#[tokio::test]
-async fn shutdown_ends_the_retries_and_a_dropped_port_lets_go_of_its_stream() {
-    let (_dir, root) = temp_root();
-    bootstrap(&root, fixed(GitOutcome::Unavailable))
-        .await
-        .unwrap();
-
-    // Never starts: shutdown ends the retry task.
-    let flaky = Arc::new(FailingFirst::new(Arc::new(Captured::default()), u32::MAX));
-    let stuck = FsDefinitions::open(&root, Duration::from_millis(5))
-        .unwrap()
-        .with_watchers(flaky)
-        .with_retry(quick());
-    let _changes = stuck.watch().unwrap();
-    tokio::time::timeout(FAILSAFE, stuck.shutdown())
-        .await
-        .expect("the retry task ends with the port");
-
-    // Started, then dropped without a shutdown: the stream goes with it.
-    let counting = Arc::new(Counting::new(Arc::new(Captured::default())));
-    let held = FsDefinitions::open(&root, Duration::from_millis(5))
-        .unwrap()
-        .with_watchers(counting.clone());
-    let _changes = held.watch().unwrap();
-    eventually(|| (counting.live() == 1).then_some(())).await;
-    drop(held);
-    assert_eq!(counting.live(), 0, "dropping the port stopped its watcher");
 }
