@@ -240,6 +240,9 @@ pub(crate) struct Store {
     /// The standing rules, as `rule.list` last said; `None` until it has. They have no watch, so
     /// they are read when Settings opens and after a decision that makes one or a revoke.
     rules: Option<Result<Vec<reno_proto::StandingRule>, String>>,
+    /// A page asked for the standing rules: they are read as soon as a daemon that has them is
+    /// connected, even when it was asked before the daemon said what it supports.
+    rules_wanted: bool,
     /// Rules being revoked (their buttons are disabled).
     revoking: BTreeSet<reno_proto::RuleId>,
     /// Ages use the system clock (a real daemon) or the state's newest timestamp (the fake).
@@ -317,6 +320,7 @@ impl Store {
             log_fetching: BTreeSet::new(),
             registry: RegistryData::default(),
             registry_wanted: false,
+            rules_wanted: false,
             registry_removing: BTreeSet::new(),
             registry_refused: BTreeMap::new(),
             signins: BTreeMap::new(),
@@ -532,6 +536,10 @@ impl Store {
             // The daemon's features are known now: a registry list that was waiting can go.
             if self.registry_wanted && self.registry.listing.is_none() {
                 self.load_registry(false, cx);
+            }
+            // So can standing rules a page asked for before then.
+            if self.rules_wanted && self.rules.is_none() {
+                self.load_rules(cx);
             }
         }
         let open_run_changed = self.open.as_ref().is_some_and(|run| {
@@ -1084,7 +1092,7 @@ impl Store {
             self.registry.fetching = false;
             self.load_registry(false, cx);
         }
-        if self.rules.is_some() {
+        if self.rules_wanted || self.rules.is_some() {
             self.load_rules(cx);
         }
         if let Some(run) = self.open.clone() {
@@ -1971,6 +1979,7 @@ impl Store {
 
     /// `rule.list`: the rules in force. A daemon without them leaves the list unread.
     pub(crate) fn load_rules(&mut self, cx: &mut Context<Self>) {
+        self.rules_wanted = true;
         if !self.state.supports(reno_proto::FEATURE_RULES) {
             return;
         }
