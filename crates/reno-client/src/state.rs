@@ -484,6 +484,16 @@ impl State {
 
     /// Upserts into the window. A fetched copy of the same run is dropped: the window is newer.
     fn upsert_run(&mut self, summary: RunSummary, changed: &mut Changed) {
+        // A summary older than the one held (a `run.get` answer that arrives after
+        // `runs.watch` moved on) would undo the newer state, and the watch does not send an
+        // unchanged list again. A tie still replaces it.
+        if self
+            .runs
+            .get(&summary.run_id)
+            .is_some_and(|held| summary.updated_at_ms < held.updated_at_ms)
+        {
+            return;
+        }
         self.fetched.remove(&summary.run_id);
         if self.runs.get(&summary.run_id) != Some(&summary) {
             changed.runs = true;
@@ -762,6 +772,29 @@ mod tests {
             s.run(&a.run_id).map(|r| r.status),
             Some(RunStatus::Succeeded)
         );
+    }
+
+    #[test]
+    fn a_run_get_answer_older_than_the_watch_does_not_undo_it() {
+        // `run.get` asked while the run was running answers after `runs.watch` said it
+        // succeeded: the older summary must not put it back, because the watch will not send
+        // an unchanged list again.
+        let mut s = State::new();
+        let mut done = summary("a", RunStatus::Succeeded, 10);
+        done.updated_at_ms = 13;
+        s.apply(Update::Runs(vec![done.clone()]));
+        let mut stale = summary("a", RunStatus::Running, 10);
+        stale.updated_at_ms = 10;
+        assert!(s.apply(Update::RunUpserted(stale)).is_empty());
+        assert_eq!(s.run(&done.run_id), Some(&done));
+        // A newer summary still replaces it.
+        let mut later = summary("a", RunStatus::Queued, 10);
+        later.updated_at_ms = 20;
+        assert!(
+            s.apply(Update::RunUpserted(later.clone()))
+                .run(&later.run_id)
+        );
+        assert_eq!(s.run(&later.run_id), Some(&later));
     }
 
     #[test]
