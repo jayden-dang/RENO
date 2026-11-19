@@ -99,6 +99,17 @@ impl RunScreen {
         }
     }
 
+    /// `RENO_DEMO_MENU`: opens a menu for a screenshot.
+    pub(crate) fn open_demo_menu(&mut self, menu: &str, cx: &mut Context<Self>) {
+        if menu == "approval-more" {
+            self.menu_open = self.panel_for.clone();
+            cx.notify();
+        } else {
+            let menu = menu.to_owned();
+            self.steer.update(cx, |c, cx| c.open_demo_menu(&menu, cx));
+        }
+    }
+
     /// Who gets Esc and Enter now.
     fn key_target(&self, window: &Window) -> Target {
         focus_guard::key_target(Facts {

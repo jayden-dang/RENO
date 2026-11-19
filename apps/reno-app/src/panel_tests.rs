@@ -263,3 +263,15 @@ fn on_a_new_task_files_are_real_and_plan_and_goal_are_the_fake_s(cx: &mut TestAp
     );
     assert!(!painted(vcx, "plus-goal"));
 }
+
+#[gpui::test]
+fn the_box_on_a_run_says_work_with_the_executor(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (root, vcx) = open_run(cx, &store, "reviewer1");
+    wait_drawn(vcx, |vcx| painted(vcx, "composer"));
+    let composer = steer(vcx, &root);
+    assert_eq!(
+        composer.read_with(vcx, |c, cx| c.placeholder_text(cx).to_string()),
+        "Work with Codex"
+    );
+}

@@ -564,6 +564,23 @@ impl Composer {
         (!reason.is_empty()).then(|| reason.to_owned())
     }
 
+    #[cfg(test)]
+    pub(crate) fn placeholder_text(&self, cx: &App) -> SharedString {
+        self.placeholder(cx)
+    }
+
+    /// `RENO_DEMO_MENU`: opens a menu for a screenshot.
+    pub(crate) fn open_demo_menu(&mut self, menu: &str, cx: &mut Context<Self>) {
+        match menu {
+            "plus" => self.plus_open = true,
+            "permission" => self.permission_open = true,
+            "effort" => self.effort_open = true,
+            _ => return,
+        }
+        self.sync_overlay(cx);
+        cx.notify();
+    }
+
     /// Whether anything is typed (a draft the owner would lose sight of).
     pub(crate) fn has_text(&self) -> bool {
         !self.model.text().is_empty()
@@ -1586,19 +1603,16 @@ impl Composer {
             ),
             Mode::Steer(run) => {
                 let store = self.store.read(cx);
-                let bot = store
-                    .state()
-                    .run(run)
-                    .and_then(|r| summary::run_bot(r).map(str::to_owned))
-                    .unwrap_or_else(|| "the run".to_owned());
+                let state = store.state();
+                let who = state.run(run).map_or_else(
+                    || "the run".to_owned(),
+                    |r| summary::executor_name(r.executor.as_str()),
+                );
                 match self.steer_state(cx) {
-                    Some(SteerState::Ended(_)) => {
-                        format!("New run in {}\u{2026}", self.project_name(cx)).into()
-                    }
                     Some(SteerState::Waiting(_)) => {
-                        format!("Steer {bot} when it is running").into()
+                        format!("Work with {who} when it is running").into()
                     }
-                    _ => format!("Steer {bot}\u{2026} (delivered at the next step)").into(),
+                    _ => format!("Work with {who}").into(),
                 }
             }
         }
