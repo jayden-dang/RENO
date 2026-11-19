@@ -1171,7 +1171,8 @@ fn note_superseded(
         tracing::warn!(
             target: "reno_harness::claude",
             request_id,
-            "the CLI reused the id of a request still open; the earlier one is dropped"
+            "{}",
+            crate::exec::superseded_line("CLI")
         );
     }
 }

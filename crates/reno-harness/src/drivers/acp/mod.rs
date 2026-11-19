@@ -1110,7 +1110,8 @@ fn note_superseded(replaced: bool, request_id: &str) {
         tracing::warn!(
             target: "reno_harness::acp",
             request_id,
-            "the agent reused the id of a request still open; the earlier one is dropped"
+            "{}",
+            crate::exec::superseded_line("agent")
         );
     }
 }

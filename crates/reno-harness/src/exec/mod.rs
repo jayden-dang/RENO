@@ -70,6 +70,14 @@ pub use mock::{ConfigAsked, MockExecutor, MockLog, MockStep};
 pub use requests::{Open, OpenRequests, Resolved};
 pub use unknown::UnknownFrames;
 
+/// What a driver logs when an agent reuses the id of a request that is still open.
+///
+/// Claude, Codex, and ACP each warn with this sentence. The peer is the only word that
+/// changes (`CLI`, `app-server`, `agent`).
+pub(crate) fn superseded_line(peer: &str) -> String {
+    format!("the {peer} reused the id of a request still open; the earlier one is dropped")
+}
+
 /// How much a probe may do to find out. Only an executor whose full probe starts the agent
 /// itself (a registry ACP agent: `initialize` and `session/new`) tells the two apart; for every
 /// other executor both depths are the same probe.

@@ -1304,7 +1304,8 @@ fn note_superseded(replaced: Option<Open<ApprovalPayload, InputPayload>>, reques
         tracing::warn!(
             target: "reno_harness::codex",
             request_id,
-            "the app-server reused the id of a request still open; the earlier one is dropped"
+            "{}",
+            crate::exec::superseded_line("app-server")
         );
     }
 }
