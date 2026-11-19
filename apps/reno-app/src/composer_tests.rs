@@ -433,7 +433,10 @@ fn a_live_run_has_one_button_that_is_stop_when_empty_and_send_with_text(cx: &mut
     draw(vcx);
     click(vcx, "recent-run_keeper1");
     wait_drawn(vcx, |vcx| painted(vcx, "composer-stop"));
-    assert!(!painted(vcx, "send"), "empty and live: the one button is Stop");
+    assert!(
+        !painted(vcx, "send"),
+        "empty and live: the one button is Stop"
+    );
     let steer = root
         .read_with(vcx, |r, _| r.run_screen().cloned())
         .unwrap()
@@ -442,7 +445,10 @@ fn a_live_run_has_one_button_that_is_stop_when_empty_and_send_with_text(cx: &mut
     steer.update_in(vcx, |c, window, cx| c.fill("use the mirror", window, cx));
     wait_drawn(vcx, |vcx| steer.read_with(vcx, |c, cx| c.can_send(cx)));
     assert!(painted(vcx, "send"), "text: the button is Send");
-    assert!(!painted(vcx, "composer-stop"), "typing turns Stop into Send");
+    assert!(
+        !painted(vcx, "composer-stop"),
+        "typing turns Stop into Send"
+    );
     click(vcx, "send");
     assert_eq!(steer.read_with(vcx, |c, _| c.text().to_owned()), "");
     wait_drawn(vcx, |vcx| painted(vcx, "composer-note"));

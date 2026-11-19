@@ -36,8 +36,14 @@ pub(crate) fn user_text(text: &str, expanded: bool) -> UserText {
             toggle: Some("Show less"),
         };
     }
+    // Back to the last space, so a word is not cut in two (unless it is one long word).
+    let head = &text[..cut];
+    let head = head
+        .rfind(char::is_whitespace)
+        .filter(|&at| at > cut / 2)
+        .map_or(head, |at| &head[..at]);
     UserText {
-        shown: format!("{}\u{2026}", text[..cut].trim_end()),
+        shown: format!("{}\u{2026}", head.trim_end()),
         toggle: Some("Show more"),
     }
 }
@@ -86,12 +92,23 @@ fn other_step(label: &str) -> (StepIcon, &'static str, &'static str, &str) {
     }
 }
 
+/// Whether a call is the harness asking a person (its label is the tool's name).
+fn is_input_tool(label: &str) -> bool {
+    label.eq_ignore_ascii_case("AskUserQuestion")
+        || label.eq_ignore_ascii_case("request_user_input")
+}
+
 /// One line for each step; a run of edits is one line, "Edited 3 files".
 pub(crate) fn step_lines(calls: &[ToolEntry]) -> Vec<StepLine> {
     let mut lines = Vec::new();
     let mut at = 0;
     while at < calls.len() {
         let call = &calls[at];
+        // The harness asking a person is the question row's, not a step.
+        if call.kind == ToolKind::Other && is_input_tool(&call.label) {
+            at += 1;
+            continue;
+        }
         let live = call.outcome == Outcome::Pending;
         let failed = matches!(call.outcome, Outcome::Failed(_));
         match call.kind {
@@ -207,7 +224,11 @@ pub(crate) fn routing_line(view: &RoutingView) -> String {
 /// Whether the "Thinking" shimmer shows: the run is live and the agent is between steps, not
 /// streaming text, not running a step, not waiting on a person.
 pub(crate) fn thinking(rows: &[Row], live: bool) -> bool {
-    live && match rows.iter().rev().find(|r| !matches!(r, Row::Routing { .. })) {
+    live && match rows
+        .iter()
+        .rev()
+        .find(|r| !matches!(r, Row::Routing { .. }))
+    {
         None | Some(Row::User { .. } | Row::Reasoning { .. }) => true,
         Some(Row::Tools { calls, .. }) => calls.iter().all(ToolEntry::finished),
         Some(_) => false,
@@ -285,7 +306,10 @@ mod tests {
     fn a_long_user_message_collapses_behind_show_more_and_opens() {
         let text = "word ".repeat(100);
         let closed = user_text(&text, false);
-        assert!(closed.shown.chars().count() <= COLLAPSE_CHARS + 1, "{closed:?}");
+        assert!(
+            closed.shown.chars().count() <= COLLAPSE_CHARS + 1,
+            "{closed:?}"
+        );
         assert!(closed.shown.starts_with("word word"));
         assert!(closed.shown.ends_with('\u{2026}'));
         assert_eq!(closed.toggle, Some("Show more"));
@@ -295,6 +319,28 @@ mod tests {
         // Multi-byte text is cut on a character, not in the middle of one.
         let wide = "\u{e9}".repeat(COLLAPSE_CHARS + 5);
         assert_eq!(user_text(&wide, false).toggle, Some("Show more"));
+    }
+
+    #[test]
+    fn a_collapsed_message_is_cut_between_words_not_in_one() {
+        let text = "abcdefghij ".repeat(40);
+        let closed = user_text(&text, false);
+        assert!(
+            closed.shown.ends_with("abcdefghij\u{2026}"),
+            "{:?}",
+            closed.shown
+        );
+    }
+
+    #[test]
+    fn the_harness_asking_a_person_is_not_a_step() {
+        let lines = step_lines(&[
+            call("1", ToolKind::Other, "AskUserQuestion", ok()),
+            call("2", ToolKind::Command, "ls", ok()),
+            call("3", ToolKind::Other, "request_user_input", Outcome::Pending),
+        ]);
+        let texts: Vec<_> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["Ran ls"]);
     }
 
     #[test]
@@ -318,7 +364,12 @@ mod tests {
         let icons: Vec<_> = lines.iter().map(|l| l.icon).collect();
         assert_eq!(
             icons,
-            [StepIcon::Terminal, StepIcon::Read, StepIcon::Fetch, StepIcon::Tool]
+            [
+                StepIcon::Terminal,
+                StepIcon::Read,
+                StepIcon::Fetch,
+                StepIcon::Tool
+            ]
         );
         assert_eq!(lines[0].call.as_deref(), Some("1"));
     }
@@ -365,12 +416,7 @@ mod tests {
     }
 
     fn started() -> (Seq, ExecEvent) {
-        (
-            Seq(1),
-            ExecEvent::Text {
-                text: "hi".into(),
-            },
-        )
+        (Seq(1), ExecEvent::Text { text: "hi".into() })
     }
 
     #[test]
@@ -411,7 +457,10 @@ mod tests {
 
     #[test]
     fn a_question_is_a_card_while_open_a_bubble_when_answered_a_line_when_closed() {
-        assert_eq!(question_view(&[q()], &Resolution::Pending), QuestionView::Card);
+        assert_eq!(
+            question_view(&[q()], &Resolution::Pending),
+            QuestionView::Card
+        );
         assert_eq!(
             question_view(&[q()], &Resolution::Answered(vec![Some("Red".into())])),
             QuestionView::Answered(vec![("Which colour?".into(), Some("Red".into()))])
@@ -481,11 +530,17 @@ mod tests {
 
     #[test]
     fn only_the_last_prose_before_done_is_the_final_message() {
-        assert_eq!(final_message_ix(&[user(0), prose(1), tools(2, ok()), prose(3), done(4)]), Some(3));
+        assert_eq!(
+            final_message_ix(&[user(0), prose(1), tools(2, ok()), prose(3), done(4)]),
+            Some(3)
+        );
         assert_eq!(final_message_ix(&[user(0), prose(1), done(2)]), Some(1));
         // Live, or ending on a step: no final message.
         assert_eq!(final_message_ix(&[user(0), prose(1)]), None);
-        assert_eq!(final_message_ix(&[user(0), prose(1), tools(2, ok()), done(3)]), None);
+        assert_eq!(
+            final_message_ix(&[user(0), prose(1), tools(2, ok()), done(3)]),
+            None
+        );
     }
 
     #[test]
@@ -532,6 +587,12 @@ mod tests {
         let line = routing_line(&view);
         assert!(line.starts_with("Routed to Codex \u{b7} "), "{line}");
         assert!(line.len() > "Routed to Codex \u{b7} ".len(), "{line}");
-        let _ = (ExecEvent::Text { text: String::new() }, json!(null), ToolCall::new("x", json!(null), ActionClass::Other));
+        let _ = (
+            ExecEvent::Text {
+                text: String::new(),
+            },
+            json!(null),
+            ToolCall::new("x", json!(null), ActionClass::Other),
+        );
     }
 }

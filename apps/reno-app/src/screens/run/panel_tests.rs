@@ -226,7 +226,10 @@ fn the_home_lists_its_rows_with_letters_and_opens_one_with_its_key(cx: &mut Test
         assert!(painted(vcx, &format!("home-row-{row}")), "{row}");
     }
     assert!(painted(vcx, "home-add-action"));
-    assert!(!painted(vcx, "home-now"), "the panel does not repeat the status");
+    assert!(
+        !painted(vcx, "home-now"),
+        "the panel does not repeat the status"
+    );
 
     // A built row opens its tab: C goes to Review (the New tab is replaced).
     vcx.simulate_keystrokes("c");

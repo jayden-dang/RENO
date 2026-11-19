@@ -51,7 +51,8 @@ fn fold_key(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>, call: &str)
     screen.read_with(vcx, |s, _| {
         s.rows()
             .iter()
-            .find_map(|r| match r {
+            .find_map(|r| {
+                match r {
                 Row::Worked { key, rows, .. }
                     if rows.iter().any(|r| {
                         matches!(r, Row::Tools { calls, .. } if calls.iter().any(|c| c.id == call))
@@ -60,6 +61,7 @@ fn fold_key(vcx: &mut VisualTestContext, screen: &Entity<RunScreen>, call: &str)
                     Some(key.0)
                 }
                 _ => None,
+            }
             })
             .expect("a fold")
     })
@@ -132,7 +134,10 @@ fn review_shows_in_the_panel_beside_the_transcript_and_each_file_folds(cx: &mut 
     wait_drawn(vcx, |vcx| painted(vcx, "change-patch-Cargo.toml"));
     assert!(painted(vcx, "panel-tab-review"));
     assert!(painted(vcx, "panel-tab-session"));
-    assert!(!painted(vcx, "review-finding"), "the panel does not repeat the status");
+    assert!(
+        !painted(vcx, "review-finding"),
+        "the panel does not repeat the status"
+    );
     assert!(painted(vcx, "chat-canvas"));
     assert!(painted(vcx, "composer"), "the chat is not replaced");
     // The header's Changes pill is gone.

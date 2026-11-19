@@ -82,7 +82,11 @@ impl RunScreen {
             .child(icon(
                 glyph,
                 14.0,
-                if line.failed { theme.danger } else { theme.faint },
+                if line.failed {
+                    theme.danger
+                } else {
+                    theme.faint
+                },
             ))
             .child(
                 div()
@@ -99,9 +103,11 @@ impl RunScreen {
                     theme.faint,
                 ))
             });
-        let block = output
-            .filter(|_| shown)
-            .and_then(|c| c.output.as_ref().map(|out| self.output_block(theme, key, c, out, cx)));
+        let block = output.filter(|_| shown).and_then(|c| {
+            c.output
+                .as_ref()
+                .map(|out| self.output_block(theme, key, c, out, cx))
+        });
         div()
             .flex()
             .flex_col()

@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, FontWeight, IntoElement, ListAlignment,
-    ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*, px,
+    ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*,
+    px,
 };
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
@@ -29,8 +30,8 @@ use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::markdown_view::{self, Streaming};
 use crate::ui::theme::{self, Theme};
-use crate::vm::convo;
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
+use crate::vm::convo;
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 use crate::vm::rules;
@@ -434,6 +435,21 @@ impl RunScreen {
         self.feed_markdown(&rows);
         rows.extend(tail);
         self.apply(Built { rows, facts });
+    }
+
+    /// Opens every fold of a finished turn (a screenshot hook: `RENO_OPEN_FOLDS=1`).
+    pub(crate) fn open_all_folds(&mut self, cx: &mut Context<Self>) {
+        let folds: Vec<Key> = self
+            .rows
+            .iter()
+            .filter(|row| matches!(row, Row::Worked { .. }))
+            .map(Row::key)
+            .collect();
+        for key in folds {
+            if !self.open.contains(&key) {
+                self.toggle(key, cx);
+            }
+        }
     }
 
     /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).

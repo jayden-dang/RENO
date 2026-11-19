@@ -330,9 +330,7 @@ pub(crate) fn fold_turns(rows: Vec<Row>, elapsed_ms: Option<u64>) -> Vec<Row> {
     let stretches = (0..rows.len())
         .filter(|&at| folded[at] && (at == 0 || !folded[at - 1]))
         .count();
-    let secs = elapsed_ms
-        .filter(|_| stretches == 1)
-        .map(|ms| ms / 1000);
+    let secs = elapsed_ms.filter(|_| stretches == 1).map(|ms| ms / 1000);
     let mut out: Vec<Row> = Vec::with_capacity(rows.len());
     let mut open: Option<Vec<Row>> = None;
     let close = |out: &mut Vec<Row>, open: &mut Option<Vec<Row>>| {
@@ -1594,7 +1592,10 @@ mod tests {
             &[],
         );
         let rows = fold_turns(built.rows, None);
-        let Row::Worked { key, rows: inner, .. } = rows[1].clone().in_segment(2) else {
+        let Row::Worked {
+            key, rows: inner, ..
+        } = rows[1].clone().in_segment(2)
+        else {
             panic!("a fold");
         };
         assert_ne!(key, inner[0].key());
@@ -1613,8 +1614,27 @@ mod tests {
         )
         .rows;
         stamp_prompt(&mut rows, 5_000);
-        assert!(matches!(&rows[0], Row::User { at_ms: Some(5_000), .. }), "{rows:?}");
-        assert!(matches!(&rows[1], Row::User { at_ms: None, steer: true, .. }), "{rows:?}");
+        assert!(
+            matches!(
+                &rows[0],
+                Row::User {
+                    at_ms: Some(5_000),
+                    ..
+                }
+            ),
+            "{rows:?}"
+        );
+        assert!(
+            matches!(
+                &rows[1],
+                Row::User {
+                    at_ms: None,
+                    steer: true,
+                    ..
+                }
+            ),
+            "{rows:?}"
+        );
     }
 
     fn routing_view() -> RoutingView {

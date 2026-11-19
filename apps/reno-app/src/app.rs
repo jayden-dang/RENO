@@ -82,6 +82,9 @@ pub(crate) struct Options {
     /// `RENO_FOLLOW_UP=<text>`: with `RENO_OPEN=run_<id>`, send `text` from that run's box once it
     /// is open, so a thread with two runs can be looked at (screenshots, reviews).
     pub(crate) follow_up: Option<String>,
+    /// `RENO_OPEN_FOLDS=1`: with `RENO_OPEN=run_<id>`, open every "Worked for" fold of that run
+    /// (screenshots, reviews).
+    pub(crate) open_folds: bool,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: open Settings › Add from registry and put the registry
     /// group in a state once it has loaded (screenshots, reviews). Steps on an added agent's line
@@ -179,6 +182,7 @@ impl Options {
         options.files_search = env("RENO_FILES_SEARCH").filter(|v| !v.is_empty());
         options.terminal_input = env("RENO_TERMINAL_INPUT").filter(|v| !v.is_empty());
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
+        options.open_folds = env("RENO_OPEN_FOLDS").is_some_and(|v| v == "1");
         options.registry_demo = env("RENO_REGISTRY_DEMO").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
@@ -221,6 +225,8 @@ pub(crate) struct Start {
     pub(crate) terminal_input: Option<String>,
     /// A message to send from that run's box once it is open.
     pub(crate) follow_up: Option<String>,
+    /// Open every fold of that run's transcript.
+    pub(crate) open_folds: bool,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
     /// state once it has loaded (screenshots, reviews).
@@ -279,6 +285,7 @@ pub(crate) fn run(options: Options) {
             files_search: options.files_search.clone(),
             terminal_input: options.terminal_input.clone(),
             follow_up: options.follow_up.clone(),
+            open_folds: options.open_folds,
             registry_demo: options.registry_demo.clone(),
             open_settings: options.open_settings,
         };
@@ -325,6 +332,7 @@ pub(crate) fn open_window(
         files_search,
         terminal_input,
         follow_up,
+        open_folds,
         registry_demo,
         open_settings,
     } = start;
@@ -424,6 +432,17 @@ pub(crate) fn open_window(
                                             screen.type_files_search(text, window, cx);
                                         }
                                     });
+                                }
+                            })
+                            .ok();
+                        }
+                        if open_folds {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(500))
+                                .await;
+                            root.update(cx, |root, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |screen, cx| screen.open_all_folds(cx));
                                 }
                             })
                             .ok();
@@ -1466,6 +1485,7 @@ mod tests {
                 files_search: None,
                 terminal_input: None,
                 follow_up: None,
+                open_folds: false,
                 registry_demo: None,
                 open_settings: None,
                 data_dir: None,

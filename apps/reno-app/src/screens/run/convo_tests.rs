@@ -7,14 +7,20 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 
 use super::RunScreen;
 use crate::app::RootView;
-use crate::tests::{click, draw, fake_store, kinds, painted, run_id, wait_drawn, wait_until, window};
+use crate::tests::{
+    click, draw, fake_store, kinds, painted, run_id, wait_drawn, wait_until, window,
+};
 use crate::transcript::Row;
 use crate::ui::theme::Appearance;
 
 fn open<'a>(
     cx: &'a mut TestAppContext,
     run: &str,
-) -> (Entity<RootView>, &'a mut VisualTestContext, Entity<RunScreen>) {
+) -> (
+    Entity<RootView>,
+    &'a mut VisualTestContext,
+    Entity<RunScreen>,
+) {
     let store = fake_store(cx);
     wait_until(cx, |cx| {
         store.read_with(cx, |s, _| s.state().approvals().len() == 2)
@@ -38,7 +44,12 @@ fn rows(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> Vec<Row> {
 fn the_canvas_has_no_run_header(cx: &mut TestAppContext) {
     let (_root, vcx, _screen) = open(cx, "builder1");
     wait_drawn(vcx, |vcx| painted(vcx, "chat-canvas"));
-    for gone in ["crumb-project", "status-run_builder1", "header-stop", "usage-chip"] {
+    for gone in [
+        "crumb-project",
+        "status-run_builder1",
+        "header-stop",
+        "usage-chip",
+    ] {
         assert!(!painted(vcx, gone), "`{gone}` is still drawn");
     }
 }
@@ -106,7 +117,10 @@ fn the_final_message_of_a_finished_turn_has_a_quiet_copy(cx: &mut TestAppContext
         .read_from_clipboard()
         .and_then(|item| item.text())
         .unwrap_or_default();
-    assert!(copied.starts_with("The cache-control change is correct"), "{copied}");
+    assert!(
+        copied.starts_with("The cache-control change is correct"),
+        "{copied}"
+    );
 }
 
 #[gpui::test]
@@ -114,7 +128,11 @@ fn a_question_nobody_can_answer_any_more_is_one_muted_line(cx: &mut TestAppConte
     let (_root, vcx, screen) = open(cx, "builder0");
     wait_drawn(vcx, |vcx| painted(vcx, "question-closed"));
     assert!(kinds(&rows(vcx, &screen)).contains(&"question"));
-    for card in ["question-tag-declined", "question-declined-line", "question-dimmed-chip"] {
+    for card in [
+        "question-tag-declined",
+        "question-declined-line",
+        "question-dimmed-chip",
+    ] {
         assert!(!painted(vcx, card), "`{card}`: the card is gone");
     }
 }
