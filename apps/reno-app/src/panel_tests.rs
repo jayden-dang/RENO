@@ -233,12 +233,9 @@ fn the_effort_popover_offers_only_the_levels_the_model_has_and_a_step_reaches_th
 
 #[gpui::test]
 fn a_step_on_a_live_run_goes_to_the_daemon(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
     let store = held(cx);
     let (_root, vcx) = open_run(cx, &store, "keeper1");
-    wait_drawn(vcx, |vcx| painted(vcx, "approval-panel"));
-    store.update(vcx, |s, cx| s.cancel_run(run_id("scout1"), cx));
-    // Answer the held push so the composer and its chip are there.
-    click(vcx, "approve");
     wait_drawn(vcx, |vcx| painted(vcx, "model-chip"));
     click(vcx, "model-chip");
     wait_drawn(vcx, |vcx| painted(vcx, "effort-step-high"));
@@ -248,4 +245,21 @@ fn a_step_on_a_live_run_goes_to_the_daemon(cx: &mut TestAppContext) {
             s.state().run(&run_id("keeper1")).and_then(|r| r.effort) == Some(Effort::High)
         })
     });
+}
+
+#[gpui::test]
+fn on_a_new_task_files_are_real_and_plan_and_goal_are_the_fake_s(cx: &mut TestAppContext) {
+    let store = held(cx);
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "plus");
+    wait_drawn(vcx, |vcx| painted(vcx, "plus-files"));
+    assert!(painted(vcx, "plus-plan-mode") && painted(vcx, "plus-goal"));
+    store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
+    wait_drawn(vcx, |vcx| !painted(vcx, "plus-plan-mode"));
+    assert!(
+        painted(vcx, "plus-files"),
+        "attachments work on a real daemon"
+    );
+    assert!(!painted(vcx, "plus-goal"));
 }

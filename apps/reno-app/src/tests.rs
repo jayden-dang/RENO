@@ -596,9 +596,10 @@ fn opening_a_run_from_the_sidebar_shows_its_transcript(cx: &mut TestAppContext) 
         panic!("expected prose");
     };
     assert!(text.starts_with("Three crates have minor updates"));
-    // The header, the details pane and the card are on screen.
+    // The held action's panel is on screen, in the composer's place.
     assert!(painted(vcx, "approve"));
-    assert!(painted(vcx, "composer-stop"));
+    assert!(painted(vcx, "approval-panel"));
+    assert!(!painted(vcx, "composer-stop"));
     let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
     let facts = screen.read_with(vcx, |s, _| s.facts().clone());
     assert_eq!(facts.model.as_deref(), Some("opus-5.5"));

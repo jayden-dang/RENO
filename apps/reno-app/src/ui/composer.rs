@@ -39,6 +39,7 @@ use gpui::{
 use reno_client::ConnectionStatus;
 use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskRunParams};
 
+mod chips;
 mod menu;
 mod picker;
 mod rings;
@@ -338,6 +339,18 @@ pub(crate) struct Composer {
     picker_keyboard: bool,
     /// The picker's own focus, so typing goes to its search and not to the text.
     picker_focus: FocusHandle,
+    /// The "+" menu, the permission menu and the effort popover are open, and where the "+" and
+    /// the permission chip were last painted.
+    plus_open: bool,
+    permission_open: bool,
+    effort_open: bool,
+    plus_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    permission_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The permission mode picked here (`None`: the harness's first) and the "+" menu's toggles.
+    /// Until the daemon takes them (ROAD-4) they live in the box only, and show on the fake.
+    permission: Option<String>,
+    plan_mode: bool,
+    goal: bool,
     /// The context ring's card on the run's foot is open.
     context_card_open: bool,
     /// The Account row shows its plan meters.
@@ -416,6 +429,14 @@ impl Composer {
             picker_focus: cx.focus_handle(),
             refocus: false,
             context_card_open: false,
+            plus_open: false,
+            permission_open: false,
+            effort_open: false,
+            plus_bounds: Rc::default(),
+            permission_bounds: Rc::default(),
+            permission: None,
+            plan_mode: false,
+            goal: false,
             usage_card_open: false,
             picker_window_open: false,
             ring_bounds: Rc::default(),
@@ -436,7 +457,12 @@ impl Composer {
     /// Tells the app-wide overlay signal whether any of this composer's menus, pickers or cards
     /// is open. Called wherever one opens or closes, so the two always agree.
     pub(super) fn sync_overlay(&self, cx: &mut Context<Self>) {
-        let open = self.picker_open || self.class_open || self.context_card_open;
+        let open = self.picker_open
+            || self.class_open
+            || self.context_card_open
+            || self.plus_open
+            || self.permission_open
+            || self.effort_open;
         let owner = cx.entity_id();
         overlay::set(cx, owner, open);
     }
@@ -446,6 +472,7 @@ impl Composer {
     pub(crate) fn hide(&mut self, cx: &mut Context<Self>) {
         self.class_open = false;
         self.context_card_open = false;
+        self.close_menus();
         self.close_picker(cx);
         self.sync_overlay(cx);
         cx.notify();
@@ -1825,11 +1852,8 @@ impl Render for Composer {
                 .gap(px(4.0))
                 .px(px(14.0))
                 .pb(px(12.0))
-                .child(
-                    kit::icon_button(&theme, "attach", Icon::Clip, 28.0)
-                        .debug_selector(|| "attach".to_owned())
-                        .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
-                )
+                .children(self.plus_button(&theme, cx))
+                .children(self.permission_chip(&theme, cx))
                 .child(self.class_button(&theme, cx))
                 .child(div().flex_1())
                 .child(self.model_chip(&theme, cx))
@@ -1850,9 +1874,12 @@ impl Render for Composer {
                 .gap(px(4.0))
                 .px(px(14.0))
                 .pb(px(12.0))
+                .children(self.plus_button(&theme, cx))
+                .children(self.permission_chip(&theme, cx))
+                .child(div().flex_1())
                 .child(self.model_chip(&theme, cx))
                 .children(self.context_ring(&theme, cx))
-                .child(div().flex_1())
+                .child(div().w(px(4.0)))
                 .child(self.action_button(&theme, cx)),
         };
         // A run's note sits on one line above the box, so the foot never truncates.
@@ -1896,6 +1923,57 @@ impl Render for Composer {
                 let content = self.picker(&theme, cx);
                 let at = self.chip_bounds.clone();
                 self.popover(&at, content, Self::close_picker, None, cx)
+            })
+            .flatten();
+        let small_menus = [
+            (
+                self.plus_open && !self.plus_items(cx).is_empty(),
+                &self.plus_bounds,
+                0,
+            ),
+            (
+                self.permission_open && self.store.read(cx).capabilities().permission_modes,
+                &self.permission_bounds,
+                1,
+            ),
+        ]
+        .into_iter()
+        .filter(|(open, _, _)| *open)
+        .filter_map(|(_, at, which)| {
+            let content = if which == 0 {
+                self.plus_menu(&theme, cx)
+            } else {
+                self.permission_menu(&theme, cx)
+            };
+            self.popover(
+                at,
+                content,
+                |this, cx| {
+                    this.close_menus();
+                    this.sync_overlay(cx);
+                    cx.notify();
+                },
+                None,
+                cx,
+            )
+        })
+        .collect::<Vec<_>>();
+        let effort = self
+            .effort_open
+            .then(|| {
+                let content = self.effort_popover(&theme, cx);
+                let at = self.chip_bounds.clone();
+                self.popover(
+                    &at,
+                    content,
+                    |this, cx| {
+                        this.effort_open = false;
+                        this.sync_overlay(cx);
+                        cx.notify();
+                    },
+                    None,
+                    cx,
+                )
             })
             .flatten();
         let cards = (self.context_card_open && self.mode != Mode::Home)
@@ -1999,6 +2077,8 @@ impl Render for Composer {
             .children(note)
             .child(boxed)
             .children(picker)
+            .children(effort)
+            .children(small_menus)
             .children(cards)
     }
 }

@@ -76,8 +76,8 @@ mod tests {
     fn the_real_daemon_hides_every_not_yet_control() {
         assert_eq!(Capabilities::REAL.plus_items(false), []);
         assert_eq!(Capabilities::REAL.plus_items(true), [PlusItem::Files]);
-        assert!(!Capabilities::REAL.permission_modes);
-        assert!(!Capabilities::REAL.allow_similar);
+        let real = Capabilities::REAL;
+        assert!(!real.permission_modes && !real.allow_similar);
     }
 
     #[test]
@@ -90,6 +90,7 @@ mod tests {
             Capabilities::FAKE.plus_items(false),
             [PlusItem::PlanMode, PlusItem::Goal]
         );
-        assert!(Capabilities::FAKE.permission_modes && Capabilities::FAKE.allow_similar);
+        let fake = Capabilities::FAKE;
+        assert!(fake.permission_modes && fake.allow_similar);
     }
 }

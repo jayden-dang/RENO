@@ -47,6 +47,8 @@ mod terminal;
 mod transcript;
 
 pub(crate) use dock::bind_keys;
+#[cfg(test)]
+pub(crate) use dock::keep_composer_under_panels;
 pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.

@@ -995,20 +995,6 @@ fn a_run_refused_for_its_executor_shows_the_executors_health(cx: &mut TestAppCon
 
 // --- Deny with a reason ----------------------------------------------------------------------
 
-fn history_of(
-    store: &Entity<Store>,
-    cx: &TestAppContext,
-    id: &str,
-) -> Option<reno_proto::ApprovalRecord> {
-    store.read_with(cx, |s, _| {
-        s.state()
-            .approval_history()
-            .iter()
-            .find(|r| r.id.as_str() == id)
-            .cloned()
-    })
-}
-
 // --- Answering inside the run (ui-brief 2026-11-17) ------------------------------------------
 
 fn open_run_screen(

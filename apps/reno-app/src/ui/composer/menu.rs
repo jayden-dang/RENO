@@ -34,7 +34,10 @@ impl Composer {
         };
         // A menu hangs from the side its trigger sits on: the class button and a run's chip are
         // at the left of the foot, Home's chip at the right.
-        let left = Rc::ptr_eq(at, &self.class_bounds) || matches!(self.mode, Mode::Steer(_));
+        let left = Rc::ptr_eq(at, &self.class_bounds)
+            || Rc::ptr_eq(at, &self.plus_bounds)
+            || Rc::ptr_eq(at, &self.permission_bounds)
+            || matches!(self.mode, Mode::Steer(_));
         let (corner, anchor) = if left {
             (
                 if below {

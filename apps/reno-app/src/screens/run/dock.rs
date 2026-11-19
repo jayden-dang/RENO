@@ -14,6 +14,18 @@ use crate::vm::approval_panel::{self, Kind};
 use crate::vm::focus_guard::{self, Facts, Target};
 use crate::vm::rules;
 
+#[cfg(test)]
+thread_local! {
+    static COMPOSER_STAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests of the composer itself use runs that hold an approval: this keeps their box on screen
+/// under the panel, as if the owner had been typing. The approval tests do not call it.
+#[cfg(test)]
+pub(crate) fn keep_composer_under_panels() {
+    COMPOSER_STAYS.with(|c| c.set(true));
+}
+
 actions!(run_approval, [DenyHeld, AllowHeld]);
 
 /// The key context of the approval panel; its keys work only while it has the keyboard.
@@ -50,6 +62,10 @@ impl RunScreen {
             // The box a screen opens with is focused by default: that is not typing.
             let focused = self.dock_drawn && steer.focus_handle_ref().is_focused(window);
             self.keep_composer = focus_guard::composer_stays(focused, steer.has_text());
+            #[cfg(test)]
+            {
+                self.keep_composer |= COMPOSER_STAYS.with(std::cell::Cell::get);
+            }
         }
         self.dock_drawn = true;
         // A draft is never hidden under the panel.

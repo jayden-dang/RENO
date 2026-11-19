@@ -80,16 +80,16 @@ const OTHER: &[Mode] = &[
 ];
 
 /// The modes of `harness`, in the order its own picker lists them. The first is the default.
-pub(crate) fn modes(harness: &ExecutorId) -> &'static [Mode] {
-    match harness.as_str() {
-        "codex" => CODEX,
-        "claude-code" => CLAUDE,
+pub(crate) fn modes(harness: Option<&ExecutorId>) -> &'static [Mode] {
+    match harness.map(ExecutorId::as_str) {
+        Some("codex") => CODEX,
+        Some("claude-code") => CLAUDE,
         _ => OTHER,
     }
 }
 
 /// The mode with `id`, else the harness's default.
-pub(crate) fn chosen(harness: &ExecutorId, id: Option<&str>) -> Mode {
+pub(crate) fn chosen(harness: Option<&ExecutorId>, id: Option<&str>) -> Mode {
     let all = modes(harness);
     id.and_then(|id| all.iter().find(|m| m.id == id))
         .copied()
@@ -106,18 +106,21 @@ mod tests {
 
     #[test]
     fn codex_offers_its_three_modes_and_only_full_access_warns() {
-        let titles: Vec<_> = modes(&id("codex")).iter().map(|m| m.title).collect();
+        let titles: Vec<_> = modes(Some(&id("codex"))).iter().map(|m| m.title).collect();
         assert_eq!(
             titles,
             ["Ask for approval", "Approve for me", "Full access"]
         );
-        let warns: Vec<_> = modes(&id("codex")).iter().map(|m| m.warning).collect();
+        let warns: Vec<_> = modes(Some(&id("codex")))
+            .iter()
+            .map(|m| m.warning)
+            .collect();
         assert_eq!(warns, [false, false, true]);
     }
 
     #[test]
     fn claude_has_its_own_modes_each_with_a_subtitle() {
-        let all = modes(&id("claude-code"));
+        let all = modes(Some(&id("claude-code")));
         assert_eq!(all.len(), 4);
         assert!(all.iter().all(|m| !m.subtitle.is_empty()));
         assert_eq!(all.last().map(|m| m.warning), Some(true));
@@ -125,8 +128,15 @@ mod tests {
 
     #[test]
     fn an_unknown_harness_gets_the_generic_pair_and_a_stale_id_falls_back() {
-        assert_eq!(modes(&id("pi")).len(), 2);
-        assert_eq!(chosen(&id("codex"), Some("nope")).title, "Ask for approval");
-        assert_eq!(chosen(&id("codex"), Some("full")).title, "Full access");
+        assert_eq!(modes(Some(&id("pi"))).len(), 2);
+        assert_eq!(modes(None).len(), 2, "Auto has not picked a harness yet");
+        assert_eq!(
+            chosen(Some(&id("codex")), Some("nope")).title,
+            "Ask for approval"
+        );
+        assert_eq!(
+            chosen(Some(&id("codex")), Some("full")).title,
+            "Full access"
+        );
     }
 }
