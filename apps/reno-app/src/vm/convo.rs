@@ -93,9 +93,17 @@ fn other_step(label: &str) -> (StepIcon, &'static str, &'static str, &str) {
 }
 
 /// Whether a call is the harness asking a person (its label is the tool's name).
-fn is_input_tool(label: &str) -> bool {
+pub(crate) fn is_input_tool(label: &str) -> bool {
     label.eq_ignore_ascii_case("AskUserQuestion")
         || label.eq_ignore_ascii_case("request_user_input")
+}
+
+/// Whether a tool group shows at least one step (a group of only the harness's questions shows
+/// none).
+pub(crate) fn has_steps(calls: &[ToolEntry]) -> bool {
+    calls
+        .iter()
+        .any(|c| !(c.kind == ToolKind::Other && is_input_tool(&c.label)))
 }
 
 /// One line for each step; a run of edits is one line, "Edited 3 files".
@@ -178,10 +186,18 @@ pub(crate) fn run_elapsed_ms(
     updated_ms: u64,
     events: &[(Seq, ExecEvent)],
 ) -> Option<u64> {
-    let more_than_one_turn = events
-        .iter()
-        .any(|(_, e)| matches!(e, ExecEvent::UserMessage { .. } | ExecEvent::Resumed { .. }));
-    (ended && !more_than_one_turn && updated_ms >= created_ms).then(|| updated_ms - created_ms)
+    // A steer or a resume puts more than one turn in the span; a held action or a question is
+    // time spent waiting on a person, which is not work.
+    let not_one_stretch = events.iter().any(|(_, e)| {
+        matches!(
+            e,
+            ExecEvent::UserMessage { .. }
+                | ExecEvent::Resumed { .. }
+                | ExecEvent::NeedsApproval { .. }
+                | ExecEvent::NeedsInput { .. }
+        )
+    });
+    (ended && !not_one_stretch && updated_ms >= created_ms).then(|| updated_ms - created_ms)
 }
 
 /// What a question shows as.
@@ -209,7 +225,7 @@ pub(crate) fn question_view(questions: &[Question], resolution: &Resolution) -> 
             QuestionView::Closed("Question closed: nobody answered in time".to_owned())
         }
         Resolution::Unanswered => {
-            QuestionView::Closed("Question closed: the run ended without an answer".to_owned())
+            QuestionView::Closed("Question closed: no answer was given".to_owned())
         }
     }
 }
@@ -235,11 +251,14 @@ pub(crate) fn thinking(rows: &[Row], live: bool) -> bool {
     }
 }
 
-/// The row that is the final agent message of a finished turn (it carries the quiet actions).
-pub(crate) fn final_message_ix(rows: &[Row]) -> Option<usize> {
-    let done = rows.iter().rposition(|r| matches!(r, Row::Done { .. }))?;
-    let at = done.checked_sub(1)?;
-    matches!(rows[at], Row::Prose { .. }).then_some(at)
+/// The rows that are the final agent message of a finished turn (they carry the quiet actions):
+/// the prose just before a `Done`, in every turn of the list.
+pub(crate) fn final_messages(rows: &[Row]) -> Vec<usize> {
+    rows.windows(2)
+        .enumerate()
+        .filter(|(_, pair)| matches!((&pair[0], &pair[1]), (Row::Prose { .. }, Row::Done { .. })))
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// The tick rail: the index of each user message's row.
@@ -444,6 +463,26 @@ mod tests {
             ),
         ];
         assert_eq!(run_elapsed_ms(true, 1_000, 13_500, &resumed), None);
+        // Time spent waiting on a person is not work: a held action or a question is no number.
+        for wait in [
+            ExecEvent::NeedsInput {
+                request_id: "q".into(),
+                questions: vec![],
+            },
+            ExecEvent::NeedsApproval {
+                request_id: "a".into(),
+                subject: reno_proto::ApprovalSubject {
+                    action: ActionClass::Command,
+                    tool: "bash".into(),
+                    command: Some("ls".into()),
+                    paths: vec![],
+                    raw: json!(null),
+                },
+            },
+        ] {
+            let waited = [started(), (Seq(2), wait)];
+            assert_eq!(run_elapsed_ms(true, 1_000, 13_500, &waited), None);
+        }
     }
 
     fn q() -> Question {
@@ -471,7 +510,7 @@ mod tests {
         );
         assert_eq!(
             question_view(&[q()], &Resolution::Unanswered),
-            QuestionView::Closed("Question closed: the run ended without an answer".into())
+            QuestionView::Closed("Question closed: no answer was given".into())
         );
     }
 
@@ -529,18 +568,28 @@ mod tests {
     }
 
     #[test]
-    fn only_the_last_prose_before_done_is_the_final_message() {
+    fn the_prose_just_before_a_done_is_a_final_message_in_every_turn() {
         assert_eq!(
-            final_message_ix(&[user(0), prose(1), tools(2, ok()), prose(3), done(4)]),
-            Some(3)
+            final_messages(&[user(0), prose(1), tools(2, ok()), prose(3), done(4)]),
+            [3]
         );
-        assert_eq!(final_message_ix(&[user(0), prose(1), done(2)]), Some(1));
-        // Live, or ending on a step: no final message.
-        assert_eq!(final_message_ix(&[user(0), prose(1)]), None);
+        assert_eq!(final_messages(&[user(0), prose(1), done(2)]), [1]);
+        // A thread of two runs, or a run resumed after its first Done: one in each turn.
         assert_eq!(
-            final_message_ix(&[user(0), prose(1), tools(2, ok()), done(3)]),
-            None
+            final_messages(&[
+                user(0),
+                prose(1),
+                done(2),
+                user(3),
+                tools(4, ok()),
+                prose(5),
+                done(6)
+            ]),
+            [1, 5]
         );
+        // Live, or ending on a step: none.
+        assert!(final_messages(&[user(0), prose(1)]).is_empty());
+        assert!(final_messages(&[user(0), prose(1), tools(2, ok()), done(3)]).is_empty());
     }
 
     #[test]

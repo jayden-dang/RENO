@@ -80,8 +80,8 @@ impl RunScreen {
                     return div().into_any_element();
                 };
                 let actions = top
-                    .filter(|ix| convo::final_message_ix(&self.rows) == Some(*ix))
-                    .map(|_| self.message_actions(theme, text));
+                    .filter(|ix| convo::final_messages(&self.rows).contains(ix))
+                    .map(|_| self.message_actions(theme, *key, text));
                 div()
                     .flex()
                     .flex_col()
@@ -307,18 +307,17 @@ impl RunScreen {
     }
 
     /// The quiet icons under the final agent message of a finished turn.
-    fn message_actions(&self, theme: &Theme, text: &str) -> AnyElement {
+    fn message_actions(&self, theme: &Theme, key: Key, text: &str) -> AnyElement {
         let text = text.to_owned();
         div()
             .flex()
             .items_center()
             .gap(px(2.0))
             .child(
-                kit::icon_button(theme, "message-copy", Icon::Copy, 24.0).on_click(
-                    move |_, _, cx| {
+                kit::icon_button(theme, format!("message-copy-{}", key.0), Icon::Copy, 24.0)
+                    .on_click(move |_, _, cx| {
                         output::copy(cx, text.clone(), "Message copied");
-                    },
-                ),
+                    }),
             )
             .into_any_element()
     }

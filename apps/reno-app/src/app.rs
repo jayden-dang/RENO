@@ -1453,6 +1453,18 @@ mod tests {
     }
 
     #[test]
+    fn open_folds_is_a_demo_switch_for_the_run_screen() {
+        assert!(!parse(&["--fake"], &[]).unwrap().open_folds);
+        let o = parse(&["--fake"], &[("RENO_OPEN_FOLDS", "1")]).unwrap();
+        assert!(o.open_folds);
+        assert!(
+            !parse(&["--fake"], &[("RENO_OPEN_FOLDS", "0")])
+                .unwrap()
+                .open_folds
+        );
+    }
+
+    #[test]
     fn no_flags_means_the_socket() {
         assert_eq!(parse(&[], &[]), Ok(Options::default()));
         assert!(!Options::default().fake);

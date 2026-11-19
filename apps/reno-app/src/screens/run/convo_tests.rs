@@ -110,9 +110,16 @@ fn an_answered_question_is_a_bubble_above_its_answer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_final_message_of_a_finished_turn_has_a_quiet_copy(cx: &mut TestAppContext) {
-    let (_root, vcx, _screen) = open(cx, "reviewer1");
-    wait_drawn(vcx, |vcx| painted(vcx, "message-copy"));
-    click(vcx, "message-copy");
+    let (_root, vcx, screen) = open(cx, "reviewer1");
+    wait_drawn(vcx, |vcx| kinds(&rows(vcx, &screen)).contains(&"worked"));
+    // The prose just before the Done row is the final message.
+    let all = rows(vcx, &screen);
+    let Some(Row::Prose { key, .. }) = all.get(all.len() - 2) else {
+        panic!("the final message sits before Done: {all:?}");
+    };
+    let copy = format!("message-copy-{}", key.0);
+    wait_drawn(vcx, |vcx| painted(vcx, &copy));
+    click(vcx, &copy);
     let copied = vcx
         .read_from_clipboard()
         .and_then(|item| item.text())

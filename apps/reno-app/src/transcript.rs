@@ -300,7 +300,11 @@ pub(crate) fn with_routing(mut rows: Vec<Row>, routing: Option<RoutingView>) -> 
 /// bare under the fold. A user message, a question or the routing line ends a stretch, so each
 /// stretch folds on its own; the time (`elapsed_ms`, the run's) goes on the fold only when the
 /// turn has one stretch, since that is the only fold the whole span belongs to.
-pub(crate) fn fold_turns(rows: Vec<Row>, elapsed_ms: Option<u64>) -> Vec<Row> {
+pub(crate) fn fold_turns(mut rows: Vec<Row>, elapsed_ms: Option<u64>) -> Vec<Row> {
+    // A group of only the harness's questions has no step to show: the question row is its trace.
+    rows.retain(
+        |row| !matches!(row, Row::Tools { calls, .. } if !crate::vm::convo::has_steps(calls)),
+    );
     let foldable = |row: &Row| {
         matches!(
             row,
@@ -1634,6 +1638,25 @@ mod tests {
                 }
             ),
             "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_harness_asking_a_person_leaves_no_empty_fold_behind() {
+        let built = build_rows(
+            Some("do it"),
+            &at(vec![
+                asks("q1", vec![pick()]),
+                ask_tool("a1"),
+                result("a1", true, "User answered: \"Red\""),
+                text("Done."),
+                finish(),
+            ]),
+            &[],
+        );
+        assert_eq!(
+            fold_kinds(&fold_turns(built.rows, Some(4_000))),
+            ["user", "question", "prose", "done"]
         );
     }
 

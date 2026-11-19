@@ -612,7 +612,8 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     draw(vcx);
     let run = send_from_home(vcx, &root, "write a haiku");
 
-    // Rows only ever grow at the end while the run streams; the final shape is fixed.
+    // Rows only ever grow at the end while the run streams; when the turn finishes, its interim
+    // text and steps fold behind one row, and the final shape is fixed.
     let mut seen: Vec<Vec<&'static str>> = Vec::new();
     wait_drawn(vcx, |vcx| {
         let k = kinds(&rows_of(vcx, &root));
@@ -623,15 +624,15 @@ fn streaming_events_append_rows_in_order(cx: &mut TestAppContext) {
     });
     assert_eq!(
         seen.last().unwrap(),
-        &["prompt", "routing", "prose", "tools", "prose", "done"]
+        &["prompt", "routing", "worked", "prose", "done"]
     );
-    for pair in seen.windows(2) {
+    for pair in seen.windows(2).filter(|p| !p[1].contains(&"worked")) {
         assert!(
             pair[1].len() >= pair[0].len() && pair[1].starts_with(&pair[0][..pair[0].len() - 1]),
             "rows changed out of order: {pair:?}"
         );
     }
-    let rows = rows_of(vcx, &root);
+    let rows = flat(rows_of(vcx, &root));
     let Row::Prose { text, .. } = &rows[2] else {
         panic!("expected prose");
     };
