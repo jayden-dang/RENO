@@ -230,7 +230,7 @@ impl Composer {
                     cx.notify();
                 }))
         });
-        menu(theme, "permission-menu", 400.0)
+        menu(theme, "permission-menu", 440.0)
             .child(
                 div()
                     .px(px(10.0))

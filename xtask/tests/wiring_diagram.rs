@@ -29,7 +29,8 @@ fn workspace() -> PathBuf {
 
 fn page_source() -> String {
     let path = workspace().join("docs/wiring.html");
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
 fn wiring(source: &str) -> serde_json::Value {
@@ -45,8 +46,14 @@ fn wiring(source: &str) -> serde_json::Value {
     );
     assert!(source.contains("knot.file"), "callouts must show the file");
     assert!(source.contains("knot.line"), "callouts must show the line");
-    assert!(source.contains("knot.how"), "callouts must show how to untangle");
-    assert!(source.contains("edge.reason"), "each line must carry its reason");
+    assert!(
+        source.contains("knot.how"),
+        "callouts must show how to untangle"
+    );
+    assert!(
+        source.contains("edge.reason"),
+        "each line must carry its reason"
+    );
     serde_json::from_str(raw).expect("wiring json")
 }
 
@@ -101,7 +108,10 @@ fn the_diagram_wires_every_rust_file_and_names_each_knot() {
         .iter()
         .map(|value| value.as_str().expect("file").to_owned())
         .collect();
-    assert_eq!(listed, on_disk, "endpoint set is the .rs list at the branch point");
+    assert_eq!(
+        listed, on_disk,
+        "endpoint set is the .rs list at the branch point"
+    );
 
     let edges = data["edges"].as_array().expect("edges");
     let mut endpoints = std::collections::BTreeSet::new();
@@ -112,18 +122,23 @@ fn the_diagram_wires_every_rust_file_and_names_each_knot() {
         let file = edge["file"].as_str().expect("edge file");
         let reason = edge["reason"].as_str().expect("edge reason");
         assert!(FEATURES.contains(&feature), "unknown feature {feature}");
-        assert!(!reason.trim().is_empty(), "empty reason for {feature} -> {file}");
+        assert!(
+            !reason.trim().is_empty(),
+            "empty reason for {feature} -> {file}"
+        );
         assert!(on_disk.contains(file), "edge leaves the .rs set: {file}");
         endpoints.insert(file.to_owned());
         by_feature.entry(feature).or_default().insert(file);
     }
     assert_eq!(
-        endpoints,
-        on_disk,
+        endpoints, on_disk,
         "every .rs file is an endpoint, and every endpoint is an .rs file"
     );
     for feature in FEATURES {
-        let touched = by_feature.get(feature).map(std::collections::BTreeSet::len).unwrap_or(0);
+        let touched = by_feature
+            .get(feature)
+            .map(std::collections::BTreeSet::len)
+            .unwrap_or(0);
         assert!(touched >= 1, "{feature} touches no file");
         assert!(touched < on_disk.len(), "{feature} touches every file");
     }
@@ -138,11 +153,17 @@ fn the_diagram_wires_every_rust_file_and_names_each_knot() {
         let needle = knot["needle"].as_str().expect("knot needle");
         assert!(number >= 1, "knot numbers start at 1");
         assert!(!how.trim().is_empty(), "knot {number} has no how-to");
-        assert!(on_disk.contains(file), "knot {number} is not a first-party .rs file");
+        assert!(
+            on_disk.contains(file),
+            "knot {number} is not a first-party .rs file"
+        );
         let shown = git_show(sha, file);
         let lines: Vec<&str> = shown.lines().collect();
         let index = usize::try_from(line).expect("line") - 1;
-        assert!(index < lines.len(), "knot {number} line {line} is past the end of {file}");
+        assert!(
+            index < lines.len(),
+            "knot {number} line {line} is past the end of {file}"
+        );
         assert!(
             lines[index].contains(needle),
             "knot {number} {file}:{line} does not contain {needle:?}: {}",
