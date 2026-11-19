@@ -236,6 +236,24 @@ impl RunScreen {
         &self.run
     }
 
+    /// The "write your own" line of the question panel, while it shows.
+    #[cfg(test)]
+    pub(crate) fn question_input(&self) -> Option<&Entity<Composer>> {
+        None
+    }
+
+    /// The inline refusal under the question panel.
+    #[cfg(test)]
+    pub(crate) fn question_refusal(&self) -> Option<String> {
+        None
+    }
+
+    /// The question panel's page.
+    #[cfg(test)]
+    pub(crate) fn question_page(&self) -> Option<usize> {
+        None
+    }
+
     pub(crate) fn steer_input(&self) -> &Entity<Composer> {
         &self.steer
     }

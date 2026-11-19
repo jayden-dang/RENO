@@ -2,7 +2,7 @@
 //! must pass before it is sent (ui-brief, "Question panel"; the rules mirror ROAD-1's).
 
 use reno_client::answers::{QuestionAnswer, QuestionRules};
-use reno_proto::Question;
+use reno_proto::{ExecEvent, Question, RunStatus};
 
 /// One option, with the key that picks it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +58,40 @@ impl PanelModel {
     pub(crate) fn counter(&self, page: usize) -> Option<String> {
         (self.pages.len() > 1).then(|| format!("{}/{}", page + 1, self.pages.len()))
     }
+}
+
+/// The ask a run is waiting on: its id and questions. None once it was answered, declined or
+/// closed, or when the run is not waiting for input.
+pub(crate) fn open_question(
+    status: RunStatus,
+    events: &[ExecEvent],
+) -> Option<(String, Vec<Question>)> {
+    if status != RunStatus::WaitingInput {
+        return None;
+    }
+    let at = events
+        .iter()
+        .rposition(|e| matches!(e, ExecEvent::NeedsInput { .. }))?;
+    let ExecEvent::NeedsInput {
+        request_id,
+        questions,
+    } = &events[at]
+    else {
+        return None;
+    };
+    let mut input_tools = std::collections::HashSet::new();
+    for event in &events[at + 1..] {
+        match event {
+            ExecEvent::InputExpired { request_id: r } if r == request_id => return None,
+            ExecEvent::Done { .. } => return None,
+            ExecEvent::Tool { id, call } if crate::transcript::is_input_tool(&call.name) => {
+                input_tools.insert(id.as_str());
+            }
+            ExecEvent::ToolResult { id, .. } if input_tools.contains(id.as_str()) => return None,
+            _ => {}
+        }
+    }
+    Some((request_id.clone(), questions.clone()))
 }
 
 /// Why an answer is not sent.
@@ -370,5 +404,45 @@ mod tests {
             Err(Refusal::NoSuchQuestion { id: "zz".into() })
         );
         assert_eq!(check(&m, &[ans("a", &["B"]), ans("b", &["X"])]), Ok(()));
+    }
+
+    fn needs(id: &str) -> ExecEvent {
+        ExecEvent::NeedsInput {
+            request_id: id.to_owned(),
+            questions: vec![q("c", &["A"], false)],
+        }
+    }
+
+    fn tool(id: &str, name: &str) -> ExecEvent {
+        ExecEvent::Tool {
+            id: id.to_owned(),
+            call: reno_proto::ToolCall::new(name, serde_json::json!({}), reno_proto::ActionClass::Other),
+        }
+    }
+
+    fn result(id: &str) -> ExecEvent {
+        ExecEvent::ToolResult {
+            id: id.to_owned(),
+            ok: true,
+            summary: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn an_ask_is_open_until_answered_declined_or_the_run_stops_waiting() {
+        let waiting = RunStatus::WaitingInput;
+        let asked = vec![needs("r1")];
+        let (id, questions) = open_question(waiting, &asked).unwrap();
+        assert_eq!((id.as_str(), questions.len()), ("r1", 1));
+        assert!(open_question(RunStatus::Running, &asked).is_none());
+        let answered = vec![needs("r1"), tool("t", "AskUserQuestion"), result("t")];
+        assert!(open_question(waiting, &answered).is_none());
+        let declined = vec![needs("r1"), ExecEvent::InputExpired { request_id: "r1".into() }];
+        assert!(open_question(waiting, &declined).is_none());
+        let other_tool = vec![needs("r1"), tool("t", "bash"), result("t")];
+        assert!(open_question(waiting, &other_tool).is_some(), "another tool's result is not an answer");
+        let second = vec![needs("r1"), tool("t", "AskUserQuestion"), result("t"), needs("r2")];
+        assert_eq!(open_question(waiting, &second).unwrap().0, "r2");
     }
 }

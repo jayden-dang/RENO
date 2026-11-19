@@ -177,7 +177,7 @@ pub(crate) enum Resolution {
 }
 
 /// Whether a tool is the harness asking a person (its result carries the answer).
-fn is_input_tool(name: &str) -> bool {
+pub(crate) fn is_input_tool(name: &str) -> bool {
     name.eq_ignore_ascii_case("AskUserQuestion") || name.eq_ignore_ascii_case("request_user_input")
 }
 
