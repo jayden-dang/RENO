@@ -12,9 +12,10 @@ use gpui::{
 
 use super::ScreenEvent;
 use crate::store::Store;
-use crate::ui::kit::{self, MONO};
+use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::page;
 use crate::ui::theme::{self, Theme};
+use crate::vm::finished::{self, More};
 use crate::vm::lanes::{self, Lane};
 
 /// The lane's fixed columns: the title, the state in words and the age.
@@ -38,7 +39,10 @@ impl RunsScreen {
     }
 
     /// Called when the screen is shown.
-    pub(crate) fn shown(&self, _cx: &mut Context<Self>) {}
+    pub(crate) fn shown(&self, cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, cx| store.load_finished_page(cx));
+    }
 
     #[cfg(test)]
     pub(crate) fn lanes(&self, cx: &gpui::App) -> Vec<Lane> {
@@ -120,13 +124,14 @@ impl RunsScreen {
                 kit::tag(tone, asks.label()).whitespace_nowrap()
             }))
             .child(
+                // The badge already says a waiting state; the column keeps its width.
                 div()
                     .w(px(STATUS_W))
                     .flex_none()
                     .whitespace_nowrap()
                     .text_size(px(12.5))
                     .text_color(kit::run_color(theme, lane.status, None))
-                    .child(lane.status_label),
+                    .children(lane.status_word),
             )
             .child(
                 div()
@@ -144,14 +149,76 @@ impl RunsScreen {
     }
 }
 
+impl RunsScreen {
+    /// A finished run: the same height as a lane, no stripe, a muted state word and age.
+    fn finished_row(row: &finished::Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let run = row.run.clone();
+        let id = format!("finished-{}", row.run);
+        let hover = theme.raised.opacity(0.4);
+        div()
+            .id(SharedString::from(id.clone()))
+            .debug_selector(move || id.clone())
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(36.0))
+            .px(px(13.0))
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!(
+                "{}, {}",
+                row.title, row.status_label
+            )))
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(kit::focus_ring(theme))
+            .hover(move |s| s.bg(hover))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ScreenEvent::OpenRun(run.clone()))))
+            .child(kit::exec_glyph(theme, &row.executor, 14.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(theme.muted)
+                    .child(row.title.clone()),
+            )
+            .child(
+                div()
+                    .w(px(STATUS_W))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(12.5))
+                    .text_color(theme.faint)
+                    .child(row.status_label),
+            )
+            .child(
+                div()
+                    .w(px(TIME_W))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .whitespace_nowrap()
+                    .font_family(MONO)
+                    .text_size(px(12.0))
+                    .text_color(theme.faint)
+                    .child(row.time.clone()),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for RunsScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
-        let (banner, lanes) = {
+        let (banner, lanes, ended) = {
             let store = self.store.read(cx);
             (
                 crate::vm::banner(store.state()),
                 lanes::lanes(store.state(), store.now_ms()),
+                finished::build(store.state(), store.is_paging(), store.now_ms()),
             )
         };
         let retry: page::Action = {
@@ -169,7 +236,7 @@ impl Render for RunsScreen {
         } else {
             detail
         };
-        let empty = lanes.is_empty() && banner.is_none();
+        let empty = lanes.is_empty() && ended.rows.is_empty() && banner.is_none();
 
         let body = page::content(page::WIDE)
             .when_some(banner.as_ref(), |c, b| {
@@ -193,14 +260,50 @@ impl Render for RunsScreen {
                     .flex_col()
                     .gap(px(6.0))
                     .children(lanes.iter().map(|l| Self::lane(l, &theme, cx))),
-            );
+            )
+            .when(!ended.rows.is_empty(), |c| {
+                c.child(
+                    div()
+                        .id("finished")
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .pt(px(10.0))
+                                .pb(px(4.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.faint)
+                                .child("Finished"),
+                        )
+                        .children(ended.rows.iter().map(|r| Self::finished_row(r, &theme, cx))),
+                )
+            })
+            .when(ended.more != More::None, |c| {
+                let loading = ended.more == More::Loading;
+                c.child(
+                    kit::pill_button_enabled(
+                        &theme,
+                        "show-older",
+                        if loading {
+                            "Loading\u{2026}"
+                        } else {
+                            "Show older"
+                        },
+                        Tone::Quiet,
+                        !loading,
+                    )
+                    .when(!loading, |b| {
+                        b.on_click(cx.listener(|this, _, _, cx| this.shown(cx)))
+                    }),
+                )
+            });
 
         div()
             .id("runs")
             .size_full()
             .flex()
             .flex_col()
-            .child(page::header(&theme, "All runs", div()))
             .child(page::column("runs-scroll").child(body))
     }
 }

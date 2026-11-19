@@ -443,3 +443,47 @@ fn back_to_app_returns_to_the_new_thread_in_its_project(cx: &mut TestAppContext)
     assert_eq!(root.read_with(vcx, |r, _| r.home_folder().cloned()), folder);
     assert!(painted(vcx, "new-thread-title"));
 }
+
+#[gpui::test]
+fn finished_runs_beyond_the_first_page_are_reached_with_show_older(cx: &mut TestAppContext) {
+    use crate::vm::finished::STATUSES;
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    store.update(cx, |s, _| s.set_runs_page(1));
+    let (ended, live) = store.read_with(cx, |s, _| {
+        (
+            s.state()
+                .all_runs(&STATUSES)
+                .iter()
+                .map(|r| r.run_id.to_string())
+                .collect::<Vec<_>>(),
+            s.state()
+                .runs()
+                .into_iter()
+                .filter(|r| !STATUSES.contains(&r.status))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert!(ended.len() >= 2, "the demo has finished runs: {ended:?}");
+    // Only the live window is held: the finished runs have to come in by pages.
+    store.update(cx, |s, cx| {
+        s.apply(Update::Runs(live), cx);
+    });
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |r, window, cx| r.navigate(Nav::Runs, window, cx));
+    let row =
+        |i: usize| -> &'static str { Box::leak(format!("finished-{}", ended[i]).into_boxed_str()) };
+    wait_drawn(vcx, |vcx| painted(vcx, row(0)));
+    assert!(!painted(vcx, row(1)), "one page of one run so far");
+    assert!(painted(vcx, "show-older"));
+    assert!(!painted(vcx, "runs-header"), "the title is said once");
+
+    click(vcx, "show-older");
+    wait_drawn(vcx, |vcx| painted(vcx, row(1)));
+    click(vcx, row(1));
+    wait_drawn(vcx, |vcx| {
+        root.read_with(vcx, |r, _| r.run_screen().is_some())
+    });
+    assert_eq!(current_run(vcx, &root), ended[1]);
+}

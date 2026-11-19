@@ -10,6 +10,7 @@ pub(crate) mod context;
 pub(crate) mod diff_syntax;
 pub(crate) mod executors;
 pub(crate) mod files;
+pub(crate) mod finished;
 pub(crate) mod git_graph;
 pub(crate) mod history;
 pub(crate) mod lanes;

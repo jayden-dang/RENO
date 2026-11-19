@@ -20,6 +20,8 @@ pub(crate) struct Lane {
     pub(crate) status: RunStatus,
     /// "running", "needs input", "held for you": never wraps.
     pub(crate) status_label: &'static str,
+    /// The state in words, unless the badge already says it.
+    pub(crate) status_word: Option<&'static str>,
     /// What the run did last, on one line; `None` until the app has seen an event.
     pub(crate) tail: Option<String>,
     /// What it waits for the person to do.
@@ -95,6 +97,9 @@ pub(crate) fn lanes(state: &State, now_ms: u64) -> Vec<Lane> {
             executor: run.executor.as_str().to_owned(),
             status: run.status,
             status_label: summary::status_label(run.status),
+            status_word: projects::badge(run)
+                .is_none()
+                .then(|| summary::status_label(run.status)),
             tail: state.transcript(&run.run_id).and_then(tail_of),
             asks: projects::badge(run),
             time: summary::age_label(now_ms.saturating_sub(run.created_at_ms)),
@@ -183,6 +188,22 @@ mod tests {
         assert_eq!(by("run_go").time, "4m");
         assert_eq!(by("run_go").executor, "codex");
         assert_eq!(by("run_go").title, "Build");
+    }
+
+    #[test]
+    fn a_waiting_state_is_said_once_by_its_badge_not_again_as_a_status_word() {
+        let s = state(vec![
+            run("ask", RunStatus::WaitingInput, "a", 0),
+            run("held", RunStatus::WaitingApproval, "h", 0),
+            run("go", RunStatus::Running, "g", 0),
+            run("q", RunStatus::Queued, "q", 0),
+        ]);
+        let lanes = lanes(&s, 0);
+        let by = |id: &str| lanes.iter().find(|l| l.run.to_string() == id).unwrap();
+        assert_eq!(by("run_ask").status_word, None);
+        assert_eq!(by("run_held").status_word, None);
+        assert_eq!(by("run_go").status_word, Some("running"));
+        assert_eq!(by("run_q").status_word, Some("queued"));
     }
 
     #[test]

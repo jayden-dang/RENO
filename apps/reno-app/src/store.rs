@@ -52,6 +52,9 @@ use crate::vm;
 use crate::vm::changes::{Loaded, Patch, ReviewScope};
 use crate::vm::registry::RegistryData;
 
+/// How many finished runs one page of All runs asks for.
+pub(crate) const RUNS_PAGE: u32 = 20;
+
 /// Things the shell reacts to that are not state: a started run, a failed action.
 #[derive(Clone, Debug)]
 pub(crate) enum StoreEvent {
@@ -226,6 +229,10 @@ pub(crate) struct Store {
     signins: BTreeMap<ExecutorId, signin::SigninRun>,
     /// Executors with a sign-in command open in Terminal, looked at again when the person is back.
     signin_terminals: BTreeSet<ExecutorId>,
+    /// Pages of finished runs being asked for.
+    paging: bool,
+    /// How many finished runs one page asks for.
+    runs_page: u32,
     /// All runs is showing: live runs' transcripts are followed for their tails.
     follow_live: bool,
     /// Runs being fetched with `run.get`.
@@ -323,6 +330,8 @@ impl Store {
             signins: BTreeMap::new(),
             signin_terminals: BTreeSet::new(),
             follow_live: false,
+            paging: false,
+            runs_page: RUNS_PAGE,
             fetching_runs: BTreeSet::new(),
             fetching_defs: BTreeSet::new(),
             validating: BTreeSet::new(),
@@ -482,6 +491,16 @@ impl Store {
 
     pub(crate) fn is_log_open(&self, id: &ExecutorId) -> bool {
         self.log_open.contains(id)
+    }
+
+    /// A page of finished runs is being asked for.
+    pub(crate) fn is_paging(&self) -> bool {
+        self.paging
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_runs_page(&mut self, limit: u32) {
+        self.runs_page = limit;
     }
 
     pub(crate) fn is_validating(&self, kind: DefKind, name: &str) -> bool {
@@ -1066,6 +1085,7 @@ impl Store {
     fn refetch_after_reconnect(&mut self, cx: &mut Context<Self>) {
         self.fetching_runs.clear();
         self.fetching_defs.clear();
+        self.paging = false;
         if matches!(self.state.feed(Feed::ApprovalHistory), FeedState::Failed(_)) {
             self.load_history(cx);
         }
@@ -1889,6 +1909,43 @@ impl Store {
                 }),
                 err: Box::new(move |store, cx| {
                     store.firing.remove(&err_name);
+                    cx.notify();
+                }),
+                quiet: false,
+            },
+        );
+    }
+
+    /// `run.list`: the first page of finished runs, or the next one. One request at a time.
+    pub(crate) fn load_finished_page(&mut self, cx: &mut Context<Self>) {
+        let Some(params) = vm::finished::next_page(&self.state, self.runs_page) else {
+            return;
+        };
+        let filter = vm::finished::STATUSES.to_vec();
+        if self.client().is_none() || self.paging {
+            return;
+        }
+        self.paging = true;
+        cx.notify();
+        self.call(
+            "Could not load runs",
+            move |client| async move { client.list_runs_page(params).await },
+            cx,
+            D {
+                ok: Box::new(move |store, page: reno_proto::RunListResult, cx| {
+                    store.paging = false;
+                    store.apply(
+                        Update::RunsPage {
+                            filter,
+                            runs: page.runs,
+                            next: page.next,
+                        },
+                        cx,
+                    );
+                    cx.notify();
+                }),
+                err: Box::new(|store, cx| {
+                    store.paging = false;
                     cx.notify();
                 }),
                 quiet: false,
