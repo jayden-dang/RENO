@@ -838,7 +838,7 @@ impl SettingsScreen {
             || (Prefs::default(), Delivery::None),
             |b| {
                 let b = b.read(cx);
-                (b.prefs().clone(), b.delivery())
+                (b.prefs(cx), b.delivery())
             },
         );
         let rows = NOTIFICATION_SWITCHES.map(|(pref, label, help)| {

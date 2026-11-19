@@ -402,9 +402,9 @@ fn the_notifications_tab_toggles_persist_beside_the_socket(cx: &mut TestAppConte
 
     click(vcx, "notify-finished");
     click(vcx, "notify-dockBadge");
-    assert!(!banners.read_with(vcx, |b, _| b.prefs().finished));
-    assert!(!banners.read_with(vcx, |b, _| b.prefs().dock_badge));
-    assert!(banners.read_with(vcx, |b, _| b.prefs().notifications));
+    assert!(!banners.read_with(vcx, |b, cx| b.prefs(cx).finished));
+    assert!(!banners.read_with(vcx, |b, cx| b.prefs(cx).dock_badge));
+    assert!(banners.read_with(vcx, |b, cx| b.prefs(cx).notifications));
     let written: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(written["finished"], false);
