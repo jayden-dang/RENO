@@ -482,6 +482,19 @@ pub(crate) fn subject_line(subject: &ApprovalSubject) -> String {
     }
 }
 
+/// What a held action asks, after its bot's name: "wants to push to atlas-api", "wants network
+/// access", "wants to run a command". Home's approval card and the palette word it alike.
+pub(crate) fn approval_what(state: &State, approval: &Approval) -> String {
+    let repo = state
+        .run(&approval.run_id)
+        .and_then(|run| parse_title(&run.title).repo.map(str::to_owned));
+    match (action_word(&approval.subject), repo) {
+        ("push", Some(repo)) => format!("wants to push to {repo}"),
+        ("network request", _) => "wants network access".to_owned(),
+        (word, _) => format!("wants to run a {word}"),
+    }
+}
+
 /// The bot that owns an approval's run, when its title names one.
 pub(crate) fn approval_bot<'a>(state: &'a State, approval: &Approval) -> Option<&'a str> {
     state.run(&approval.run_id).and_then(run_bot)

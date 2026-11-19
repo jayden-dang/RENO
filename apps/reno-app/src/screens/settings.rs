@@ -41,6 +41,7 @@ const SEARCH: Look = Look {
     multiline: false,
     rows: 1,
     width: None,
+    bare: false,
 };
 
 /// What the navigation column needs from the root: the way back.

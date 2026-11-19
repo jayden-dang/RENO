@@ -7,12 +7,13 @@ Screenshot: [2026-11-19-palette-ui-brief.png](./2026-11-19-palette-ui-brief.png)
 ## Decision
 
 Direction **E "Compact tabs"**: the scope tabs and live counts of draft B, made compact (one-line
-rows, underline tabs, no footer), with draft D's waiting detail shrunk to one line and kept only
-for a held action. Five directions were drafted in the app on the fake daemon (A Spotlight list,
+rows, underline tabs, no footer). Every row is one line: a waiting thread shows its title and its
+badge, nothing more. Five directions were drafted in the app on the fake daemon (A Spotlight list,
 B Scoped tabs, C List + preview, D = A with C's waiting preview inline, E). The owner first
 agreed to D, then asked for "one more option upgrade from B - but make it more compact, and
 modern more", judged E "better", removed the question line ("the status dot is enough"), then
-"remove it and lock".
+"remove it and lock". Testing the build, the owner removed the held action's line as well: "we
+just show the title of session it good dont' make it complex".
 
 ## Grounding
 
@@ -114,22 +115,17 @@ The palette is the app's only search and its main way around: the sidebar has no
 - **Match:** the first occurrence of the query in a row's title, name or line is bold and
   `accent`.
 - **Selected:** `raised` at 75% fill. Hover is the same fill.
-- **Held action, selected:** the row grows a second line, indented to the title:
-  - the bot's sentence, as Home's approval card words it, in `text` ("scout wants network
-    access", "keeper wants to push to atlas-api");
-  - the exact command in Geist Mono 11.5 `muted`, truncating;
-  - right-aligned a ↵ keycap and "open".
-- **Question, selected:** no second line. The badge says it.
-- **Components:** rung 1 — `kit::logo`, `sidebar::badge_tag` (make it shared), `icon`, the panel's
-  `keycap` (move it into `kit`); `summary::parse_title`, `summary::approval_bot`,
-  `summary::action_word`, `summary::subject_line` for the held-action sentence and command.
-- **Keys and clicks:** ↑ ↓ move (wrapping); ↵ or a click activates:
+- **Waiting thread, selected:** still one line. The badge ("Needs input", "Needs approval") says
+  what it waits for; the thread itself says the rest.
+- **Components:** rung 1 — `kit::logo`, `sidebar::badge_tag` (make it shared), `icon`,
+  `kit::keycap`; `summary::parse_title` for the title.
+- **Keys and clicks:** ↑ ↓, or ⌃J ⌃K, move (wrapping); ↵ or a click activates:
   - a thread opens it (`open_run` on its latest run);
   - a command runs it;
   - a file opens it in the side panel's Files tab;
   - a line opens that file at that line.
 - **A11y:** each row is a button whose label includes the badge ("check upstream advisories,
-  Needs approval"); the second line is part of the selected row's label.
+  Needs approval").
 
 ## Type & color (summary)
 
@@ -149,12 +145,12 @@ selected, and the tabs count every kind of result before you switch.
 2. Then an extra direction from B, "more compact, and modern more": E.
 3. E chosen over D ("that better").
 4. No second line for a question: "the status dot is enough".
+5. No second line for a held action either (while testing the build): "we just show the title of
+   session it good dont' make it complex".
+6. ⌃J and ⌃K move the selection down and up, like ↓ ↑ ("for dev").
 
 ## Open for the build and the contracts (not decided here)
 
-- **Held-action line.** The owner removed the question line; the held-action line (with its
-  command) was kept because it shows what the badge cannot. Confirm before the build if it
-  should go too.
 - **File search needs a run.** `fs.search_files` and `fs.search_content` take a `run_id`, so on
   Home there is nothing to search (the "Open a thread…" state). Searching a project with no
   thread focused needs a project-level method (ROAD-52 / backend).

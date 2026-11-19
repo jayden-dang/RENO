@@ -20,6 +20,7 @@ pub(crate) mod git_graph;
 pub(crate) mod history;
 pub(crate) mod lanes;
 pub(crate) mod models;
+pub(crate) mod palette;
 pub(crate) mod panel_home;
 pub(crate) mod permission;
 pub(crate) mod picker;

@@ -31,6 +31,8 @@ mod composer_tests;
 #[cfg(test)]
 mod notify_tests;
 #[cfg(test)]
+mod palette_tests;
+#[cfg(test)]
 mod panel_tests;
 #[cfg(test)]
 mod screen_tests;

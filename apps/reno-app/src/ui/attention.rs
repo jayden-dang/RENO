@@ -60,14 +60,7 @@ impl AttentionDock {
         let executor = state
             .run(&approval.run_id)
             .map_or("", |run| run.executor.as_str());
-        let repo = state
-            .run(&approval.run_id)
-            .and_then(|run| summary::parse_title(&run.title).repo.map(str::to_owned));
-        let what = match (summary::action_word(&approval.subject), repo) {
-            ("push", Some(repo)) => format!("wants to push to {repo}"),
-            ("network request", _) => "wants network access".to_owned(),
-            (word, _) => format!("wants to run a {word}"),
-        };
+        let what = summary::approval_what(state, approval);
         let age = summary::age_label(store.now_ms().saturating_sub(approval.requested_at_ms));
         let command = summary::subject_line(&approval.subject);
         let is_network = approval.subject.action == reno_proto::ActionClass::Network;
