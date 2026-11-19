@@ -304,15 +304,6 @@ impl SettingsScreen {
                     vec![
                         row(
                             theme,
-                            "Wrap long lines",
-                            None,
-                            switch(theme, "wrap-lines", p.wrap_lines, |p| {
-                                p.wrap_lines = !p.wrap_lines;
-                            }, cx),
-                            false,
-                        ),
-                        row(
-                            theme,
                             "Show hidden files",
                             None,
                             switch(theme, "hidden-files", p.hidden_files, |p| {

@@ -102,6 +102,7 @@ fn the_tree_loads_lazily_expands_and_pages_a_six_hundred_file_folder(cx: &mut Te
             "docs",
             "many",
             "src",
+            ".env.example",
             "Cargo.toml",
             "notes.txt",
             "README.md"
@@ -494,4 +495,17 @@ fn the_files_tab_is_saved_as_its_own_kind_and_comes_back_to_the_root(cx: &mut Te
     let restored = crate::panel::PanelState::restore(&serde_json::from_str(&json).unwrap());
     assert!(restored.tabs().contains(&Surface::Files));
     assert_eq!(restored.active(), &Surface::Files);
+}
+
+#[gpui::test]
+fn hidden_files_follow_settings(cx: &mut TestAppContext) {
+    let (_root, vcx, screen, _fake) = open_run(cx, "builder1", 800.0);
+    show_files(vcx, &screen);
+    wait_row(vcx, ".env.example");
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.hidden_files = false));
+    draw(vcx);
+    assert!(!painted(vcx, "files-row-.env.example"), "hidden");
+    assert!(painted(vcx, "files-row-README.md"));
+    vcx.update(|_, cx| crate::prefs::update(cx, |p| p.hidden_files = true));
+    wait_row(vcx, ".env.example");
 }

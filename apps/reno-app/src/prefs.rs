@@ -99,14 +99,13 @@ impl Word for SendWith {
 }
 
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 7] = [
     "mode",
     "theme",
     "accent",
     "reduceMotion",
     "sendWith",
     "escapeStops",
-    "wrapLines",
     "hiddenFiles",
 ];
 
@@ -129,8 +128,6 @@ pub(crate) struct Prefs {
     pub(crate) send_with: SendWith,
     /// Escape in a running thread stops it.
     pub(crate) escape_stops: bool,
-    /// The Files tab wraps long lines.
-    pub(crate) wrap_lines: bool,
     /// The Files tab lists dotfiles.
     pub(crate) hidden_files: bool,
     /// Keys of the file this build does not know, written back unchanged.
@@ -150,7 +147,6 @@ impl Default for Prefs {
             reduce_motion: Motion::System,
             send_with: SendWith::Enter,
             escape_stops: false,
-            wrap_lines: false,
             hidden_files: true,
             rest: Map::new(),
         }
@@ -224,7 +220,6 @@ impl Prefs {
         prefs.reduce_motion = Motion::from_word(word("reduceMotion"));
         prefs.send_with = SendWith::from_word(word("sendWith"));
         prefs.escape_stops = flag("escapeStops", prefs.escape_stops);
-        prefs.wrap_lines = flag("wrapLines", prefs.wrap_lines);
         prefs.hidden_files = flag("hiddenFiles", prefs.hidden_files);
         prefs.rest = map
             .into_iter()
@@ -249,7 +244,6 @@ impl Prefs {
         put("reduceMotion", self.reduce_motion.word().into());
         put("sendWith", self.send_with.word().into());
         put("escapeStops", self.escape_stops.into());
-        put("wrapLines", self.wrap_lines.into());
         put("hiddenFiles", self.hidden_files.into());
         serde_json::to_vec_pretty(&Value::Object(map)).unwrap_or_default()
     }
@@ -396,7 +390,6 @@ mod tests {
         assert_eq!(p.reduce_motion, Motion::System);
         assert_eq!(p.send_with, SendWith::Enter);
         assert!(!p.escape_stops, "Escape does not stop a run today");
-        assert!(!p.wrap_lines, "the Files tab does not wrap today");
         assert!(p.hidden_files, "dotfiles are listed today");
     }
 
@@ -412,7 +405,6 @@ mod tests {
             p.reduce_motion = Motion::On;
             p.send_with = SendWith::CommandEnter;
             p.escape_stops = true;
-            p.wrap_lines = true;
             p.hidden_files = false;
         });
         let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -428,7 +420,7 @@ mod tests {
         assert_eq!(again.accent, AccentName::Violet);
         assert_eq!(again.reduce_motion, Motion::On);
         assert_eq!(again.send_with, SendWith::CommandEnter);
-        assert!(again.escape_stops && again.wrap_lines && !again.hidden_files);
+        assert!(again.escape_stops && !again.hidden_files);
     }
 
     #[test]

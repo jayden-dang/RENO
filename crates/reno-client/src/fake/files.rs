@@ -58,6 +58,8 @@ fn tree() -> BTreeMap<String, Node> {
     file("src/main.rs", "fn main() {\n    demo();\n}\n");
     file("docs/guide.md", "# Guide\r\n\r\nWindows line endings.\r\n");
     file("notes.txt", "alpha\nbeta\nAlpha again\n");
+    // A dotfile, for Settings › General › Show hidden files.
+    file(".env.example", "API_URL=http://localhost:3000\n");
     nodes.insert(
         "assets/logo.png".to_owned(),
         Node::File([&b"\x89PNG\r\n\x1a\n"[..], &[0u8; 120][..]].concat()),

@@ -123,11 +123,11 @@ fn general_saves_its_switches_and_the_composer_list(cx: &mut TestAppContext) {
     assert!(painted(vcx, "send-enter"));
     click(vcx, "send-cmdenter");
     click(vcx, "escape-stops");
-    click(vcx, "wrap-lines");
     click(vcx, "hidden-files");
     let p = saved(vcx);
     assert_eq!(p.send_with, SendWith::CommandEnter);
-    assert!(p.escape_stops && p.wrap_lines && !p.hidden_files);
+    assert!(p.escape_stops && !p.hidden_files);
+    assert!(!painted(vcx, "wrap-lines"), "no wrap switch until the viewer can wrap");
     click(vcx, "offer-claude-code");
     assert!(!store.read_with(vcx, |s, _| s.composer_prefs().offered("claude-code")));
 }

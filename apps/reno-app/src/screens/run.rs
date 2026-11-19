@@ -758,6 +758,11 @@ impl RunScreen {
 impl Render for RunScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
+        // Settings › General › Show hidden files.
+        let show_hidden = crate::prefs::current(cx).hidden_files;
+        if let Some(files) = self.files.as_mut() {
+            files.model.set_show_hidden(show_hidden);
+        }
         let ticks = convo::tick_marks(&self.rows);
         let transcript = div()
             .id("transcript")
