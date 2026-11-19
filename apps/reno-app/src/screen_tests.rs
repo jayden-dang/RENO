@@ -13,12 +13,12 @@ use reno_proto::{ErrorCode, ErrorObject, RunStatus};
 
 use crate::app::RootView;
 use crate::nav::Nav;
-use crate::screens::settings::Tab;
 use crate::store::Store;
 use crate::tests::{click, draw, fake_store, painted, wait_drawn, wait_until, window};
 use crate::ui::theme::Appearance;
 use crate::vm::executors::Group;
 use crate::vm::runs::RunFilter;
+use crate::vm::settings_nav::Category;
 use crate::vm::{Section, settings, triggers};
 
 fn store_with(cx: &mut TestAppContext, mut config: FakeConfig) -> Entity<Store> {
@@ -37,6 +37,10 @@ fn daemon(cx: &TestAppContext, store: &Entity<Store>) -> std::sync::Arc<FakeDaem
 }
 
 fn go(vcx: &mut VisualTestContext, root: &Entity<RootView>, nav: Nav) {
+    if nav == Nav::Executors {
+        // The roster's two-line rows run past the default window; tall enough to click them all.
+        vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(2400.0)));
+    }
     root.update_in(vcx, |r, window, cx| r.navigate(nav, window, cx));
     draw(vcx);
 }
@@ -200,12 +204,126 @@ fn triggers_empty_and_unavailable(cx: &mut TestAppContext) {
     assert_eq!(defs.bots, Section::Unavailable);
 }
 
+fn category(vcx: &mut VisualTestContext, root: &Entity<RootView>) -> Category {
+    root.read_with(vcx, |r, cx| r.settings().read(cx).category())
+}
+
+#[gpui::test]
+fn the_settings_row_opens_settings_in_the_sidebars_place_and_back_returns(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    click(vcx, "nav-Runs");
+    assert!(painted(vcx, "sidebar"));
+    // Executors and Settings are no longer top rows; Settings is the footer row.
+    assert!(!painted(vcx, "nav-Executors"));
+    click(vcx, "nav-Settings");
+    draw(vcx);
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
+    assert!(painted(vcx, "settings-nav") && !painted(vcx, "sidebar"));
+    for key in [
+        "executors",
+        "registry",
+        "definitions",
+        "policy",
+        "notifications",
+        "daemon",
+    ] {
+        assert!(painted(vcx, &format!("settings-{key}")), "{key}");
+    }
+    // Executors is the first page, with its own controls.
+    assert_eq!(category(vcx, &root), Category::Executors);
+    wait_drawn(vcx, |vcx| painted(vcx, "check-all"));
+
+    // A category changes the highlighted row and the page.
+    click(vcx, "settings-daemon");
+    assert_eq!(category(vcx, &root), Category::Daemon);
+    wait_drawn(vcx, |vcx| painted(vcx, "daemon-facts"));
+    assert!(!painted(vcx, "check-all"));
+
+    // Back returns to the screen Settings opened over.
+    click(vcx, "settings-back");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Runs);
+    draw(vcx);
+    assert!(painted(vcx, "sidebar") && !painted(vcx, "settings-nav"));
+}
+
+#[gpui::test]
+fn back_from_settings_returns_to_the_open_run_or_home(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    // Opened from Home, Back goes Home.
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-back");
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Home);
+    // Opened over a run, Back shows that run again; a category change in between does not
+    // forget it.
+    root.update_in(vcx, |r, window, cx| {
+        r.open_run(crate::tests::run_id("keeper1"), window, cx);
+    });
+    draw(vcx);
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-policy");
+    go(vcx, &root, Nav::Executors);
+    click(vcx, "settings-back");
+    let screen = root
+        .read_with(vcx, |r, _| r.run_screen().cloned())
+        .expect("the run");
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.run_id().clone()),
+        crate::tests::run_id("keeper1")
+    );
+}
+
+#[gpui::test]
+fn executors_is_a_settings_page_and_the_footer_counts_what_needs_you(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    executors_live(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let needing = executor_view(vcx, &root).needing;
+    assert!(needing > 0, "the fake has executors that need you");
+    assert!(painted(vcx, "settings-count"));
+    go(vcx, &root, Nav::Executors);
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
+    assert_eq!(category(vcx, &root), Category::Executors);
+    assert!(painted(vcx, "settings-executors-count"));
+    wait_drawn(vcx, |vcx| painted(vcx, "line-codex"));
+    // The roster has no registry group; that is its own page.
+    assert!(!painted(vcx, "group-registry"));
+}
+
+#[gpui::test]
+fn searching_settings_filters_the_categories(cx: &mut TestAppContext) {
+    let store = fake_store(cx);
+    connected(cx, &store);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-search");
+    vcx.simulate_input("dock");
+    draw(vcx);
+    assert!(painted(vcx, "settings-notifications"));
+    assert!(!painted(vcx, "settings-executors") && !painted(vcx, "settings-daemon"));
+    assert_eq!(category(vcx, &root), Category::Notifications);
+    wait_drawn(vcx, |vcx| painted(vcx, "notify-dockBadge"));
+    vcx.simulate_input("zzz");
+    draw(vcx);
+    assert!(painted(vcx, "settings-nothing"));
+    assert_eq!(
+        category(vcx, &root),
+        Category::Notifications,
+        "the page stays"
+    );
+}
+
 #[gpui::test]
 fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     connected(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     go(vcx, &root, Nav::Settings);
+    click(vcx, "settings-definitions");
     wait_drawn(vcx, |vcx| painted(vcx, "validate-bot-keeper"));
     wait_drawn(vcx, |vcx| {
         let v = root.read_with(vcx, |r, cx| r.settings().read(cx).defs_view(cx));
@@ -252,8 +370,8 @@ fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) 
     assert!(keeper.has_problems());
     assert_eq!(view.orphan_problems.len(), 1);
 
-    // The daemon tab.
-    click(vcx, "tab-Daemon");
+    // The Daemon page.
+    click(vcx, "settings-daemon");
     wait_drawn(vcx, |vcx| {
         root.read_with(vcx, |r, cx| r.settings().read(cx).daemon_view(cx))
             .uptime
@@ -262,11 +380,8 @@ fn settings_definitions_problems_validation_and_daemon(cx: &mut TestAppContext) 
     let daemon_view = root.read_with(vcx, |r, cx| r.settings().read(cx).daemon_view(cx));
     assert_eq!(daemon_view.version.as_deref(), Some("0.0.0-fake"));
     assert_eq!(daemon_view.active, Some(3));
-    assert_eq!(
-        root.read_with(vcx, |r, cx| r.settings().read(cx).tab()),
-        Tab::Daemon
-    );
-    click(vcx, "tab-Policy");
+    assert_eq!(category(vcx, &root), Category::Daemon);
+    click(vcx, "settings-policy");
     wait_drawn(vcx, |vcx| {
         store.read_with(vcx, |s, _| settings::policy(s.state()).is_some())
     });
@@ -800,10 +915,11 @@ fn a_run_refused_for_its_executor_shows_the_executors_health(cx: &mut TestAppCon
     store.update(vcx, |s, cx| s.run_task("/refused".into(), "codex", cx));
     crate::tests::show_session(vcx);
     wait_drawn(vcx, |vcx| painted(vcx, "run-open-executors"));
-    // The signed-out reason is on the run's own screen, with the way to the Executors screen.
+    // The signed-out reason is on the run's own screen, with the way to Settings › Executors.
     assert!(painted(vcx, "run-check-executor"));
     click(vcx, "run-open-executors");
-    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Executors);
+    assert_eq!(root.read_with(vcx, |r, _| r.nav()), Nav::Settings);
+    assert_eq!(category(vcx, &root), Category::Executors);
 }
 
 // --- Deny with a reason ----------------------------------------------------------------------
@@ -926,7 +1042,7 @@ fn the_approve_menu_keeps_the_answer_for_the_bot(cx: &mut TestAppContext) {
             .unwrap()
     });
     go(vcx, &root, Nav::Settings);
-    click(vcx, "tab-Policy");
+    click(vcx, "settings-policy");
     let revoke = format!("revoke-{}", rule.id);
     wait_drawn(vcx, |vcx| painted(vcx, &revoke));
     click(vcx, &revoke);
@@ -1147,7 +1263,7 @@ fn registry_config(job_millis: u64) -> FakeConfig {
     }
 }
 
-/// The Executors screen on a window tall enough to click the registry group at its foot.
+/// Settings › Add from registry on a window tall enough to click every line.
 fn registry_page(
     cx: &mut TestAppContext,
     config: FakeConfig,
@@ -1156,8 +1272,20 @@ fn registry_page(
     executors_live(cx, &store);
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(3200.0)));
-    go(vcx, &root, Nav::Executors);
+    registry_tab(vcx, &root);
     (store, root, vcx)
+}
+
+fn registry_tab(vcx: &mut VisualTestContext, root: &Entity<RootView>) {
+    root.update_in(vcx, |r, window, cx| {
+        r.open_settings(Category::Registry, window, cx);
+    });
+    draw(vcx);
+}
+
+/// Settings › Executors, where an added registry agent's line is.
+fn roster_tab(vcx: &mut VisualTestContext, root: &Entity<RootView>) {
+    go(vcx, root, Nav::Executors);
 }
 
 fn registry_of(
@@ -1257,6 +1385,8 @@ fn the_registry_group_lists_what_can_be_added_after_the_roster(cx: &mut TestAppC
     assert!(painted(vcx, "registry-search") && painted(vcx, "registry-refresh"));
     assert!(painted(vcx, "registry-own-line"));
     // The added agents are ordinary lines of the roster, with where they came from.
+    // The added agents are on the roster, Settings › Executors.
+    roster_tab(vcx, &root);
     let cline = row_of(vcx, &root, "acp.cline");
     assert_eq!(cline.group, Group::Ready);
     assert_eq!(cline.registry.unwrap().id, "cline");
@@ -1426,6 +1556,7 @@ fn a_failed_add_says_why_with_the_log_and_retry_adds_it(cx: &mut TestAppContext)
 fn update_adds_the_new_version_and_says_so(cx: &mut TestAppContext) {
     let (_store, root, vcx) = registry_page(cx, registry_config(60));
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     assert_eq!(
         row_of(vcx, &root, "acp.cline").available.as_deref(),
         Some("1.1.0")
@@ -1445,6 +1576,7 @@ fn remove_is_confirmed_on_the_line_then_the_agent_is_listed_again(cx: &mut TestA
     let (_store, root, vcx) = registry_page(cx, registry_config(60));
     wait_registry(vcx);
     assert!(!painted(vcx, "registry-agent-cline"));
+    roster_tab(vcx, &root);
     click(vcx, "remove-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "remove-dialog-acp.cline"));
     assert!(painted(vcx, "remove-confirm-acp.cline") && painted(vcx, "remove-cancel-acp.cline"));
@@ -1456,6 +1588,9 @@ fn remove_is_confirmed_on_the_line_then_the_agent_is_listed_again(cx: &mut TestA
     click(vcx, "remove-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "remove-confirm-acp.cline"));
     click(vcx, "remove-confirm-acp.cline");
+    wait_drawn(vcx, |vcx| !painted(vcx, "line-acp.cline"));
+    // Listed again on the registry page.
+    registry_tab(vcx, &root);
     wait_drawn(vcx, |vcx| painted(vcx, "registry-agent-cline"));
     assert!(
         executor_view(vcx, &root)
@@ -1470,6 +1605,7 @@ fn remove_is_confirmed_on_the_line_then_the_agent_is_listed_again(cx: &mut TestA
 fn a_removal_the_daemon_refuses_is_said_on_the_line(cx: &mut TestAppContext) {
     let (store, root, vcx) = registry_page(cx, registry_config(60));
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     daemon(vcx, &store).set_active_runs(&"acp.cline".parse().unwrap(), 1);
     click(vcx, "remove-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "remove-confirm-acp.cline"));
@@ -1496,6 +1632,7 @@ fn the_keys_editor_reads_and_saves_an_agents_environment_and_never_shows_it_else
 ) {
     let (store, root, vcx) = registry_page(cx, registry_config(60));
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     click(vcx, "line-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "env-card-acp.cline"));
     // Its environment is read once; typing before that would be overwritten by the answer.
@@ -1573,6 +1710,7 @@ fn an_added_agent_that_needs_a_sign_in_opens_terminal_with_its_own_command_throu
     let recording = Rc::new(crate::terminal::fake::Recording::default());
     vcx.update(|_, cx| crate::terminal::install(cx, recording.clone()));
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     // The agent offers a terminal method (its `authMethods`); the daemon's generic maintenance
     // step says another command, which must not be the one that runs.
     let mut list = store.read_with(vcx, |s, _| s.state().executors().to_vec());
@@ -1622,7 +1760,7 @@ fn browser_signin_page(
     Rc<crate::links::fake::Recording>,
     Rc<crate::terminal::fake::Recording>,
 ) {
-    let (store, _root, vcx) = registry_page(cx, registry_config(60));
+    let (store, root, vcx) = registry_page(cx, registry_config(60));
     let pages = Rc::new(crate::links::fake::Recording::default());
     let terminals = Rc::new(crate::terminal::fake::Recording::default());
     vcx.update(|_, cx| {
@@ -1630,6 +1768,7 @@ fn browser_signin_page(
         crate::terminal::install(cx, terminals.clone());
     });
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     daemon(vcx, &store).script_signin(&"acp.cline".parse().unwrap(), script);
     click(vcx, "line-acp.cline");
     wait_drawn(vcx, |vcx| painted(vcx, "registry-browser-signin-acp.cline"));
@@ -1782,6 +1921,7 @@ fn cancel_stops_a_browser_sign_in_and_leaves_nothing_on_the_line(cx: &mut TestAp
 fn an_agent_that_needs_a_key_offers_add_key_which_opens_its_editor(cx: &mut TestAppContext) {
     let (store, root, vcx) = registry_page(cx, registry_config(60));
     wait_registry(vcx);
+    roster_tab(vcx, &root);
     let mut list = store.read_with(vcx, |s, _| s.state().executors().to_vec());
     let cline = list
         .iter_mut()
@@ -1807,7 +1947,7 @@ fn the_registry_failing_says_so_with_retry_and_offline_keeps_the_copy(cx: &mut T
     );
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     vcx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(3200.0)));
-    go(vcx, &root, Nav::Executors);
+    registry_tab(vcx, &root);
     wait_drawn(vcx, |vcx| painted(vcx, "registry-failed"));
     assert!(matches!(
         registry_of(vcx, &root).unwrap().state,

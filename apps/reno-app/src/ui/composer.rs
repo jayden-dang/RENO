@@ -1688,7 +1688,7 @@ impl Composer {
                     panel = panel.child(
                         div()
                             .text_color(theme.warning)
-                            .child("Nothing can take this task right now. Fix an executor on the Executors screen."),
+                            .child("Nothing can take this task right now. Fix an executor in Settings › Executors."),
                     );
                 }
                 panel

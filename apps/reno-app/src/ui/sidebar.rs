@@ -1,21 +1,24 @@
-//! The sidebar (ui-brief 2026-11-17): five nav rows, then "Projects": one folder per repository
-//! with its threads (a run of its own on a daemon without threads) and their status dots, and a footer with the daemon status dot. It sits on
-//! `shell`. A closed folder still lists the runs that wait for you.
+//! The sidebar: Home, Runs and Triggers, then "Projects": one folder per repository with its
+//! threads (a run of its own on a daemon without threads) and their status dots, and the Settings
+//! row as its footer (ui-brief 2026-11-19, settings). It sits on `shell`. A closed folder still
+//! lists the runs that wait for you.
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use gpui::{App, Div, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px};
 use reno_client::ConnectionStatus;
 use reno_proto::RunId;
 
 use super::icon::{Icon, icon};
 use super::kit;
+use super::page::{self, CountTone};
 use super::theme::Theme;
 use crate::nav::Nav;
 use crate::store::Store;
 use crate::summary;
 use crate::vm::projects::{self, Dot, Folder, FolderKey};
+use crate::vm::settings_nav::{self, Pip};
 
 /// Width of the sidebar column, padding included.
 pub(crate) const WIDTH: f32 = 248.0;
@@ -53,6 +56,7 @@ pub(crate) fn badge(nav: Nav, counts: &summary::Attention) -> Option<RowBadge> {
     Some(RowBadge { text, hot })
 }
 
+/// The daemon's state in a word, for Home's chip.
 pub(crate) fn daemon_label(status: ConnectionStatus) -> &'static str {
     match status {
         ConnectionStatus::Connected => "renod",
@@ -245,22 +249,82 @@ fn folder_view(
         }))
 }
 
-/// The sidebar column. `active` marks the current destination.
+/// The footer's Settings row: the gear (marked while the daemon is not connected), the word, and
+/// how many executors can't take runs.
+pub(crate) fn settings_row(
+    theme: &Theme,
+    needing: usize,
+    connection: ConnectionStatus,
+    selected: bool,
+    on_nav: &NavHandler,
+) -> impl IntoElement {
+    let on_nav = Rc::clone(on_nav);
+    let hover = theme.row_selected();
+    let pip = settings_nav::daemon_pip(connection).map(|pip| match pip {
+        Pip::Warning => theme.warning,
+        Pip::Danger => theme.danger,
+    });
+    let gear = div()
+        .relative()
+        .flex_none()
+        .child(icon(Icon::PhGear, 16.0, theme.muted))
+        .children(pip.map(|tone| {
+            div()
+                .id("settings-pip")
+                .debug_selector(|| "settings-pip".to_owned())
+                .absolute()
+                .top(px(-2.0))
+                .right(px(-3.0))
+                .size(px(7.0))
+                .rounded(px(3.5))
+                .bg(tone)
+                .border_1()
+                .border_color(theme.shell)
+        }));
+    div()
+        .id("nav-Settings")
+        .debug_selector(|| "nav-Settings".to_owned())
+        .flex_1()
+        .h(px(34.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(9.0))
+        .text_size(px(14.0))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(SharedString::from(settings_nav::settings_label(needing)))
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(kit::focus_ring(theme))
+        .when(selected, |r| r.bg(theme.row_selected()))
+        .when(!selected, |r| r.hover(move |s| s.bg(hover.opacity(0.6))))
+        .on_click(move |_, window, cx| on_nav(Nav::Settings, window, cx))
+        .child(gear)
+        .child(div().flex_1().child("Settings"))
+        .when(needing > 0, |r| {
+            r.child(
+                page::count(theme, needing, CountTone::Danger)
+                    .id("settings-count")
+                    .debug_selector(|| "settings-count".to_owned()),
+            )
+        })
+}
+
+/// The sidebar column. `active` marks the current destination; `needing` is how many executors
+/// can't take runs.
 pub(crate) fn sidebar(
     theme: &Theme,
     store: &Store,
     active: Nav,
+    needing: usize,
     toggled: &HashSet<FolderKey>,
     handlers: &SidebarHandlers,
 ) -> impl IntoElement {
     let state = store.state();
     let counts = summary::attention(state);
-    let daemon_text = daemon_label(store.connection());
-    let daemon_color = match store.connection() {
-        ConnectionStatus::Connected => theme.success,
-        ConnectionStatus::Connecting => theme.warning,
-        ConnectionStatus::Disconnected => theme.danger,
-    };
 
     let hide = Rc::clone(&handlers.hide);
     let new_task = Rc::clone(&handlers.navigate);
@@ -314,42 +378,19 @@ pub(crate) fn sidebar(
         .px(px(10.0))
         .flex()
         .items_center()
-        .gap(px(10.0))
         .border_t_1()
         .border_color(theme.hairline)
-        .child(
-            div()
-                .size(px(24.0))
-                .rounded(px(12.0))
-                .bg(theme.raised)
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child("L"),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(14.0))
-                .text_color(theme.text)
-                .child("Local"),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_size(px(13.0))
-                .text_color(theme.muted)
-                .child(kit::dot(daemon_color, 7.0))
-                .child(daemon_text),
-        );
+        .child(settings_row(
+            theme,
+            needing,
+            store.connection(),
+            active == Nav::Settings,
+            &handlers.navigate,
+        ));
 
     div()
         .id("sidebar")
+        .debug_selector(|| "sidebar".to_owned())
         .w(px(WIDTH))
         .h_full()
         .flex_none()

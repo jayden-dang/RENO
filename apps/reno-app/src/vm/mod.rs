@@ -23,6 +23,7 @@ pub(crate) mod routing;
 pub(crate) mod rules;
 pub(crate) mod runs;
 pub(crate) mod settings;
+pub(crate) mod settings_nav;
 pub(crate) mod terminal;
 pub(crate) mod threads;
 pub(crate) mod triggers;

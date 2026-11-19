@@ -58,6 +58,95 @@ pub(crate) fn column(id: &'static str) -> Stateful<Div> {
         .py(px(26.0))
 }
 
+/// Width of a Settings page's column (ui-brief 2026-11-19, settings).
+pub(crate) const SETTINGS: f32 = 720.0;
+
+/// A Settings page's scrolling area: [`column`] with the roomier top the brief gives it.
+pub(crate) fn settings_column(id: &'static str) -> Stateful<Div> {
+    column(id).pt(px(44.0)).pb(px(80.0))
+}
+
+/// A Settings page's title: 22 px, in the danger colour when it states what blocks runs, over one
+/// muted line.
+pub(crate) fn title(
+    theme: &Theme,
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    danger: bool,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_size(px(22.0))
+                .line_height(px(28.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .when(danger, |t| t.text_color(theme.danger))
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_size(px(13.5))
+                .line_height(px(21.0))
+                .text_color(theme.muted)
+                .child(detail.into()),
+        )
+}
+
+/// How a count reads: on the danger fill when something needs the person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CountTone {
+    Danger,
+    Soft,
+}
+
+/// A count in a pill: "2" beside Settings, beside a category, after a section heading.
+pub(crate) fn count(theme: &Theme, n: usize, tone: CountTone) -> Div {
+    let (fill, ink) = match tone {
+        CountTone::Danger => (theme.danger, gpui::white()),
+        CountTone::Soft => (theme.raised, theme.muted),
+    };
+    div()
+        .flex_none()
+        .min_w(px(18.0))
+        .h(px(18.0))
+        .px(px(5.0))
+        .rounded(px(9.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(fill)
+        .text_color(ink)
+        .text_size(px(11.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(n.to_string())
+}
+
+/// A Settings section's heading: 14 px semibold, an optional count, and `aside` on the right.
+pub(crate) fn section_head(
+    theme: &Theme,
+    label: impl Into<SharedString>,
+    n: Option<usize>,
+    aside: Option<gpui::AnyElement>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .pb(px(10.0))
+        .child(
+            div()
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label.into()),
+        )
+        .children(n.map(|n| count(theme, n, CountTone::Soft)))
+        .child(div().flex_1())
+        .children(aside)
+}
+
 /// The column of at most `width` px that holds the page's content.
 pub(crate) fn content(width: f32) -> Div {
     div()

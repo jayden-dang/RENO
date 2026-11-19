@@ -33,7 +33,7 @@ pub(crate) fn entries() -> Vec<Entry> {
         icon: nav.icon(),
         action: PaletteAction::Go(nav),
     };
-    Nav::ROWS
+    Nav::ALL
         .into_iter()
         .map(go)
         .chain([
