@@ -1,6 +1,6 @@
-//! What the three first-run variants share when they draw: the job's control on an agent, an
-//! agent's state mark, the look controls, the project rows and the notification switch. Each is
-//! a method of [`SetupFlow`] so its clicks reach the flow; the variants only lay them out.
+//! What the wizard's steps draw: the job's control on an agent, an agent's state mark, the look
+//! controls and the project rows. Each is a method of [`SetupFlow`] so its clicks reach the
+//! flow.
 
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, Role, SharedString, Toggled, div,
@@ -60,7 +60,7 @@ impl SetupFlow {
         let action = line.action.clone()?;
         let (verb, glyph) = match action {
             Action::SignIn(_) => ("sign-in", None),
-            Action::Install => ("install", Some(Icon::PhDownload)),
+            Action::Install { .. } => ("install", Some(Icon::PhDownload)),
         };
         let id = line.id.clone();
         let label = if matches!(line.state, AgentState::Failed(_)) {
@@ -242,40 +242,6 @@ impl SetupFlow {
                     )
                     .when(on, |r| r.child(icon(Icon::PhCheck, 14.0, theme.accent)))
             }))
-            .into_any_element()
-    }
-
-    /// "Tell me when a run needs me": the notification switch, kept as it is flipped.
-    pub(crate) fn notify_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let on = prefs::current(cx).notifications;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Tell me when a run needs me"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.muted)
-                            .child("A banner when an agent asks a question or waits for approval."),
-                    ),
-            )
-            .child(
-                kit::switch(theme, "setup-notifications", on)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_notifications(!on, cx))),
-            )
             .into_any_element()
     }
 }

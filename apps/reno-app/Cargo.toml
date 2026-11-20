@@ -9,9 +9,6 @@ publish.workspace = true
 [features]
 default = []
 mimalloc = ["dep:mimalloc"]
-# ROAD-38 draft: `SHOT=<variant>-<state> reno-app` renders one state off-screen to a PNG (see
-# `draft38_shots.rs`). Needs gpui's test support for its off-screen renderer.
-shots = ["gpui/test-support", "dep:gpui_macos"]
 
 [dependencies]
 reno-proto.workspace = true
@@ -32,9 +29,6 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
 gpui_tokio.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
-
-# Only for the `shots` feature: the Mac renderer's read-back of a frame (same revision as gpui).
-gpui_macos = { git = "https://github.com/zed-industries/zed", rev = "596dfdcf32d85d4d8d17a8887b4d0979ec7c5e14", features = ["test-support"], optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

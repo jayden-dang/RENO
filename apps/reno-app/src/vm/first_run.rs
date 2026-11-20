@@ -1,6 +1,6 @@
 //! First-run setup (ROAD-38): which agents can take runs on this Mac and what the person can do
 //! about the ones that cannot, the sentence that says so, and where a person is in setup. Pure;
-//! the three drafts draw it differently and share every rule here.
+//! the wizard draws it and every rule is here.
 //!
 //! Every choice setup offers applies when it is made (the look changes at once, an install or a
 //! sign-in starts at once, the project is the new-thread project at once), so leaving setup at
@@ -23,14 +23,19 @@ pub(crate) enum SignInRoute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     SignIn(SignInRoute),
-    Install,
+    /// Install it. `review`: the agent's recipe runs a vendor script as the person, so the
+    /// Executors page's review panel comes first; the daemon's own fetch needs none.
+    Install {
+        review: bool,
+    },
 }
 
 impl Action {
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::SignIn(_) => "Sign in",
-            Self::Install => "Install",
+            Self::Install { review: true } => "Install\u{2026}",
+            Self::Install { review: false } => "Install",
         }
     }
 }
@@ -161,13 +166,10 @@ pub(crate) fn agent_lines(
             };
             let action = match &state {
                 AgentState::NeedsSignIn => route.map(Action::SignIn),
-                AgentState::NotInstalled | AgentState::Failed(_)
-                    if matches!(
-                        row.install,
-                        Some(InstallOffer::Now | InstallOffer::Review | InstallOffer::Legacy)
-                    ) =>
-                {
-                    Some(Action::Install)
+                AgentState::NotInstalled | AgentState::Failed(_) if row.install.is_some() => {
+                    Some(Action::Install {
+                        review: row.install == Some(InstallOffer::Review),
+                    })
                 }
                 _ => None,
             };
@@ -234,14 +236,6 @@ fn capitalize(text: &str) -> String {
     })
 }
 
-/// How many of the agents cannot take runs and are not on their way.
-pub(crate) fn blocked(lines: &[AgentLine]) -> usize {
-    lines
-        .iter()
-        .filter(|l| !l.state.can_take_runs() && !l.state.working())
-        .count()
-}
-
 /// A project Reno knows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectLine {
@@ -261,7 +255,8 @@ pub(crate) fn found_words(name: &str, facts: &reno_client::places::ProjectFacts)
     }
 }
 
-/// The five steps of the wizard.
+/// The steps of the wizard. Where nothing can bring a project in (no daemon that takes one), the
+/// project step is left out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     Welcome,
@@ -272,24 +267,37 @@ pub(crate) enum Step {
 }
 
 impl Step {
-    pub(crate) const ALL: [Self; 5] = [
-        Self::Welcome,
-        Self::Look,
-        Self::Agents,
-        Self::Project,
-        Self::Done,
-    ];
-
-    pub(crate) fn index(self) -> usize {
-        Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    /// The steps, in order.
+    pub(crate) fn all(with_project: bool) -> Vec<Self> {
+        [
+            Self::Welcome,
+            Self::Look,
+            Self::Agents,
+            Self::Project,
+            Self::Done,
+        ]
+        .into_iter()
+        .filter(|s| with_project || *s != Self::Project)
+        .collect()
     }
 
-    pub(crate) fn next(self) -> Self {
-        Self::ALL[(self.index() + 1).min(Self::ALL.len() - 1)]
+    pub(crate) fn index(self, with_project: bool) -> usize {
+        Self::all(with_project)
+            .iter()
+            .position(|s| *s == self)
+            .unwrap_or(0)
     }
 
-    pub(crate) fn back(self) -> Self {
-        Self::ALL[self.index().saturating_sub(1)]
+    /// The step after this one; the last stays.
+    pub(crate) fn next(self, with_project: bool) -> Self {
+        let all = Self::all(with_project);
+        all[(self.index(with_project) + 1).min(all.len() - 1)]
+    }
+
+    /// The step before this one; the first stays.
+    pub(crate) fn back(self, with_project: bool) -> Self {
+        let all = Self::all(with_project);
+        all[self.index(with_project).saturating_sub(1)]
     }
 
     pub(crate) fn parse(word: &str) -> Option<Self> {
@@ -304,105 +312,21 @@ impl Step {
     }
 }
 
-/// The four things setup covers, for the checklist and the one page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Item {
-    Appearance,
-    Agents,
-    Project,
-    Notifications,
-}
-
-impl Item {
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Appearance,
-        Self::Agents,
-        Self::Project,
-        Self::Notifications,
-    ];
-
-    pub(crate) const fn title(self) -> &'static str {
-        match self {
-            Self::Appearance => "Appearance",
-            Self::Agents => "Agents",
-            Self::Project => "First project",
-            Self::Notifications => "Notifications",
-        }
-    }
-
-    pub(crate) fn parse(word: &str) -> Option<Self> {
-        match word {
-            "appearance" | "look" => Some(Self::Appearance),
-            "agents" => Some(Self::Agents),
-            "project" => Some(Self::Project),
-            "notifications" => Some(Self::Notifications),
-            _ => None,
-        }
-    }
-}
-
 /// Where a person is in setup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Setup {
     /// The wizard's step.
     pub(crate) step: Step,
-    /// The checklist's open item.
-    pub(crate) open_item: Option<Item>,
     /// The project chosen, by name.
     pub(crate) project: Option<String>,
-    /// The look was looked at (a choice was made, or "Keep this look").
-    pub(crate) looked: bool,
-    /// Notifications were answered.
-    pub(crate) notified: bool,
-    /// The checklist card was put away.
-    pub(crate) card_dismissed: bool,
 }
 
 impl Setup {
     pub(crate) fn new() -> Self {
         Self {
             step: Step::Welcome,
-            open_item: None,
             project: None,
-            looked: false,
-            notified: false,
-            card_dismissed: false,
         }
-    }
-
-    /// Whether `item` is done. Agents are done when none is blocked.
-    pub(crate) fn is_done(&self, item: Item, blocked_agents: usize) -> bool {
-        match item {
-            Item::Appearance => self.looked,
-            Item::Agents => blocked_agents == 0,
-            Item::Project => self.project.is_some(),
-            Item::Notifications => self.notified,
-        }
-    }
-
-    pub(crate) fn done_count(&self, blocked_agents: usize) -> usize {
-        Item::ALL
-            .iter()
-            .filter(|i| self.is_done(**i, blocked_agents))
-            .count()
-    }
-
-    /// "2 of 4".
-    pub(crate) fn progress(&self, blocked_agents: usize) -> String {
-        format!("{} of {}", self.done_count(blocked_agents), Item::ALL.len())
-    }
-
-    pub(crate) fn all_done(&self, blocked_agents: usize) -> bool {
-        self.done_count(blocked_agents) == Item::ALL.len()
-    }
-
-    /// Opens `item`, or closes it when it is open.
-    pub(crate) fn toggle(&mut self, item: Item) {
-        self.open_item = if self.open_item == Some(item) {
-            None
-        } else {
-            Some(item)
-        };
     }
 }
 
@@ -412,39 +336,34 @@ impl Default for Setup {
     }
 }
 
-/// The connecting gate stays up at least this long, so a daemon that answers at once does not
-/// make it flash (ms).
-pub(crate) const GATE_MIN_MS: u64 = 1_200;
+/// Whether the connecting gate may lift: the daemon has answered, one way or the other. A daemon
+/// that is not there must show Home's offline notice and Retry, so the gate never hides that.
+pub(crate) fn gate_lifts(connection: reno_client::ConnectionStatus) -> bool {
+    connection != reno_client::ConnectionStatus::Connecting
+}
+
 /// How long the gate takes to fade into the app (ms).
-pub(crate) const GATE_FADE_MS: u64 = 650;
+pub(crate) const GATE_FADE_MS: u64 = 500;
 
-/// A step of the gate's checklist shows as done no sooner than this after the gate went up (ms),
-/// so a daemon that answers at once still reads as three things being done, one after another:
-/// Starting renod, Loading threads, Reading agents.
-pub(crate) const GATE_STEP_MS: [u64; 3] = [300, 700, 1_100];
-
-/// Which of the gate's three steps are done: each when what it waits for has arrived and its
-/// moment has come.
-pub(crate) fn gate_steps(connected: bool, threads: bool, agents: bool, up_ms: u64) -> [bool; 3] {
-    [
-        connected && up_ms >= GATE_STEP_MS[0],
-        threads && up_ms >= GATE_STEP_MS[1],
-        agents && up_ms >= GATE_STEP_MS[2],
-    ]
+/// `RENO_SETUP`: what a demo launch does with setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hook {
+    /// Setup does not show.
+    Skip,
+    /// Setup shows at this step, even when it was done.
+    At(Step),
 }
 
-/// Whether the gate may lift: it has been up long enough, the daemon answered one way or the
-/// other (a daemon that is not there must show Home's offline notice and Retry, so the gate
-/// never hides that), and a hook is not holding it.
-pub(crate) fn gate_lifts(
-    up_ms: u64,
-    connection: reno_client::ConnectionStatus,
-    held: bool,
-) -> bool {
-    !held && up_ms >= GATE_MIN_MS && connection != reno_client::ConnectionStatus::Connecting
+impl Hook {
+    pub(crate) fn parse(word: &str) -> Option<Self> {
+        match word {
+            "skip" => Some(Self::Skip),
+            other => Step::parse(other).map(Self::At),
+        }
+    }
 }
 
-/// Whether setup shows at all: only when it was not finished or skipped, or a hook asks.
+/// Whether setup shows: on a first run (not `onboarded`), or when asked to (`RENO_SETUP`).
 pub(crate) fn should_show(onboarded: bool, forced: bool) -> bool {
     forced || !onboarded
 }
@@ -477,7 +396,6 @@ mod tests {
             "3 of 5 agents can take runs on this Mac: Claude Code, Codex and Pi. \
              Grok needs signing in; Cursor is not installed."
         );
-        assert_eq!(blocked(&lines), 2);
     }
 
     #[test]
@@ -494,7 +412,6 @@ mod tests {
              Grok needs signing in; Cursor is not installed."
         );
         lines[2].state = AgentState::Signing;
-        assert_eq!(blocked(&lines), 1, "an agent on its way is not blocked");
         assert!(finding(&lines).contains("Grok is signing in"));
         lines[2].state = AgentState::Ready;
         lines[3].state = AgentState::Ready;
@@ -502,7 +419,6 @@ mod tests {
             finding(&lines),
             "All 4 agents can take runs on this Mac: Claude Code, Codex, Grok and Cursor."
         );
-        assert_eq!(blocked(&lines), 0);
     }
 
     #[test]
@@ -548,70 +464,30 @@ mod tests {
     }
 
     #[test]
-    fn the_wizard_walks_five_steps_and_stops_at_both_ends() {
-        assert_eq!(Step::Welcome.back(), Step::Welcome);
-        assert_eq!(Step::Welcome.next(), Step::Look);
-        assert_eq!(Step::Project.next(), Step::Done);
-        assert_eq!(Step::Done.next(), Step::Done);
-        assert_eq!(Step::Done.index(), 4);
+    fn the_wizard_walks_its_steps_and_stops_at_both_ends() {
+        assert_eq!(Step::Welcome.back(true), Step::Welcome);
+        assert_eq!(Step::Welcome.next(true), Step::Look);
+        assert_eq!(Step::Agents.next(true), Step::Project);
+        assert_eq!(Step::Project.next(true), Step::Done);
+        assert_eq!(Step::Done.next(true), Step::Done);
+        assert_eq!(Step::all(true).len(), 5);
         assert_eq!(Step::parse("agents"), Some(Step::Agents));
         assert_eq!(Step::parse("sideways"), None);
     }
 
     #[test]
-    fn progress_counts_what_is_done() {
-        let mut setup = Setup::new();
-        assert_eq!(setup.progress(2), "0 of 4");
-        assert_eq!(setup.progress(0), "1 of 4", "no blocked agent is done");
-        setup.looked = true;
-        setup.project = Some("reno".into());
-        assert_eq!(setup.progress(2), "2 of 4");
-        setup.notified = true;
-        assert!(!setup.all_done(2));
-        assert!(setup.all_done(0));
+    fn without_a_way_to_bring_a_project_in_the_step_is_left_out() {
+        assert_eq!(Step::all(false).len(), 4);
+        assert_eq!(Step::Agents.next(false), Step::Done);
+        assert_eq!(Step::Done.back(false), Step::Agents);
     }
 
     #[test]
-    fn an_item_opens_and_closes_and_one_is_open_at_a_time() {
-        let mut setup = Setup::new();
-        setup.toggle(Item::Agents);
-        assert_eq!(setup.open_item, Some(Item::Agents));
-        setup.toggle(Item::Project);
-        assert_eq!(setup.open_item, Some(Item::Project));
-        setup.toggle(Item::Project);
-        assert_eq!(setup.open_item, None);
-    }
-
-    #[test]
-    fn the_gate_checklist_goes_one_step_at_a_time_and_waits_for_what_it_needs() {
-        assert_eq!(gate_steps(true, true, true, 0), [false, false, false]);
-        assert_eq!(gate_steps(true, true, true, 500), [true, false, false]);
-        assert_eq!(gate_steps(true, true, true, 800), [true, true, false]);
-        assert_eq!(gate_steps(true, true, true, 1_200), [true, true, true]);
-        assert_eq!(
-            gate_steps(false, true, true, 5_000),
-            [false, true, true],
-            "a step is not done before its answer has come"
-        );
-    }
-
-    #[test]
-    fn the_gate_lifts_when_the_daemon_has_answered_and_it_has_been_seen() {
+    fn the_gate_lifts_as_soon_as_the_daemon_has_answered() {
         use reno_client::ConnectionStatus::{Connected, Connecting, Disconnected};
-        assert!(
-            !gate_lifts(0, Connected, false),
-            "not before it can be read"
-        );
-        assert!(
-            !gate_lifts(GATE_MIN_MS, Connecting, false),
-            "not while connecting"
-        );
-        assert!(gate_lifts(GATE_MIN_MS, Connected, false));
-        assert!(
-            gate_lifts(GATE_MIN_MS, Disconnected, false),
-            "offline must show Home's notice, not hide behind the gate"
-        );
-        assert!(!gate_lifts(60_000, Connected, true), "a hook holds it");
+        assert!(!gate_lifts(Connecting));
+        assert!(gate_lifts(Connected));
+        assert!(gate_lifts(Disconnected), "offline shows Home's notice");
     }
 
     #[test]

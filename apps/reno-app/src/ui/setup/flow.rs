@@ -1,12 +1,11 @@
 //! The setup entity: where a person is in first-run setup, what each click does, and the events
-//! the root view hears when it ends. The three variants draw it (`wizard`, `checklist`, `page`);
-//! none has a rule of its own. Each choice applies as it is made: the look at once, a sign-in
+//! the root view hears when it ends. The wizard draws it and has no rule of its own. Each choice applies as it is made: the look at once, a sign-in
 //! or an install as the existing executor action, the project as the new-thread project, so
 //! Skip at any point leaves nothing half-done.
 
 use std::path::PathBuf;
 
-use gpui::{AppContext as _, Context, Entity, EventEmitter, ScrollHandle, Subscription, Task};
+use gpui::{AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use reno_proto::{ExecutorId, JobKind};
 
 use crate::prefs::{self, AccentName, Mode, ThemeName};
@@ -14,7 +13,7 @@ use crate::store::Store;
 use crate::summary;
 use crate::ui::field::{Field, FieldEvent, Look};
 use crate::vm::executors;
-use crate::vm::first_run::{self, Action, AgentLine, Item, ProjectLine, SignInRoute, Step};
+use crate::vm::first_run::{self, Action, AgentLine, ProjectLine, SignInRoute, Step};
 
 /// What the root view hears.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +22,9 @@ pub(crate) enum FlowEvent {
     Over { skipped: bool },
     /// The first project was chosen: Home works in it.
     Project(PathBuf),
+    /// An install that has to be reviewed first (its recipe runs a vendor script): setup is over
+    /// and the Executors page opens on that agent's review.
+    Review(ExecutorId),
 }
 
 /// Cloning a project from a URL, as the project step has it.
@@ -46,8 +48,6 @@ pub(crate) struct SetupFlow {
     _url: Subscription,
     pub(crate) store: Entity<Store>,
     pub(crate) setup: first_run::Setup,
-    /// C's page.
-    pub(crate) scroll: ScrollHandle,
     _store: Subscription,
 }
 
@@ -55,9 +55,7 @@ impl EventEmitter<FlowEvent> for SetupFlow {}
 
 impl SetupFlow {
     pub(crate) fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        // The checklist opens on the agents: that is the finding's job.
-        let mut setup = first_run::Setup::new();
-        setup.open_item = Some(Item::Agents);
+        let setup = first_run::Setup::new();
         let url = cx.new(|cx| {
             Field::new(
                 "setup-clone-url",
@@ -81,7 +79,6 @@ impl SetupFlow {
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             setup,
-            scroll: ScrollHandle::new(),
         }
     }
 
@@ -104,6 +101,34 @@ impl SetupFlow {
     /// The finding sentence.
     pub(crate) fn finding(&self, cx: &gpui::App) -> String {
         first_run::finding(&self.lines(cx))
+    }
+
+    /// What the done step says was set: look, agents and, where one can be brought in, the first
+    /// project.
+    pub(crate) fn summary(&self, cx: &gpui::App) -> Vec<(&'static str, String)> {
+        let p = prefs::current(cx);
+        let lines = self.lines(cx);
+        let ready = lines.iter().filter(|l| l.state.can_take_runs()).count();
+        let mut rows = vec![
+            (
+                "Look",
+                format!("{:?} \u{b7} {:?} \u{b7} {:?}", p.mode, p.theme, p.accent),
+            ),
+            (
+                "Agents",
+                format!("{ready} of {} can take runs", lines.len()),
+            ),
+        ];
+        if self.with_project(cx) {
+            rows.push((
+                "First project",
+                self.setup
+                    .project
+                    .clone()
+                    .unwrap_or_else(|| "none yet; pick one from the sidebar".to_owned()),
+            ));
+        }
+        rows
     }
 
     /// The projects Reno knows.
@@ -132,7 +157,8 @@ impl SetupFlow {
         };
         let name = summary::executor_name(id);
         match action {
-            Action::Install => {
+            Action::Install { review: true } => cx.emit(FlowEvent::Review(executor)),
+            Action::Install { review: false } => {
                 self.store.update(cx, |store, cx| {
                     store.start_executor_job(executor, JobKind::Install, false, cx);
                 });
@@ -160,7 +186,6 @@ impl SetupFlow {
         cx: &mut Context<Self>,
     ) {
         prefs::update(cx, change);
-        self.setup.looked = true;
         cx.notify();
     }
 
@@ -174,12 +199,6 @@ impl SetupFlow {
 
     pub(crate) fn set_accent(&mut self, accent: AccentName, cx: &mut Context<Self>) {
         self.set_look(|p| p.accent = accent, cx);
-    }
-
-    pub(crate) fn set_notifications(&mut self, on: bool, cx: &mut Context<Self>) {
-        prefs::update(cx, |p| p.notifications = on);
-        self.setup.notified = true;
-        cx.notify();
     }
 
     /// Whether a folder can be brought in here: only a daemon with the places contract takes one.
@@ -308,24 +327,19 @@ impl SetupFlow {
         cx.notify();
     }
 
+    /// Whether the project step is there: only where something can bring a project in.
+    pub(crate) fn with_project(&self, cx: &gpui::App) -> bool {
+        self.can_import(cx)
+    }
+
     pub(crate) fn next(&mut self, cx: &mut Context<Self>) {
-        let step = self.setup.step.next();
+        let step = self.setup.step.next(self.with_project(cx));
         self.go(step, cx);
     }
 
     pub(crate) fn back(&mut self, cx: &mut Context<Self>) {
-        let step = self.setup.step.back();
+        let step = self.setup.step.back(self.with_project(cx));
         self.go(step, cx);
-    }
-
-    pub(crate) fn toggle(&mut self, item: Item, cx: &mut Context<Self>) {
-        self.setup.toggle(item);
-        cx.notify();
-    }
-
-    /// B's card is put away; setup is over for good.
-    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) {
-        self.skip(cx);
     }
 
     /// "Skip setup": over, and never shown again. Nothing is left staged: the look and the
@@ -337,19 +351,5 @@ impl SetupFlow {
     /// "Start building".
     pub(crate) fn finish(&mut self, cx: &mut Context<Self>) {
         cx.emit(FlowEvent::Over { skipped: false });
-    }
-
-    /// `RENO_DRAFT38_FIRST_RUN`: a step of the wizard, an item of the checklist, `done`.
-    pub(crate) fn hook(&mut self, word: &str, cx: &mut Context<Self>) {
-        if let Some(step) = Step::parse(word) {
-            self.setup.step = step;
-        }
-        if let Some(item) = Item::parse(word) {
-            self.setup.open_item = Some(item);
-        }
-        if word == "done" {
-            self.setup.open_item = None;
-        }
-        cx.notify();
     }
 }

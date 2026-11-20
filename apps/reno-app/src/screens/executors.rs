@@ -186,6 +186,14 @@ impl ExecutorsScreen {
             .update(cx, |store, cx| store.refresh_executors(id, cx));
     }
 
+    /// Opens one agent's line on the review of its install (what first-run setup sends a reviewed
+    /// install to).
+    pub(crate) fn review_install(&mut self, id: &ExecutorId, cx: &mut Context<Self>) {
+        self.expanded.insert(id.to_string());
+        self.reviewing.insert(id.to_string());
+        cx.notify();
+    }
+
     pub(crate) fn install(&mut self, id: ExecutorId, cx: &mut Context<Self>) {
         self.store
             .update(cx, |store, cx| store.install_executor(id, cx));

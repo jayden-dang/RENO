@@ -5225,7 +5225,6 @@ dependencies = [
  "chrono",
  "futures",
  "gpui",
- "gpui_macos",
  "gpui_platform",
  "gpui_tokio",
  "mimalloc",

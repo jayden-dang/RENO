@@ -13,6 +13,7 @@ pub(crate) fn link(thread: &ThreadId) -> String {
 }
 
 /// The thread a link names. Strict: the exact scheme and path, one thread id, nothing after it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse(url: &str) -> Option<ThreadId> {
     url.strip_prefix(PREFIX)?.parse().ok()
 }

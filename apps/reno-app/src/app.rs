@@ -37,7 +37,6 @@ use crate::screens::triggers::TriggersScreen;
 use crate::store::{Store, StoreEvent};
 use crate::ui::bar::{self, Anchor_, Bar};
 use crate::ui::composer;
-use crate::ui::draft38;
 use crate::ui::icon::Assets;
 use crate::ui::kit::SANS;
 use crate::ui::motion::{self, ReduceMotion};
@@ -46,7 +45,6 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
-use crate::vm::draft38::Variant as Draft38Variant;
 use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
 use crate::vm::shell::{self, Chip, History, Place};
@@ -119,22 +117,9 @@ pub(crate) struct Options {
     /// `close:atlas01`, a run's suffix; with `--fake`): act on the "fix the ACP v2 handshake"
     /// thread's row once the screen is up (screenshots, reviews).
     pub(crate) sidebar_open: Option<String>,
-    /// `--fake --draft38` (`RENO_DRAFT38=a|b|c`, default `a`): the ROAD-38 first-run draft, with
-    /// its variant. Without the flag the app is exactly as it was.
-    pub(crate) draft38: Option<Draft38Variant>,
-    /// `RENO_DRAFT38_FIRST_RUN=1|welcome|look|agents|project|done|appearance|notifications`:
-    /// with `--draft38`, show setup even when it was done, at that step or with that item open.
-    pub(crate) draft38_first_run: Option<String>,
-    /// `RENO_DRAFT38_GATE=hold`: with `--draft38`, the connecting gate stays up.
-    pub(crate) draft38_gate_hold: bool,
-    /// `RENO_DRAFT38_PROJECTS=none`: with `--draft38`, the daemon knows no project yet.
-    pub(crate) draft38_no_projects: bool,
-    /// `RENO_DRAFT38_IMPORT=<path>`: with `--draft38`, setup's folder panel answers with that
-    /// path (`/demo/reno`, `/demo/notes`; `/demo/todo.txt` and `/demo/locked-vault` are refused).
-    pub(crate) draft38_import: Option<String>,
-    /// `RENO_DRAFT38_OPEN=restart|restart-fail|updates|link`: with `--draft38`, setup is skipped
-    /// and that surface is put on show once the screen is up (screenshots, reviews).
-    pub(crate) draft38_open: Option<String>,
+    /// `RENO_SETUP=skip|welcome|look|agents|project|done` (with `--fake`): skip first-run setup,
+    /// or open it at that step even when it was done (screenshots, reviews).
+    pub(crate) setup: Option<crate::vm::first_run::Hook>,
 }
 
 impl Options {
@@ -154,55 +139,19 @@ impl Options {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let mut options = Self::default();
-        let mut draft38 = false;
         for arg in args {
             match arg.as_str() {
                 "--fake" => options.fake = true,
-                "--draft38" => draft38 = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
-        if draft38 {
-            if !options.fake {
-                return Err("--draft38 needs --fake".to_owned());
-            }
-            options.draft38 = Some(match env("RENO_DRAFT38").filter(|v| !v.is_empty()) {
-                None => Draft38Variant::A,
-                Some(key) => Draft38Variant::parse(&key)
-                    .ok_or_else(|| format!("RENO_DRAFT38: {key} is not a, b or c"))?,
-            });
-            if let Some(word) = env("RENO_DRAFT38_FIRST_RUN").filter(|v| !v.is_empty()) {
-                let known = word == "1"
-                    || crate::vm::first_run::Step::parse(&word).is_some()
-                    || crate::vm::first_run::Item::parse(&word).is_some();
-                if !known {
-                    return Err(format!("RENO_DRAFT38_FIRST_RUN: unknown value {word}"));
-                }
-                options.draft38_first_run = Some(word);
-            }
-            match env("RENO_DRAFT38_GATE")
-                .filter(|v| !v.is_empty())
-                .as_deref()
-            {
-                None => {}
-                Some("hold") => options.draft38_gate_hold = true,
-                Some(other) => return Err(format!("RENO_DRAFT38_GATE: {other} is not hold")),
-            }
-            match env("RENO_DRAFT38_PROJECTS")
-                .filter(|v| !v.is_empty())
-                .as_deref()
-            {
-                None => {}
-                Some("none") => options.draft38_no_projects = true,
-                Some(other) => return Err(format!("RENO_DRAFT38_PROJECTS: {other} is not none")),
-            }
-            options.draft38_import = env("RENO_DRAFT38_IMPORT").filter(|v| !v.is_empty());
-            if let Some(open) = env("RENO_DRAFT38_OPEN").filter(|v| !v.is_empty()) {
-                if !crate::vm::draft38::OPEN_HOOKS.contains(&open.as_str()) {
-                    return Err(format!("RENO_DRAFT38_OPEN: unknown hook {open}"));
-                }
-                options.draft38_open = Some(open);
-            }
+        if options.fake
+            && let Some(word) = env("RENO_SETUP").filter(|v| !v.is_empty())
+        {
+            options.setup = Some(
+                crate::vm::first_run::Hook::parse(&word)
+                    .ok_or_else(|| format!("RENO_SETUP: unknown value {word}"))?,
+            );
         }
         if options.fake
             && let Some(open) = env("RENO_SIDEBAR_OPEN").filter(|v| !v.is_empty())
@@ -358,8 +307,8 @@ pub(crate) struct Start {
     pub(crate) composer_open: Option<String>,
     /// The sidebar's start hook.
     pub(crate) sidebar_open: Option<String>,
-    /// The ROAD-38 draft's open hook.
-    pub(crate) draft38_open: Option<String>,
+    /// `RENO_SETUP`.
+    pub(crate) setup: Option<crate::vm::first_run::Hook>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -379,17 +328,9 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        if let Some(variant) = options.draft38 {
-            draft38::install(
-                variant,
-                draft38::Hooks {
-                    first_run: options.draft38_first_run.clone(),
-                    gate_hold: options.draft38_gate_hold,
-                    import: options.draft38_import.clone(),
-                },
-                cx,
-            );
-            // A draft against the fake daemon never opens a browser.
+        crate::ui::restart::bind_keys(cx);
+        if options.fake {
+            // A demo against the fake daemon never opens a browser.
             crate::links::mute();
         }
 
@@ -407,12 +348,7 @@ pub(crate) fn run(options: Options) {
         let toasts = toast::install(cx);
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
-            if options.draft38.is_some() {
-                store.start_fake_first_run(options.draft38_no_projects, cx);
-                if options.composer_fail.as_deref() == Some("commands") {
-                    store.set_commands_unreadable(true);
-                }
-            } else if options.fake {
+            if options.fake {
                 store.start_fake(cx);
                 if options.composer_fail.as_deref() == Some("commands") {
                     store.set_commands_unreadable(true);
@@ -443,7 +379,7 @@ pub(crate) fn run(options: Options) {
             composer_type: options.composer_type.clone(),
             composer_open: options.composer_open.clone(),
             sidebar_open: options.sidebar_open.clone(),
-            draft38_open: options.draft38_open.clone(),
+            setup: options.setup,
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -497,8 +433,15 @@ pub(crate) fn open_window(
         composer_type,
         composer_open,
         sidebar_open,
-        draft38_open,
+        setup,
     } = start;
+    let named = open.is_some()
+        || open_run.is_some()
+        || open_project.is_some()
+        || open_new_thread.is_some()
+        || open_settings.is_some()
+        || sidebar_open.is_some()
+        || composer_open.is_some();
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -541,20 +484,7 @@ pub(crate) fn open_window(
                     })
                     .detach();
                 }
-                root.init_draft38(draft38_open.is_some(), window, cx);
-                if let Some(hook) = draft38_open {
-                    // After the runs and their threads are read and the gate has gone.
-                    cx.spawn_in(window, async move |root, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(3000))
-                            .await;
-                        root.update_in(cx, |root, window, cx| {
-                            root.draft38_hook(&hook, window, cx);
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
+                root.init_first_run(setup, named, window, cx);
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
@@ -743,15 +673,6 @@ enum Screen {
     Settings,
 }
 
-/// The connecting gate: how long it has been in its phase, counted in its own ticks.
-struct Gate {
-    phase: draft38::gate::Phase,
-    ms: u64,
-}
-
-/// How often the gate looks at the daemon.
-const GATE_TICK_MS: u64 = 100;
-
 pub(crate) struct RootView {
     store: Entity<Store>,
     home: Entity<HomeScreen>,
@@ -789,15 +710,14 @@ pub(crate) struct RootView {
     pending_fired: Option<RunId>,
     /// The sidebar's interaction state: menu, rename, confirm, "Show more", width.
     sidebar: sidebar::State,
-    /// ROAD-38 draft: first-run setup while it shows (none without `--draft38`, or once it is
-    /// over), the connecting gate, and the restart of `renod`.
-    setup: Option<Entity<draft38::flow::SetupFlow>>,
-    gate: Option<Gate>,
+    /// First-run setup while it shows, the connecting gate, and the restart of `renod`.
+    setup: Option<Entity<crate::ui::setup::flow::SetupFlow>>,
+    gate: Option<crate::ui::gate::Phase>,
     restart: crate::vm::daemon_restart::Restart,
     /// The panel under the restart affordance is open.
     restart_open: bool,
     restart_at: Anchor_,
-    _draft_subscriptions: Vec<Subscription>,
+    _first_run_subscriptions: Vec<Subscription>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -827,6 +747,7 @@ impl RootView {
             cx.subscribe_in(&executors, window, Self::on_screen_event),
             cx.observe(&store, |this, _, cx| {
                 this.remember_updates(cx);
+                this.lift_gate(cx);
                 cx.notify();
             }),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
@@ -949,7 +870,7 @@ impl RootView {
             restart: crate::vm::daemon_restart::Restart::default(),
             restart_open: false,
             restart_at: Rc::new(Cell::new(None)),
-            _draft_subscriptions: Vec::new(),
+            _first_run_subscriptions: Vec::new(),
             toasts,
             screen: Screen::Home,
             before_settings: None,
@@ -971,160 +892,103 @@ impl RootView {
         }
     }
 
-    // --- ROAD-38 draft ---------------------------------------------------------------------
+    // --- First run: the connecting gate and setup (ROAD-38) ----------------------------------
 
-    /// Turns the draft's parts on for this window: the connecting gate, first-run setup unless it
-    /// was done (or `skip_setup`), and the hooks. Does nothing without `--draft38`.
-    pub(crate) fn init_draft38(
+    /// What a window opens with: the connecting gate when the daemon has not answered yet (it is
+    /// drawn on the first frame and never waits for the daemon), and first-run setup on a first
+    /// run. `hook` (`RENO_SETUP`, with `--fake`) skips setup or opens it at a step; `named` says a
+    /// screen was asked for by name, which is shown instead of setup.
+    pub(crate) fn init_first_run(
         &mut self,
-        skip_setup: bool,
+        hook: Option<crate::vm::first_run::Hook>,
+        named: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(variant) = draft38::current(cx) else {
-            return;
-        };
-        let hooks = draft38::hooks(cx);
-        // The gate is up from the first frame; the daemon is not waited for.
-        self.gate = Some(Gate {
-            phase: draft38::gate::Phase::Up,
-            ms: 0,
-        });
-        // A held gate keeps counting, so its checklist still goes on; it just never lifts.
-        cx.spawn_in(window, async move |root, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(GATE_TICK_MS))
-                    .await;
-                let alive = root
-                    .update(cx, |root, cx| root.gate_tick(cx))
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-            }
-        })
-        .detach();
-        let forced = hooks.first_run.is_some();
+        use crate::vm::first_run::{Hook, should_show};
+        if self.store.read(cx).connection() == reno_client::ConnectionStatus::Connecting {
+            self.gate = Some(crate::ui::gate::Phase::Up);
+        }
+        let forced = matches!(hook, Some(Hook::At(_)));
         let onboarded = crate::prefs::current(cx).onboarded;
-        if crate::vm::first_run::should_show(onboarded, forced) && !(skip_setup && !forced) {
-            let store = self.store.clone();
-            let flow = cx.new(|cx| draft38::flow::SetupFlow::new(store, cx));
-            self._draft_subscriptions
-                .push(cx.subscribe_in(&flow, window, Self::on_setup_event));
-            self.setup = Some(flow.clone());
-            if let Some(path) = hooks.import.clone() {
-                flow.update(cx, |flow, cx| flow.import_path(PathBuf::from(path), cx));
-            }
-            if let Some(word) = hooks.first_run.as_deref() {
-                if word == "done" && variant != Draft38Variant::A {
-                    // B and C: setup is over, and Home is the empty new-thread state it leaves.
-                    self.end_setup(window, cx);
-                    self.set_home_folder(
-                        Some(crate::vm::projects::FolderKey::Repo(PathBuf::from(
-                            "/demo/reno",
-                        ))),
-                        cx,
-                    );
-                } else {
-                    flow.update(cx, |flow, cx| flow.hook(word, cx));
-                }
-            }
+        let skipped = hook == Some(Hook::Skip) || (named && !forced);
+        if !should_show(onboarded, forced) || skipped {
+            return;
         }
-        // C's page scrolls to a section when a hook names one.
-        if let Some(word) = hooks.first_run.as_deref()
-            && matches!(word, "agents" | "project" | "notifications")
-        {
-            self.scroll_setup_to(word, cx);
+        let store = self.store.clone();
+        let flow = cx.new(|cx| crate::ui::setup::flow::SetupFlow::new(store, cx));
+        self._first_run_subscriptions
+            .push(cx.subscribe_in(&flow, window, Self::on_setup_event));
+        if let Some(Hook::At(step)) = hook {
+            flow.update(cx, |flow, cx| flow.go(step, cx));
         }
+        self.setup = Some(flow);
     }
 
-    /// One look at the gate: lifts it when the daemon has answered and it has been up long
-    /// enough, and takes it away once it has faded. `false` once there is nothing to watch.
-    fn gate_tick(&mut self, cx: &mut Context<Self>) -> bool {
-        let connection = self.store.read(cx).connection();
-        let held = draft38::hooks(cx).gate_hold;
-        let Some(gate) = &mut self.gate else {
-            return false;
-        };
-        gate.ms += GATE_TICK_MS;
-        let up = gate.ms;
-        match gate.phase {
-            draft38::gate::Phase::Up => {
-                if crate::vm::first_run::gate_lifts(up, connection, held) {
-                    gate.phase = draft38::gate::Phase::Fading;
-                    gate.ms = 0;
-                    cx.notify();
-                }
-                true
-            }
-            draft38::gate::Phase::Fading => {
-                if up >= crate::vm::first_run::GATE_FADE_MS {
-                    self.gate = None;
-                    cx.notify();
-                    return false;
-                }
-                true
-            }
+    /// The daemon has answered, or failed to: the gate fades, then goes.
+    fn lift_gate(&mut self, cx: &mut Context<Self>) {
+        use crate::ui::gate::Phase;
+        if self.gate != Some(Phase::Up)
+            || !crate::vm::first_run::gate_lifts(self.store.read(cx).connection())
+        {
+            return;
         }
+        self.gate = Some(Phase::Fading);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(crate::vm::first_run::GATE_FADE_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                this.gate = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The gate's phase, for tests.
     #[cfg(test)]
-    pub(crate) fn gate_phase(&self) -> Option<draft38::gate::Phase> {
-        self.gate.as_ref().map(|g| g.phase)
+    pub(crate) fn gate_phase(&self) -> Option<crate::ui::gate::Phase> {
+        self.gate
     }
 
-    /// Setup is over (or never was): the draft's parts for it go.
+    /// Setup is over: it never shows again.
     fn end_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.setup = None;
         crate::prefs::update(cx, |p| p.onboarded = true);
-        self.home.update(cx, |home, cx| home.set_card(None, cx));
         self.focus_composer(window, cx);
         cx.notify();
     }
 
     fn on_setup_event(
         &mut self,
-        _: &Entity<draft38::flow::SetupFlow>,
-        event: &draft38::flow::FlowEvent,
+        _: &Entity<crate::ui::setup::flow::SetupFlow>,
+        event: &crate::ui::setup::flow::FlowEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use draft38::flow::FlowEvent;
+        use crate::ui::setup::flow::FlowEvent;
         match event {
             FlowEvent::Over { .. } => self.end_setup(window, cx),
             FlowEvent::Project(path) => {
                 self.set_home_folder(Some(crate::vm::projects::FolderKey::Repo(path.clone())), cx);
+            }
+            FlowEvent::Review(id) => {
+                // The install of this agent is reviewed where it is reviewed.
+                self.end_setup(window, cx);
+                self.navigate(Nav::Executors, window, cx);
+                self.executors
+                    .update(cx, |screen, cx| screen.review_install(id, cx));
             }
         }
     }
 
     /// Setup is showing, for tests.
     #[cfg(test)]
-    pub(crate) fn setup(&self) -> Option<&Entity<draft38::flow::SetupFlow>> {
+    pub(crate) fn setup(&self) -> Option<&Entity<crate::ui::setup::flow::SetupFlow>> {
         self.setup.as_ref()
-    }
-
-    /// C's page: brings a section to the top.
-    fn scroll_setup_to(&mut self, section: &str, cx: &mut Context<Self>) {
-        let Some(flow) = self.setup.clone() else {
-            return;
-        };
-        let y = match section {
-            "agents" => 190.0,
-            "project" => 470.0,
-            _ => 10_000.0,
-        };
-        flow.update(cx, |flow, _| {
-            flow.scroll.set_offset(gpui::point(px(0.0), px(-y)));
-        });
-    }
-
-    /// The ⌘⌥ keys moved the variant: B's card follows it, the rest follow in `render`.
-    fn sync_setup_card(&mut self, cx: &mut Context<Self>) {
-        let card = self.setup.clone();
-        self.home.update(cx, |home, cx| home.set_card(card, cx));
     }
 
     // --- Skip this version (ROAD-38) ----------------------------------------------------------
@@ -1132,9 +996,6 @@ impl RootView {
     /// "Skip this version" on one agent: its update to this version is not offered again, and a
     /// newer one is. Remembered in the app-local `skippedUpdates`.
     pub(crate) fn skip_update(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !draft38::on(cx) {
-            return;
-        }
         let Some(update) = self
             .agent_updates(cx)
             .into_iter()
@@ -1157,18 +1018,16 @@ impl RootView {
     // --- Thread links (ROAD-38) ---------------------------------------------------------------
 
     /// Opens a `reno://thread/<id>` link: focuses that thread's latest run. The URL scheme is not
-    /// registered with the OS (that needs the app bundle), so this is the one entry a link
-    /// reaches; a test drives it. `false` (and a toast, for a link that was meant) when it did
+    /// registered with the OS (that needs the app bundle), so nothing calls this yet but a test;
+    /// it is the one entry a link will reach. `false` (and a toast, for a link that was meant) when it did
     /// not open anything.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn open_link(
         &mut self,
         url: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !draft38::on(cx) {
-            return false;
-        }
         let Some(thread) = crate::vm::thread_link::parse(url) else {
             toast::push(
                 cx,
@@ -1204,13 +1063,10 @@ impl RootView {
 
     // --- Restarting renod (ROAD-38) -----------------------------------------------------------
 
-    /// The affordance was pressed: the question (A, B), C's card, or the failure again.
+    /// The pill was pressed: the question, or the failure again.
     pub(crate) fn restart_press(&mut self, cx: &mut Context<Self>) {
         use crate::vm::daemon_restart::Phase;
         match self.restart.phase {
-            Phase::Idle if draft38::current(cx) == Some(Draft38Variant::C) => {
-                self.restart_open = !self.restart_open;
-            }
             Phase::Idle => self.restart_ask(cx),
             Phase::Asking | Phase::Failed(_) => self.restart_open = !self.restart_open,
             Phase::Restarting => {}
@@ -1265,35 +1121,16 @@ impl RootView {
         .detach();
     }
 
+    /// What the confirm says of the runs that are live now, for tests.
+    #[cfg(test)]
+    pub(crate) fn restart_live_words(&self, cx: &App) -> String {
+        crate::vm::daemon_restart::live_words(shell::live_runs(self.store.read(cx).state()).len())
+    }
+
     /// The restart's state, for tests.
     #[cfg(test)]
     pub(crate) fn restart_phase(&self) -> &crate::vm::daemon_restart::Phase {
         &self.restart.phase
-    }
-
-    /// `RENO_DRAFT38_OPEN`: puts that surface on show.
-    pub(crate) fn draft38_hook(&mut self, hook: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match hook {
-            "restart-card" => self.restart_press(cx),
-            "restart" => {
-                if draft38::current(cx) == Some(Draft38Variant::C) {
-                    self.restart_open = false;
-                }
-                self.restart_ask(cx);
-            }
-            "restart-fail" => {
-                self.store.read(cx).demo_fail_next_restart();
-                self.restart_ask(cx);
-                self.restart_go(cx);
-            }
-            "updates" => self.toggle_updates(cx),
-            "link" => {
-                if let Ok(thread) = reno_proto::ThreadId::from_suffix("plan1") {
-                    self.open_link(&crate::vm::thread_link::link(&thread), window, cx);
-                }
-            }
-            _ => {}
-        }
     }
 
     /// The picker's Account row: look at the harness's login on the Executors screen.
@@ -1657,12 +1494,8 @@ impl RootView {
             store.now_ms(),
             store.registry().listing.as_ref(),
         );
-        // ROAD-38: a version the person skipped is not offered again.
-        if draft38::on(cx) {
-            executors::without_skipped(all, &crate::prefs::current(cx).skipped_updates)
-        } else {
-            all
-        }
+        // A version the person skipped is not offered again.
+        executors::without_skipped(all, &crate::prefs::current(cx).skipped_updates)
     }
 
     /// While the list is open, keeps its rows so one that finishes reads "Up to date".
@@ -1910,10 +1743,8 @@ impl RootView {
                 edit: None,
             },
         );
-        // ROAD-38: archived threads are not places to jump to.
-        if draft38::on(cx)
-            && let Some(marks) = store.thread_marks()
-        {
+        // Archived threads are not places to jump to.
+        if let Some(marks) = store.thread_marks() {
             palette::without_archived(&mut folders, &marks.archived);
         }
         let threads = palette::threads(&folders, |run| {
@@ -2060,51 +1891,14 @@ impl Render for RootView {
         });
 
         let on_run = matches!(self.screen, Screen::Run(_));
-        // ROAD-38 draft: C's setup page takes the canvas; A's wizard and the gates are overlays
-        // under the status bar; B's card is drawn by Home.
-        let draft = draft38::current(cx);
-        self.sync_setup_card(cx);
-        let setup_page = self
-            .setup
-            .clone()
-            .filter(|_| draft == Some(Draft38Variant::C))
-            .map(|flow| draft38::page::page(&flow, &theme, cx));
+        // Setup (the wizard) and the connecting gate are overlays under the status bar.
         let setup_wizard = self
             .setup
             .clone()
-            .filter(|_| draft == Some(Draft38Variant::A))
-            .map(|flow| draft38::wizard::overlay(&flow, &theme, cx));
-        let gate_phase = self.gate.as_ref().map(|g| g.phase);
-        let gate_progress = {
-            use reno_client::{Feed, FeedState};
-            let state = self.store.read(cx).state();
-            let live = |feed| state.feed(feed) == FeedState::Live;
-            let up_ms = self.gate.as_ref().map_or(u64::MAX, |g| match g.phase {
-                draft38::gate::Phase::Up => g.ms,
-                draft38::gate::Phase::Fading => u64::MAX,
-            });
-            let [started, threads, agents] = crate::vm::first_run::gate_steps(
-                state.connection() == reno_client::ConnectionStatus::Connected,
-                live(Feed::Runs) && live(Feed::Threads),
-                live(Feed::Executors),
-                up_ms,
-            );
-            draft38::gate::Progress {
-                started,
-                threads,
-                agents,
-            }
-        };
-        let gate_splash = draft
-            .zip(gate_phase)
-            .and_then(|(v, phase)| draft38::gate::splash(v, &theme, gate_progress, phase));
-        let gate_line = (draft == Some(Draft38Variant::B))
-            .then_some(gate_phase)
-            .flatten()
-            .map(|phase| draft38::gate::progress_line(&theme, phase));
-        let skeleton = (draft == Some(Draft38Variant::B)
-            && gate_phase == Some(draft38::gate::Phase::Up))
-        .then(|| draft38::gate::skeleton_rows(&theme));
+            .map(|flow| crate::ui::setup::wizard::overlay(&flow, &theme, cx));
+        let gate_splash = self
+            .gate
+            .map(|phase| crate::ui::gate::splash(&theme, phase));
         let panel = div()
             .id("canvas-panel")
             .debug_selector(|| "canvas-panel".to_owned())
@@ -2116,21 +1910,20 @@ impl Render for RootView {
             .mr(px(GUTTER))
             .when(self.sidebar_hidden, |p| p.ml(px(GUTTER)))
             // A run draws its own two canvases; every other screen sits on this one.
-            .when(!on_run || setup_page.is_some(), |p| {
+            .when(!on_run, |p| {
                 p.rounded(px(14.0))
                     .bg(theme.canvas)
                     .border_1()
                     .border_color(theme.hairline)
                     .overflow_hidden()
             })
-            .child(match (setup_page, &self.screen) {
-                (Some(page), _) => page,
-                (None, Screen::Home) => self.home.clone().into_any_element(),
-                (None, Screen::Runs) => self.runs.clone().into_any_element(),
-                (None, Screen::Run(run)) => run.clone().into_any_element(),
-                (None, Screen::Project(project)) => project.clone().into_any_element(),
-                (None, Screen::Triggers) => self.triggers.clone().into_any_element(),
-                (None, Screen::Settings) => self.settings.clone().into_any_element(),
+            .child(match &self.screen {
+                Screen::Home => self.home.clone().into_any_element(),
+                Screen::Runs => self.runs.clone().into_any_element(),
+                Screen::Run(run) => run.clone().into_any_element(),
+                Screen::Project(project) => project.clone().into_any_element(),
+                Screen::Triggers => self.triggers.clone().into_any_element(),
+                Screen::Settings => self.settings.clone().into_any_element(),
             });
 
         let main = div()
@@ -2178,7 +1971,7 @@ impl Render for RootView {
             on_run,
             more_at: self.more_at.clone(),
             updates_at: self.updates_at.clone(),
-            draft: draft.map(|variant| {
+            restart: {
                 let (versions, live) = {
                     let store = self.store.read(cx);
                     // Nothing to restart until renod has answered.
@@ -2189,20 +1982,15 @@ impl Render for RootView {
                         shell::live_runs(store.state()).len(),
                     )
                 };
-                let restart = draft38::restart::RestartBar {
-                    variant,
+                crate::ui::restart::RestartBar {
                     phase: self.restart.phase.clone(),
                     offered: crate::vm::daemon_restart::offered(versions.as_ref(), &self.restart),
                     open: self.restart_open,
                     versions,
                     live,
                     at: self.restart_at.clone(),
-                };
-                bar::DraftBar {
-                    label: std::cell::RefCell::new(draft38::label(&theme, cx)),
-                    restart,
                 }
-            }),
+            },
         };
         let this = cx.entity();
         let status_bar = bar::status_bar(&this, &bar);
@@ -2212,16 +2000,8 @@ impl Render for RootView {
             &self.folders_toggled,
             &self.sidebar,
             Rc::clone(&act),
-        )
-        .with_links(draft.is_some());
+        );
         let sidebar_overlays = sidebar::overlays(&theme, &view);
-        let slots = sidebar::DraftSlots {
-            banner: bar
-                .draft
-                .as_ref()
-                .and_then(|d| draft38::restart::banner(&this, &theme, &d.restart)),
-            skeleton,
-        };
 
         div()
             .id("root")
@@ -2229,7 +2009,7 @@ impl Render for RootView {
                 gpui::KeyContext::parse(&format!("Root {}", actions::SIDEBAR_OPEN))
                     .unwrap_or_default()
             } else if self.restart_open {
-                gpui::KeyContext::parse(&format!("Root {}", draft38::OPEN_CONTEXT))
+                gpui::KeyContext::parse(&format!("Root {}", crate::ui::restart::OPEN_CONTEXT))
                     .unwrap_or_default()
             } else {
                 gpui::KeyContext::parse("Root").unwrap_or_default()
@@ -2239,7 +2019,9 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &draft38::Dismiss, _, cx| this.restart_cancel(cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::ui::restart::Dismiss, _, cx| this.restart_cancel(cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::DismissSidebar, w, cx| {
                 this.sidebar_act(sidebar::Act::Dismiss, w, cx);
             }))
@@ -2322,7 +2104,6 @@ impl Render for RootView {
                                 &handlers,
                                 &view,
                                 sidebar_width,
-                                slots,
                             ))
                         }
                     })
@@ -2330,7 +2111,6 @@ impl Render for RootView {
             )
             .children(setup_wizard)
             .children(gate_splash)
-            .children(gate_line)
             .children(popovers)
             .children(sidebar_overlays)
             .children(self.palette.clone())
@@ -2395,79 +2175,27 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_switch_needs_the_fake_daemon_and_is_checked() {
-        let draft = |args: &[&str], env: &[(&str, &str)]| parse(args, env);
-        // Without `--fake` it is a parse error, whatever else is given.
+    fn the_setup_hook_exists_only_with_the_fake_daemon_and_is_checked() {
+        use crate::vm::first_run::{Hook, Step};
+        let hook = |h: &'static str| ("RENO_SETUP", h);
+        assert_eq!(parse(&[], &[hook("skip")]).unwrap().setup, None);
         assert_eq!(
-            draft(&["--draft38"], &[]).unwrap_err(),
-            "--draft38 needs --fake"
+            parse(&["--fake"], &[hook("skip")]).unwrap().setup,
+            Some(Hook::Skip)
         );
-        // With it, variant A unless `RENO_DRAFT38` says otherwise.
-        let a = draft(&["--fake", "--draft38"], &[]).unwrap();
-        assert_eq!(a.draft38, Some(Draft38Variant::A));
-        for (key, want) in [("b", Draft38Variant::B), ("C", Draft38Variant::C)] {
-            let o = draft(&["--fake", "--draft38"], &[("RENO_DRAFT38", key)]).unwrap();
-            assert_eq!(o.draft38, Some(want));
-        }
-        assert!(draft(&["--fake", "--draft38"], &[("RENO_DRAFT38", "d")]).is_err());
-        // Without `--draft38` the app is as it was: the variable and the hooks mean nothing.
-        let plain = draft(
-            &["--fake"],
-            &[
-                ("RENO_DRAFT38", "c"),
-                ("RENO_DRAFT38_GATE", "hold"),
-                ("RENO_DRAFT38_FIRST_RUN", "1"),
-                ("RENO_DRAFT38_OPEN", "restart"),
-            ],
-        )
-        .unwrap();
-        assert_eq!(plain.draft38, None);
-        assert!(!plain.draft38_gate_hold);
-        assert_eq!((plain.draft38_first_run, plain.draft38_open), (None, None));
-    }
-
-    #[test]
-    fn the_draft_hooks_are_checked() {
-        let on = |env: &[(&str, &str)]| parse(&["--fake", "--draft38"], env);
-        let o = on(&[
-            ("RENO_DRAFT38_FIRST_RUN", "agents"),
-            ("RENO_DRAFT38_GATE", "hold"),
-            ("RENO_DRAFT38_OPEN", "restart-fail"),
-        ])
-        .unwrap();
-        assert_eq!(o.draft38_first_run.as_deref(), Some("agents"));
-        assert!(o.draft38_gate_hold);
-        assert_eq!(o.draft38_open.as_deref(), Some("restart-fail"));
-        for word in [
-            "1",
-            "welcome",
-            "look",
-            "agents",
-            "project",
-            "done",
-            "notifications",
+        for (word, step) in [
+            ("welcome", Step::Welcome),
+            ("look", Step::Look),
+            ("agents", Step::Agents),
+            ("project", Step::Project),
+            ("done", Step::Done),
         ] {
-            assert!(on(&[("RENO_DRAFT38_FIRST_RUN", word)]).is_ok(), "{word}");
+            assert_eq!(
+                parse(&["--fake"], &[hook(word)]).unwrap().setup,
+                Some(Hook::At(step))
+            );
         }
-        assert!(on(&[("RENO_DRAFT38_FIRST_RUN", "sideways")]).is_err());
-        assert!(on(&[("RENO_DRAFT38_GATE", "open")]).is_err());
-        for hook in crate::vm::draft38::OPEN_HOOKS {
-            assert!(on(&[("RENO_DRAFT38_OPEN", hook)]).is_ok(), "{hook}");
-        }
-        assert!(on(&[("RENO_DRAFT38_OPEN", "dance")]).is_err());
-        let o = on(&[
-            ("RENO_DRAFT38_PROJECTS", "none"),
-            ("RENO_DRAFT38_IMPORT", "/demo/notes"),
-        ])
-        .unwrap();
-        assert!(o.draft38_no_projects);
-        assert_eq!(o.draft38_import.as_deref(), Some("/demo/notes"));
-        assert!(on(&[("RENO_DRAFT38_PROJECTS", "some")]).is_err());
-        let plain = parse(&["--fake"], &[("RENO_DRAFT38_PROJECTS", "none")]).unwrap();
-        assert!(
-            !plain.draft38_no_projects,
-            "without --draft38 it means nothing"
-        );
+        assert!(parse(&["--fake"], &[hook("sideways")]).is_err());
     }
 
     #[test]

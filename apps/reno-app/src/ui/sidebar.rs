@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px};
 use reno_client::ConnectionStatus;
 use reno_proto::RunId;
 
@@ -256,18 +256,8 @@ pub(crate) fn settings_row(
         })
 }
 
-/// What the ROAD-38 draft puts in the sidebar: B's restart banner above everything, and B's
-/// skeleton rows in place of the thread list while its connecting gate is up.
-#[derive(Default)]
-pub(crate) struct DraftSlots {
-    pub(crate) banner: Option<AnyElement>,
-    pub(crate) skeleton: Option<AnyElement>,
-}
-
 /// The sidebar column. `active` marks the current destination; `needing` is how many executors
 /// can't take runs.
-// The draft's slots made the eighth argument; the winner folds them into `View`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn sidebar(
     theme: &Theme,
     store: &Store,
@@ -276,7 +266,6 @@ pub(crate) fn sidebar(
     handlers: &SidebarHandlers,
     view: &View<'_>,
     width: f32,
-    slots: DraftSlots,
 ) -> impl IntoElement {
     let selected_run = store.looking_at().cloned();
 
@@ -308,13 +297,9 @@ pub(crate) fn sidebar(
             .child(div().flex_1().child("Start a task"))
     };
 
-    let list = match slots.skeleton {
-        Some(skeleton) => skeleton,
-        None => rows::section(theme, view, selected_run.as_ref(), handlers, |folder| {
-            folder_view(theme, folder, selected_run.as_ref(), handlers, view)
-        })
-        .into_any_element(),
-    };
+    let list = rows::section(theme, view, selected_run.as_ref(), handlers, |folder| {
+        folder_view(theme, folder, selected_run.as_ref(), handlers, view)
+    });
 
     let foot = div()
         .flex_none()
@@ -347,7 +332,6 @@ pub(crate) fn sidebar(
                 .overflow_y_scroll()
                 .track_scroll(&view.state.scroll)
                 .px(px(10.0))
-                .children(slots.banner)
                 .child(start)
                 .child(list),
         )

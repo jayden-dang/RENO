@@ -31,8 +31,6 @@ pub(crate) type ActHandler = Rc<dyn Fn(Act, &mut Window, &mut App)>;
 pub(crate) struct View<'a> {
     /// Renaming, pinning and archiving exist.
     pub(crate) edit: bool,
-    /// "Copy link" is in the row menu (the ROAD-38 draft is on).
-    pub(crate) links: bool,
     pub(crate) listing: Listing,
     pub(crate) state: &'a State,
     pub(crate) store: &'a Store,
@@ -67,20 +65,11 @@ impl<'a> View<'a> {
         );
         Self {
             edit: store.capabilities().thread_edit,
-            links: false,
             listing,
             state,
             store,
             act,
         }
-    }
-}
-
-impl View<'_> {
-    /// Offers "Copy link" in the row menu (the ROAD-38 draft).
-    pub(crate) fn with_links(mut self, links: bool) -> Self {
-        self.links = links;
-        self
     }
 }
 
@@ -539,7 +528,7 @@ pub(crate) fn overlays(theme: &Theme, v: &View<'_>) -> Vec<AnyElement> {
         Rc::new(move |window, cx| act(Act::Dismiss, window, cx))
     };
     if let Some(m) = &v.state.menu {
-        let facts = State::facts(v.store, &m.thread, v.links);
+        let facts = State::facts(v.store, &m.thread);
         let entries = if m.copy {
             threads::copy_entries(facts)
         } else {

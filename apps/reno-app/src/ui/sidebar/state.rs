@@ -157,7 +157,7 @@ impl State {
     }
 
     /// What the menu needs to know about `thread`.
-    pub(crate) fn facts(store: &Store, thread: &ThreadId, link: bool) -> Facts {
+    pub(crate) fn facts(store: &Store, thread: &ThreadId) -> Facts {
         let info = store.state().thread(thread);
         let latest = info.and_then(|i| i.latest_run()).map(|r| r.run_id.clone());
         Facts {
@@ -170,7 +170,6 @@ impl State {
             has_session: latest
                 .and_then(|run| store.state().run(&run).map(|r| r.session.is_some()))
                 .unwrap_or(false),
-            link,
         }
     }
 
@@ -476,7 +475,7 @@ impl State {
         };
         let item = if archive {
             Item::Archive
-        } else if Self::facts(store.read(cx), &thread, false).pinned {
+        } else if Self::facts(store.read(cx), &thread).pinned {
             Item::Unpin
         } else {
             Item::Pin

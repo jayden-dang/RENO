@@ -46,7 +46,7 @@ impl FakeDaemon {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The next restart ends with `renod` not coming back (`RENO_DRAFT38_OPEN=restart-fail`).
+    /// The next restart ends with `renod` not coming back.
     pub fn fail_next_restart(&self) {
         self.daemon_state().fail_next = true;
     }

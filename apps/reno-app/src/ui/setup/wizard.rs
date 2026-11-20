@@ -1,9 +1,9 @@
-//! A "Wizard": first run as a full-window, centred flow of five steps, one thing per screen,
-//! with progress dots and Back / Continue, and "Skip setup" at the bottom left. The accent is
-//! spent on the step's primary button and the progress dots. Step titles are Geist 24 semibold,
-//! body Geist 14.
+//! First run as a full-window, centred flow of five steps (four where nothing can bring a project
+//! in), one thing per screen, with progress dots and Back / Continue, and "Skip setup" at the
+//! bottom left. The accent is spent on the step's primary button and the progress dots. Step
+//! titles are Geist 24 semibold, body Geist 14.
 //!
-//! It covers everything under the status bar, so the bar, and the switch's label in it, stay.
+//! It covers everything under the status bar, so the bar stays.
 
 use gpui::{
     AnyElement, App, Context, Entity, FontWeight, IntoElement, SharedString, div, prelude::*, px,
@@ -29,23 +29,33 @@ pub(crate) fn overlay(flow: &Entity<SetupFlow>, theme: &Theme, cx: &mut App) -> 
 
 impl SetupFlow {
     fn wizard(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let step = self.setup.step;
+        let with_project = self.with_project(cx);
+        // A project step that is not there is not shown, whoever asked for it.
+        let step = match self.setup.step {
+            Step::Project if !with_project => Step::Done,
+            step => step,
+        };
         let lines = self.lines(cx);
         let body = match step {
             Step::Welcome => self.welcome(theme, &lines, cx),
             Step::Look => self.look_step(theme, cx),
             Step::Agents => self.agents_step(theme, &lines, cx),
             Step::Project => self.project_step(theme, cx),
-            Step::Done => self.done_step(theme, &lines, cx),
+            Step::Done => self.done_step(theme, cx),
         };
-        let dots = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .children(Step::ALL.iter().map(|s| {
-                let on = *s == step;
-                let reached = s.index() <= step.index();
+        let dots = div().flex().items_center().gap(px(6.0)).children(
+            Step::all(with_project).into_iter().map(|s| {
+                let on = s == step;
+                let reached = s.index(with_project) <= step.index(with_project);
                 div()
+                    .id(gpui::SharedString::from(format!(
+                        "setup-dot-{}",
+                        s.index(with_project)
+                    )))
+                    .debug_selector({
+                        let at = s.index(with_project);
+                        move || format!("setup-dot-{at}")
+                    })
                     .h(px(6.0))
                     .w(px(if on { 20.0 } else { 6.0 }))
                     .rounded(px(3.0))
@@ -54,7 +64,8 @@ impl SetupFlow {
                     } else {
                         theme.text.opacity(0.18)
                     })
-            }));
+            }),
+        );
         let first = step == Step::Welcome;
         let last = step == Step::Done;
         let skip = (!last).then(|| {
@@ -401,14 +412,7 @@ impl SetupFlow {
     }
 
     /// Step 5: what was set, and the way out.
-    fn done_step(
-        &mut self,
-        theme: &Theme,
-        lines: &[AgentLine],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ready = lines.iter().filter(|l| l.state.can_take_runs()).count();
-        let p = crate::prefs::current(cx);
+    fn done_step(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let row = |label: &'static str, value: String| {
             div()
                 .h(px(40.0))
@@ -432,12 +436,7 @@ impl SetupFlow {
                         .child(value),
                 )
         };
-        let mode = format!("{:?} \u{b7} {:?} \u{b7} {:?}", p.mode, p.theme, p.accent);
-        let project = self
-            .setup
-            .project
-            .clone()
-            .unwrap_or_else(|| "none yet; pick one from the sidebar".to_owned());
+        let rows = self.summary(cx);
         div()
             .flex()
             .flex_col()
@@ -457,12 +456,7 @@ impl SetupFlow {
                     .bg(theme.surface)
                     .border_1()
                     .border_color(theme.hairline)
-                    .child(row("Look", mode))
-                    .child(row(
-                        "Agents",
-                        format!("{ready} of {} can take runs", lines.len()),
-                    ))
-                    .child(row("First project", project)),
+                    .children(rows.into_iter().map(|(label, value)| row(label, value))),
             )
             .into_any_element()
     }

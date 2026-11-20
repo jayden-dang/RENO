@@ -15,7 +15,6 @@ pub(crate) mod context;
 pub(crate) mod convo;
 pub(crate) mod daemon_restart;
 pub(crate) mod diff_syntax;
-pub(crate) mod draft38;
 pub(crate) mod effort_slider;
 pub(crate) mod executors;
 pub(crate) mod files;

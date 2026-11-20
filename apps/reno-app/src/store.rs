@@ -790,9 +790,9 @@ impl Store {
         result
     }
 
-    /// `RENO_DRAFT38_OPEN=restart-fail`: the next restart of the fake daemon does not come back.
-    /// Does nothing against a real daemon.
-    pub(crate) fn demo_fail_next_restart(&self) {
+    /// The next restart of the fake daemon does not come back.
+    #[cfg(test)]
+    pub(crate) fn fail_next_restart_for_test(&self) {
         if let Some(fake) = &self.fake {
             fake.fail_next_restart();
         }
@@ -966,34 +966,17 @@ impl Store {
     }
 
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
-    /// The `--fake` demo world, with the sidebar's demo threads (pinned, archived, a project with
-    /// fourteen).
+    /// The `--fake` demo world: a first run (five agents, three of them ready; `renod` 0.4.1
+    /// running with 0.4.2 installed), with the sidebar's demo threads (pinned, archived, a
+    /// project with fourteen).
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
-                registry_agents: true,
-                question_run: true,
-                question_demo_runs: true,
-                activity_runs: true,
-                sidebar_threads: true,
-                ..FakeConfig::default()
-            },
-            cx,
-        );
-        self.tick_fake_activity(cx);
-    }
-
-    /// The ROAD-38 first-run world: the demo world with the plan's five executors and a newer
-    /// `renod` installed than the one running. The ACP registry's added agents are not in it.
-    pub(crate) fn start_fake_first_run(&mut self, no_projects: bool, cx: &mut Context<Self>) {
-        self.start_fake_with(
-            FakeConfig {
-                question_run: true,
-                question_demo_runs: true,
-                activity_runs: true,
-                sidebar_threads: true,
                 first_run: true,
-                no_projects,
+                question_run: true,
+                question_demo_runs: true,
+                activity_runs: true,
+                sidebar_threads: true,
                 ..FakeConfig::default()
             },
             cx,

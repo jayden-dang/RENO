@@ -33,10 +33,7 @@ mod activity_tests;
 mod composer_surface_tests;
 #[cfg(test)]
 mod composer_tests;
-#[cfg(feature = "shots")]
-mod draft38_shots;
 #[cfg(test)]
-mod draft38_tests;
 #[cfg(test)]
 mod new_thread_tests;
 #[cfg(test)]
@@ -51,6 +48,8 @@ mod question_tests;
 mod screen_tests;
 #[cfg(test)]
 mod settings_pages_tests;
+#[cfg(test)]
+mod setup_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
@@ -69,11 +68,6 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[allow(clippy::print_stderr)]
 fn main() -> ExitCode {
-    #[cfg(feature = "shots")]
-    if std::env::var_os("SHOT").is_some() {
-        draft38_shots::run();
-        return ExitCode::SUCCESS;
-    }
     let options = match app::Options::parse(std::env::args().skip(1), |key| std::env::var(key).ok())
     {
         Ok(options) => options,
