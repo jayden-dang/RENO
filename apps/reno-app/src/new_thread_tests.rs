@@ -8,11 +8,14 @@ use gpui::TestAppContext;
 use crate::nav::Nav;
 use crate::tests::{approvals, click, draw, fake_store, painted, wait_drawn, wait_until, window};
 use crate::ui::theme::Appearance;
+use crate::vm::capabilities::Capabilities;
 
 #[gpui::test]
 fn with_no_project_it_asks_plainly_and_shows_the_chip_strip(cx: &mut TestAppContext) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
+    // The real daemon has no place chooser: the page is the heading and the chip strip.
+    store.update(cx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     assert!(painted(vcx, "new-thread-mark"), "the mark is centred above");
@@ -36,6 +39,7 @@ fn a_projects_plus_opens_it_with_that_project_and_its_name_opens_the_project(
 ) {
     let store = fake_store(cx);
     wait_until(cx, |cx| approvals(cx, &store) == 2);
+    store.update(cx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
     let (root, vcx) = window(cx, &store, Appearance::Dark);
     draw(vcx);
     click(vcx, "recent-run_keeper1");

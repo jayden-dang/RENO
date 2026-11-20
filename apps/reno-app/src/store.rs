@@ -502,7 +502,7 @@ impl Store {
         result
     }
 
-    /// ROAD-31 draft: the fake harness's commands cannot be read (the failure branch).
+    /// The fake harness's commands cannot be read (the failure branch; `RENO_COMPOSER_FAIL`).
     pub(crate) fn set_commands_unreadable(&self, unreadable: bool) {
         if let Some(fake) = &self.fake {
             fake.set_commands_unreadable(unreadable);
@@ -559,7 +559,7 @@ impl Store {
         self.stop_errors.get(&(run.clone(), task.to_owned()))
     }
 
-    // ---- ROAD-31: the mocked completions, queue and places contracts ----------------------------
+    // ---- the mocked completions, queue and places contracts (ROAD-31) ---------------------------
 
     /// The ONE seam to the completions contract: the fake daemon's mock, and only where a
     /// capability that needs it is on.

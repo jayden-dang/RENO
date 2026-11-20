@@ -70,8 +70,7 @@ impl TextLayout {
             if local.y < top + height {
                 let hit = line
                     .closest_index_for_position(point(local.x, local.y - top), self.line_height);
-                // A faint completion after the text is not text: a click on it lands at the end.
-                return (start + hit.unwrap_or_else(|end| end)).min(self.text.len());
+                return start + hit.unwrap_or_else(|end| end);
             }
             top += height;
         }
@@ -160,17 +159,15 @@ fn run_for(style: &TextStyle, color: Hsla, len: usize) -> TextRun {
     }
 }
 
-/// What the draft adds to the text's look without touching the text: coloured words, and a faint
-/// completion after the caret. Empty when the draft is off, and the text shapes as before.
+/// What the composer adds to the text's look without touching the text: mentions drawn as chips.
+/// Empty when nothing is mentioned, and the text shapes as before.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Decor {
     /// Byte ranges of the text, in order, with their ink and an optional fill.
     pub(crate) spans: Vec<(Range<usize>, Hsla, Option<Hsla>)>,
-    /// Painted after the end of the text in this ink; not part of the text.
-    pub(crate) ghost: Option<(String, Hsla)>,
 }
 
-/// The runs of `text`: IME composition underlined, `decor`'s words coloured, its ghost last.
+/// The runs of `text`: IME composition underlined, `decor`'s words styled.
 fn runs_for(
     style: &TextStyle,
     color: Hsla,
@@ -214,9 +211,6 @@ fn runs_for(
     if runs.is_empty() {
         runs.push(run_for(style, color, 0));
     }
-    if let Some((ghost, ink)) = &decor.ghost {
-        runs.push(run_for(style, *ink, ghost.len()));
-    }
     runs
 }
 
@@ -231,14 +225,10 @@ fn shape(
     width: Option<Pixels>,
 ) -> Vec<WrappedLine> {
     let runs = runs_for(style, color, text, marked, decor);
-    let shown = match &decor.ghost {
-        Some((ghost, _)) => SharedString::from(format!("{text}{ghost}")),
-        None => text.clone(),
-    };
     let font_size = style.font_size.to_pixels(window.rem_size());
     window
         .text_system()
-        .shape_text(shown, font_size, &runs, width, None)
+        .shape_text(text.clone(), font_size, &runs, width, None)
         .map(|lines| lines.into_iter().collect())
         .unwrap_or_default()
 }
@@ -316,7 +306,7 @@ impl Element for TextArea {
             (
                 SharedString::from(composer.text_for_layout().to_owned()),
                 composer.marked_range(),
-                composer.decor(&self.theme, cx),
+                composer.decor(&self.theme),
             )
         };
         let style = window.text_style();
@@ -351,7 +341,7 @@ impl Element for TextArea {
         let selection = composer.selection();
         let caret = composer.caret();
         let marked = composer.marked_range();
-        let decor = composer.decor(&self.theme, cx);
+        let decor = composer.decor(&self.theme);
         let focused = composer.is_focused(window);
         let reveal = composer.wants_caret_visible();
         let mut scroll = composer.scroll_offset();

@@ -5,17 +5,18 @@
 
 use gpui::{
     Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    Window, canvas, div, prelude::*, px,
 };
 use reno_client::ConnectionStatus;
 
 use super::ScreenEvent;
 use crate::store::Store;
-use crate::ui::composer::Composer;
+use crate::ui::composer::{Composer, PlaceMenu, PlaceView};
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
 use crate::ui::theme;
 use crate::vm::new_thread;
+use crate::vm::places;
 use crate::vm::projects::FolderKey;
 
 /// What the top of the column says besides the heading.
@@ -93,6 +94,76 @@ impl HomeScreen {
     }
 }
 
+impl HomeScreen {
+    /// "What should we build in [reno] on [main] in [a new worktree]?": the underlined words open
+    /// the project, branch and checkout pickers, which hang from them.
+    fn place_sentence(
+        &self,
+        theme: &theme::Theme,
+        place: &PlaceView,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let words = places::sentence(&place.project.name, &place.branch, &place.checkout);
+        let open = self.composer.read(cx).place_open();
+        let word = |id: &'static str, menu: PlaceMenu, text: String, cx: &mut Context<Self>| {
+            let anchor = self.composer.read(cx).place_anchor(menu);
+            div()
+                .id(id)
+                .debug_selector(|| id.to_owned())
+                .relative()
+                .cursor_pointer()
+                .underline()
+                .text_color(if open == Some(menu) {
+                    theme.accent
+                } else {
+                    theme.text
+                })
+                .hover(|s| s.text_color(theme.accent))
+                .child(
+                    canvas(move |b, _, _| anchor.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+                .child(SharedString::from(text))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.composer
+                        .update(cx, |composer, cx| composer.place_toggle(menu, window, cx));
+                }))
+        };
+        div()
+            .id("new-thread-title")
+            .debug_selector(|| "new-thread-title".to_owned())
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .items_baseline()
+            .gap_x(px(7.0))
+            .text_size(px(24.0))
+            .line_height(px(34.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .child("What should we build in")
+            .child(word("place-project", PlaceMenu::Project, words.project, cx))
+            .child("on")
+            .child(word("place-branch", PlaceMenu::Branch, words.branch, cx))
+            .child("in")
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .child(word(
+                        "place-checkout",
+                        PlaceMenu::Checkout,
+                        words.checkout,
+                        cx,
+                    ))
+                    .child("?"),
+            )
+            .into_any_element()
+    }
+}
+
 impl EventEmitter<ScreenEvent> for HomeScreen {}
 
 impl Render for HomeScreen {
@@ -101,11 +172,11 @@ impl Render for HomeScreen {
         let headline = self.headline(cx);
         let heading = self.heading();
         let project = self.project.as_ref().map(|(name, _)| name.clone());
-        // ROAD-31 draft: the composer draws where the task runs (chips, breadcrumb or sentence),
-        // so the chip strip steps aside, and the sentence is the heading.
-        let place = self.composer.read(cx).draft_place(cx);
-        let sentence_heads = place == Some(crate::vm::draft31::Variant::C);
-
+        // With a place chooser (the fake daemon), the heading is the sentence that says where the
+        // task runs; its underlined words open the pickers. Without one, the heading and the chip
+        // strip are as they always were.
+        let place = self.composer.read(cx).place_view(cx);
+        let sentence = place.as_ref().map(|p| self.place_sentence(&theme, p, cx));
         let title = div()
             .id("new-thread-title")
             .debug_selector(|| "new-thread-title".to_owned())
@@ -198,6 +269,8 @@ impl Render for HomeScreen {
             .justify_center()
             .px(px(24.0))
             .pb(px(60.0))
+            // The sentence needs room above it for its pickers, so the column sits lower.
+            .when(place.is_some(), |d| d.pt(px(200.0)))
             .child(
                 div()
                     .w_full()
@@ -212,7 +285,7 @@ impl Render for HomeScreen {
                             .debug_selector(|| "new-thread-mark".to_owned())
                             .child(icon(Icon::Mark, 40.0, theme.text)),
                     )
-                    .when(!sentence_heads, |d| d.child(title))
+                    .child(sentence.unwrap_or_else(|| title.into_any_element()))
                     .children(notice)
                     .child(div().h(px(6.0)))
                     .when(place.is_none(), |d| d.child(chips))

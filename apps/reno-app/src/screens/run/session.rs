@@ -94,11 +94,11 @@ impl RunScreen {
                 .collect::<Vec<_>>()
         };
 
-        // ROAD-31 draft: a run started from the place chooser says where it runs.
+        // A run started from the place chooser says where it runs.
         let place_row = self.store.read(cx).run_place(&self.run).map(|p| KvRow {
             label: "Runs in",
             value: format!("{} on {}", p.project, p.branch),
-            sub: Some(crate::vm::draft31::checkout_phrase(&p.checkout)),
+            sub: Some(crate::vm::places::checkout_phrase(&p.checkout)),
         });
         let workspace: Vec<KvRow> = sections
             .workspace

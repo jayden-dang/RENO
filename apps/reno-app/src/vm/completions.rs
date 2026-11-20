@@ -1,76 +1,10 @@
-//! ROAD-31, the composer draft: everything the three variants share and none of them draws.
-//! Which variant is showing, which `@` `/` `$` token the caret is in, the entries a trigger
-//! offers (grouped, filtered, capped), the tokens that read as coloured words in the text, and
-//! the sentences that state what the composer found ("Runs in reno on main, in a new worktree",
-//! "2 messages wait for this turn to end"). The variants differ only in how they draw these.
+//! `@` `/` `$` completions in the composer: which token the caret is in, the entries a trigger
+//! offers (grouped, filtered, capped) and the mentions that read as words in the text. Pure: the
+//! composer draws it (`ui/composer/completions.rs`) and the store supplies the data.
 
 use std::ops::Range;
 
 use reno_client::completions::{CommandKind, CommandsError, HarnessCommand, ProjectFile};
-use reno_client::places::Checkout;
-
-// ---- the switch ----------------------------------------------------------------------------
-
-/// The three directions under review.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Variant {
-    /// Popovers: every choice is a small popover next to what it changes.
-    #[default]
-    A,
-    /// Command sheet: one place to look before you type.
-    B,
-    /// Sentence: the place reads as a sentence, the message's parts as coloured words.
-    C,
-}
-
-impl Variant {
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::B => "B",
-            Self::C => "C",
-        }
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::A => "Popovers",
-            Self::B => "Command sheet",
-            Self::C => "Sentence",
-        }
-    }
-
-    /// "A \u{2014} Popovers".
-    pub(crate) fn label(self) -> String {
-        format!("{} \u{2014} {}", self.key(), self.name())
-    }
-
-    pub(crate) fn next(self) -> Self {
-        match self {
-            Self::A => Self::B,
-            Self::B => Self::C,
-            Self::C => Self::A,
-        }
-    }
-
-    pub(crate) fn prev(self) -> Self {
-        match self {
-            Self::A => Self::C,
-            Self::B => Self::A,
-            Self::C => Self::B,
-        }
-    }
-
-    /// `RENO_DRAFT31=a|b|c`, either case.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text.trim().to_ascii_lowercase().as_str() {
-            "a" => Some(Self::A),
-            "b" => Some(Self::B),
-            "c" => Some(Self::C),
-            _ => None,
-        }
-    }
-}
 
 // ---- the trigger under the caret -----------------------------------------------------------
 
@@ -92,15 +26,6 @@ impl Trigger {
             Self::At => '@',
             Self::Slash => '/',
             Self::Dollar => '$',
-        }
-    }
-
-    /// The command sheet's tab.
-    pub(crate) fn tab(self) -> &'static str {
-        match self {
-            Self::At => "Files",
-            Self::Slash => "Commands",
-            Self::Dollar => "Skills",
         }
     }
 
@@ -157,11 +82,6 @@ pub(crate) fn find_active(text: &str, caret: usize) -> Option<Active> {
     })
 }
 
-/// Whether `trigger` may stand at `start` of `text` (for a tab that changes the trigger).
-pub(crate) fn trigger_fits(text: &str, start: usize, trigger: Trigger) -> bool {
-    trigger != Trigger::Slash || start == 0 || text[..start].ends_with('\n')
-}
-
 // ---- the entries ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +106,7 @@ pub(crate) struct Entry {
     pub(crate) group: String,
     /// What goes into the text, trigger included and a space after.
     pub(crate) insert: String,
-    /// A file's first lines, for the sheet's preview.
+    /// A file's first lines.
     pub(crate) head: Vec<String>,
     /// How a command is used, when it takes an argument.
     pub(crate) usage: Option<String>,
@@ -204,16 +124,12 @@ pub(crate) struct Listing {
     pub(crate) pending: bool,
 }
 
-/// The app's own commands: real, handled here, never sent to the harness.
+/// The app's own commands: real, handled here, never sent to the harness. Only the ones that
+/// do something are listed; `/stop` only where there is a run to stop.
 pub(crate) const APP_COMMANDS: &[(&str, &str)] = &[
     ("model", "Choose the harness and model"),
-    ("new", "Start a new thread"),
     ("resume", "Go back to a recent thread"),
     ("settings", "Open Settings"),
-    ("diff", "Show this run's changes"),
-    ("files", "Browse this run's files"),
-    ("terminal", "Open a terminal in this run"),
-    ("rename", "Rename this thread"),
     ("stop", "Stop the run"),
 ];
 
@@ -274,6 +190,7 @@ pub(crate) fn command_listing(
     query: &str,
     harness_name: &str,
     harness: Option<&Result<Vec<HarnessCommand>, CommandsError>>,
+    live_run: bool,
 ) -> Listing {
     let mut listing = Listing::default();
     match harness {
@@ -291,9 +208,15 @@ pub(crate) fn command_listing(
         None => {}
     }
     listing.entries.extend(
-        ranked(APP_COMMANDS.iter(), |(name, _)| name, query)
-            .into_iter()
-            .map(|(name, description)| app_entry(name, description)),
+        ranked(
+            APP_COMMANDS
+                .iter()
+                .filter(|(name, _)| live_run || *name != "stop"),
+            |(name, _)| name,
+            query,
+        )
+        .into_iter()
+        .map(|(name, description)| app_entry(name, description)),
     );
     listing
 }
@@ -359,19 +282,11 @@ pub(crate) fn window_start(selected: usize, top: usize, cap: usize) -> usize {
     }
 }
 
-// ---- tokens read as words ------------------------------------------------------------------
-
-/// What kind of word a finished token is, for colouring.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TokenKind {
-    File,
-    Command,
-    Skill,
-}
+// ---- mentions ------------------------------------------------------------------------------
 
 /// The `@file`, `/command` and `$skill` words of `text`, found by scanning, never stored (an undo
-/// cannot leave one behind). `except` is the token being typed: it is not coloured yet.
-pub(crate) fn tokens(text: &str, except: Option<&Range<usize>>) -> Vec<(Range<usize>, TokenKind)> {
+/// cannot leave one behind). `except` is the token being typed: it is not styled yet.
+pub(crate) fn mentions(text: &str, except: Option<&Range<usize>>) -> Vec<Range<usize>> {
     let mut found = Vec::new();
     let mut at = 0;
     for word in text.split_inclusive(char::is_whitespace) {
@@ -381,78 +296,16 @@ pub(crate) fn tokens(text: &str, except: Option<&Range<usize>>) -> Vec<(Range<us
         if body.chars().count() < 2 || except.is_some_and(|e| e.start == range.start) {
             continue;
         }
-        let kind = match body.chars().next().and_then(Trigger::of) {
-            Some(Trigger::At) => TokenKind::File,
-            Some(Trigger::Dollar) => TokenKind::Skill,
-            Some(Trigger::Slash) if range.start == 0 || text[..range.start].ends_with('\n') => {
-                TokenKind::Command
-            }
-            _ => continue,
+        let counts = match body.chars().next().and_then(Trigger::of) {
+            Some(Trigger::At | Trigger::Dollar) => true,
+            Some(Trigger::Slash) => range.start == 0 || text[..range.start].ends_with('\n'),
+            None => false,
         };
-        found.push((range, kind));
+        if counts {
+            found.push(range);
+        }
     }
     found
-}
-
-// ---- where a task runs ---------------------------------------------------------------------
-
-/// "New worktree", "This checkout", or the worktree's own name.
-pub(crate) fn checkout_label(checkout: &Checkout) -> String {
-    match checkout {
-        Checkout::NewWorktree => "New worktree".to_owned(),
-        Checkout::ThisCheckout => "This checkout".to_owned(),
-        Checkout::Worktree(name) => name.clone(),
-    }
-}
-
-/// "in a new worktree", "in this checkout", "in the worktree reno-model-chip".
-pub(crate) fn checkout_phrase(checkout: &Checkout) -> String {
-    match checkout {
-        Checkout::NewWorktree => "in a new worktree".to_owned(),
-        Checkout::ThisCheckout => "in this checkout".to_owned(),
-        Checkout::Worktree(name) => format!("in the worktree {name}"),
-    }
-}
-
-/// The finding for a new thread: "Runs in reno on main, in a new worktree".
-pub(crate) fn place_finding(project: &str, branch: &str, checkout: &Checkout) -> String {
-    format!(
-        "Runs in {project} on {branch}, {}",
-        checkout_phrase(checkout)
-    )
-}
-
-/// The branch list's foot: "Showing 20 of 34", or the count when all are shown.
-pub(crate) fn branches_foot(shown: usize, total: usize) -> String {
-    if shown >= total {
-        match total {
-            1 => "1 branch".to_owned(),
-            n => format!("{n} branches"),
-        }
-    } else {
-        format!("Showing {shown} of {total}")
-    }
-}
-
-// ---- the queue -----------------------------------------------------------------------------
-
-/// The finding on a run with a queue; `None` when nothing waits.
-pub(crate) fn queue_finding(waiting: usize) -> Option<String> {
-    match waiting {
-        0 => None,
-        1 => Some("1 message waits for this turn to end".to_owned()),
-        n => Some(format!("{n} messages wait for this turn to end")),
-    }
-}
-
-/// "1 queued", "2 queued".
-pub(crate) fn queue_chip(waiting: usize) -> String {
-    format!("{waiting} queued")
-}
-
-/// Where a dragged message lands: the place of the row it is dropped on.
-pub(crate) fn drop_place(len: usize, target: usize) -> usize {
-    target.min(len.saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -461,16 +314,6 @@ mod tests {
 
     fn active(text: &str) -> Option<Active> {
         find_active(text, text.len())
-    }
-
-    #[test]
-    fn the_variants_cycle_both_ways_and_read_as_key_dash_name() {
-        assert_eq!(Variant::A.next(), Variant::B);
-        assert_eq!(Variant::C.next(), Variant::A);
-        assert_eq!(Variant::A.prev(), Variant::C);
-        assert_eq!(Variant::B.label(), "B \u{2014} Command sheet");
-        assert_eq!(Variant::parse(" C "), Some(Variant::C));
-        assert_eq!(Variant::parse("d"), None);
     }
 
     #[test]
@@ -496,9 +339,6 @@ mod tests {
         // `@src/` is a file query, not a command.
         let file = active("@src/").unwrap();
         assert_eq!((file.trigger, file.query.as_str()), (Trigger::At, "src/"));
-        assert!(trigger_fits("hello @x", 6, Trigger::At));
-        assert!(!trigger_fits("hello @x", 6, Trigger::Slash));
-        assert!(trigger_fits("@x", 0, Trigger::Slash));
     }
 
     #[test]
@@ -528,9 +368,12 @@ mod tests {
     #[test]
     fn slash_lists_harness_commands_then_the_apps_and_never_skills() {
         let all = Ok(commands());
-        let listing = command_listing("", "Claude Code", Some(&all));
+        let listing = command_listing("", "Claude Code", Some(&all), true);
         let labels: Vec<&str> = listing.entries.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(&labels[..3], ["/compact", "/review", "/model"]);
+        // `/stop` needs a run to stop.
+        let home = command_listing("", "Claude Code", Some(&all), false);
+        assert!(home.entries.iter().all(|e| e.label != "/stop"));
         assert_eq!(labels.len(), 2 + APP_COMMANDS.len());
         assert_eq!(listing.entries[0].group, "Claude Code");
         assert_eq!(listing.entries[2].group, "Reno");
@@ -541,17 +384,17 @@ mod tests {
     #[test]
     fn a_query_ranks_prefixes_before_substrings() {
         let all = Ok(commands());
-        let listing = command_listing("re", "Claude Code", Some(&all));
+        let listing = command_listing("re", "Claude Code", Some(&all), true);
         let labels: Vec<&str> = listing.entries.iter().map(|e| e.label.as_str()).collect();
-        assert_eq!(labels, ["/review", "/resume", "/rename"]);
-        let none = command_listing("zzz", "Claude Code", Some(&all));
+        assert_eq!(labels, ["/review", "/resume"]);
+        let none = command_listing("zzz", "Claude Code", Some(&all), true);
         assert!(none.entries.is_empty());
     }
 
     #[test]
     fn unreadable_harness_commands_say_so_and_the_apps_still_work() {
         let failed = Err(CommandsError::Unreadable);
-        let listing = command_listing("", "Claude Code", Some(&failed));
+        let listing = command_listing("", "Claude Code", Some(&failed), true);
         assert_eq!(
             listing.failure.as_deref(),
             Some("Claude Code's commands could not be read")
@@ -562,7 +405,7 @@ mod tests {
 
     #[test]
     fn without_the_contract_slash_offers_the_apps_commands_and_dollar_nothing() {
-        let listing = command_listing("", "Claude Code", None);
+        let listing = command_listing("", "Claude Code", None, true);
         assert_eq!(listing.entries.len(), APP_COMMANDS.len());
         assert_eq!(listing.failure, None);
         let skills = skill_listing("", "Claude Code", None);
@@ -609,67 +452,12 @@ mod tests {
     }
 
     #[test]
-    fn finished_tokens_are_found_by_scanning_and_the_one_being_typed_is_left_out() {
+    fn finished_mentions_are_found_by_scanning_and_the_one_being_typed_is_left_out() {
         let text = "/review @src/main.rs and $changelog then @sr";
-        let found = tokens(text, None);
-        let words: Vec<(&str, TokenKind)> =
-            found.iter().map(|(r, k)| (&text[r.clone()], *k)).collect();
-        assert_eq!(
-            words,
-            [
-                ("/review", TokenKind::Command),
-                ("@src/main.rs", TokenKind::File),
-                ("$changelog", TokenKind::Skill),
-                ("@sr", TokenKind::File),
-            ]
-        );
-        let typing = tokens(text, Some(&(41..44)));
-        assert_eq!(typing.len(), 3);
+        let words: Vec<&str> = mentions(text, None).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(words, ["/review", "@src/main.rs", "$changelog", "@sr"]);
+        assert_eq!(mentions(text, Some(&(41..44))).len(), 3);
         // A slash mid-line and a lone trigger are plain text.
-        assert!(tokens("and /not @ $", None).is_empty());
-    }
-
-    #[test]
-    fn the_findings_are_sentences() {
-        assert_eq!(
-            place_finding("reno", "main", &Checkout::NewWorktree),
-            "Runs in reno on main, in a new worktree"
-        );
-        assert_eq!(
-            place_finding("reno", "main", &Checkout::ThisCheckout),
-            "Runs in reno on main, in this checkout"
-        );
-        assert_eq!(
-            place_finding(
-                "reno",
-                "fix/model-chip",
-                &Checkout::Worktree("reno-model-chip".into())
-            ),
-            "Runs in reno on fix/model-chip, in the worktree reno-model-chip"
-        );
-        assert_eq!(queue_finding(0), None);
-        assert_eq!(
-            queue_finding(1).as_deref(),
-            Some("1 message waits for this turn to end")
-        );
-        assert_eq!(
-            queue_finding(2).as_deref(),
-            Some("2 messages wait for this turn to end")
-        );
-        assert_eq!(queue_chip(2), "2 queued");
-    }
-
-    #[test]
-    fn the_branch_foot_counts_what_is_shown_and_what_there_is() {
-        assert_eq!(branches_foot(20, 34), "Showing 20 of 34");
-        assert_eq!(branches_foot(7, 7), "7 branches");
-        assert_eq!(branches_foot(1, 1), "1 branch");
-    }
-
-    #[test]
-    fn a_drop_never_lands_past_the_last_place() {
-        assert_eq!(drop_place(3, 1), 1);
-        assert_eq!(drop_place(3, 9), 2);
-        assert_eq!(drop_place(0, 0), 0);
+        assert!(mentions("and /not @ $", None).is_empty());
     }
 }
