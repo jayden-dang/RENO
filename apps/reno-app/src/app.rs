@@ -105,6 +105,14 @@ pub(crate) struct Options {
     /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
     /// data dir.
     pub(crate) data_dir: Option<PathBuf>,
+    /// `RENO_COMPOSER_TYPE=@src/` (with `--fake`): put that in the box once the screen is up, so
+    /// its completion list is open (screenshots, reviews).
+    pub(crate) composer_type: Option<String>,
+    /// `RENO_COMPOSER_OPEN=project|branch|checkout|queue-edit|clone-ok|clone-fail` (with
+    /// `--fake`): open that picker, edit the first queued message, or run a clone (screenshots).
+    pub(crate) composer_open: Option<String>,
+    /// `RENO_COMPOSER_FAIL=commands` (with `--fake`): the harness's commands cannot be read.
+    pub(crate) composer_fail: Option<String>,
 }
 
 impl Options {
@@ -129,6 +137,11 @@ impl Options {
                 "--fake" => options.fake = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if options.fake {
+            options.composer_type = env("RENO_COMPOSER_TYPE").filter(|v| !v.is_empty());
+            options.composer_open = env("RENO_COMPOSER_OPEN").filter(|v| !v.is_empty());
+            options.composer_fail = env("RENO_COMPOSER_FAIL").filter(|v| !v.is_empty());
         }
         options.appearance = match env("RENO_APPEARANCE").as_deref() {
             Some("light") => Some(Appearance::Light),
@@ -261,6 +274,9 @@ pub(crate) struct Start {
     pub(crate) registry_demo: Option<String>,
     /// The Settings page to open on.
     pub(crate) open_settings: Option<Category>,
+    /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: text to type and a picker to open.
+    pub(crate) composer_type: Option<String>,
+    pub(crate) composer_open: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -297,6 +313,9 @@ pub(crate) fn run(options: Options) {
             let mut store = Store::connecting();
             if options.fake {
                 store.start_fake(cx);
+                if options.composer_fail.as_deref() == Some("commands") {
+                    store.set_commands_unreadable(true);
+                }
             } else {
                 store.start_socket(cx);
             }
@@ -320,6 +339,8 @@ pub(crate) fn run(options: Options) {
             activity_open: options.activity_open.clone(),
             registry_demo: options.registry_demo.clone(),
             open_settings: options.open_settings,
+            composer_type: options.composer_type.clone(),
+            composer_open: options.composer_open.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -370,6 +391,8 @@ pub(crate) fn open_window(
         activity_open,
         registry_demo,
         open_settings,
+        composer_type,
+        composer_open,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -387,6 +410,19 @@ pub(crate) fn open_window(
             let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
             root.update(cx, |root, cx| {
                 root.focus_composer(window, cx);
+                if composer_type.is_some() || composer_open.is_some() {
+                    // After the runs are read and any opened run is up.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(3000))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.composer_hooks(composer_type, composer_open, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
@@ -890,6 +926,29 @@ impl RootView {
             _ => self.focus_handle.clone(),
         };
         window.focus(&handle, cx);
+    }
+
+    /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: act on the composer that is showing.
+    fn composer_hooks(
+        &mut self,
+        text: Option<String>,
+        open: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let composer = match &self.screen {
+            Screen::Home => self.home.read(cx).composer().clone(),
+            Screen::Run(run) => run.read(cx).steer_input().clone(),
+            _ => return,
+        };
+        composer.update(cx, |composer, cx| {
+            if let Some(text) = text {
+                composer.fill(&text, window, cx);
+            }
+            if let Some(open) = open {
+                composer.open_for_capture(&open, window, cx);
+            }
+        });
     }
 
     /// The home screen is about to be replaced: its composer lives on, hidden, so it closes its
@@ -1627,6 +1686,24 @@ mod tests {
     }
 
     #[test]
+    fn the_composer_hooks_exist_only_with_the_fake_daemon() {
+        let hooks = [
+            ("RENO_COMPOSER_TYPE", "@src/"),
+            ("RENO_COMPOSER_OPEN", "branch"),
+            ("RENO_COMPOSER_FAIL", "commands"),
+        ];
+        let off = parse(&[], &hooks).unwrap();
+        assert_eq!(
+            (off.composer_type, off.composer_open, off.composer_fail),
+            (None, None, None)
+        );
+        let on = parse(&["--fake"], &hooks).unwrap();
+        assert_eq!(on.composer_type.as_deref(), Some("@src/"));
+        assert_eq!(on.composer_open.as_deref(), Some("branch"));
+        assert_eq!(on.composer_fail.as_deref(), Some("commands"));
+    }
+
+    #[test]
     fn no_flags_means_the_socket() {
         assert_eq!(parse(&[], &[]), Ok(Options::default()));
         assert!(!Options::default().fake);
@@ -1666,6 +1743,7 @@ mod tests {
                 registry_demo: None,
                 open_settings: None,
                 data_dir: None,
+                ..Options::default()
             })
         );
         let thread = parse(&[], &[("RENO_OPEN", "newthread:/work/atlas-api")]).unwrap();

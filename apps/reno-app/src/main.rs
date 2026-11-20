@@ -29,6 +29,8 @@ mod vm;
 #[cfg(test)]
 mod activity_tests;
 #[cfg(test)]
+mod composer_surface_tests;
+#[cfg(test)]
 mod composer_tests;
 #[cfg(test)]
 mod new_thread_tests;

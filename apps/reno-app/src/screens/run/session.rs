@@ -94,6 +94,19 @@ impl RunScreen {
                 .collect::<Vec<_>>()
         };
 
+        // A run started from the place chooser says where it runs.
+        let place_row = self.store.read(cx).run_place(&self.run).map(|p| KvRow {
+            label: "Runs in",
+            value: format!("{} on {}", p.project, p.branch),
+            sub: Some(crate::vm::places::checkout_phrase(&p.checkout)),
+        });
+        let workspace: Vec<KvRow> = sections
+            .workspace
+            .iter()
+            .cloned()
+            .chain(place_row)
+            .collect();
+
         body.children(self.activity_sections(theme, cx))
             .children(failed.map(|failed| {
                 div()
@@ -105,9 +118,8 @@ impl RunScreen {
             }))
             .child(heading("Run"))
             .children(group(&sections.run))
-            .when(!sections.workspace.is_empty(), |d| {
-                d.child(heading("Workspace"))
-                    .children(group(&sections.workspace))
+            .when(!workspace.is_empty(), |d| {
+                d.child(heading("Workspace")).children(group(&workspace))
             })
             .child(heading("Usage"))
             .children(group(&sections.usage))

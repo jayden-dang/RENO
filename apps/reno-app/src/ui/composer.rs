@@ -40,9 +40,14 @@ use reno_client::ConnectionStatus;
 use reno_proto::{ExecutorId, RoutingDecision, RunId, RunStatus, TaskRunParams};
 
 mod chips;
+mod completions;
 mod menu;
 mod picker;
+mod places;
+mod queue;
 mod rings;
+
+pub(crate) use places::{PlaceMenu, PlaceView};
 
 use super::icon::{Icon, icon};
 use super::kit;
@@ -100,6 +105,10 @@ actions!(
         Cancel,
         Newline,
         ShowCharacterPalette,
+        /// Tab takes the open completion (else it is Tab).
+        AcceptCompletion,
+        /// ⌥ Enter puts the draft in the run's queue.
+        QueueMessage,
     ]
 );
 
@@ -157,6 +166,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
+        KeyBinding::new("tab", AcceptCompletion, ctx),
+        KeyBinding::new("alt-enter", QueueMessage, ctx),
     ]);
 }
 
@@ -378,6 +389,11 @@ pub(crate) struct Composer {
     picker_for_live: bool,
     /// Home: the folder a new thread works in (a project's "+"), or none for the daemon's own.
     folder: Option<PathBuf>,
+    /// The `@` `/` `$` list, the queue's edit and the new thread's place chooser (view state; the
+    /// data they show is the store's).
+    completions: completions::State,
+    queue: queue::QueueState,
+    places: places::PlaceState,
     _store: Subscription,
     _events: Subscription,
 }
@@ -452,6 +468,9 @@ impl Composer {
             class_bounds: Rc::default(),
             picker_for_live: false,
             folder: None,
+            completions: completions::State::new(),
+            queue: queue::QueueState::new(cx),
+            places: places::PlaceState::new(cx),
         };
         // A composer that goes away with a menu open takes its signal with it.
         let owner = cx.entity_id();
@@ -469,7 +488,8 @@ impl Composer {
             || self.context_card_open
             || self.plus_open
             || self.permission_open
-            || self.effort_open;
+            || self.effort_open
+            || self.places.menu.is_some();
         let owner = cx.entity_id();
         overlay::set(cx, owner, open);
     }
@@ -481,6 +501,8 @@ impl Composer {
         self.context_card_open = false;
         self.close_menus();
         self.close_picker(cx);
+        self.place_close_menu(cx);
+        self.completions.complete = None;
         self.sync_overlay(cx);
         cx.notify();
     }
@@ -566,6 +588,10 @@ impl Composer {
         let mut params =
             self.with_pick(routing::task_params(prompt, self.class, attachments, state));
         params.cwd.clone_from(&self.folder);
+        // The place chooser, when the connection has one, names the project's folder.
+        if let Some(cwd) = &self.places.cwd {
+            params.cwd = Some(cwd.clone());
+        }
         params
     }
 
@@ -573,6 +599,10 @@ impl Composer {
     pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.folder != folder {
             self.folder = folder;
+            // The place follows the project a "+" chose.
+            self.places.project = None;
+            self.places.branch = None;
+            self.place_sync_place(cx);
             self.refresh_preview(cx);
             cx.notify();
         }
@@ -599,6 +629,28 @@ impl Composer {
         }
         self.sync_overlay(cx);
         cx.notify();
+    }
+
+    /// `RENO_COMPOSER_OPEN`: opens a picker, starts editing the first queued message, or runs a
+    /// clone, for a screenshot.
+    pub(crate) fn open_for_capture(
+        &mut self,
+        what: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use places::PlaceMenu;
+        match what {
+            "project" => self.place_open_menu(PlaceMenu::Project, window, cx),
+            "branch" => self.place_open_menu(PlaceMenu::Branch, window, cx),
+            "checkout" => self.place_open_menu(PlaceMenu::Checkout, window, cx),
+            "queue-edit" => self.queue_demo_edit(window, cx),
+            "clone-ok" => {
+                self.place_demo_clone("https://github.com/jaydendang/atlas-docs", window, cx);
+            }
+            "clone-fail" => self.place_demo_clone("https://example.com/nope.git", window, cx),
+            _ => {}
+        }
     }
 
     /// Whether anything is typed (a draft the owner would lose sight of).
@@ -778,8 +830,14 @@ impl Composer {
         match self.mode.clone() {
             Mode::Home => {
                 let params = self.home_params(&prompt, &wire, self.store.read(cx).state());
-                self.store
-                    .update(cx, |store, cx| store.submit_task(params, ticket, cx));
+                let place = self.place_view(cx).map(|p| reno_client::places::Place {
+                    project: p.project.name,
+                    branch: p.branch,
+                    checkout: p.checkout,
+                });
+                self.store.update(cx, |store, cx| {
+                    store.submit_task_at(params, place, ticket, cx)
+                });
             }
             Mode::Steer(run) => {
                 let thread = self.continuing(cx);
@@ -1122,6 +1180,7 @@ impl Composer {
         self.goal_x = None;
         self.reveal = true;
         window.notify_text_selection_changed(&self.focus_handle);
+        self.completion_refresh(cx);
         cx.notify();
     }
 
@@ -1129,12 +1188,17 @@ impl Composer {
         self.goal_x = None;
         self.reveal = true;
         window.notify_text_input_changed(&self.focus_handle);
+        self.completion_refresh(cx);
         self.refresh_preview(cx);
         cx.notify();
     }
 
     /// Enter: sends, or starts a new line when Settings › General says ⌘ Enter sends.
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        // An open completion takes Enter first.
+        if self.completion_accept(None, window, cx) {
+            return;
+        }
         // A reason input (a deny note) is one answer: Enter always gives it.
         if self.mode != Mode::Reason
             && crate::prefs::current(cx).send_with == crate::prefs::SendWith::CommandEnter
@@ -1149,7 +1213,27 @@ impl Composer {
         self.submit(window, cx);
     }
 
+    /// Tab: takes the open completion; else it is the
+    /// Tab it always was.
+    fn on_accept_completion(
+        &mut self,
+        _: &AcceptCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.completion_accept(None, window, cx) {
+            cx.propagate();
+        }
+    }
+
+    fn on_queue_message(&mut self, _: &QueueMessage, window: &mut Window, cx: &mut Context<Self>) {
+        self.queue_add(window, cx);
+    }
+
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_dismiss(cx) {
+            return;
+        }
         if self.picker_open || self.class_open {
             self.class_open = false;
             self.context_card_open = false;
@@ -1361,10 +1445,16 @@ impl Composer {
     }
 
     fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_nav(-1, cx) {
+            return;
+        }
         self.vertical(-1, false, window, cx);
     }
 
     fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_nav(1, cx) {
+            return;
+        }
         self.vertical(1, false, window, cx);
     }
 
@@ -1931,6 +2021,7 @@ impl Render for Composer {
                 .children(self.plus_button(&theme, cx))
                 .children(self.permission_chip(&theme, cx))
                 .child(div().flex_1())
+                .children(self.queue_button(&theme, cx))
                 .child(self.model_chip(&theme, cx))
                 .children(self.context_ring(&theme, cx))
                 .child(div().w(px(4.0)))
@@ -1961,6 +2052,7 @@ impl Render for Composer {
             },
             _ => None,
         };
+        let note = note.or_else(|| self.queue_note(&theme));
         let note = note.map(|(text, tone)| {
             div()
                 .id("composer-note")
@@ -2052,6 +2144,8 @@ impl Render for Composer {
             .flatten();
 
         let home = self.mode == Mode::Home;
+        let above: Vec<gpui::AnyElement> = self.queue_card(&theme, cx).into_iter().collect();
+        let box_anchor = self.completions.box_bounds.clone();
         let boxed = div()
             .id("composer")
             .debug_selector(|| "composer".to_owned())
@@ -2059,6 +2153,8 @@ impl Render for Composer {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_send_now))
+            .on_action(cx.listener(Self::on_accept_completion))
+            .on_action(cx.listener(Self::on_queue_message))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_backspace))
@@ -2118,6 +2214,12 @@ impl Render for Composer {
                 theme.hairline
             })
             .opacity(if enabled { 1.0 } else { 0.72 })
+            .relative()
+            .child(
+                canvas(move |b, _, _| box_anchor.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
             .child(text_area)
             .children(self.attachment_row(&theme, cx))
             .when(!bare, |d| d.child(foot))
@@ -2127,12 +2229,17 @@ impl Render for Composer {
             .children(classes);
         // The picker is a sibling of the box, not inside it: it has its own keyboard (a search
         // field), which the box's key bindings (Backspace, Enter, Escape) must not see.
+        let completion = self.completion_overlay(&theme, cx);
+        let place_menu = self.place_menu(&theme, cx);
         div()
             .w_full()
             .flex()
             .flex_col()
+            .children(above)
             .children(note)
             .child(boxed)
+            .children(completion)
+            .children(place_menu)
             .children(picker)
             .children(effort)
             .children(small_menus)

@@ -17,7 +17,7 @@ use crate::vm::activity as words;
 use crate::vm::capabilities::Capabilities;
 
 /// A connected fake store with the activity demo runs (plan1 busy, plan0 empty).
-fn following(cx: &mut TestAppContext) -> Entity<Store> {
+pub(crate) fn following(cx: &mut TestAppContext) -> Entity<Store> {
     crate::tests::one_window_test_at_a_time();
     cx.update(|cx| {
         crate::actions::bind_keys(cx);
@@ -45,7 +45,7 @@ fn following(cx: &mut TestAppContext) -> Entity<Store> {
     store
 }
 
-fn open_run<'a>(
+pub(crate) fn open_run<'a>(
     cx: &'a mut TestAppContext,
     store: &Entity<Store>,
     run: &str,

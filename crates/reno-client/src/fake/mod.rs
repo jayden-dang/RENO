@@ -39,12 +39,15 @@
 
 mod activity;
 mod changes;
+mod completions;
 pub mod data;
 mod extras;
 pub mod files;
 mod history;
 mod jobs;
+mod places;
 mod questions;
+mod queue;
 mod registry;
 mod script;
 mod signin;
@@ -223,6 +226,10 @@ pub struct FakeDaemon {
     server: Arc<Server>,
     /// The mocked run-activity simulations (see [`activity`]).
     activity: activity::Sims,
+    /// The mocked completions (see [`completions`]), message queue and places.
+    completions: completions::Sim,
+    queue: queue::Sim,
+    places: places::Sim,
 }
 
 impl std::fmt::Debug for Shared {
@@ -301,6 +308,9 @@ impl FakeDaemon {
             shared,
             server,
             activity: activity::seed(config_activity),
+            completions: completions::Sim::default(),
+            queue: queue::seed(config_activity),
+            places: places::Sim::default(),
         })
     }
 

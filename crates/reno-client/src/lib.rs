@@ -20,10 +20,13 @@
 pub mod activity;
 pub mod answers;
 pub mod client;
+pub mod completions;
 pub mod error;
 pub mod launcher;
 pub mod mirror;
 pub mod paths;
+pub mod places;
+pub mod queue;
 pub mod state;
 
 #[cfg(feature = "fake")]
