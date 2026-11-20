@@ -14,7 +14,6 @@ pub(crate) mod composer_prefs;
 pub(crate) mod context;
 pub(crate) mod convo;
 pub(crate) mod diff_syntax;
-pub(crate) mod draft32;
 pub(crate) mod effort_slider;
 pub(crate) mod executors;
 pub(crate) mod files;

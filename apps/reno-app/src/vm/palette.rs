@@ -895,10 +895,7 @@ mod tests {
             dot: Dot::Waiting,
             badge: Some(Badge::NeedsApproval),
             age: "3h".to_owned(),
-            pinned: false,
             project: "web-console".to_owned(),
-            created_ms: 0,
-            updated_ms: 0,
         };
         let folders = [Folder {
             key: FolderKey::Repo("/demo/web-console".into()),

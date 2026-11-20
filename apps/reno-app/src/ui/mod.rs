@@ -2,11 +2,11 @@
 
 pub(crate) mod bar;
 pub(crate) mod composer;
-pub(crate) mod draft32;
 pub(crate) mod field;
 pub(crate) mod icon;
 pub(crate) mod kit;
 pub(crate) mod markdown_view;
+pub(crate) mod menu;
 pub(crate) mod motion;
 pub(crate) mod notice;
 pub(crate) mod overlay;

@@ -49,7 +49,7 @@ mod settings_pages_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
-mod sidebar_draft_tests;
+mod sidebar_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

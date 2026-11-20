@@ -169,13 +169,8 @@ pub(crate) struct ThreadRow {
     pub(crate) badge: Option<Badge>,
     /// "2m", "1h", "1d": since the latest run started.
     pub(crate) age: String,
-    /// The thread is pinned (the mocked thread desk; always false without it).
-    pub(crate) pinned: bool,
     /// The folder's name: the project the thread is in.
     pub(crate) project: String,
-    /// When the thread's first run started, and when its latest run last changed.
-    pub(crate) created_ms: u64,
-    pub(crate) updated_ms: u64,
 }
 
 /// One project folder.
@@ -212,14 +207,12 @@ pub(crate) struct Edit<'a> {
     pub(crate) marks: &'a ThreadMarks,
     /// Folders listed whole, not a page.
     pub(crate) expanded: &'a HashSet<FolderKey>,
-    /// Pinned threads leave their folders (a "Pinned" section, a strip) instead of leading them.
-    pub(crate) pinned_apart: bool,
 }
 
 /// The sidebar's list: the folders, and the threads that are listed apart from them.
 pub(crate) struct Listing {
     pub(crate) folders: Vec<Folder>,
-    /// Pinned threads, in pin order; only when [`Edit::pinned_apart`].
+    /// Pinned threads, in pin order: the "Pinned" section. They leave their folders.
     pub(crate) pinned: Vec<ThreadRow>,
     /// Archived threads, the most recently archived first, from every project.
     pub(crate) archived: Vec<ThreadRow>,
@@ -344,10 +337,7 @@ pub(crate) fn listing(
                 dot: dot(latest, inputs.seen, looking),
                 badge: badge(latest),
                 age: summary::age_label(inputs.now_ms.saturating_sub(latest.created_at_ms)),
-                pinned: marks.is_some_and(|m| index_in(&m.pinned, entry).is_some()),
                 project: name.clone(),
-                created_ms: entry.first().created_at_ms,
-                updated_ms: latest.updated_at_ms,
             }
         };
         if let Some(edit) = inputs.edit {
@@ -356,45 +346,30 @@ pub(crate) fn listing(
                     archived.push((at, row_of(entry)));
                     return false;
                 }
-                if edit.pinned_apart
-                    && let Some(at) = index_in(&edit.marks.pinned, entry)
-                {
+                if let Some(at) = index_in(&edit.marks.pinned, entry) {
                     pinned_apart.push((at, row_of(entry)));
                     return false;
                 }
                 true
             });
         }
-        // Pinned threads lead their folder (when they stay in it), in pin order.
-        let pin_rank = |entry: &Entry<'_>| {
-            inputs
-                .edit
-                .and_then(|e| index_in(&e.marks.pinned, entry))
-                .unwrap_or(usize::MAX)
-        };
         list.sort_by(|a, b| {
-            pin_rank(a)
-                .cmp(&pin_rank(b))
-                .then_with(|| is_waiting(b.latest()).cmp(&is_waiting(a.latest())))
+            is_waiting(b.latest())
+                .cmp(&is_waiting(a.latest()))
                 .then_with(|| b.latest().created_at_ms.cmp(&a.latest().created_at_ms))
                 .then_with(|| a.latest().run_id.cmp(&b.latest().run_id))
         });
         let open = key.open_by_default() != inputs.toggled.contains(&key);
         let waiting = list.iter().filter(|e| is_waiting(e.latest())).count();
-        // Waiting threads, and pinned ones that stay, are always listed.
-        let fixed = list
-            .iter()
-            .filter(|e| is_waiting(e.latest()) || pin_rank(e) != usize::MAX)
-            .count();
         let expanded = open
             && list.len() > PER_FOLDER
             && inputs.edit.is_some_and(|e| e.expanded.contains(&key));
         let shown = if !open {
-            fixed
+            waiting
         } else if expanded {
             list.len()
         } else {
-            fixed.max(PER_FOLDER.min(list.len()))
+            waiting.max(PER_FOLDER.min(list.len()))
         };
         let rows = list.iter().take(shown).map(row_of).collect();
         out.folders.push(Folder {
@@ -753,17 +728,12 @@ mod tests {
         table: &[(String, String)],
         marks: &ThreadMarks,
         expanded: &HashSet<FolderKey>,
-        apart: bool,
     ) -> Listing {
         let refs: Vec<&RunSummary> = runs.iter().collect();
         let seen = Seen::new(0);
         let toggled = HashSet::new();
         let of = named(table);
-        let edit = Edit {
-            marks,
-            expanded,
-            pinned_apart: apart,
-        };
+        let edit = Edit { marks, expanded };
         listing(
             &refs,
             roots,
@@ -779,16 +749,16 @@ mod tests {
     fn a_long_project_says_how_many_it_hides_and_lists_them_all_when_asked() {
         let (runs, table) = many(14);
         let none = HashSet::new();
-        let l = list(&runs, &table, &ThreadMarks::default(), &none, true);
+        let l = list(&runs, &table, &ThreadMarks::default(), &none);
         let f = &l.folders[0];
         assert_eq!((f.rows.len(), f.hidden, f.expanded), (8, 6, false));
         let open: HashSet<_> = [f.key.clone()].into();
-        let l = list(&runs, &table, &ThreadMarks::default(), &open, true);
+        let l = list(&runs, &table, &ThreadMarks::default(), &open);
         let f = &l.folders[0];
         assert_eq!((f.rows.len(), f.hidden, f.expanded), (14, 0, true));
         // A page or less has nothing to show or hide.
         let (few, table) = many(8);
-        let l = list(&few, &table, &ThreadMarks::default(), &open, true);
+        let l = list(&few, &table, &ThreadMarks::default(), &open);
         assert_eq!((l.folders[0].hidden, l.folders[0].expanded), (0, false));
         // Without the controls a folder lists a page, as ever.
         let refs: Vec<&RunSummary> = runs.iter().collect();
@@ -810,7 +780,7 @@ mod tests {
     fn archived_threads_leave_their_folder_and_are_listed_apart_most_recent_first() {
         let (runs, table) = many(14);
         let m = marks(&[], &["t3", "t1"]);
-        let l = list(&runs, &table, &m, &HashSet::new(), true);
+        let l = list(&runs, &table, &m, &HashSet::new());
         let f = &l.folders[0];
         assert!(
             f.rows
@@ -824,27 +794,14 @@ mod tests {
     }
 
     #[test]
-    fn pinned_threads_lead_their_folder_or_stand_apart_in_pin_order() {
+    fn pinned_threads_stand_apart_from_their_folder_in_pin_order() {
         let (runs, table) = many(14);
         let m = marks(&["t2", "t9"], &[]);
-        // B: first in the folder, past the page cap, marked.
-        let inline = list(&runs, &table, &m, &HashSet::new(), false);
-        let f = &inline.folders[0];
-        let lead: Vec<_> = f
-            .rows
-            .iter()
-            .take(2)
-            .map(|r| (r.run.as_str(), r.pinned))
-            .collect();
-        assert_eq!(lead, [("run_r2", true), ("run_r9", true)]);
-        assert_eq!(f.rows.len(), 8);
-        assert!(inline.pinned.is_empty());
-        // A and C: out of the folder, in the pin order.
-        let apart = list(&runs, &table, &m, &HashSet::new(), true);
-        let pins: Vec<_> = apart.pinned.iter().map(|r| r.run.as_str()).collect();
+        let l = list(&runs, &table, &m, &HashSet::new());
+        let pins: Vec<_> = l.pinned.iter().map(|r| r.run.as_str()).collect();
         assert_eq!(pins, ["run_r2", "run_r9"]);
-        assert!(apart.folders[0].rows.iter().all(|r| !r.pinned));
-        assert_eq!(apart.folders[0].hidden, 12 - 8);
+        assert!(l.folders[0].rows.iter().all(|r| r.run.as_str() != "run_r2"));
+        assert_eq!(l.folders[0].hidden, 12 - 8);
     }
 
     #[test]
@@ -855,7 +812,7 @@ mod tests {
             ThreadId::from_suffix("t1").unwrap(),
             "ACP, properly".to_owned(),
         );
-        let l = list(&runs, &table, &m, &HashSet::new(), true);
+        let l = list(&runs, &table, &m, &HashSet::new());
         let titles: Vec<_> = l.folders[0].rows.iter().map(|r| r.title.as_str()).collect();
         assert!(titles.contains(&"ACP, properly") && titles.contains(&"title r0"));
     }

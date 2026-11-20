@@ -19,7 +19,6 @@ use super::sidebar::badge_tag;
 use super::theme::{self, Theme};
 use crate::nav::Nav;
 use crate::store::Store;
-use crate::ui::draft32;
 use crate::vm::palette::{
     self as vm, Found, Inputs, Item, Kind, Line, Section, Sheet, Tab, Thread,
 };
@@ -30,8 +29,6 @@ pub(crate) enum PaletteAction {
     Go(Nav),
     ToggleTheme,
     ToggleSidebar,
-    /// ROAD-32 variant C: the archived threads page.
-    Archived,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +50,6 @@ pub(crate) fn entries() -> Vec<Entry> {
     Nav::ALL
         .into_iter()
         .map(go)
-        .chain(draft32::palette_entry())
         .chain([
             Entry {
                 label: "Toggle theme",

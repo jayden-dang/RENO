@@ -113,7 +113,7 @@ pub struct FakeConfig {
     /// plan, background tasks and subagents (see [`crate::activity`]). Off for tests that count
     /// runs. Default false.
     pub activity_runs: bool,
-    /// ROAD-32 draft: add the sidebar's demo threads (an `atlas-api` with 14, four archived ones
+    /// ROAD-32: add the sidebar's demo threads (an `atlas-api` with 14, four archived ones
     /// in `reno` and `web-console`) and start with two threads pinned and four archived, in the
     /// mocked thread desk (see [`crate::thread_desk`]). Off for tests that count runs. Default
     /// false.

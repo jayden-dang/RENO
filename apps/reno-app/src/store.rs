@@ -909,16 +909,16 @@ impl Store {
     }
 
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
-    /// The `--fake` demo world; `sidebar_threads` adds the ROAD-32 draft's demo threads (only
-    /// `--draft32` asks), so the plain demo is what it always was.
-    pub(crate) fn start_fake_demo(&mut self, sidebar_threads: bool, cx: &mut Context<Self>) {
+    /// The `--fake` demo world, with the sidebar's demo threads (pinned, archived, a project with
+    /// fourteen).
+    pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
                 registry_agents: true,
                 question_run: true,
                 question_demo_runs: true,
                 activity_runs: true,
-                sidebar_threads,
+                sidebar_threads: true,
                 ..FakeConfig::default()
             },
             cx,
@@ -946,7 +946,7 @@ impl Store {
         .detach();
     }
 
-    /// Like [`Store::start_fake_demo`], with a config (an empty world, missing features).
+    /// Like [`Store::start_fake`], with a config (an empty world, missing features).
     pub(crate) fn start_fake_with(&mut self, config: FakeConfig, cx: &mut Context<Self>) {
         self.roots = crate::local::Roots::literal();
         match FakeDaemon::start(config) {

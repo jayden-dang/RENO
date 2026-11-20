@@ -166,7 +166,7 @@ impl Default for Prefs {
             send_with: SendWith::Enter,
             escape_stops: false,
             hidden_files: true,
-            sidebar_width: crate::ui::draft32::DEFAULT_WIDTH,
+            sidebar_width: crate::ui::sidebar::WIDTH,
             rest: Map::new(),
         }
     }
@@ -245,7 +245,7 @@ impl Prefs {
             .get("sidebarWidth")
             .and_then(Value::as_f64)
             .map_or(prefs.sidebar_width, |w| {
-                (w as f32).clamp(crate::ui::draft32::MIN_WIDTH, crate::ui::draft32::MAX_WIDTH)
+                (w as f32).clamp(crate::ui::sidebar::MIN_WIDTH, crate::ui::sidebar::MAX_WIDTH)
             });
         prefs.rest = map
             .into_iter()

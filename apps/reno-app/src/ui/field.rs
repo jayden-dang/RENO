@@ -37,6 +37,9 @@ pub(crate) struct Look {
     /// No fill, border or padding, and the parent's text size: a field that is the surface's
     /// own first line (the palette's search). Its placeholder stays beside the caret.
     pub(crate) bare: bool,
+    /// Enter on blank text still reports `Submit`, so the owner can say what is missing (a
+    /// rename that needs a title).
+    pub(crate) submit_blank: bool,
 }
 
 impl Look {
@@ -47,6 +50,7 @@ impl Look {
         rows: 1,
         width: Some(240.0),
         bare: false,
+        submit_blank: false,
     };
     pub(crate) const LINE: Look = Look {
         pill: false,
@@ -55,6 +59,7 @@ impl Look {
         rows: 1,
         width: None,
         bare: false,
+        submit_blank: false,
     };
     pub(crate) const COMMAND: Look = Look {
         pill: false,
@@ -63,6 +68,7 @@ impl Look {
         rows: 1,
         width: None,
         bare: false,
+        submit_blank: false,
     };
     pub(crate) const BARE: Look = Look {
         pill: false,
@@ -71,6 +77,12 @@ impl Look {
         rows: 1,
         width: None,
         bare: true,
+        submit_blank: false,
+    };
+    /// The inline rename of a sidebar row: [`Look::BARE`] that reports a blank Enter.
+    pub(crate) const RENAME: Look = Look {
+        submit_blank: true,
+        ..Look::BARE
     };
     pub(crate) const ENV: Look = Look {
         pill: false,
@@ -79,6 +91,7 @@ impl Look {
         rows: 4,
         width: None,
         bare: false,
+        submit_blank: false,
     };
 }
 
@@ -238,6 +251,16 @@ impl Field {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
+        if self.look.submit_blank
+            && !self.look.multiline
+            && key.key == "enter"
+            && !key.modifiers.shift
+            && self.model.text().trim().is_empty()
+        {
+            cx.emit(FieldEvent::Submit);
+            cx.stop_propagation();
+            return;
+        }
         let outcome = apply_key(
             &mut self.model,
             key.key.as_str(),

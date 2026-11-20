@@ -1,6 +1,7 @@
-//! The draft's interaction state, owned by the root view: which menu, card, confirm or rename is
-//! open, the hover that opens a card, the filters, the width. Every click in the sidebar is an
-//! [`Act`]; [`State::apply`] is the one place they land, so a test can drive them without a mouse.
+//! The sidebar's interaction state, owned by the root view: which menu, confirm or rename is open,
+//! which projects list every thread, whether the archive is open, the width. Every click in the
+//! sidebar is an [`Act`]; [`State::apply`] is the one place they land, so a test can drive them
+//! without a mouse.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -14,38 +15,27 @@ use gpui::{
 use reno_client::thread_desk::ThreadEditError;
 use reno_proto::{RunId, ThreadId};
 
-use super::super::field::{Field, FieldEvent, Look};
-use super::super::toast::{self, Tone};
 use crate::app::RootView;
 use crate::store::Store;
-use crate::vm::draft32::{Facts, Item, Variant};
+use crate::ui::field::{Field, FieldEvent, Look};
+use crate::ui::toast::{self, Tone};
 use crate::vm::projects::FolderKey;
+use crate::vm::threads::{Facts, Item};
 
-/// The sidebar's width when nothing was chosen, and the least and most it can be dragged to.
-pub(crate) const DEFAULT_WIDTH: f32 = crate::ui::sidebar::WIDTH;
+/// The least and most the sidebar can be dragged to (its default is [`super::WIDTH`]).
 pub(crate) const MIN_WIDTH: f32 = 200.0;
 pub(crate) const MAX_WIDTH: f32 = 380.0;
-/// How long the pointer rests on a row before the details card opens, and how long it waits to
-/// change to another row's once it is open.
-const REST_MS: u64 = 400;
-const SWITCH_MS: u64 = 150;
-/// How long the card stays after the pointer leaves the row and the card.
-const LEAVE_MS: u64 = 300;
 
 /// What a click, key or timer in the sidebar asks for.
 #[derive(Clone, Debug)]
 pub(crate) enum Act {
     /// The pointer entered or left a thread's row.
     Hover(ThreadId, bool),
-    /// The pointer entered or left the details card.
-    CardHover(bool),
-    /// Open the details card for a thread now (a right click).
-    Card(ThreadId),
     /// Open the row's menu: at the pointer, or (`None`) under the row.
     Menu(ThreadId, Option<Point<Pixels>>),
     /// The menu's Copy sub-list, and back from it.
     CopyList(bool),
-    /// An entry of a menu, or a card button, on a thread.
+    /// An entry of the menu on a thread.
     Do(ThreadId, Item),
     Unarchive(ThreadId),
     RenameSubmit,
@@ -56,14 +46,9 @@ pub(crate) enum Act {
     Blur,
     /// "Show 6 more" / "Show less" on a project.
     ToggleMore(FolderKey),
-    /// A's "Archived \u{b7} 4" row.
+    /// The "Archived \u{b7} 4" row.
     ToggleArchived,
-    /// B's "Threads \u{25be}" header menu, and its two choices.
-    FilterMenu(Option<Point<Pixels>>),
-    Filter(bool),
-    /// C's archived page.
-    Page(bool),
-    /// Scroll the sidebar to its end (the `archived` and `more` hooks).
+    /// Scroll the sidebar to its end (the `archived` and `more` start hooks).
     ScrollEnd,
     /// The sidebar's edge was dragged to this width, and let go.
     Resize(f32),
@@ -73,8 +58,6 @@ pub(crate) enum Act {
 struct Rename {
     thread: ThreadId,
     field: Entity<Field>,
-    /// The field is in C's card, not in the row.
-    in_card: bool,
     _subs: [Subscription; 2],
 }
 
@@ -90,12 +73,6 @@ pub(crate) struct Confirm {
     pub(crate) at: Point<Pixels>,
 }
 
-pub(crate) struct CardState {
-    pub(crate) thread: ThreadId,
-    /// Where the pointer was: the card's top edge follows it.
-    pub(crate) y: Pixels,
-}
-
 pub(crate) struct Failure {
     pub(crate) thread: ThreadId,
     pub(crate) message: String,
@@ -104,81 +81,51 @@ pub(crate) struct Failure {
 pub(crate) type RowBounds = Rc<RefCell<HashMap<ThreadId, Bounds<Pixels>>>>;
 
 pub(crate) struct State {
-    shown: Option<Variant>,
     pub(crate) menu: Option<MenuState>,
     rename: Option<Rename>,
     pub(crate) confirm: Option<Confirm>,
-    pub(crate) card: Option<CardState>,
     pub(crate) failure: Option<Failure>,
     pub(crate) hover: Option<ThreadId>,
-    hover_gen: u64,
-    card_hover: bool,
-    /// A: the archive is open under "Archived \u{b7} 4".
+    /// The archive is open under "Archived \u{b7} 4".
     pub(crate) archived_open: bool,
-    /// B: the list is the archive, not the active threads.
-    pub(crate) filter_archived: bool,
-    pub(crate) filter_menu: Option<Point<Pixels>>,
     pub(crate) expanded: HashSet<FolderKey>,
     pub(crate) width: f32,
     pub(crate) resizing: bool,
-    /// C: the archived page replaces the screen.
-    pub(crate) page: bool,
     /// Where each thread's row was last painted.
     pub(crate) rows: RowBounds,
-    /// The sidebar's scroll, for the `more` hook.
     pub(crate) scroll: gpui::ScrollHandle,
 }
 
 impl State {
     pub(crate) fn new(width: f32) -> Self {
         Self {
-            shown: None,
             menu: None,
             rename: None,
             confirm: None,
-            card: None,
             failure: None,
             hover: None,
-            hover_gen: 0,
-            card_hover: false,
             archived_open: false,
-            filter_archived: false,
-            filter_menu: None,
             expanded: HashSet::new(),
             width: width.clamp(MIN_WIDTH, MAX_WIDTH),
             resizing: false,
-            page: false,
             rows: Rc::default(),
             scroll: gpui::ScrollHandle::new(),
         }
     }
 
-    /// Switching variants starts from a quiet sidebar.
-    pub(crate) fn sync(&mut self, variant: Variant) {
-        if self.shown.is_some_and(|v| v != variant) {
-            let (width, rows, scroll) = (self.width, self.rows.clone(), self.scroll.clone());
-            *self = Self::new(width);
-            self.rows = rows;
-            self.scroll = scroll;
-        }
-        self.shown = Some(variant);
-    }
-
-    /// Something of the draft is open: Escape means it.
+    /// Something of the sidebar is open: Escape means it.
     pub(crate) fn any_open(&self) -> bool {
         self.menu.is_some()
             || self.rename.is_some()
             || self.confirm.is_some()
-            || self.card.is_some()
             || self.failure.is_some()
-            || self.filter_menu.is_some()
     }
 
-    /// The rename field and where it is, when one is open for `thread`.
-    pub(crate) fn rename_of(&self, thread: &ThreadId, in_card: bool) -> Option<&Entity<Field>> {
+    /// The rename field, when one is open for `thread`.
+    pub(crate) fn rename_of(&self, thread: &ThreadId) -> Option<&Entity<Field>> {
         self.rename
             .as_ref()
-            .filter(|r| &r.thread == thread && r.in_card == in_card)
+            .filter(|r| &r.thread == thread)
             .map(|r| &r.field)
     }
 
@@ -191,19 +138,19 @@ impl State {
         self.menu = None;
         self.rename = None;
         self.confirm = None;
-        self.card = None;
         self.failure = None;
-        self.filter_menu = None;
-        self.card_hover = false;
     }
 
-    /// The thread on screen in the run screen, which the keys act on when no row is chosen.
+    /// Under the row, a little in from its left edge: where its menu and confirm hang.
+    fn under(&self, thread: &ThreadId) -> Option<Point<Pixels>> {
+        self.row_at(thread)
+            .map(|b| point(b.left() + px(34.0), b.bottom() - px(2.0)))
+    }
+
+    /// The thread on screen in the run screen, which the keys act on when no menu is open.
     fn current_thread(&self, store: &Entity<Store>, cx: &App) -> Option<ThreadId> {
         if let Some(menu) = &self.menu {
             return Some(menu.thread.clone());
-        }
-        if let Some(card) = &self.card {
-            return Some(card.thread.clone());
         }
         let store = store.read(cx);
         store.looking_at().and_then(|run| store.thread_of(run))
@@ -213,11 +160,12 @@ impl State {
     pub(crate) fn facts(store: &Store, thread: &ThreadId) -> Facts {
         let info = store.state().thread(thread);
         let latest = info.and_then(|i| i.latest_run()).map(|r| r.run_id.clone());
-        let marks = store.thread_marks();
         Facts {
             known: info.is_some(),
             edit: store.capabilities().thread_edit,
-            pinned: marks.is_some_and(|m| m.pinned.contains(thread)),
+            pinned: store
+                .thread_marks()
+                .is_some_and(|m| m.pinned.contains(thread)),
             has_path: info.is_some_and(|i| i.worktree.is_some() || i.cwd.is_some()),
             has_session: latest
                 .and_then(|run| store.state().run(&run).map(|r| r.session.is_some()))
@@ -256,29 +204,28 @@ impl State {
     fn start_rename(
         &mut self,
         thread: &ThreadId,
-        in_card: bool,
         title: &str,
         window: &mut Window,
         cx: &mut Context<RootView>,
     ) {
         let field = cx.new(|cx| {
             Field::new(
-                "draft32-rename",
+                "sidebar-rename",
                 "Thread title",
                 "Thread title",
-                Look::BARE,
+                Look::RENAME,
                 cx,
             )
         });
         field.update(cx, |field, cx| field.set_text(title, cx));
         let submit = cx.subscribe_in(&field, window, |root, _, event: &FieldEvent, window, cx| {
             if *event == FieldEvent::Submit {
-                root.draft32_act(Act::RenameSubmit, window, cx);
+                root.sidebar_act(Act::RenameSubmit, window, cx);
             }
         });
         let handle = field.read(cx).focus_handle(cx);
         let blur = cx.on_blur(&handle, window, |root, window, cx| {
-            root.draft32_act(Act::Blur, window, cx);
+            root.sidebar_act(Act::Blur, window, cx);
         });
         window.focus(&handle, cx);
         self.menu = None;
@@ -286,50 +233,14 @@ impl State {
         self.rename = Some(Rename {
             thread: thread.clone(),
             field,
-            in_card,
             _subs: [submit, blur],
         });
-    }
-
-    fn timer(&self, gen_: u64, ms: u64, window: &mut Window, cx: &mut Context<RootView>) {
-        cx.spawn_in(window, async move |root, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(ms))
-                .await;
-            root.update_in(cx, |root, window, cx| root.draft32_timer(gen_, window, cx))
-                .ok();
-        })
-        .detach();
-    }
-
-    /// The timer a hover started has run out.
-    pub(crate) fn on_timer(&mut self, gen_: u64, window: &Window) {
-        if gen_ != self.hover_gen {
-            return;
-        }
-        if let Some(thread) = self.hover.clone() {
-            if self.card.as_ref().is_none_or(|c| c.thread != thread) && self.rename.is_none() {
-                self.confirm = None;
-                self.failure = None;
-                self.card = Some(CardState {
-                    thread,
-                    y: window.mouse_position().y,
-                });
-            }
-        } else if !self.card_hover
-            && self.rename.is_none()
-            && self.confirm.is_none()
-            && self.failure.is_none()
-        {
-            self.card = None;
-        }
     }
 
     /// Does what `act` asks. `true` when the composer should have the focus back.
     pub(crate) fn apply(
         &mut self,
         act: Act,
-        variant: Variant,
         store: &Entity<Store>,
         window: &mut Window,
         cx: &mut Context<RootView>,
@@ -341,41 +252,10 @@ impl State {
                 } else if self.hover.as_ref() == Some(&thread) {
                     self.hover = None;
                 }
-                self.hover_gen += 1;
-                if variant == Variant::C && self.menu.is_none() {
-                    let ms = match (on, self.card.is_some()) {
-                        (true, false) => REST_MS,
-                        (true, true) => SWITCH_MS,
-                        (false, _) => LEAVE_MS,
-                    };
-                    self.timer(self.hover_gen, ms, window, cx);
-                }
-                false
-            }
-            Act::CardHover(on) => {
-                self.card_hover = on;
-                self.hover_gen += 1;
-                if !on {
-                    self.timer(self.hover_gen, LEAVE_MS, window, cx);
-                }
-                false
-            }
-            Act::Card(thread) => {
-                self.close_all();
-                self.hover = Some(thread.clone());
-                self.hover_gen += 1;
-                self.card = Some(CardState {
-                    thread,
-                    y: window.mouse_position().y,
-                });
                 false
             }
             Act::Menu(thread, at) => {
-                let at = at.or_else(|| {
-                    self.row_at(&thread)
-                        .map(|b| point(b.left() + px(34.0), b.bottom() - px(2.0)))
-                });
-                if let Some(at) = at {
+                if let Some(at) = at.or_else(|| self.under(&thread)) {
                     self.close_all();
                     self.hover = Some(thread.clone());
                     self.menu = Some(MenuState {
@@ -392,7 +272,7 @@ impl State {
                 }
                 false
             }
-            Act::Do(thread, item) => self.apply_item(thread, item, variant, store, window, cx),
+            Act::Do(thread, item) => self.apply_item(thread, item, store, window, cx),
             Act::Unarchive(thread) => {
                 let result = store.update(cx, |store, cx| {
                     store.thread_set_archived(&thread, false, cx)
@@ -424,14 +304,11 @@ impl State {
             }
             Act::ConfirmClose => {
                 if let Some(confirm) = self.confirm.take() {
-                    self.card = None;
-                    let busy = {
-                        let store = store.read(cx);
-                        store
-                            .state()
-                            .thread(&confirm.thread)
-                            .is_some_and(|i| i.status == reno_proto::ThreadStatus::Active)
-                    };
+                    let busy = store
+                        .read(cx)
+                        .state()
+                        .thread(&confirm.thread)
+                        .is_some_and(|i| i.status == reno_proto::ThreadStatus::Active);
                     if !busy {
                         let thread = confirm.thread;
                         store.update(cx, |store, cx| store.close_thread(thread, cx));
@@ -441,9 +318,7 @@ impl State {
             }
             Act::Dismiss => {
                 let had_rename = self.rename.is_some();
-                if self.filter_menu.is_some() {
-                    self.filter_menu = None;
-                } else if let Some(menu) = &mut self.menu
+                if let Some(menu) = &mut self.menu
                     && menu.copy
                 {
                     // Esc backs out one step at a time.
@@ -466,21 +341,6 @@ impl State {
             }
             Act::ToggleArchived => {
                 self.archived_open = !self.archived_open;
-                false
-            }
-            Act::FilterMenu(at) => {
-                self.close_all();
-                self.filter_menu = at;
-                false
-            }
-            Act::Filter(archived) => {
-                self.filter_archived = archived;
-                self.filter_menu = None;
-                false
-            }
-            Act::Page(on) => {
-                self.close_all();
-                self.page = on;
                 false
             }
             Act::ScrollEnd => {
@@ -508,23 +368,21 @@ impl State {
         &mut self,
         thread: ThreadId,
         item: Item,
-        variant: Variant,
         store: &Entity<Store>,
         window: &mut Window,
         cx: &mut Context<RootView>,
     ) -> bool {
-        let in_card = variant == Variant::C;
         match item {
             Item::Rename => {
                 let title = {
                     let store = store.read(cx);
-                    let marks = store.thread_marks();
-                    marks
+                    store
+                        .thread_marks()
                         .and_then(|m| m.titles.get(&thread).cloned())
-                        .or_else(|| self.title_of(store, &thread))
+                        .or_else(|| Self::title_of(store, &thread))
                         .unwrap_or_default()
                 };
-                self.start_rename(&thread, in_card, &title, window, cx);
+                self.start_rename(&thread, &title, window, cx);
             }
             Item::Pin | Item::Unpin => {
                 let pin = item == Item::Pin;
@@ -539,11 +397,10 @@ impl State {
             Item::Archive => {
                 self.menu = None;
                 self.failure = None;
-                match store.update(cx, |store, cx| store.thread_set_archived(&thread, true, cx)) {
-                    Ok(()) => {
-                        self.card = None;
-                    }
-                    Err(e) => self.fail(&thread, &e),
+                if let Err(e) =
+                    store.update(cx, |store, cx| store.thread_set_archived(&thread, true, cx))
+                {
+                    self.fail(&thread, &e);
                 }
             }
             Item::Copy => {
@@ -552,43 +409,32 @@ impl State {
                 }
             }
             Item::CopyPath | Item::CopyThreadId | Item::CopySession => {
-                let (text, what) = {
-                    let store = store.read(cx);
-                    (
-                        Self::copy_text(store, &thread, item),
-                        match item {
-                            Item::CopyPath => "path",
-                            Item::CopyThreadId => "thread ID",
-                            _ => "harness session ID",
-                        },
-                    )
+                let what = match item {
+                    Item::CopyPath => "path",
+                    Item::CopyThreadId => "thread ID",
+                    _ => "harness session ID",
                 };
+                let text = Self::copy_text(store.read(cx), &thread, item);
                 if let Some(text) = text {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                     toast::push(cx, Tone::Info, "Copied", format!("Copied the {what}."));
                 }
                 self.menu = None;
-                self.card = None;
             }
             Item::Close => {
-                let run = {
-                    let store = store.read(cx);
-                    store
-                        .state()
-                        .thread(&thread)
-                        .and_then(|i| i.latest_run())
-                        .map(|r| r.run_id.clone())
-                };
+                let run = store
+                    .read(cx)
+                    .state()
+                    .thread(&thread)
+                    .and_then(|i| i.latest_run())
+                    .map(|r| r.run_id.clone());
                 if let Some(run) = run {
                     store.update(cx, |store, cx| store.load_changes(&run, cx));
                     let at = self
                         .menu
                         .as_ref()
                         .map(|m| m.at)
-                        .or_else(|| {
-                            self.row_at(&thread)
-                                .map(|b| point(b.left() + px(34.0), b.bottom() - px(2.0)))
-                        })
+                        .or_else(|| self.under(&thread))
                         .unwrap_or_else(|| window.mouse_position());
                     self.menu = None;
                     self.confirm = Some(Confirm { thread, run, at });
@@ -599,7 +445,7 @@ impl State {
     }
 
     /// The title a row shows for `thread` before any rename.
-    fn title_of(&self, store: &Store, thread: &ThreadId) -> Option<String> {
+    fn title_of(store: &Store, thread: &ThreadId) -> Option<String> {
         let info = store.state().thread(thread)?;
         let first = info.runs.first()?.run_id.clone();
         let title = store.state().run(&first)?.title.clone();
@@ -610,13 +456,15 @@ impl State {
     pub(crate) fn key_act(
         &mut self,
         archive: bool,
-        variant: Variant,
         store: &Entity<Store>,
         window: &mut Window,
         cx: &mut Context<RootView>,
-    ) -> bool {
+    ) {
+        if !store.read(cx).capabilities().thread_edit {
+            return;
+        }
         let Some(thread) = self.current_thread(store, cx) else {
-            return false;
+            return;
         };
         let item = if archive {
             Item::Archive
@@ -625,10 +473,7 @@ impl State {
         } else {
             Item::Pin
         };
-        if !store.read(cx).capabilities().thread_edit {
-            return false;
-        }
-        self.apply_item(thread, item, variant, store, window, cx)
+        self.apply_item(thread, item, store, window, cx);
     }
 
     /// Once the list has been laid out again, scroll to its end.
@@ -638,78 +483,50 @@ impl State {
                 .timer(Duration::from_millis(600))
                 .await;
             root.update_in(cx, |root, window, cx| {
-                root.draft32_act(Act::ScrollEnd, window, cx);
+                root.sidebar_act(Act::ScrollEnd, window, cx);
             })
             .ok();
         })
         .detach();
     }
 
-    /// `RENO_DRAFT32_OPEN=menu|rename|hover|archived|archive|resize|close`, on `thread` (the
-    /// "fix the ACP v2 handshake" row unless the hook names another).
+    /// `RENO_SIDEBAR_OPEN=menu|copy|rename|archived|more|archive|resize|close`, on `thread` (the
+    /// "fix the ACP v2 handshake" thread unless the hook names another): states for screenshots.
     pub(crate) fn hook(
         &mut self,
         what: &str,
         thread: ThreadId,
-        variant: Variant,
         store: &Entity<Store>,
         window: &mut Window,
         cx: &mut Context<RootView>,
     ) {
         match what {
-            "menu" if variant == Variant::C => {
-                self.apply(Act::Card(thread.clone()), variant, store, window, cx);
-                self.card = self.card.take().map(|c| CardState {
-                    y: self.row_at(&thread).map_or(c.y, |b| b.top()),
-                    ..c
-                });
-            }
             "menu" => {
-                self.apply(Act::Menu(thread, None), variant, store, window, cx);
+                self.apply(Act::Menu(thread, None), store, window, cx);
+            }
+            "copy" => {
+                self.apply(Act::Menu(thread, None), store, window, cx);
+                self.apply(Act::CopyList(true), store, window, cx);
             }
             "rename" => {
-                if variant == Variant::C {
-                    self.apply(Act::Card(thread.clone()), variant, store, window, cx);
-                    self.card = self.card.take().map(|c| CardState {
-                        y: self.row_at(&thread).map_or(c.y, |b| b.top()),
-                        ..c
-                    });
-                }
-                self.apply_item(thread, Item::Rename, variant, store, window, cx);
-            }
-            "hover" => {
-                if variant == Variant::C {
-                    self.hook("menu", thread, variant, store, window, cx);
-                } else {
-                    self.hover = Some(thread);
-                }
+                self.apply_item(thread, Item::Rename, store, window, cx);
             }
             "archived" => {
-                match variant {
-                    Variant::A => self.archived_open = true,
-                    Variant::B => self.filter_archived = true,
-                    Variant::C => self.page = true,
-                }
+                self.archived_open = true;
                 self.scroll_end_soon(window, cx);
             }
-            "archive" => {
-                if variant == Variant::C {
-                    self.hook("menu", thread.clone(), variant, store, window, cx);
-                }
-                self.hover = Some(thread.clone());
-                self.apply_item(thread, Item::Archive, variant, store, window, cx);
-            }
             "more" => self.scroll_end_soon(window, cx),
+            "archive" => {
+                self.hover = Some(thread.clone());
+                self.apply_item(thread, Item::Archive, store, window, cx);
+            }
             "resize" => {
                 self.width = 300.0;
                 self.resizing = true;
             }
             "close" => {
-                if variant == Variant::C {
-                    self.hook("menu", thread.clone(), variant, store, window, cx);
-                }
                 self.hover = Some(thread.clone());
-                self.apply_item(thread, Item::Close, variant, store, window, cx);
+                self.apply_item(thread, Item::Close, store, window, cx);
             }
             _ => {}
         }
