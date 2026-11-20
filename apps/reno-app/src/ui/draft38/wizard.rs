@@ -289,18 +289,114 @@ impl SetupFlow {
             .into_any_element()
     }
 
-    /// Step 4: the first project.
+    /// Step 4: the first project, brought in from this Mac.
     fn project_step(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        use super::flow::CloneUi;
+        let can_import = self.can_import(cx);
+        let known = !self.projects(cx).is_empty();
+        let buttons = can_import.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    kit::pill_button(
+                        theme,
+                        "setup-import",
+                        "Import from this Mac\u{2026}",
+                        Tone::Primary,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.import_from_mac(cx))),
+                )
+                .child(
+                    kit::pill_button(theme, "setup-clone", "Clone from URL\u{2026}", Tone::Quiet)
+                        .on_click(cx.listener(|this, _, window, cx| this.open_clone(window, cx))),
+                )
+        });
+        let clone = self.clone.clone().map(|state| {
+            let note: Option<(SharedString, gpui::Hsla)> = match &state {
+                CloneUi::Typing => None,
+                CloneUi::Cloning => Some(("Cloning\u{2026}".into(), theme.muted)),
+                CloneUi::Failed(why) => Some((why.clone().into(), theme.danger)),
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(div().w(px(340.0)).child(self.url.clone()))
+                        .child(
+                            kit::pill_button_enabled(
+                                theme,
+                                "setup-clone-go",
+                                "Clone",
+                                Tone::Quiet,
+                                state != CloneUi::Cloning,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.start_clone(cx))),
+                        ),
+                )
+                .children(note.map(|(text, tone)| {
+                    div()
+                        .id("setup-clone-note")
+                        .debug_selector(|| "setup-clone-note".to_owned())
+                        .text_size(px(12.5))
+                        .text_color(tone)
+                        .child(text)
+                }))
+        });
+        let error = self.import_error.clone().map(|why| {
+            div()
+                .id("setup-import-error")
+                .debug_selector(|| "setup-import-error".to_owned())
+                .text_size(px(13.0))
+                .text_color(theme.danger)
+                .child(why)
+        });
+        let found = self.found(cx).map(|words| {
+            div()
+                .id("setup-found")
+                .debug_selector(|| "setup-found".to_owned())
+                .px(px(12.0))
+                .py(px(9.0))
+                .rounded(px(9.0))
+                .bg(theme.surface)
+                .border_1()
+                .border_color(theme.hairline)
+                .text_size(px(13.0))
+                .child(words)
+        });
+        let list = known.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted)
+                        .child("Or pick one Reno already knows"),
+                )
+                .child(self.project_rows(theme, 36.0, false, cx))
+        });
         div()
             .flex()
             .flex_col()
-            .gap(px(20.0))
+            .gap(px(16.0))
             .child(Self::heading(
                 theme,
-                "Pick a first project",
-                "Your first thread starts here. You can work in any other folder from the sidebar.",
+                "Bring in your first project",
+                "Pick a folder on this Mac. Your first thread starts there.",
             ))
-            .child(self.project_rows(theme, 44.0, false, cx))
+            .children(buttons)
+            .children(clone)
+            .children(error)
+            .children(found)
+            .children(list)
             .into_any_element()
     }
 

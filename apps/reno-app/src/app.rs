@@ -127,6 +127,11 @@ pub(crate) struct Options {
     pub(crate) draft38_first_run: Option<String>,
     /// `RENO_DRAFT38_GATE=hold`: with `--draft38`, the connecting gate stays up.
     pub(crate) draft38_gate_hold: bool,
+    /// `RENO_DRAFT38_PROJECTS=none`: with `--draft38`, the daemon knows no project yet.
+    pub(crate) draft38_no_projects: bool,
+    /// `RENO_DRAFT38_IMPORT=<path>`: with `--draft38`, setup's folder panel answers with that
+    /// path (`/demo/reno`, `/demo/notes`; `/demo/todo.txt` and `/demo/locked-vault` are refused).
+    pub(crate) draft38_import: Option<String>,
     /// `RENO_DRAFT38_OPEN=restart|restart-fail|updates|link`: with `--draft38`, setup is skipped
     /// and that surface is put on show once the screen is up (screenshots, reviews).
     pub(crate) draft38_open: Option<String>,
@@ -183,6 +188,15 @@ impl Options {
                 Some("hold") => options.draft38_gate_hold = true,
                 Some(other) => return Err(format!("RENO_DRAFT38_GATE: {other} is not hold")),
             }
+            match env("RENO_DRAFT38_PROJECTS")
+                .filter(|v| !v.is_empty())
+                .as_deref()
+            {
+                None => {}
+                Some("none") => options.draft38_no_projects = true,
+                Some(other) => return Err(format!("RENO_DRAFT38_PROJECTS: {other} is not none")),
+            }
+            options.draft38_import = env("RENO_DRAFT38_IMPORT").filter(|v| !v.is_empty());
             if let Some(open) = env("RENO_DRAFT38_OPEN").filter(|v| !v.is_empty()) {
                 if !crate::vm::draft38::OPEN_HOOKS.contains(&open.as_str()) {
                     return Err(format!("RENO_DRAFT38_OPEN: unknown hook {open}"));
@@ -371,6 +385,7 @@ pub(crate) fn run(options: Options) {
                 draft38::Hooks {
                     first_run: options.draft38_first_run.clone(),
                     gate_hold: options.draft38_gate_hold,
+                    import: options.draft38_import.clone(),
                 },
                 cx,
             );
@@ -393,7 +408,7 @@ pub(crate) fn run(options: Options) {
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
             if options.draft38.is_some() {
-                store.start_fake_first_run(cx);
+                store.start_fake_first_run(options.draft38_no_projects, cx);
                 if options.composer_fail.as_deref() == Some("commands") {
                     store.set_commands_unreadable(true);
                 }
@@ -998,6 +1013,9 @@ impl RootView {
             self._draft_subscriptions
                 .push(cx.subscribe_in(&flow, window, Self::on_setup_event));
             self.setup = Some(flow.clone());
+            if let Some(path) = hooks.import.clone() {
+                flow.update(cx, |flow, cx| flow.import_path(PathBuf::from(path), cx));
+            }
             if let Some(word) = hooks.first_run.as_deref() {
                 if word == "done" && variant != Draft38Variant::A {
                     // B and C: setup is over, and Home is the empty new-thread state it leaves.
@@ -2437,6 +2455,19 @@ mod tests {
             assert!(on(&[("RENO_DRAFT38_OPEN", hook)]).is_ok(), "{hook}");
         }
         assert!(on(&[("RENO_DRAFT38_OPEN", "dance")]).is_err());
+        let o = on(&[
+            ("RENO_DRAFT38_PROJECTS", "none"),
+            ("RENO_DRAFT38_IMPORT", "/demo/notes"),
+        ])
+        .unwrap();
+        assert!(o.draft38_no_projects);
+        assert_eq!(o.draft38_import.as_deref(), Some("/demo/notes"));
+        assert!(on(&[("RENO_DRAFT38_PROJECTS", "some")]).is_err());
+        let plain = parse(&["--fake"], &[("RENO_DRAFT38_PROJECTS", "none")]).unwrap();
+        assert!(
+            !plain.draft38_no_projects,
+            "without --draft38 it means nothing"
+        );
     }
 
     #[test]

@@ -48,16 +48,21 @@ pub(crate) fn run() {
     let platform = gpui_platform::current_platform(false);
     let mut cx = VisualTestAppContext::with_asset_source(platform, Arc::new(Assets));
     let first_run = match state {
-        "welcome" | "light" | "gate" => None,
         "agents" => Some("agents"),
-        "project" => Some("project"),
+        "project" | "project-empty" | "project-known" | "imported-git" | "imported-plain"
+        | "import-error" => Some("project"),
         "done" => Some("done"),
         _ => None,
     };
-    let skip_setup = !matches!(
-        state,
-        "welcome" | "light" | "gate" | "agents" | "project" | "done"
-    );
+    // The folder the panel is taken to answer with, and whether Reno knows no project yet.
+    let import = match state {
+        "imported-git" => Some("/demo/reno"),
+        "imported-plain" | "done" => Some("/demo/notes"),
+        "import-error" => Some("/demo/todo.txt"),
+        _ => None,
+    };
+    let no_projects = matches!(state, "project-empty" | "done");
+    let skip_setup = !(first_run.is_some() || matches!(state, "welcome" | "light" | "gate"));
     let hold = state == "gate";
     let store = cx.update(|app| {
         gpui_tokio::init(app);
@@ -72,12 +77,13 @@ pub(crate) fn run() {
             Hooks {
                 first_run: first_run.map(str::to_owned),
                 gate_hold: hold,
+                import: import.map(str::to_owned),
             },
             app,
         );
         app.new(|cx| {
             let mut store = Store::connecting();
-            store.start_fake_first_run(cx);
+            store.start_fake_first_run(no_projects, cx);
             store
         })
     });

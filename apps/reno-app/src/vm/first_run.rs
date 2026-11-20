@@ -249,6 +249,18 @@ pub(crate) struct ProjectLine {
     pub(crate) path: std::path::PathBuf,
 }
 
+/// What Reno found in a project's folder, in words: what it is and where runs will work.
+pub(crate) fn found_words(name: &str, facts: &reno_client::places::ProjectFacts) -> String {
+    if facts.git {
+        format!(
+            "{name} \u{b7} a git repository on {} \u{b7} runs get their own worktree",
+            facts.branch.as_deref().unwrap_or("its default branch")
+        )
+    } else {
+        format!("{name} \u{b7} not a git repository \u{b7} runs work in the folder itself")
+    }
+}
+
 /// The five steps of the wizard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -511,6 +523,27 @@ mod tests {
             ]),
             "None of the 2 agents can take runs on this Mac yet. \
              Codex needs signing in; Pi needs an update."
+        );
+    }
+
+    #[test]
+    fn what_was_found_says_where_runs_will_work() {
+        use reno_client::places::ProjectFacts;
+        let git = ProjectFacts {
+            git: true,
+            branch: Some("main".into()),
+        };
+        assert_eq!(
+            found_words("reno", &git),
+            "reno \u{b7} a git repository on main \u{b7} runs get their own worktree"
+        );
+        let plain = ProjectFacts {
+            git: false,
+            branch: None,
+        };
+        assert_eq!(
+            found_words("notes", &plain),
+            "notes \u{b7} not a git repository \u{b7} runs work in the folder itself"
         );
     }
 

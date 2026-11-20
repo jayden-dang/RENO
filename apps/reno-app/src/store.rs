@@ -37,7 +37,7 @@ use reno_client::completions::{CommandsError, CompletionDesk, HarnessCommand, Pr
 use reno_client::daemon_desk::{DaemonDesk, DaemonVersions, RestartError};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
-use reno_client::places::{Place, PlaceDesk};
+use reno_client::places::{AddProjectError, Place, PlaceDesk, Project, ProjectFacts};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
 use reno_client::{
@@ -683,6 +683,23 @@ impl Store {
         self.fake.as_deref().map(|fake| fake as &dyn PlaceDesk)
     }
 
+    /// Takes a folder in as a project (the mocked places contract; `None` without the place
+    /// chooser, so only the fake can).
+    pub(crate) fn place_add_project(
+        &mut self,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Project, AddProjectError>> {
+        let result = self.place_desk().map(|desk| desk.add_project(path));
+        cx.notify();
+        result
+    }
+
+    /// What is in a project's folder, when the places contract can say.
+    pub(crate) fn place_project_facts(&self, path: &std::path::Path) -> Option<ProjectFacts> {
+        self.place_desk().map(|desk| desk.project_facts(path))
+    }
+
     /// Where `run` was started, when it was started from the place chooser.
     pub(crate) fn run_place(&self, run: &RunId) -> Option<Place> {
         self.place_desk().and_then(|desk| desk.run_place(run))
@@ -968,7 +985,7 @@ impl Store {
 
     /// The ROAD-38 first-run world: the demo world with the plan's five executors and a newer
     /// `renod` installed than the one running. The ACP registry's added agents are not in it.
-    pub(crate) fn start_fake_first_run(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_fake_first_run(&mut self, no_projects: bool, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
                 question_run: true,
@@ -976,6 +993,7 @@ impl Store {
                 activity_runs: true,
                 sidebar_threads: true,
                 first_run: true,
+                no_projects,
                 ..FakeConfig::default()
             },
             cx,

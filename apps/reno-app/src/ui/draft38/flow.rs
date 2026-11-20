@@ -6,12 +6,13 @@
 
 use std::path::PathBuf;
 
-use gpui::{Context, Entity, EventEmitter, ScrollHandle, Subscription};
+use gpui::{AppContext as _, Context, Entity, EventEmitter, ScrollHandle, Subscription, Task};
 use reno_proto::{ExecutorId, JobKind};
 
 use crate::prefs::{self, AccentName, Mode, ThemeName};
 use crate::store::Store;
 use crate::summary;
+use crate::ui::field::{Field, FieldEvent, Look};
 use crate::vm::executors;
 use crate::vm::first_run::{self, Action, AgentLine, Item, ProjectLine, SignInRoute, Step};
 
@@ -24,7 +25,25 @@ pub(crate) enum FlowEvent {
     Project(PathBuf),
 }
 
+/// Cloning a project from a URL, as the project step has it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CloneUi {
+    /// The URL field is open.
+    Typing,
+    Cloning,
+    /// It did not work: the daemon's words.
+    Failed(String),
+}
+
 pub(crate) struct SetupFlow {
+    /// Where the chosen project is, for what Reno finds in it.
+    pub(crate) project_path: Option<PathBuf>,
+    /// Why the last folder was not taken in.
+    pub(crate) import_error: Option<String>,
+    pub(crate) clone: Option<CloneUi>,
+    pub(crate) url: Entity<Field>,
+    clone_task: Option<Task<()>>,
+    _url: Subscription,
     pub(crate) store: Entity<Store>,
     pub(crate) setup: first_run::Setup,
     /// C's page.
@@ -39,7 +58,26 @@ impl SetupFlow {
         // The checklist opens on the agents: that is the finding's job.
         let mut setup = first_run::Setup::new();
         setup.open_item = Some(Item::Agents);
+        let url = cx.new(|cx| {
+            Field::new(
+                "setup-clone-url",
+                "Repository URL",
+                "https://github.com/owner/repo",
+                Look::LINE,
+                cx,
+            )
+        });
         Self {
+            project_path: None,
+            import_error: None,
+            clone: None,
+            _url: cx.subscribe(&url, |this, _, event: &FieldEvent, cx| {
+                if *event == FieldEvent::Submit {
+                    this.start_clone(cx);
+                }
+            }),
+            url,
+            clone_task: None,
             _store: cx.observe(&store, |_, _, cx| cx.notify()),
             store,
             setup,
@@ -144,8 +182,122 @@ impl SetupFlow {
         cx.notify();
     }
 
+    /// Whether a folder can be brought in here: only a daemon with the places contract takes one.
+    pub(crate) fn can_import(&self, cx: &gpui::App) -> bool {
+        self.store.read(cx).place_desk().is_some()
+    }
+
+    /// "Import from this Mac\u{2026}": the native folder panel; the folder chosen is the first project.
+    pub(crate) fn import_from_mac(&mut self, cx: &mut Context<Self>) {
+        let panel = crate::folder_picker::pick(cx);
+        cx.spawn(async move |this, cx| {
+            let Ok(answer) = panel.await else {
+                return;
+            };
+            if let Some(path) = crate::folder_picker::first(answer) {
+                this.update(cx, |this, cx| this.import_path(path, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A folder was chosen: the daemon takes it in, and it is the first project, or the reason
+    /// it was not is said.
+    pub(crate) fn import_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let result = self
+            .store
+            .update(cx, |store, cx| store.place_add_project(&path, cx));
+        match result {
+            Some(Ok(project)) => {
+                self.import_error = None;
+                self.clone = None;
+                self.choose_project(
+                    &ProjectLine {
+                        name: project.name,
+                        path: project.path,
+                    },
+                    cx,
+                );
+            }
+            Some(Err(error)) => {
+                self.import_error = Some(error.to_string());
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
+    /// What Reno found in the chosen project's folder, in words.
+    pub(crate) fn found(&self, cx: &gpui::App) -> Option<String> {
+        let name = self.setup.project.as_ref()?;
+        let facts = self
+            .store
+            .read(cx)
+            .place_project_facts(self.project_path.as_ref()?)?;
+        Some(first_run::found_words(name, &facts))
+    }
+
+    /// "Clone from URL\u{2026}": the URL field opens.
+    pub(crate) fn open_clone(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.import_error = None;
+        self.clone = Some(CloneUi::Typing);
+        let focus = gpui::Focusable::focus_handle(self.url.read(cx), cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Clones what the field holds: the places clone, with its time and its failure words.
+    pub(crate) fn start_clone(&mut self, cx: &mut Context<Self>) {
+        if self.clone == Some(CloneUi::Cloning) {
+            return;
+        }
+        let url = self.url.read(cx).text().to_owned();
+        let Some(ms) = self
+            .store
+            .read(cx)
+            .place_desk()
+            .map(|d| d.clone_duration_ms(&url))
+        else {
+            return;
+        };
+        self.clone = Some(CloneUi::Cloning);
+        self.clone_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(ms))
+                .await;
+            this.update(cx, |this, cx| this.finish_clone(&url, cx)).ok();
+        }));
+        cx.notify();
+    }
+
+    fn finish_clone(&mut self, url: &str, cx: &mut Context<Self>) {
+        let result = self
+            .store
+            .read(cx)
+            .place_desk()
+            .map(|d| d.clone_project(url));
+        match result {
+            Some(Ok(project)) => {
+                self.clone = None;
+                self.choose_project(
+                    &ProjectLine {
+                        name: project.name,
+                        path: project.path,
+                    },
+                    cx,
+                );
+            }
+            Some(Err(error)) => {
+                self.clone = Some(CloneUi::Failed(error.to_string()));
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
     /// The first project: Home works in it from now on.
     pub(crate) fn choose_project(&mut self, project: &ProjectLine, cx: &mut Context<Self>) {
+        self.project_path = Some(project.path.clone());
         self.setup.project = Some(project.name.clone());
         cx.emit(FlowEvent::Project(project.path.clone()));
         cx.notify();

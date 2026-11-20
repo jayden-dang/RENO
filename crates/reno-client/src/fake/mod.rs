@@ -124,6 +124,9 @@ pub struct FakeConfig {
     /// `renod` runs 0.4.1 with 0.4.2 installed (see [`crate::daemon_desk`]). Off for tests that
     /// count executors. Default false.
     pub first_run: bool,
+    /// With `first_run`'s true first run: no project is known yet (the places desk lists none,
+    /// until one is added). Default false.
+    pub no_projects: bool,
 }
 
 impl Default for FakeConfig {
@@ -142,6 +145,7 @@ impl Default for FakeConfig {
             activity_runs: false,
             sidebar_threads: false,
             first_run: false,
+            no_projects: false,
         }
     }
 }
@@ -342,7 +346,7 @@ impl FakeDaemon {
             activity: activity::seed(config_activity),
             completions: completions::Sim::default(),
             queue: queue::seed(config_activity),
-            places: places::Sim::default(),
+            places: places::Sim::new(config.no_projects),
             thread_desk: thread_desk::seed(config.sidebar_threads),
             daemon_desk: daemon_desk::seed(config.first_run),
         })

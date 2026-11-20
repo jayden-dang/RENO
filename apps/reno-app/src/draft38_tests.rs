@@ -38,17 +38,30 @@ fn config() -> FakeConfig {
 
 /// The first-run world, connected, with the draft on and every opener recorded.
 fn world(cx: &mut TestAppContext, variant: Variant, hooks: Hooks) -> Entity<Store> {
+    world_with(cx, variant, hooks, config())
+}
+
+fn world_with(
+    cx: &mut TestAppContext,
+    variant: Variant,
+    hooks: Hooks,
+    config: FakeConfig,
+) -> Entity<Store> {
     one_window_test_at_a_time();
     cx.update(|cx| {
         gpui_tokio::init(cx);
         crate::actions::bind_keys(cx);
         crate::links::install(cx, Rc::new(crate::links::fake::Recording::default()));
         crate::terminal::install(cx, Rc::new(crate::terminal::fake::Recording::default()));
+        crate::folder_picker::install(
+            cx,
+            Rc::new(crate::folder_picker::fake::Recording::default()),
+        );
         draft38::install(variant, hooks, cx);
     });
     let store = cx.new(|cx| {
         let mut store = Store::connecting();
-        store.start_fake_with(config(), cx);
+        store.start_fake_with(config, cx);
         store
     });
     wait_until(cx, |cx| {
@@ -234,6 +247,7 @@ fn setup_runs_once_then_never_again_and_a_hook_can_force_it(cx: &mut TestAppCont
         cx.set_global(Hooks {
             first_run: Some("1".into()),
             gate_hold: false,
+            import: None,
         });
     });
     let (forced, _) = {
@@ -363,6 +377,7 @@ fn a_held_gate_stays_up(cx: &mut TestAppContext) {
         Hooks {
             first_run: None,
             gate_hold: true,
+            import: None,
         },
     );
     vcx.executor().advance_clock(Duration::from_secs(10));
@@ -667,4 +682,162 @@ fn without_the_draft_an_archived_thread_is_still_in_the_palette(cx: &mut TestApp
     });
     assert!(found, "the app is as it was without --draft38");
     let _ = AgentState::Ready;
+}
+
+// ---- the first project: import from this Mac ---------------------------------------------------
+
+/// Setup at its project step, the folder panel answering with `answer` (`None`: cancelled).
+fn at_the_project_step<'a>(
+    cx: &'a mut TestAppContext,
+    no_projects: bool,
+    answer: Option<&str>,
+) -> (
+    Rc<crate::folder_picker::fake::Recording>,
+    Entity<RootView>,
+    &'a mut VisualTestContext,
+) {
+    let store = world_with(
+        cx,
+        Variant::A,
+        Hooks::default(),
+        FakeConfig {
+            no_projects,
+            ..config()
+        },
+    );
+    let panel = Rc::new(crate::folder_picker::fake::Recording::default());
+    *panel.answer.borrow_mut() = answer.map(std::path::PathBuf::from);
+    cx.update(|cx| crate::folder_picker::install(cx, panel.clone()));
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    root.update_in(vcx, |root, window, cx| root.init_draft38(false, window, cx));
+    let_the_gate_go(vcx);
+    let f = flow(vcx, &root);
+    f.update(vcx, |f, cx| f.go(Step::Project, cx));
+    draw(vcx);
+    (panel, root, vcx)
+}
+
+fn found(vcx: &mut VisualTestContext, root: &Entity<RootView>) -> Option<String> {
+    let f = flow(vcx, root);
+    f.read_with(vcx, |f, cx| f.found(cx))
+}
+
+#[gpui::test]
+fn import_from_this_mac_asks_the_panel_and_the_folder_becomes_the_first_project(
+    cx: &mut TestAppContext,
+) {
+    let (panel, root, vcx) = at_the_project_step(cx, true, Some("/demo/reno"));
+    assert!(painted(vcx, "setup-import") && painted(vcx, "setup-clone"));
+    assert_eq!(panel.asked.get(), 0, "nothing is asked until it is pressed");
+    click(vcx, "setup-import");
+    wait_drawn(vcx, |vcx| painted(vcx, "setup-found"));
+    assert_eq!(panel.asked.get(), 1);
+    assert_eq!(
+        found(vcx, &root).as_deref(),
+        Some("reno \u{b7} a git repository on main \u{b7} runs get their own worktree")
+    );
+    assert_eq!(
+        root.read_with(vcx, |r, _| r.home_folder().cloned()),
+        Some(crate::vm::projects::FolderKey::Repo("/demo/reno".into()))
+    );
+    let f = flow(vcx, &root);
+    assert_eq!(
+        f.read_with(vcx, |f, _| f.setup.project.clone()).as_deref(),
+        Some("reno")
+    );
+}
+
+#[gpui::test]
+fn a_plain_folder_says_runs_work_in_the_folder_itself(cx: &mut TestAppContext) {
+    let (_panel, root, vcx) = at_the_project_step(cx, true, Some("/demo/notes"));
+    click(vcx, "setup-import");
+    wait_drawn(vcx, |vcx| painted(vcx, "setup-found"));
+    assert_eq!(
+        found(vcx, &root).as_deref(),
+        Some("notes \u{b7} not a git repository \u{b7} runs work in the folder itself")
+    );
+}
+
+#[gpui::test]
+fn a_refused_folder_says_why_and_is_not_the_project_and_a_cancel_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    for (answer, words) in [
+        (Some("/demo/todo.txt"), "That is not a folder"),
+        (Some("/demo/locked-vault"), "Reno cannot read that folder"),
+    ] {
+        let (_panel, root, vcx) = at_the_project_step(cx, true, answer);
+        click(vcx, "setup-import");
+        wait_drawn(vcx, |vcx| painted(vcx, "setup-import-error"));
+        let f = flow(vcx, &root);
+        assert_eq!(
+            f.read_with(vcx, |f, _| f.import_error.clone()).as_deref(),
+            Some(words)
+        );
+        assert_eq!(f.read_with(vcx, |f, _| f.setup.project.clone()), None);
+        assert!(!painted(vcx, "setup-found"));
+    }
+    let (panel, root, vcx) = at_the_project_step(cx, true, None);
+    click(vcx, "setup-import");
+    draw(vcx);
+    assert_eq!(panel.asked.get(), 1);
+    let f = flow(vcx, &root);
+    assert_eq!(f.read_with(vcx, |f, _| f.import_error.clone()), None);
+    assert_eq!(f.read_with(vcx, |f, _| f.setup.project.clone()), None);
+}
+
+#[gpui::test]
+fn known_projects_are_listed_only_when_there_are_some(cx: &mut TestAppContext) {
+    let (_panel, _root, vcx) = at_the_project_step(cx, true, None);
+    assert!(
+        !painted(vcx, "setup-project-reno"),
+        "a true first run lists none"
+    );
+    let (_panel, _root, vcx) = at_the_project_step(cx, false, None);
+    for name in ["reno", "web-console", "atlas-api"] {
+        assert!(painted(vcx, &format!("setup-project-{name}")), "{name}");
+    }
+}
+
+#[gpui::test]
+fn clone_from_url_uses_the_places_clone_and_its_failure_words(cx: &mut TestAppContext) {
+    let (_panel, root, vcx) = at_the_project_step(cx, true, None);
+    click(vcx, "setup-clone");
+    let f = flow(vcx, &root);
+    f.update(vcx, |f, cx| {
+        f.url
+            .update(cx, |u, cx| u.set_text("https://example.com/x.git", cx))
+    });
+    click(vcx, "setup-clone-go");
+    vcx.executor().advance_clock(Duration::from_millis(800));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(
+        f.read_with(vcx, |f, _| f.clone.clone()),
+        Some(crate::ui::draft38::flow::CloneUi::Failed(
+            "Could not clone: repository not found".to_owned()
+        ))
+    );
+    f.update(vcx, |f, cx| {
+        f.url.update(cx, |u, cx| {
+            u.set_text("https://github.com/ada/atlas-docs.git", cx)
+        });
+        f.start_clone(cx);
+    });
+    vcx.executor().advance_clock(Duration::from_millis(1_600));
+    vcx.run_until_parked();
+    draw(vcx);
+    assert_eq!(
+        f.read_with(vcx, |f, _| f.setup.project.clone()).as_deref(),
+        Some("atlas-docs")
+    );
+}
+
+#[gpui::test]
+fn a_daemon_that_cannot_take_a_folder_in_shows_no_import(cx: &mut TestAppContext) {
+    let (_panel, root, vcx) = at_the_project_step(cx, false, None);
+    let store = flow(vcx, &root).read_with(vcx, |f, _| f.store.clone());
+    store.update(vcx, |s, cx| s.set_capabilities(Capabilities::REAL, cx));
+    draw(vcx);
+    assert!(!painted(vcx, "setup-import") && !painted(vcx, "setup-clone"));
 }

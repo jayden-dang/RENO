@@ -37,6 +37,9 @@ pub(crate) struct Hooks {
     pub(crate) first_run: Option<String>,
     /// `RENO_DRAFT38_GATE=hold`: the connecting gate stays up.
     pub(crate) gate_hold: bool,
+    /// `RENO_DRAFT38_IMPORT=<path>`: the folder panel is taken to answer with that path once
+    /// setup is up (screenshots, reviews).
+    pub(crate) import: Option<String>,
 }
 
 struct Current(Variant);
