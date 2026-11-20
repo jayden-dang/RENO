@@ -43,6 +43,7 @@ mod chips;
 mod menu;
 mod picker;
 mod rings;
+mod road31;
 
 use super::icon::{Icon, icon};
 use super::kit;
@@ -100,6 +101,10 @@ actions!(
         Cancel,
         Newline,
         ShowCharacterPalette,
+        /// ROAD-31 draft: Tab takes the open completion (else it is Tab).
+        AcceptCompletion,
+        /// ROAD-31 draft: ⌥ Enter puts the draft in the run's queue.
+        QueueMessage,
     ]
 );
 
@@ -157,6 +162,15 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
+    ]);
+}
+
+/// The ROAD-31 draft's own keys; bound only when the draft is on.
+pub(crate) fn bind_draft_keys(cx: &mut App) {
+    let ctx = Some(CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("tab", AcceptCompletion, ctx),
+        KeyBinding::new("alt-enter", QueueMessage, ctx),
     ]);
 }
 
@@ -378,6 +392,8 @@ pub(crate) struct Composer {
     picker_for_live: bool,
     /// Home: the folder a new thread works in (a project's "+"), or none for the daemon's own.
     folder: Option<PathBuf>,
+    /// The ROAD-31 draft's state (completions, queue, place); inert unless the draft is on.
+    road31: road31::State,
     _store: Subscription,
     _events: Subscription,
 }
@@ -452,6 +468,7 @@ impl Composer {
             class_bounds: Rc::default(),
             picker_for_live: false,
             folder: None,
+            road31: road31::State::new(cx),
         };
         // A composer that goes away with a menu open takes its signal with it.
         let owner = cx.entity_id();
@@ -469,7 +486,8 @@ impl Composer {
             || self.context_card_open
             || self.plus_open
             || self.permission_open
-            || self.effort_open;
+            || self.effort_open
+            || self.road31_overlay_open();
         let owner = cx.entity_id();
         overlay::set(cx, owner, open);
     }
@@ -481,6 +499,9 @@ impl Composer {
         self.context_card_open = false;
         self.close_menus();
         self.close_picker(cx);
+        self.road31_close_menu(cx);
+        self.road31.queue.open = false;
+        self.road31.complete = None;
         self.sync_overlay(cx);
         cx.notify();
     }
@@ -566,6 +587,10 @@ impl Composer {
         let mut params =
             self.with_pick(routing::task_params(prompt, self.class, attachments, state));
         params.cwd.clone_from(&self.folder);
+        // The draft's place chooser, when it is on, names the project's folder.
+        if let Some(cwd) = &self.road31.cwd {
+            params.cwd = Some(cwd.clone());
+        }
         params
     }
 
@@ -573,6 +598,10 @@ impl Composer {
     pub(crate) fn set_folder(&mut self, folder: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.folder != folder {
             self.folder = folder;
+            // The draft's place follows the project a "+" chose.
+            self.road31.place.project = None;
+            self.road31.place.branch = None;
+            self.road31_sync_place(cx);
             self.refresh_preview(cx);
             cx.notify();
         }
@@ -751,6 +780,9 @@ impl Composer {
         if !self.model.can_submit() || !self.target_live(cx) || self.store.read(cx).is_sending() {
             return;
         }
+        if self.road31_submit_box_edit(window, cx) {
+            return;
+        }
         if !self.connected(cx) {
             toast::push(
                 cx,
@@ -778,8 +810,16 @@ impl Composer {
         match self.mode.clone() {
             Mode::Home => {
                 let params = self.home_params(&prompt, &wire, self.store.read(cx).state());
-                self.store
-                    .update(cx, |store, cx| store.submit_task(params, ticket, cx));
+                let place = self
+                    .road31_place_view(cx)
+                    .map(|p| reno_client::places::Place {
+                        project: p.project.name,
+                        branch: p.branch,
+                        checkout: p.checkout,
+                    });
+                self.store.update(cx, |store, cx| {
+                    store.submit_task_at(params, place, ticket, cx)
+                });
             }
             Mode::Steer(run) => {
                 let thread = self.continuing(cx);
@@ -1122,6 +1162,7 @@ impl Composer {
         self.goal_x = None;
         self.reveal = true;
         window.notify_text_selection_changed(&self.focus_handle);
+        self.road31_refresh(cx);
         cx.notify();
     }
 
@@ -1129,12 +1170,17 @@ impl Composer {
         self.goal_x = None;
         self.reveal = true;
         window.notify_text_input_changed(&self.focus_handle);
+        self.road31_refresh(cx);
         self.refresh_preview(cx);
         cx.notify();
     }
 
     /// Enter: sends, or starts a new line when Settings › General says ⌘ Enter sends.
     fn on_submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        // An open completion takes Enter first.
+        if self.road31_accept(None, window, cx) {
+            return;
+        }
         // A reason input (a deny note) is one answer: Enter always gives it.
         if self.mode != Mode::Reason
             && crate::prefs::current(cx).send_with == crate::prefs::SendWith::CommandEnter
@@ -1149,7 +1195,32 @@ impl Composer {
         self.submit(window, cx);
     }
 
-    fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+    /// Tab: takes the open completion (the command sheet's Tab switches its tab); else it is the
+    /// Tab it always was.
+    fn on_accept_completion(
+        &mut self,
+        _: &AcceptCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handled = if self.road31(cx) == Some(crate::vm::draft31::Variant::B) {
+            self.road31_next_tab(window, cx)
+        } else {
+            self.road31_accept(None, window, cx)
+        };
+        if !handled {
+            cx.propagate();
+        }
+    }
+
+    fn on_queue_message(&mut self, _: &QueueMessage, window: &mut Window, cx: &mut Context<Self>) {
+        self.road31_queue_add(window, cx);
+    }
+
+    fn on_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.road31_dismiss(cx) || self.road31_cancel_box_edit(window, cx) {
+            return;
+        }
         if self.picker_open || self.class_open {
             self.class_open = false;
             self.context_card_open = false;
@@ -1361,10 +1432,16 @@ impl Composer {
     }
 
     fn on_up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.road31_nav(-1, cx) {
+            return;
+        }
         self.vertical(-1, false, window, cx);
     }
 
     fn on_down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.road31_nav(1, cx) {
+            return;
+        }
         self.vertical(1, false, window, cx);
     }
 
@@ -1850,6 +1927,8 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::current(cx);
+        let draft = self.road31(cx);
+        self.road31_note_variant(draft);
         if std::mem::take(&mut self.refocus) {
             window.focus(&self.focus_handle, cx);
         }
@@ -1930,7 +2009,13 @@ impl Render for Composer {
                 .pb(px(12.0))
                 .children(self.plus_button(&theme, cx))
                 .children(self.permission_chip(&theme, cx))
+                .children(
+                    (draft == Some(crate::vm::draft31::Variant::C))
+                        .then(|| self.road31_queue_chip(&theme, cx))
+                        .flatten(),
+                )
                 .child(div().flex_1())
+                .children(self.road31_queue_button(&theme, cx))
                 .child(self.model_chip(&theme, cx))
                 .children(self.context_ring(&theme, cx))
                 .child(div().w(px(4.0)))
@@ -1961,6 +2046,7 @@ impl Render for Composer {
             },
             _ => None,
         };
+        let note = note.or_else(|| self.road31_queue_note(&theme, cx));
         let note = note.map(|(text, tone)| {
             div()
                 .id("composer-note")
@@ -2052,6 +2138,21 @@ impl Render for Composer {
             .flatten();
 
         let home = self.mode == Mode::Home;
+        use crate::vm::draft31::Variant as V;
+        let above: Vec<gpui::AnyElement> = match draft {
+            Some(V::A) if home => self.road31_chip_strip(&theme, cx).into_iter().collect(),
+            Some(V::C) if home => self.road31_sentence(&theme, cx).into_iter().collect(),
+            Some(V::A) => self.road31_queue_card(&theme, cx).into_iter().collect(),
+            _ => Vec::new(),
+        };
+        let crumb = (draft == Some(V::B) && home)
+            .then(|| self.road31_crumb(&theme, cx))
+            .flatten();
+        let pills = (draft == Some(V::B) && !home)
+            .then(|| self.road31_queue_pills(&theme, cx))
+            .flatten();
+        let inline_list = self.road31_inline_list(&theme, cx);
+        let box_anchor = self.road31.box_bounds.clone();
         let boxed = div()
             .id("composer")
             .debug_selector(|| "composer".to_owned())
@@ -2059,6 +2160,8 @@ impl Render for Composer {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_send_now))
+            .on_action(cx.listener(Self::on_accept_completion))
+            .on_action(cx.listener(Self::on_queue_message))
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_newline))
             .on_action(cx.listener(Self::on_backspace))
@@ -2118,7 +2221,17 @@ impl Render for Composer {
                 theme.hairline
             })
             .opacity(if enabled { 1.0 } else { 0.72 })
+            .when(draft.is_some(), |d| {
+                d.relative().child(
+                    canvas(move |b, _, _| box_anchor.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .size_full(),
+                )
+            })
+            .children(crumb)
+            .children(pills)
             .child(text_area)
+            .children(inline_list)
             .children(self.attachment_row(&theme, cx))
             .when(!bare, |d| d.child(foot))
             .when(home && self.why_open, |c| {
@@ -2127,12 +2240,19 @@ impl Render for Composer {
             .children(classes);
         // The picker is a sibling of the box, not inside it: it has its own keyboard (a search
         // field), which the box's key bindings (Backspace, Enter, Escape) must not see.
+        let completion = self.road31_completion_overlay(&theme, cx);
+        let place_menu = self.road31_place_menu(&theme, cx);
+        let queue_menu = self.road31_queue_menu(&theme, cx);
         div()
             .w_full()
             .flex()
             .flex_col()
+            .children(above)
             .children(note)
             .child(boxed)
+            .children(completion)
+            .children(place_menu)
+            .children(queue_menu)
             .children(picker)
             .children(effort)
             .children(small_menus)

@@ -70,7 +70,8 @@ impl TextLayout {
             if local.y < top + height {
                 let hit = line
                     .closest_index_for_position(point(local.x, local.y - top), self.line_height);
-                return start + hit.unwrap_or_else(|end| end);
+                // A faint completion after the text is not text: a click on it lands at the end.
+                return (start + hit.unwrap_or_else(|end| end)).min(self.text.len());
             }
             top += height;
         }
@@ -159,6 +160,66 @@ fn run_for(style: &TextStyle, color: Hsla, len: usize) -> TextRun {
     }
 }
 
+/// What the draft adds to the text's look without touching the text: coloured words, and a faint
+/// completion after the caret. Empty when the draft is off, and the text shapes as before.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decor {
+    /// Byte ranges of the text, in order, with their ink and an optional fill.
+    pub(crate) spans: Vec<(Range<usize>, Hsla, Option<Hsla>)>,
+    /// Painted after the end of the text in this ink; not part of the text.
+    pub(crate) ghost: Option<(String, Hsla)>,
+}
+
+/// The runs of `text`: IME composition underlined, `decor`'s words coloured, its ghost last.
+fn runs_for(
+    style: &TextStyle,
+    color: Hsla,
+    text: &str,
+    marked: Option<&Range<usize>>,
+    decor: &Decor,
+) -> Vec<TextRun> {
+    let marked = marked.filter(|m| m.end <= text.len() && m.start < m.end);
+    let mut cuts = vec![0, text.len()];
+    for (range, _, _) in &decor.spans {
+        cuts.extend([range.start.min(text.len()), range.end.min(text.len())]);
+    }
+    if let Some(m) = marked {
+        cuts.extend([m.start, m.end]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut runs: Vec<TextRun> = cuts
+        .windows(2)
+        .map(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let mut run = run_for(style, color, b - a);
+            if let Some((_, ink, fill)) = decor
+                .spans
+                .iter()
+                .find(|(range, _, _)| range.start <= a && b <= range.end)
+            {
+                run.color = *ink;
+                run.background_color = *fill;
+            }
+            if marked.is_some_and(|m| m.start <= a && b <= m.end) {
+                run.underline = Some(UnderlineStyle {
+                    color: Some(run.color),
+                    thickness: px(1.0),
+                    wavy: false,
+                });
+            }
+            run
+        })
+        .collect();
+    if runs.is_empty() {
+        runs.push(run_for(style, color, 0));
+    }
+    if let Some((ghost, ink)) = &decor.ghost {
+        runs.push(run_for(style, *ink, ghost.len()));
+    }
+    runs
+}
+
 /// Shapes `text` (split at newlines, wrapped at `width`), underlining the IME `marked` range.
 fn shape(
     window: &Window,
@@ -166,35 +227,18 @@ fn shape(
     text: &SharedString,
     color: Hsla,
     marked: Option<&Range<usize>>,
+    decor: &Decor,
     width: Option<Pixels>,
 ) -> Vec<WrappedLine> {
-    let base = run_for(style, color, text.len());
-    let runs = match marked {
-        Some(m) if m.end <= text.len() && m.start < m.end => vec![
-            TextRun {
-                len: m.start,
-                ..base.clone()
-            },
-            TextRun {
-                len: m.end - m.start,
-                underline: Some(UnderlineStyle {
-                    color: Some(color),
-                    thickness: px(1.0),
-                    wavy: false,
-                }),
-                ..base.clone()
-            },
-            TextRun {
-                len: text.len() - m.end,
-                ..base
-            },
-        ],
-        _ => vec![base],
+    let runs = runs_for(style, color, text, marked, decor);
+    let shown = match &decor.ghost {
+        Some((ghost, _)) => SharedString::from(format!("{text}{ghost}")),
+        None => text.clone(),
     };
     let font_size = style.font_size.to_pixels(window.rem_size());
     window
         .text_system()
-        .shape_text(text.clone(), font_size, &runs, width, None)
+        .shape_text(shown, font_size, &runs, width, None)
         .map(|lines| lines.into_iter().collect())
         .unwrap_or_default()
 }
@@ -267,11 +311,12 @@ impl Element for TextArea {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (text, marked) = {
+        let (text, marked, decor) = {
             let composer = self.composer.read(cx);
             (
                 SharedString::from(composer.text_for_layout().to_owned()),
                 composer.marked_range(),
+                composer.decor(&self.theme, cx),
             )
         };
         let style = window.text_style();
@@ -285,7 +330,7 @@ impl Element for TextArea {
                 AvailableSpace::Definite(w) => Some(w),
                 _ => None,
             });
-            let lines = shape(window, &style, &text, color, marked.as_ref(), width);
+            let lines = shape(window, &style, &text, color, marked.as_ref(), &decor, width);
             let rows = row_count(&lines).clamp(min_rows, MAX_ROWS);
             size(width.unwrap_or_default(), line_height * rows)
         });
@@ -306,6 +351,7 @@ impl Element for TextArea {
         let selection = composer.selection();
         let caret = composer.caret();
         let marked = composer.marked_range();
+        let decor = composer.decor(&self.theme, cx);
         let focused = composer.is_focused(window);
         let reveal = composer.wants_caret_visible();
         let mut scroll = composer.scroll_offset();
@@ -323,6 +369,7 @@ impl Element for TextArea {
             &text,
             text_color,
             marked.as_ref(),
+            &decor,
             Some(bounds.size.width),
         );
         let placeholder = if text.is_empty() {
@@ -332,6 +379,7 @@ impl Element for TextArea {
                 &self.placeholder,
                 self.theme.faint,
                 None,
+                &Decor::default(),
                 Some(bounds.size.width),
             )
         } else {

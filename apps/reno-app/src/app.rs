@@ -45,6 +45,7 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
+use crate::vm::draft31::Variant;
 use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
 use crate::vm::shell::{self, Chip, History, Place};
@@ -105,6 +106,17 @@ pub(crate) struct Options {
     /// `--fake` and no such directory, nothing is saved: a fake run never writes to the real
     /// data dir.
     pub(crate) data_dir: Option<PathBuf>,
+    /// `--fake --draft31` (`RENO_DRAFT31=a|b|c`, default `a`): the ROAD-31 composer draft, with
+    /// its variant. Without the flag the composer is exactly as it was.
+    pub(crate) draft31: Option<Variant>,
+    /// `RENO_DRAFT31_TYPE=@src/`: with `--draft31`, put that in the box once the screen is up, so
+    /// its completions are open (screenshots, reviews).
+    pub(crate) draft31_type: Option<String>,
+    /// `RENO_DRAFT31_OPEN=project|branch|checkout|sheet|queue|clone-ok|clone-fail`: with
+    /// `--draft31`, open that place picker, the queue list, or run a clone (screenshots).
+    pub(crate) draft31_open: Option<String>,
+    /// `RENO_DRAFT31_FAIL=commands`: with `--draft31`, the harness's commands cannot be read.
+    pub(crate) draft31_fail: Option<String>,
 }
 
 impl Options {
@@ -124,11 +136,26 @@ impl Options {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let mut options = Self::default();
+        let mut draft31 = false;
         for arg in args {
             match arg.as_str() {
                 "--fake" => options.fake = true,
+                "--draft31" => draft31 = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if draft31 {
+            if !options.fake {
+                return Err("--draft31 needs --fake".to_owned());
+            }
+            options.draft31 = Some(match env("RENO_DRAFT31").filter(|v| !v.is_empty()) {
+                None => Variant::A,
+                Some(key) => Variant::parse(&key)
+                    .ok_or_else(|| format!("RENO_DRAFT31: {key} is not a, b or c"))?,
+            });
+            options.draft31_type = env("RENO_DRAFT31_TYPE").filter(|v| !v.is_empty());
+            options.draft31_open = env("RENO_DRAFT31_OPEN").filter(|v| !v.is_empty());
+            options.draft31_fail = env("RENO_DRAFT31_FAIL").filter(|v| !v.is_empty());
         }
         options.appearance = match env("RENO_APPEARANCE").as_deref() {
             Some("light") => Some(Appearance::Light),
@@ -261,6 +288,9 @@ pub(crate) struct Start {
     pub(crate) registry_demo: Option<String>,
     /// The Settings page to open on.
     pub(crate) open_settings: Option<Category>,
+    /// The ROAD-31 draft's start hooks: text to type and a picker to open.
+    pub(crate) draft31_type: Option<String>,
+    pub(crate) draft31_open: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -280,6 +310,9 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        if let Some(variant) = options.draft31 {
+            crate::ui::draft31::install(variant, cx);
+        }
 
         if let Some(path) = options.panel_state_path() {
             crate::panel::saved::Saved::install(path, cx);
@@ -297,6 +330,9 @@ pub(crate) fn run(options: Options) {
             let mut store = Store::connecting();
             if options.fake {
                 store.start_fake(cx);
+                if options.draft31_fail.as_deref() == Some("commands") {
+                    store.set_commands_unreadable(true);
+                }
             } else {
                 store.start_socket(cx);
             }
@@ -320,6 +356,8 @@ pub(crate) fn run(options: Options) {
             activity_open: options.activity_open.clone(),
             registry_demo: options.registry_demo.clone(),
             open_settings: options.open_settings,
+            draft31_type: options.draft31_type.clone(),
+            draft31_open: options.draft31_open.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -370,6 +408,8 @@ pub(crate) fn open_window(
         activity_open,
         registry_demo,
         open_settings,
+        draft31_type,
+        draft31_open,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -387,6 +427,19 @@ pub(crate) fn open_window(
             let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
             root.update(cx, |root, cx| {
                 root.focus_composer(window, cx);
+                if draft31_type.is_some() || draft31_open.is_some() {
+                    // After the runs are read and any opened run is up.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(3000))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.draft31_hooks(draft31_type, draft31_open, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
@@ -890,6 +943,29 @@ impl RootView {
             _ => self.focus_handle.clone(),
         };
         window.focus(&handle, cx);
+    }
+
+    /// `RENO_DRAFT31_TYPE` and `RENO_DRAFT31_OPEN`: act on the composer that is showing.
+    fn draft31_hooks(
+        &mut self,
+        text: Option<String>,
+        open: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let composer = match &self.screen {
+            Screen::Home => self.home.read(cx).composer().clone(),
+            Screen::Run(run) => run.read(cx).steer_input().clone(),
+            _ => return,
+        };
+        composer.update(cx, |composer, cx| {
+            if let Some(text) = text {
+                composer.fill(&text, window, cx);
+            }
+            if let Some(open) = open {
+                composer.draft31_open(&open, window, cx);
+            }
+        });
     }
 
     /// The home screen is about to be replaced: its composer lives on, hidden, so it closes its
@@ -1591,6 +1667,7 @@ impl Render for RootView {
                                 needing,
                                 &self.folders_toggled,
                                 &handlers,
+                                crate::ui::draft31::label(&theme, cx),
                             ))
                         }
                     })

@@ -37,6 +37,7 @@ impl Composer {
         let left = Rc::ptr_eq(at, &self.class_bounds)
             || Rc::ptr_eq(at, &self.plus_bounds)
             || Rc::ptr_eq(at, &self.permission_bounds)
+            || self.road31_hangs_left(at)
             || matches!(self.mode, Mode::Steer(_));
         let (corner, anchor) = if left {
             (

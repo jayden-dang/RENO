@@ -326,6 +326,7 @@ pub(crate) fn sidebar(
     needing: usize,
     toggled: &HashSet<FolderKey>,
     handlers: &SidebarHandlers,
+    draft: Option<gpui::AnyElement>,
 ) -> impl IntoElement {
     let state = store.state();
     let runs = state.runs();
@@ -433,6 +434,7 @@ pub(crate) fn sidebar(
                 )
                 .child(threads),
         )
+        .children(draft)
         .child(foot)
 }
 

@@ -20,6 +20,15 @@ pub(crate) struct Capabilities {
     /// The run's plan, background tasks and subagents (ROAD-35 / ROAD-52 are not built: the fake's
     /// mocked activity contract). Without it none of those controls exist.
     pub(crate) run_activity: bool,
+    /// The harness's own slash commands and skills after `/` and `$` (ROAD-31 is not built: the
+    /// fake's mocked completions contract). The app's own commands and `@` files on a live run
+    /// are real and need no capability.
+    pub(crate) harness_commands: bool,
+    /// The queue of messages that wait for a run's turn to end (ROAD-31, mocked).
+    pub(crate) message_queue: bool,
+    /// Choosing where a new task runs: project, branch, checkout, clone (ROAD-31, mocked). Also
+    /// the project-scoped `@` files of a new thread.
+    pub(crate) place_chooser: bool,
 }
 
 /// One row of the "+" menu.
@@ -67,6 +76,9 @@ impl Capabilities {
         allow_similar: false,
         answer_questions: false,
         run_activity: false,
+        harness_commands: false,
+        message_queue: false,
+        place_chooser: false,
     };
 
     /// The fake daemon: every not-yet control is on.
@@ -77,6 +89,9 @@ impl Capabilities {
         allow_similar: true,
         answer_questions: true,
         run_activity: true,
+        harness_commands: true,
+        message_queue: true,
+        place_chooser: true,
     };
 
     /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
@@ -123,6 +138,9 @@ mod tests {
                 && !real.allow_similar
                 && !real.answer_questions
                 && !real.run_activity
+                && !real.harness_commands
+                && !real.message_queue
+                && !real.place_chooser
         );
     }
 
@@ -153,5 +171,6 @@ mod tests {
         );
         let fake = Capabilities::FAKE;
         assert!(fake.permission_modes && fake.allow_similar && fake.answer_questions);
+        assert!(fake.harness_commands && fake.message_queue && fake.place_chooser);
     }
 }

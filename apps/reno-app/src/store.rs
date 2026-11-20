@@ -33,8 +33,11 @@ use gpui::{AppContext as _, Context, EventEmitter, Task};
 use gpui_tokio::Tokio;
 use reno_client::activity::{ActivityDesk, RunActivity, StopError};
 use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
+use reno_client::completions::{CommandsError, CompletionDesk, HarnessCommand, ProjectFile};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
+use reno_client::places::{Place, PlaceDesk};
+use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, State, Transcript, Update, Updates,
@@ -499,6 +502,13 @@ impl Store {
         result
     }
 
+    /// ROAD-31 draft: the fake harness's commands cannot be read (the failure branch).
+    pub(crate) fn set_commands_unreadable(&self, unreadable: bool) {
+        if let Some(fake) = &self.fake {
+            fake.set_commands_unreadable(unreadable);
+        }
+    }
+
     /// The in-process fake daemon, for tests that move its clock.
     #[cfg(test)]
     pub(crate) fn fake_daemon(&self) -> Option<Arc<FakeDaemon>> {
@@ -547,6 +557,133 @@ impl Store {
     /// Why the last Stop of this task was not taken.
     pub(crate) fn stop_error(&self, run: &RunId, task: &str) -> Option<&StopError> {
         self.stop_errors.get(&(run.clone(), task.to_owned()))
+    }
+
+    // ---- ROAD-31: the mocked completions, queue and places contracts ----------------------------
+
+    /// The ONE seam to the completions contract: the fake daemon's mock, and only where a
+    /// capability that needs it is on.
+    fn completion_desk(&self) -> Option<&dyn CompletionDesk> {
+        let caps = self.capabilities;
+        if !(caps.harness_commands || caps.place_chooser) {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn CompletionDesk)
+    }
+
+    /// Files of a project that has no run yet, for `@` on a new thread. `None` when this
+    /// connection cannot search a project (a live run's `@` uses the real `fs.search_files`).
+    pub(crate) fn new_thread_files(
+        &self,
+        project: &str,
+        query: &str,
+        limit: usize,
+    ) -> Option<Vec<ProjectFile>> {
+        if !self.capabilities.place_chooser {
+            return None;
+        }
+        self.completion_desk()
+            .map(|desk| desk.project_files(project, query, limit))
+    }
+
+    /// The harness's commands and skills for `/` and `$`. `None` when this connection has no such
+    /// contract (the app's own commands are still offered).
+    pub(crate) fn harness_commands(
+        &self,
+        harness: &str,
+    ) -> Option<Result<Vec<HarnessCommand>, CommandsError>> {
+        if !self.capabilities.harness_commands {
+            return None;
+        }
+        self.completion_desk()
+            .map(|desk| desk.harness_commands(harness))
+    }
+
+    /// The ONE seam to the message-queue contract.
+    fn queue_desk(&self) -> Option<&dyn MessageQueue> {
+        if !self.capabilities.message_queue {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn MessageQueue)
+    }
+
+    /// What waits for `run`; `None` when this connection has no queue.
+    pub(crate) fn queue(&self, run: &RunId) -> Option<Vec<QueuedMessage>> {
+        self.queue_desk().map(|desk| desk.queue(run))
+    }
+
+    /// Runs one queue change and redraws, whatever became of it.
+    fn queue_change<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&dyn MessageQueue) -> Result<T, QueueError>,
+    ) -> Result<T, QueueError> {
+        let result = self
+            .queue_desk()
+            .ok_or(QueueError::UnknownRun)
+            .and_then(change);
+        cx.notify();
+        result
+    }
+
+    pub(crate) fn queue_add(
+        &mut self,
+        run: &RunId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<QueuedMessage, QueueError> {
+        self.queue_change(cx, |desk| desk.queue_add(run, text))
+    }
+
+    pub(crate) fn queue_edit(
+        &mut self,
+        run: &RunId,
+        id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), QueueError> {
+        self.queue_change(cx, |desk| desk.queue_edit(run, id, text))
+    }
+
+    pub(crate) fn queue_move(
+        &mut self,
+        run: &RunId,
+        id: &str,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<(), QueueError> {
+        self.queue_change(cx, |desk| desk.queue_move(run, id, to))
+    }
+
+    pub(crate) fn queue_remove(
+        &mut self,
+        run: &RunId,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), QueueError> {
+        self.queue_change(cx, |desk| desk.queue_remove(run, id))
+    }
+
+    pub(crate) fn queue_send_now(
+        &mut self,
+        run: &RunId,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<QueuedMessage, QueueError> {
+        self.queue_change(cx, |desk| desk.queue_send_now(run, id))
+    }
+
+    /// The ONE seam to the places contract; `None` without the place chooser.
+    pub(crate) fn place_desk(&self) -> Option<&dyn PlaceDesk> {
+        if !self.capabilities.place_chooser {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn PlaceDesk)
+    }
+
+    /// Where `run` was started, when it was started from the place chooser.
+    pub(crate) fn run_place(&self, run: &RunId) -> Option<Place> {
+        self.place_desk().and_then(|desk| desk.run_place(run))
     }
 
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
@@ -742,6 +879,7 @@ impl Store {
             loop {
                 cx.background_executor().timer(EVERY).await;
                 fake.advance_activity(EVERY.as_millis() as u64);
+                fake.advance_queue(EVERY.as_millis() as u64);
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -1970,14 +2108,30 @@ impl Store {
         ticket: u64,
         cx: &mut Context<Self>,
     ) {
+        self.submit_task_at(params, None, ticket, cx);
+    }
+
+    /// `submit_task`, with the place the owner chose (project, branch, checkout). `task.run`
+    /// carries only the project's folder (`cwd`); the rest is bound to the started run through
+    /// the places seam, where Session shows it.
+    pub(crate) fn submit_task_at(
+        &mut self,
+        params: TaskRunParams,
+        place: Option<Place>,
+        ticket: u64,
+        cx: &mut Context<Self>,
+    ) {
         self.sending += 1;
         self.call(
             "Could not start the task",
             move |client| async move { client.submit_task(params).await },
             cx,
             D {
-                ok: Box::new(|store, started: reno_proto::TaskRunResult, cx| {
+                ok: Box::new(move |store, started: reno_proto::TaskRunResult, cx| {
                     store.sending = store.sending.saturating_sub(1);
+                    if let (Some(place), Some(desk)) = (place, store.place_desk()) {
+                        desk.record_place(&started.run_id, place);
+                    }
                     if let Some(decision) = started.routing {
                         store.routings.insert(
                             started.run_id.clone(),

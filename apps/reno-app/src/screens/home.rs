@@ -101,6 +101,10 @@ impl Render for HomeScreen {
         let headline = self.headline(cx);
         let heading = self.heading();
         let project = self.project.as_ref().map(|(name, _)| name.clone());
+        // ROAD-31 draft: the composer draws where the task runs (chips, breadcrumb or sentence),
+        // so the chip strip steps aside, and the sentence is the heading.
+        let place = self.composer.read(cx).draft_place(cx);
+        let sentence_heads = place == Some(crate::vm::draft31::Variant::C);
 
         let title = div()
             .id("new-thread-title")
@@ -208,10 +212,10 @@ impl Render for HomeScreen {
                             .debug_selector(|| "new-thread-mark".to_owned())
                             .child(icon(Icon::Mark, 40.0, theme.text)),
                     )
-                    .child(title)
+                    .when(!sentence_heads, |d| d.child(title))
                     .children(notice)
                     .child(div().h(px(6.0)))
-                    .child(chips)
+                    .when(place.is_none(), |d| d.child(chips))
                     .child(self.composer.clone()),
             )
     }
