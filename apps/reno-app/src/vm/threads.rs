@@ -127,6 +127,8 @@ pub(crate) enum Item {
     Pin,
     Unpin,
     Archive,
+    /// Puts the thread's link, `reno://thread/<id>`, on the clipboard (ROAD-38).
+    CopyLink,
     /// Opens the Copy sub-list.
     Copy,
     CopyPath,
@@ -162,6 +164,8 @@ pub(crate) struct Facts {
     pub(crate) pinned: bool,
     pub(crate) has_path: bool,
     pub(crate) has_session: bool,
+    /// "Copy link" is offered (ROAD-38).
+    pub(crate) link: bool,
 }
 
 fn item(item: Item, label: &'static str) -> Entry {
@@ -212,6 +216,9 @@ pub(crate) fn menu(facts: Facts) -> Vec<Entry> {
         };
         out.push(hinted(item(pin, label), "\u{2318}\u{21e7}P"));
         out.push(hinted(item(Item::Archive, "Archive"), "\u{2318}\u{21e7}A"));
+    }
+    if facts.link {
+        out.push(item(Item::CopyLink, "Copy link"));
     }
     out.push(item(Item::Copy, "Copy"));
     out.push(Entry::Divider);

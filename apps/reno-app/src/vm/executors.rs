@@ -990,6 +990,40 @@ pub(crate) fn agent_updates(
     out
 }
 
+/// `updates` without the versions the person chose to skip (`skipped`, by executor id: the
+/// version it was skipped at). An agent whose update job is running stays, and a version newer
+/// than the skipped one shows again.
+pub(crate) fn without_skipped(
+    updates: Vec<AgentUpdate>,
+    skipped: &std::collections::BTreeMap<String, String>,
+) -> Vec<AgentUpdate> {
+    updates
+        .into_iter()
+        .filter(|u| u.updating || skipped.get(&u.id) != Some(&u.to))
+        .collect()
+}
+
+/// The executors first-run setup lists: every agent but the test ones, those that can take runs
+/// first, then the ones that need the person most (a sign-in before an install), then by name.
+pub(crate) fn setup_rows(
+    state: &State,
+    now_ms: u64,
+    listing: Option<&ExecutorRegistryListResult>,
+) -> Vec<ExecutorRow> {
+    let mut rows: Vec<ExecutorRow> = rows_of(state, now_ms, listing)
+        .into_iter()
+        .filter(|r| r.group != Group::Test)
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.group != Group::Ready)
+            .cmp(&(b.group != Group::Ready))
+            .then_with(|| a.need.cmp(&b.need))
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    rows
+}
+
 /// Where an agent stands in the updates list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpdatePhase {
@@ -2650,6 +2684,47 @@ mod roster_tests {
         assert_eq!(
             island_rows(&[au("codex", true)], &[]),
             [(au("codex", true), UpdatePhase::Updating)]
+        );
+    }
+
+    #[test]
+    fn a_skipped_version_leaves_the_updates_and_a_newer_one_comes_back() {
+        let au = |id: &str, to: &str, updating: bool| AgentUpdate {
+            id: id.into(),
+            name: id.into(),
+            from: "1.5.0".into(),
+            to: to.into(),
+            updating,
+        };
+        let skipped: std::collections::BTreeMap<String, String> =
+            [("pi".to_owned(), "1.6.0".to_owned())].into();
+        assert!(
+            without_skipped(vec![au("pi", "1.6.0", false)], &skipped).is_empty(),
+            "the skipped version is hidden"
+        );
+        assert_eq!(
+            without_skipped(vec![au("pi", "1.7.0", false)], &skipped).len(),
+            1,
+            "a newer version is offered again"
+        );
+        assert_eq!(
+            without_skipped(vec![au("codex", "1.6.0", false)], &skipped).len(),
+            1,
+            "the skip is per agent"
+        );
+        assert_eq!(
+            without_skipped(vec![au("pi", "1.6.0", true)], &skipped).len(),
+            1,
+            "an update that is running is never hidden"
+        );
+        assert_eq!(
+            without_skipped(
+                vec![au("pi", "1.6.0", false)],
+                &std::collections::BTreeMap::new()
+            )
+            .len(),
+            1,
+            "nothing skipped hides nothing"
         );
     }
 }

@@ -2,6 +2,7 @@
 
 pub(crate) mod bar;
 pub(crate) mod composer;
+pub(crate) mod draft38;
 pub(crate) mod field;
 pub(crate) mod icon;
 pub(crate) mod kit;

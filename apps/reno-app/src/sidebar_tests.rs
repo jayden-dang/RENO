@@ -109,7 +109,7 @@ fn the_row_menu_lists_rename_pin_archive_copy_a_divider_and_close_in_the_danger_
 ) {
     let (store, root, vcx) = open(cx, Capabilities::FAKE);
     let facts = store.read_with(vcx, |s, _| {
-        crate::ui::sidebar::State::facts(s, &thread("atlas01"))
+        crate::ui::sidebar::State::facts(s, &thread("atlas01"), false)
     });
     let entries = threads::menu(facts);
     let shape: Vec<_> = entries
@@ -160,7 +160,7 @@ fn the_row_menu_lists_rename_pin_archive_copy_a_divider_and_close_in_the_danger_
 fn the_shortcuts_pin_and_archive_the_thread_of_the_open_menu(cx: &mut TestAppContext) {
     let (store, root, vcx) = open(cx, Capabilities::FAKE);
     let facts = store.read_with(vcx, |s, _| {
-        crate::ui::sidebar::State::facts(s, &thread("atlas01"))
+        crate::ui::sidebar::State::facts(s, &thread("atlas01"), false)
     });
     let hints: Vec<_> = threads::menu(facts)
         .iter()
@@ -451,7 +451,7 @@ fn the_real_daemon_hides_rename_pin_archive_pinned_and_archived_and_keeps_copy_a
     let (store, root, vcx) = open(cx, Capabilities::REAL);
     assert!(!painted(vcx, "pinned-section") && !painted(vcx, "archived-row"));
     let facts = store.read_with(vcx, |s, _| {
-        crate::ui::sidebar::State::facts(s, &thread("atlas01"))
+        crate::ui::sidebar::State::facts(s, &thread("atlas01"), false)
     });
     assert!(!facts.edit && facts.known);
     let labels: Vec<_> = threads::menu(facts)

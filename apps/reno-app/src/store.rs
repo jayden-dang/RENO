@@ -34,6 +34,7 @@ use gpui_tokio::Tokio;
 use reno_client::activity::{ActivityDesk, RunActivity, StopError};
 use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
 use reno_client::completions::{CommandsError, CompletionDesk, HarnessCommand, ProjectFile};
+use reno_client::daemon_desk::{DaemonDesk, DaemonVersions, RestartError};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::places::{Place, PlaceDesk};
@@ -741,6 +742,45 @@ impl Store {
         self.thread_change(cx, |desk| desk.set_archived(thread, archived))
     }
 
+    /// The ONE seam to the daemon-desk contract (ROAD-38); `None` without `daemon_restart`.
+    fn daemon_desk(&self) -> Option<&dyn DaemonDesk> {
+        if !self.capabilities.daemon_restart {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn DaemonDesk)
+    }
+
+    /// The running and the installed `renod`; `None` when this connection cannot restart it.
+    pub(crate) fn daemon_versions(&self) -> Option<DaemonVersions> {
+        self.daemon_desk().map(DaemonDesk::versions)
+    }
+
+    /// How long a restart takes, in ms.
+    pub(crate) fn daemon_restart_ms(&self) -> Option<u64> {
+        self.daemon_desk().map(DaemonDesk::restart_duration_ms)
+    }
+
+    /// Restarts `renod` onto the installed version and redraws, whatever became of it.
+    pub(crate) fn daemon_restart(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<String, RestartError> {
+        let result = self
+            .daemon_desk()
+            .ok_or(RestartError::UpToDate)
+            .and_then(DaemonDesk::restart);
+        cx.notify();
+        result
+    }
+
+    /// `RENO_DRAFT38_OPEN=restart-fail`: the next restart of the fake daemon does not come back.
+    /// Does nothing against a real daemon.
+    pub(crate) fn demo_fail_next_restart(&self) {
+        if let Some(fake) = &self.fake {
+            fake.fail_next_restart();
+        }
+    }
+
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
         self.deciding.contains(id)
     }
@@ -919,6 +959,23 @@ impl Store {
                 question_demo_runs: true,
                 activity_runs: true,
                 sidebar_threads: true,
+                ..FakeConfig::default()
+            },
+            cx,
+        );
+        self.tick_fake_activity(cx);
+    }
+
+    /// The ROAD-38 first-run world: the demo world with the plan's five executors and a newer
+    /// `renod` installed than the one running. The ACP registry's added agents are not in it.
+    pub(crate) fn start_fake_first_run(&mut self, cx: &mut Context<Self>) {
+        self.start_fake_with(
+            FakeConfig {
+                question_run: true,
+                question_demo_runs: true,
+                activity_runs: true,
+                sidebar_threads: true,
+                first_run: true,
                 ..FakeConfig::default()
             },
             cx,

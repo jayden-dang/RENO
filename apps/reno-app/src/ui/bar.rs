@@ -6,7 +6,7 @@
 //! The bar only draws what the root view tells it and calls the root view's methods; the rules
 //! (history, live count, which agents have an update) are in `vm/shell.rs` and `vm/executors.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
@@ -15,6 +15,7 @@ use gpui::{
 };
 use reno_client::ConnectionStatus;
 
+use super::draft38::restart::{self, RestartBar};
 use super::icon::{Icon, icon};
 use super::kit::{self, MONO, Tone};
 use super::sidebar::{MARK_INSET, daemon_label};
@@ -33,6 +34,14 @@ const LOGOS: usize = 3;
 /// Where a bar control sits, so its popover can hang from it.
 pub(crate) type Anchor_ = Rc<Cell<Option<Bounds<Pixels>>>>;
 
+/// What the ROAD-38 draft adds to the bar: the switch's label, the restart affordance and Skip on
+/// the agents-updates list. Absent without `--draft38`.
+pub(crate) struct DraftBar {
+    /// The switch's note, taken when the bar is drawn.
+    pub(crate) label: RefCell<Option<AnyElement>>,
+    pub(crate) restart: RestartBar,
+}
+
 /// What the bar shows.
 pub(crate) struct Bar<'a> {
     pub(crate) theme: &'a Theme,
@@ -50,10 +59,11 @@ pub(crate) struct Bar<'a> {
     pub(crate) on_run: bool,
     pub(crate) more_at: Anchor_,
     pub(crate) updates_at: Anchor_,
+    pub(crate) draft: Option<DraftBar>,
 }
 
 /// Reports where its parent was painted into `at`.
-fn track(at: &Anchor_) -> impl IntoElement {
+pub(crate) fn track(at: &Anchor_) -> impl IntoElement {
     let at = at.clone();
     canvas(move |bounds, _, _| at.set(Some(bounds)), |_, _, _, _| {})
         .absolute()
@@ -135,6 +145,47 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
             .debug_selector(|| "bar-chip".to_owned())
             .into_any_element()
     };
+
+    // C: the renod chip opens the restart card; the others have their own affordance.
+    let chip_restart = bar
+        .draft
+        .as_ref()
+        .map(|d| &d.restart)
+        .filter(|r| r.variant == crate::vm::draft38::Variant::C && r.offered);
+    let restarting = bar
+        .draft
+        .as_ref()
+        .is_some_and(|d| d.restart.phase == crate::vm::daemon_restart::Phase::Restarting);
+    let daemon_dot = if chip_restart.is_some() || restarting {
+        theme.warning
+    } else {
+        dot
+    };
+    let daemon_chip = kit::chip(theme, daemon_label(bar.connection))
+        .id("bar-daemon")
+        .debug_selector(|| "bar-daemon".to_owned())
+        .flex_row_reverse()
+        .child(kit::dot(daemon_dot, 7.0));
+    let daemon_chip = match chip_restart {
+        Some(rb) => daemon_chip
+            .relative()
+            .cursor_pointer()
+            .border_color(theme.warning.opacity(0.5))
+            .role(Role::Button)
+            .aria_label("renod, a newer version is installed")
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(kit::focus_ring(theme))
+            .child(track(&rb.at))
+            .on_click(on(|root, _, cx| root.restart_press(cx)))
+            .into_any_element(),
+        None => daemon_chip.into_any_element(),
+    };
+    let restart_pill = bar
+        .draft
+        .as_ref()
+        .and_then(|d| restart::pill(root, theme, &d.restart));
+    let draft_label = bar.draft.as_ref().and_then(|d| d.label.borrow_mut().take());
 
     let island = (!bar.updates.is_empty()).then(|| {
         let logos = bar
@@ -222,7 +273,14 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
                 .on_click(on(|root, _, cx| root.toggle_more(cx))),
         )
         .child(chip)
-        .child(div().flex_1().min_w_0())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .children(draft_label),
+        )
         .child(
             kit::icon_chip(theme, Icon::Play, format!("{} live", bar.live))
                 .id("bar-live")
@@ -248,13 +306,8 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
                 .focus_visible(kit::focus_ring(theme))
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx)),
         )
-        .child(
-            kit::chip(theme, daemon_label(bar.connection))
-                .id("bar-daemon")
-                .debug_selector(|| "bar-daemon".to_owned())
-                .flex_row_reverse()
-                .child(kit::dot(dot, 7.0)),
-        )
+        .child(daemon_chip)
+        .children(restart_pill)
         .children(island)
         .when(bar.on_run, |b| {
             b.child(
@@ -266,7 +319,7 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
 }
 
 /// A popover hung under the control painted at `at`, closed by a click anywhere else.
-fn popover(
+pub(crate) fn popover(
     root: &Entity<RootView>,
     at: &Anchor_,
     corner: Anchor,
@@ -300,7 +353,7 @@ fn popover(
     )
 }
 
-fn panel(theme: &Theme, id: &'static str, width: f32) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn panel(theme: &Theme, id: &'static str, width: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -365,7 +418,18 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
             }));
         out.extend(popover(root, &bar.more_at, Anchor::TopLeft, menu));
     }
+    if let Some(draft) = &bar.draft
+        && let Some(content) = restart::content(root, theme, &draft.restart)
+    {
+        let corner = if draft.restart.variant == crate::vm::draft38::Variant::B {
+            Anchor::TopLeft
+        } else {
+            Anchor::TopRight
+        };
+        out.extend(popover(root, &draft.restart.at, corner, content));
+    }
     if bar.updates_open && !bar.updates.is_empty() {
+        let skippable = bar.draft.is_some();
         let any_available = bar
             .updates
             .iter()
@@ -373,20 +437,49 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
         let rows = bar.updates.iter().map(|(u, phase)| {
             let id = u.id.clone();
             let root = root.clone();
+            let skip_id = u.id.clone();
+            let skip_root = root.clone();
+            let skip_name = u.name.clone();
             let right = match phase {
-                UpdatePhase::Available => kit::line_button(
-                    theme,
-                    SharedString::from(format!("update-{}", u.id)),
-                    None,
-                    "Update",
-                    Tone::Primary,
-                    true,
-                )
-                .on_click(move |_, _, cx| {
-                    let id = id.clone();
-                    root.update(cx, |root, cx| root.update_agent(&id, cx));
-                })
-                .into_any_element(),
+                UpdatePhase::Available => div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .when(skippable, |d| {
+                        d.child(
+                            kit::line_button(
+                                theme,
+                                SharedString::from(format!("skip-{}", u.id)),
+                                None,
+                                "Skip this version",
+                                Tone::Quiet,
+                                true,
+                            )
+                            .aria_label(SharedString::from(format!(
+                                "Skip this version of {skip_name}"
+                            )))
+                            .on_click(move |_, _, cx| {
+                                let id = skip_id.clone();
+                                skip_root.update(cx, |root, cx| root.skip_update(&id, cx));
+                            }),
+                        )
+                    })
+                    .child(
+                        kit::line_button(
+                            theme,
+                            SharedString::from(format!("update-{}", u.id)),
+                            None,
+                            "Update",
+                            Tone::Primary,
+                            true,
+                        )
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            root.update(cx, |root, cx| root.update_agent(&id, cx));
+                        }),
+                    )
+                    .into_any_element(),
                 UpdatePhase::Updating => div()
                     .flex()
                     .items_center()
@@ -441,7 +534,7 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
                 .child(right)
         });
         let all = root.clone();
-        let menu = panel(theme, "updates-menu", 360.0)
+        let menu = panel(theme, "updates-menu", if skippable { 440.0 } else { 360.0 })
             .child(
                 div()
                     .flex()

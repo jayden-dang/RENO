@@ -35,6 +35,9 @@ pub(crate) struct HomeScreen {
     composer: Entity<Composer>,
     /// The project a new thread is for (a project's "+"); none for "Start a task".
     project: Option<(String, FolderKey)>,
+    /// ROAD-38 draft: B's setup checklist, drawn above the composer while it is the variant
+    /// showing.
+    card: Option<Entity<crate::ui::draft38::flow::SetupFlow>>,
     _store: Subscription,
 }
 
@@ -46,6 +49,19 @@ impl HomeScreen {
             store,
             composer,
             project: None,
+            card: None,
+        }
+    }
+
+    /// The setup checklist to offer (B), or none once setup is over.
+    pub(crate) fn set_card(
+        &mut self,
+        card: Option<Entity<crate::ui::draft38::flow::SetupFlow>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.card != card {
+            self.card = card;
+            cx.notify();
         }
     }
 
@@ -198,6 +214,11 @@ impl Render for HomeScreen {
             }))
             .child(SharedString::from(heading.after.clone()));
 
+        let card = self
+            .card
+            .clone()
+            .filter(|_| crate::ui::draft38::current(cx) == Some(crate::vm::draft38::Variant::B))
+            .map(|flow| crate::ui::draft38::checklist::card(&flow, &theme, cx));
         let chips = div().w_full().flex().gap(px(8.0)).children(
             new_thread::chips(project.as_deref())
                 .into_iter()
@@ -260,6 +281,7 @@ impl Render for HomeScreen {
             Headline::Ready => None,
         };
 
+        let has_card = card.is_some();
         div()
             .id("home")
             .size_full()
@@ -269,8 +291,17 @@ impl Render for HomeScreen {
             .justify_center()
             .px(px(24.0))
             .pb(px(60.0))
-            // The sentence needs room above it for its pickers, so the column sits lower.
-            .when(place.is_some(), |d| d.pt(px(200.0)))
+            // The sentence needs room above it for its pickers, so the column sits lower. With
+            // the setup card there is less room: the column starts higher.
+            .when(place.is_some() && card.is_none(), |d| d.pt(px(200.0)))
+            // A window too short for the card scrolls instead of cutting the top off: the column
+            // is centred by its auto margins, which give way when there is no room.
+            .when(has_card, |d| {
+                d.pt(px(24.0))
+                    .pb(px(24.0))
+                    .justify_start()
+                    .overflow_y_scroll()
+            })
             .child(
                 div()
                     .w_full()
@@ -279,6 +310,7 @@ impl Render for HomeScreen {
                     .flex_col()
                     .items_center()
                     .gap(px(18.0))
+                    .when(has_card, |d| d.my_auto())
                     .child(
                         div()
                             .id("new-thread-mark")
@@ -289,6 +321,7 @@ impl Render for HomeScreen {
                     .children(notice)
                     .child(div().h(px(6.0)))
                     .when(place.is_none(), |d| d.child(chips))
+                    .children(card)
                     .child(self.composer.clone()),
             )
     }

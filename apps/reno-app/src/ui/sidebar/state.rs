@@ -157,7 +157,7 @@ impl State {
     }
 
     /// What the menu needs to know about `thread`.
-    pub(crate) fn facts(store: &Store, thread: &ThreadId) -> Facts {
+    pub(crate) fn facts(store: &Store, thread: &ThreadId, link: bool) -> Facts {
         let info = store.state().thread(thread);
         let latest = info.and_then(|i| i.latest_run()).map(|r| r.run_id.clone());
         Facts {
@@ -170,6 +170,7 @@ impl State {
             has_session: latest
                 .and_then(|run| store.state().run(&run).map(|r| r.session.is_some()))
                 .unwrap_or(false),
+            link,
         }
     }
 
@@ -408,6 +409,13 @@ impl State {
                     menu.copy = true;
                 }
             }
+            Item::CopyLink => {
+                cx.write_to_clipboard(ClipboardItem::new_string(crate::vm::thread_link::link(
+                    &thread,
+                )));
+                toast::push(cx, Tone::Info, "Copied", "Copied the link to this thread.");
+                self.menu = None;
+            }
             Item::CopyPath | Item::CopyThreadId | Item::CopySession => {
                 let what = match item {
                     Item::CopyPath => "path",
@@ -468,7 +476,7 @@ impl State {
         };
         let item = if archive {
             Item::Archive
-        } else if Self::facts(store.read(cx), &thread).pinned {
+        } else if Self::facts(store.read(cx), &thread, false).pinned {
             Item::Unpin
         } else {
             Item::Pin

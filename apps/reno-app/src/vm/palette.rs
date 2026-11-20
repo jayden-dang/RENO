@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use reno_proto::RunId;
+use reno_proto::{RunId, ThreadId};
 
 use crate::ui::palette::{Entry, entries, filter};
 use crate::vm::projects::{Badge, Dot, Folder};
@@ -504,6 +504,19 @@ pub(crate) fn threads(folders: &[Folder], updated: impl Fn(&RunId) -> u64) -> Ve
         .collect()
 }
 
+/// Takes the archived threads out of the folders' rows: an archived thread is not a place to
+/// jump to (ROAD-38), though the archive still lists it.
+pub(crate) fn without_archived(folders: &mut [Folder], archived: &[ThreadId]) {
+    if archived.is_empty() {
+        return;
+    }
+    for folder in folders {
+        folder
+            .rows
+            .retain(|row| row.thread.as_ref().is_none_or(|t| !archived.contains(t)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,5 +925,41 @@ mod tests {
         assert_eq!(out[0].project, "web-console");
         assert_eq!(out[0].executor, "codex");
         assert_eq!(out[0].updated_ms, 42);
+    }
+
+    #[test]
+    fn archived_threads_leave_the_folders_the_palette_lists() {
+        let row = |name: &str, thread: Option<&str>| ThreadRow {
+            thread: thread.map(|t| ThreadId::from_suffix(t).unwrap()),
+            run: run(name),
+            members: vec![run(name)],
+            title: name.to_owned(),
+            executor: "claude-code".parse().unwrap(),
+            dot: Dot::Seen,
+            badge: None,
+            age: "1h".to_owned(),
+            project: "reno".to_owned(),
+        };
+        let mut folders = vec![Folder {
+            key: FolderKey::NoProject,
+            name: "reno".to_owned(),
+            open: true,
+            waiting: 0,
+            rows: vec![
+                row("live", Some("live1")),
+                row("old", Some("arch1")),
+                row("loose", None),
+            ],
+            hidden: 0,
+            expanded: false,
+        }];
+        let archived = [ThreadId::from_suffix("arch1").unwrap()];
+        without_archived(&mut folders, &[]);
+        assert_eq!(folders[0].rows.len(), 3, "nothing archived hides nothing");
+        without_archived(&mut folders, &archived);
+        let names: Vec<&str> = folders[0].rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(names, ["live", "loose"]);
+        let found = threads(&folders, |_| 0);
+        assert!(found.iter().all(|t| t.title != "old"));
     }
 }
