@@ -731,7 +731,7 @@ impl Composer {
                     .child(
                         div()
                             .id("place-list")
-                            .max_h(px((room - 34.0).clamp(90.0, 230.0)))
+                            .max_h(px((room - 34.0).clamp(90.0, 260.0)))
                             .p(px(6.0))
                             .overflow_y_scroll()
                             .child(list),
@@ -746,7 +746,7 @@ impl Composer {
                     .child(
                         div()
                             .id("place-list")
-                            .max_h(px((room - 34.0 - 30.0).clamp(90.0, 210.0)))
+                            .max_h(px(whole_rows(room - 34.0 - 30.0, 8.0)))
                             .p(px(6.0))
                             .overflow_y_scroll()
                             .child(list),
@@ -895,6 +895,12 @@ impl Composer {
                     .child(status),
             )
     }
+}
+
+/// A picker list's height in whole 30 pt rows (and the 12 pt of padding), so no row shows cut in
+/// half: as many as fit in `avail` points, between 3 and `most`.
+fn whole_rows(avail: f32, most: f32) -> f32 {
+    ((avail - 12.0) / 30.0).floor().clamp(3.0, most) * 30.0 + 12.0
 }
 
 /// A key that types: its text, when it has no command modifier.
