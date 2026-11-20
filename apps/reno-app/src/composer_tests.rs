@@ -687,6 +687,37 @@ fn a_live_codex_run_shows_its_model_but_cannot_switch_it(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn a_live_runs_model_chip_shows_the_whole_model_name(cx: &mut TestAppContext) {
+    crate::screens::run::keep_composer_under_panels();
+    // Seen 2026-11-20: in a 1240 pt window with the side panel open, the chip of a live run read
+    // "O… Default · High": when the foot is short of room, the effort words kept their width and
+    // the model name gave way. The name is what the chip is for; the effort gives way first.
+    let store = fake_store(cx);
+    wait_until(cx, |cx| {
+        store.read_with(cx, |s, _| !s.state().executors().is_empty())
+    });
+    let (_root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    click(vcx, "recent-run_keeper1");
+    wait_drawn(vcx, |vcx| {
+        painted(vcx, "chip-model") && painted(vcx, "chip-effort")
+    });
+    let roomy = vcx.debug_bounds("chip-model").unwrap().size.width;
+
+    // Narrow enough that the foot cannot hold every chip at full size, wide enough that the
+    // side panel stays open.
+    vcx.simulate_resize(gpui::size(gpui::px(1180.0), gpui::px(816.0)));
+    draw(vcx);
+    let tight = vcx.debug_bounds("chip-model").unwrap().size.width;
+    assert_eq!(tight, roomy, "the model name is cut when the foot is tight");
+    let effort = vcx.debug_bounds("chip-effort").unwrap().size.width;
+    assert!(
+        effort < gpui::px(105.0),
+        "the effort words give way instead: {effort:?} wide"
+    );
+}
+
+#[gpui::test]
 fn a_live_runs_picker_closes_when_the_run_ends(cx: &mut TestAppContext) {
     crate::screens::run::keep_composer_under_panels();
     // Dogfood 2026-11-17: the run ended under an open picker, which turned into the next

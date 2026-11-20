@@ -178,13 +178,24 @@ impl Composer {
                 let (words, extra) = models::chip_words(state, pick);
                 chip = chip
                     .child(kit::exec_glyph(theme, pick.executor.as_str(), 13.0))
-                    .child(div().min_w_0().truncate().child(SharedString::from(words)))
+                    .child(
+                        div()
+                            .id("chip-model")
+                            .debug_selector(|| "chip-model".to_owned())
+                            // The name keeps its width; only a very long one is cut.
+                            .flex_none()
+                            .max_w(px(180.0))
+                            .truncate()
+                            .child(SharedString::from(words)),
+                    )
                     .when_some(extra, |c, extra| {
                         c.child(
                             div()
                                 .id("chip-effort")
                                 .debug_selector(|| "chip-effort".to_owned())
-                                .flex_none()
+                                // When the foot is short of room, the effort gives way first.
+                                .min_w_0()
+                                .truncate()
                                 .font_weight(FontWeight::NORMAL)
                                 .text_color(theme.faint)
                                 .child(SharedString::from(extra)),
