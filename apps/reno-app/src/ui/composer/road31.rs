@@ -35,12 +35,19 @@ use crate::vm::draft31::{
 pub(crate) use place::{PlaceMenu, PlaceView};
 
 /// How many rows each variant's list shows at once.
-pub(super) fn rows_cap(variant: Variant) -> usize {
+pub(super) fn rows_cap(variant: Variant, sheet: usize) -> usize {
     match variant {
         Variant::C => 5,
-        Variant::A | Variant::B => 8,
+        Variant::A => 8,
+        Variant::B => sheet,
     }
 }
+
+/// Room kept above a sheet: the status bar and its gutter.
+pub(super) const SHEET_TOP: f32 = 56.0;
+/// A completion row, and the chrome of the command sheet around its list.
+pub(super) const SHEET_ROW: f32 = 26.0;
+const SHEET_CHROME: f32 = 42.0 + 38.0 + 12.0 + 2.0 * 24.0;
 
 /// The rows asked of a search.
 const FILES_ASKED: u32 = 24;
@@ -62,6 +69,8 @@ pub(super) struct State {
     pub(super) dismissed: Option<(usize, Trigger)>,
     file_ticket: u64,
     file_task: Option<Task<()>>,
+    /// How many rows the command sheet shows: what fits between the status bar and the box.
+    pub(super) sheet_cap: std::cell::Cell<usize>,
     /// Where the box was last painted, for the lists that dock to it.
     pub(super) box_bounds: Anchor,
     pub(super) place: place::PlaceState,
@@ -79,6 +88,7 @@ impl State {
             dismissed: None,
             file_ticket: 0,
             file_task: None,
+            sheet_cap: std::cell::Cell::new(6),
             box_bounds: Rc::default(),
             place: place::PlaceState::new(cx),
             queue: queue::QueueState::new(cx),
@@ -86,6 +96,11 @@ impl State {
             shown: None,
         }
     }
+}
+
+/// Whole rows of the command sheet that fit in `room` points above the box.
+pub(super) fn sheet_rows(room: f32) -> usize {
+    (((room - SHEET_CHROME) / SHEET_ROW).floor().max(3.0) as usize).min(8)
 }
 
 impl Composer {
@@ -320,7 +335,11 @@ impl Composer {
             return false;
         }
         complete.selected = (complete.selected as isize + delta).rem_euclid(n as isize) as usize;
-        complete.top = window_start(complete.selected, complete.top, rows_cap(variant));
+        complete.top = window_start(
+            complete.selected,
+            complete.top,
+            rows_cap(variant, self.road31.sheet_cap.get()),
+        );
         cx.notify();
         true
     }

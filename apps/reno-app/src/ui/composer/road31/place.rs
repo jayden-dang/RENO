@@ -1140,6 +1140,13 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let query = self.road31.place.query.clone();
+        // Whole rows only, and the sheet stays under the status bar.
+        let room = self
+            .road31
+            .box_bounds
+            .get()
+            .map_or(400.0, |b| f32::from(b.origin.y) - super::SHEET_TOP - 8.0);
+        let list_h = (((room - 134.0) / 30.0).floor().clamp(3.0, 7.0)) * 30.0 + 12.0;
         let projects = self.road31_project_rows(&view.project.name, "", cx);
         let (branches, foot) = self.road31_branch_rows(view, &query, cx);
         let worktrees = self
@@ -1261,7 +1268,7 @@ impl Composer {
                             .child(
                                 div()
                                     .id("place-list")
-                                    .max_h(px(230.0))
+                                    .max_h(px(list_h))
                                     .p(px(6.0))
                                     .overflow_y_scroll()
                                     .child(right),

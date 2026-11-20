@@ -10,7 +10,7 @@ use gpui::{
     deferred, div, point, prelude::*, px,
 };
 
-use super::{Completion, Composer, rows_cap};
+use super::{Completion, Composer, SHEET_ROW, SHEET_TOP, rows_cap, sheet_rows};
 use crate::ui::composer::menu::menu;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
@@ -187,7 +187,7 @@ impl Composer {
         headers: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let cap = rows_cap(variant);
+        let cap = rows_cap(variant, self.road31.sheet_cap.get());
         let mut list = div().flex().flex_col();
         if let Some(why) = &c.listing.failure {
             if headers && c.active.trigger == Trigger::Slash {
@@ -357,6 +357,15 @@ impl Composer {
                     }))
             })
             .collect::<Vec<_>>();
+        // The sheet stays under the status bar: show the whole rows that fit above the box.
+        let room = self
+            .road31
+            .box_bounds
+            .get()
+            .map_or(400.0, |b| f32::from(b.origin.y) - SHEET_TOP - 8.0);
+        let cap = sheet_rows(room);
+        self.road31.sheet_cap.set(cap);
+        let body_h = cap as f32 * SHEET_ROW + 2.0 * 24.0 + 12.0;
         let rows = self.road31_grouped_rows(theme, c, Variant::B, true, cx);
         let preview = self.road31_preview(theme, c);
         menu(theme, "complete-sheet", width)
@@ -377,7 +386,7 @@ impl Composer {
             .child(
                 div()
                     .flex()
-                    .h(px(260.0))
+                    .h(px(body_h))
                     .child(div().w(px(width * 0.52)).flex_none().p(px(6.0)).child(rows))
                     .child(
                         div()
