@@ -93,9 +93,13 @@ fn parse_args(args: &[String]) -> Result<Options> {
     Ok(Options { quick, variants })
 }
 
-pub(crate) const USAGE: &str = "usage: cargo xtask bench [--quick] [--allocator default|system|mimalloc | --compare-allocators]";
+pub(crate) const USAGE: &str = "usage: cargo xtask bench [--app] [--quick] [--allocator default|system|mimalloc | --compare-allocators]";
 
 pub(crate) fn run(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--app") {
+        let rest: Vec<String> = args.iter().filter(|a| *a != "--app").cloned().collect();
+        return crate::app_bench::run(&rest);
+    }
     let options = match parse_args(args) {
         Ok(options) => options,
         Err(message) => {
@@ -175,12 +179,12 @@ impl Drop for Cleanup {
     }
 }
 
-struct Bins {
-    renod: PathBuf,
-    reno: PathBuf,
+pub(crate) struct Bins {
+    pub(crate) renod: PathBuf,
+    pub(crate) reno: PathBuf,
 }
 
-fn cargo_build(root: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn cargo_build(root: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("cargo")
         .current_dir(root)
         .arg("build")
@@ -266,7 +270,7 @@ fn rss_kib(pid: u32) -> Result<f64> {
         .ok_or_else(|| format!("cannot read RSS from {text:?}"))
 }
 
-fn cpu_seconds(pid: u32) -> Result<f64> {
+pub(crate) fn cpu_seconds(pid: u32) -> Result<f64> {
     if cfg!(target_os = "linux") {
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| e.to_string())?;
         stats::parse_proc_stat_cpu(&stat, LINUX_TICKS).ok_or_else(|| "bad /proc stat".to_owned())
@@ -276,7 +280,7 @@ fn cpu_seconds(pid: u32) -> Result<f64> {
     }
 }
 
-fn pause(seconds: u64) {
+pub(crate) fn pause(seconds: u64) {
     thread::sleep(Duration::from_secs(seconds));
 }
 
@@ -324,24 +328,30 @@ impl Sampler {
 
 // --- the daemon ------------------------------------------------------------------------------
 
-struct Daemon {
+pub(crate) struct Daemon {
     child: Option<Child>,
-    pid: u32,
+    pub(crate) pid: u32,
 }
 
-#[derive(Clone, Copy)]
-struct DaemonOptions {
-    hold: bool,
-    max_concurrent: Option<usize>,
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DaemonOptions {
+    pub(crate) hold: bool,
+    pub(crate) max_concurrent: Option<usize>,
+    /// `renod --stream-mock=<kind>`: the bench-only streaming script (`steady` or `burst`).
+    pub(crate) stream_mock: Option<&'static str>,
 }
 
-fn socket(dir: &Path) -> PathBuf {
+pub(crate) fn socket(dir: &Path) -> PathBuf {
     dir.join("reno.sock")
 }
 
 impl Daemon {
     /// Starts `renod` and returns it with the time until its socket accepted a connection.
-    fn start(bins: &Bins, dir: &Path, options: DaemonOptions) -> Result<(Self, Duration)> {
+    pub(crate) fn start(
+        bins: &Bins,
+        dir: &Path,
+        options: DaemonOptions,
+    ) -> Result<(Self, Duration)> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let mut command = Command::new(&bins.renod);
         command
@@ -360,6 +370,9 @@ impl Daemon {
             command.env("RENO_MOCK_HOLD", "1");
         } else {
             command.env_remove("RENO_MOCK_HOLD");
+        }
+        if let Some(kind) = options.stream_mock {
+            command.arg(format!("--stream-mock={kind}"));
         }
         match options.max_concurrent {
             Some(n) => command.env("RENO_MAX_CONCURRENT", n.to_string()),
@@ -394,7 +407,7 @@ impl Daemon {
     }
 
     /// SIGTERM, then wait for the process: the graceful shutdown the markers belong to.
-    fn stop(mut self) -> Result<()> {
+    pub(crate) fn stop(mut self) -> Result<()> {
         let mut child = self.child.take().ok_or("daemon already gone")?;
         let _ = Command::new("kill")
             .args(["-TERM", &self.pid.to_string()])
@@ -425,7 +438,7 @@ impl Drop for Daemon {
     }
 }
 
-fn reno_command(bins: &Bins, dir: &Path) -> Command {
+pub(crate) fn reno_command(bins: &Bins, dir: &Path) -> Command {
     // Runs work where `reno` is started. A write run outside a git repository is refused
     // (worktree isolation), except in the daemon's own scratch directory, which it works in in
     // place: so the bench starts `reno` there.
@@ -449,14 +462,7 @@ fn measure(plan: &Plan, bins: &Bins, store_bench: &Path, scratch: &Path) -> Resu
 
     // A first start of a binary the system has not run before is slow (the OS inspects it), and
     // would be read as the daemon's boot time. Start and stop both once on a throwaway directory.
-    let (warm, _) = Daemon::start(
-        bins,
-        &scratch.join("warm"),
-        DaemonOptions {
-            hold: false,
-            max_concurrent: None,
-        },
-    )?;
+    let (warm, _) = Daemon::start(bins, &scratch.join("warm"), DaemonOptions::default())?;
     warm.stop()?;
     let _ = reno_command(bins, &scratch.join("warm"))
         .arg("--version")
@@ -467,14 +473,7 @@ fn measure(plan: &Plan, bins: &Bins, store_bench: &Path, scratch: &Path) -> Resu
         "idle: settling {} s, then {} s of CPU",
         plan.idle_settle_s, plan.idle_cpu_s
     );
-    let (daemon, first_boot) = Daemon::start(
-        bins,
-        &main_dir,
-        DaemonOptions {
-            hold: false,
-            max_concurrent: None,
-        },
-    )?;
+    let (daemon, first_boot) = Daemon::start(bins, &main_dir, DaemonOptions::default())?;
     m.boot_empty_ms = first_boot.as_secs_f64() * 1e3;
     pause(plan.idle_settle_s);
     m.idle_rss_mib = mib(rss_median(daemon.pid, 3, Duration::from_millis(500))?);
@@ -521,14 +520,7 @@ fn measure(plan: &Plan, bins: &Bins, store_bench: &Path, scratch: &Path) -> Resu
     // 6. Boot with the ended runs in the store.
     println!("boot: {BOOTS} boots with {} ended runs", m.runs_done);
     for _ in 0..BOOTS {
-        let (daemon, boot) = Daemon::start(
-            bins,
-            &main_dir,
-            DaemonOptions {
-                hold: false,
-                max_concurrent: None,
-            },
-        )?;
+        let (daemon, boot) = Daemon::start(bins, &main_dir, DaemonOptions::default())?;
         m.boot_ms.push(boot.as_secs_f64() * 1e3);
         daemon.stop()?;
     }
@@ -598,6 +590,7 @@ fn per_live_run(plan: &Plan, bins: &Bins, dir: &Path) -> Result<f64> {
         DaemonOptions {
             hold: true,
             max_concurrent: Some(HOLD_SLOTS),
+            ..DaemonOptions::default()
         },
     )?;
     pause(plan.idle_settle_s.min(10));

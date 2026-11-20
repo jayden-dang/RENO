@@ -513,6 +513,71 @@ impl RunScreen {
         }
     }
 
+    /// `RENO_BENCH=1`: once the transcript has stopped growing, scroll it from its end to its
+    /// start and back, a fixed step a frame, and print the time between frames (`bench.rs`).
+    pub(crate) fn bench_scroll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::bench::{self, Pass, ScrollPlan};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::time::Instant;
+
+        struct Script {
+            list: ListState,
+            plan: ScrollPlan,
+            last_frame: Option<Instant>,
+            intervals: Vec<Duration>,
+        }
+        fn step(script: Rc<RefCell<Script>>, window: &mut Window, _cx: &mut gpui::App) {
+            {
+                let mut s = script.borrow_mut();
+                let now = Instant::now();
+                if let Some(last) = s.last_frame.replace(now) {
+                    s.intervals.push(now - last);
+                }
+                let before = s.list.logical_scroll_top();
+                match s.plan.pass() {
+                    Pass::Up => s.list.scroll_by(px(-bench::SCROLL_STEP_PX)),
+                    Pass::Down => s.list.scroll_by(px(bench::SCROLL_STEP_PX)),
+                    Pass::Done => {}
+                }
+                let moved = s.list.logical_scroll_top() != before;
+                s.plan.after_step(moved);
+                if s.plan.pass() == Pass::Done {
+                    bench::report_scroll(s.list.item_count(), &s.intervals);
+                    return;
+                }
+            }
+            window.refresh();
+            window.on_next_frame(move |window, cx| step(script, window, cx));
+        }
+
+        let list = self.list.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            // The rows are in when the count has held for a second and a half.
+            let mut held = 0;
+            let mut count = 0;
+            while held < 6 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let now = list.item_count();
+                held = if now == count && now > 0 { held + 1 } else { 0 };
+                count = now;
+            }
+            cx.update(|window, cx| {
+                let script = Rc::new(RefCell::new(Script {
+                    list,
+                    plan: ScrollPlan::new(),
+                    last_frame: None,
+                    intervals: Vec::new(),
+                }));
+                step(script, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
     fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.list.scroll_to(ListOffset {

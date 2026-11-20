@@ -78,8 +78,12 @@ impl ExecutorSet {
 /// The mock executor: the canned script, or the hold script when `hold` is set. It keeps no log
 /// of what it received, which would grow with every run the daemon plays.
 pub fn mock_executor(hold: bool) -> Result<MockExecutor, IdError> {
+    mock_with(mock_script(hold))
+}
+
+fn mock_with(steps: Vec<MockStep>) -> Result<MockExecutor, IdError> {
     Ok(MockExecutor::new(MOCK_ID.parse()?)
-        .with_steps(mock_script(hold))
+        .with_steps(steps)
         .without_log())
 }
 
@@ -120,6 +124,88 @@ pub fn mock_script(hold: bool) -> Vec<MockStep> {
     steps
 }
 
+/// A bench-only script for the mock (`renod --stream-mock`), which the app benchmark plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamMock {
+    /// Text deltas at a steady rate, about [`STREAM_EVENTS_PER_SECOND`] a second for
+    /// [`STREAM_SECONDS`] seconds: markdown with code blocks and a few tool steps. It is the
+    /// load of a run being watched.
+    Steady,
+    /// [`BURST_MESSAGES`] messages, each followed by a tool step, with no waiting: a long
+    /// finished run to open.
+    Burst,
+}
+
+/// The rate of [`StreamMock::Steady`].
+pub const STREAM_EVENTS_PER_SECOND: u64 = 20;
+/// How long [`StreamMock::Steady`] plays.
+pub const STREAM_SECONDS: u64 = 60;
+/// How many messages [`StreamMock::Burst`] plays.
+pub const BURST_MESSAGES: usize = 2_000;
+/// A tool step comes this many events apart in [`StreamMock::Steady`].
+const STREAM_TOOL_EVERY: u64 = 200;
+
+/// What the streaming mock says, over and over. Every code block closes inside one pass.
+const STREAM_MARKDOWN: &str = "## Reading the change\n\nI am going through the module **one function at a time**, checking each against `the spec`.\n\n- the parser keeps its state in one struct\n- errors carry the offset where they began\n- nothing here touches the clock\n\n```rust\nfn offset(input: &str, at: usize) -> Option<usize> {\n    let rest = input.get(at..)?;\n    rest.find('\\n').map(|n| at + n)\n}\n```\n\nThat is the part to keep. The next step is to run the tests again.\n\n";
+
+/// The script of a [`StreamMock`].
+pub fn stream_script(kind: StreamMock) -> Vec<MockStep> {
+    let mut steps = vec![MockStep::started("mock-session", MOCK_MODEL)];
+    match kind {
+        StreamMock::Steady => {
+            let events = STREAM_EVENTS_PER_SECOND * STREAM_SECONDS;
+            let gap = std::time::Duration::from_millis(1000 / STREAM_EVENTS_PER_SECOND);
+            let words: Vec<&str> = STREAM_MARKDOWN.split_inclusive(' ').collect();
+            let mut word = 0;
+            for n in 1..=events {
+                steps.push(MockStep::Sleep(gap));
+                if n % STREAM_TOOL_EVERY == 0 {
+                    let id = format!("stream-call-{n}");
+                    steps.push(stream_tool(&id));
+                    steps.push(stream_tool_result(&id));
+                } else {
+                    steps.push(MockStep::text(words[word % words.len()]));
+                    word += 1;
+                }
+            }
+        }
+        StreamMock::Burst => {
+            for n in 0..BURST_MESSAGES {
+                steps.push(MockStep::text(format!(
+                    "Message {n}: I looked at `item_{n}` and it reads as expected. \
+                     Nothing to change here, so on to the next.\n"
+                )));
+                let id = format!("burst-call-{n}");
+                steps.push(stream_tool(&id));
+                steps.push(stream_tool_result(&id));
+            }
+        }
+    }
+    steps.push(MockStep::Emit(ExecEvent::Done {
+        stop: StopReason::Completed,
+        result: Some("stream mock complete".into()),
+        diagnostic: None,
+        reason: None,
+    }));
+    steps
+}
+
+fn stream_tool(id: &str) -> MockStep {
+    MockStep::Emit(ExecEvent::Tool {
+        id: id.into(),
+        call: ToolCall::new("mock_tool", json!({ "note": "stream" }), ActionClass::Other),
+    })
+}
+
+fn stream_tool_result(id: &str) -> MockStep {
+    MockStep::Emit(ExecEvent::ToolResult {
+        id: id.into(),
+        ok: true,
+        summary: Some("the mock tool finished".into()),
+        output: None,
+    })
+}
+
 /// Claude Code, reading the plan usage of the login the CLI holds (read only, see
 /// `reno_harness::usage`).
 fn claude() -> ClaudeExecutor {
@@ -144,9 +230,17 @@ fn codex() -> CodexExecutor {
 /// executor that is not installed, too old or signed out stays listed (with the reason) and is
 /// refused a run before anything is spawned. With `harnesses` false only `mock` is registered
 /// and no CLI is looked for, let alone started.
-pub fn discover(hold_mock: bool, harnesses: bool) -> Result<ExecutorSet, IdError> {
+pub fn discover(
+    hold_mock: bool,
+    stream_mock: Option<StreamMock>,
+    harnesses: bool,
+) -> Result<ExecutorSet, IdError> {
+    let mock = match stream_mock {
+        Some(kind) => mock_with(stream_script(kind))?,
+        None => mock_executor(hold_mock)?,
+    };
     let mut set = ExecutorSet {
-        registry: ExecutorRegistry::new().with(Arc::new(mock_executor(hold_mock)?)),
+        registry: ExecutorRegistry::new().with(Arc::new(mock)),
         harnesses: Vec::new(),
     };
     if !harnesses {
@@ -241,7 +335,7 @@ mod tests {
 
     #[test]
     fn without_harnesses_only_the_mock_is_registered_and_nothing_is_probed() {
-        let set = discover(false, false).expect("discover");
+        let set = discover(false, None, false).expect("discover");
         let ids = set.registry.ids();
         let ids: Vec<_> = ids.iter().map(ExecutorId::as_str).collect();
         assert_eq!(ids, [MOCK_ID]);
@@ -300,6 +394,69 @@ mod tests {
             .map(|executor| executor.descriptor().id.to_string())
             .collect();
         assert_eq!(ids, ["acp.gemini", "acp.own.mine"]);
+    }
+
+    /// Counts of what a script plays and how long it sleeps.
+    fn shape(script: &[MockStep]) -> (usize, usize, usize, std::time::Duration) {
+        let mut texts = 0;
+        let mut tools = 0;
+        let mut dones = 0;
+        let mut slept = std::time::Duration::ZERO;
+        for step in script {
+            match step {
+                MockStep::Emit(ExecEvent::Text { .. }) => texts += 1,
+                MockStep::Emit(ExecEvent::Tool { .. }) => tools += 1,
+                MockStep::Emit(ExecEvent::Done { .. }) => dones += 1,
+                MockStep::Sleep(d) => slept += *d,
+                _ => {}
+            }
+        }
+        (texts, tools, dones, slept)
+    }
+
+    #[test]
+    fn the_steady_stream_plays_about_twenty_events_a_second_for_a_minute() {
+        let script = stream_script(StreamMock::Steady);
+        let (texts, tools, dones, slept) = shape(&script);
+        assert_eq!(dones, 1);
+        assert!(matches!(
+            script.last(),
+            Some(MockStep::Emit(ExecEvent::Done { .. }))
+        ));
+        assert!((3..=8).contains(&tools), "a few tool steps, got {tools}");
+        let events = texts + tools;
+        assert!((1100..=1300).contains(&events), "events: {events}");
+        let seconds = slept.as_secs_f64();
+        assert!((55.0..=65.0).contains(&seconds), "sleeps {seconds} s");
+        let rate = events as f64 / seconds;
+        assert!((18.0..=22.0).contains(&rate), "rate {rate}/s");
+    }
+
+    #[test]
+    fn the_steady_stream_is_markdown_with_whole_code_blocks() {
+        let script = stream_script(StreamMock::Steady);
+        let text: String = script
+            .iter()
+            .filter_map(|s| match s {
+                MockStep::Emit(ExecEvent::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let fences = text.matches("```").count();
+        assert!(fences >= 2, "has code blocks");
+        assert_eq!(fences % 2, 0, "every block is closed");
+        assert!(text.contains("\n- "), "has a list");
+        assert!(text.contains("\n## "), "has headings");
+    }
+
+    #[test]
+    fn the_burst_is_two_thousand_messages_split_by_tool_steps_with_no_waiting() {
+        let script = stream_script(StreamMock::Burst);
+        let (texts, tools, dones, slept) = shape(&script);
+        assert_eq!(texts, BURST_MESSAGES);
+        assert_eq!(tools, BURST_MESSAGES, "a tool step after each message");
+        assert_eq!(dones, 1);
+        assert_eq!(slept, std::time::Duration::ZERO);
     }
 
     #[test]

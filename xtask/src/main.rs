@@ -19,6 +19,8 @@ use std::process::{Command, ExitCode};
 
 use serde::Deserialize;
 
+mod app_bench;
+mod app_stats;
 mod bench;
 mod bundle;
 mod conformance;

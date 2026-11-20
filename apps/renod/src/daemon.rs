@@ -71,6 +71,8 @@ pub enum ExecutorSource {
     Discover {
         /// Use the mock's hold script: it waits to be steered or cancelled.
         hold_mock: bool,
+        /// Use a bench-only streaming script for the mock instead (`--stream-mock`).
+        stream_mock: Option<executors::StreamMock>,
         /// Look for the harness CLIs at all. Tests turn this off so that none is ever touched.
         harnesses: bool,
     },
@@ -282,8 +284,9 @@ impl Daemon {
         let executors = match executors {
             ExecutorSource::Discover {
                 hold_mock,
+                stream_mock,
                 harnesses,
-            } => executors::discover(hold_mock, harnesses)?,
+            } => executors::discover(hold_mock, stream_mock, harnesses)?,
             ExecutorSource::Given(set) => set,
         };
         let db = paths.db();
