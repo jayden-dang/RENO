@@ -21,6 +21,7 @@ pub mod activity;
 pub mod answers;
 pub mod client;
 pub mod completions;
+pub mod daemon_desk;
 pub mod error;
 pub mod launcher;
 pub mod mirror;

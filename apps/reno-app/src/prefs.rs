@@ -6,6 +6,7 @@
 //! The file is camelCase JSON. A missing or unreadable file means the defaults; a key this build
 //! does not know is kept as it was when the file is written back.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -114,7 +115,7 @@ impl Word for SendWith {
 }
 
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 10] = [
     "mode",
     "theme",
     "accent",
@@ -123,6 +124,8 @@ const KEYS: [&str; 8] = [
     "escapeStops",
     "hiddenFiles",
     "sidebarWidth",
+    "onboarded",
+    "skippedUpdates",
 ];
 
 /// The switches of Settings → Notifications (all default to on), and the choices of Settings ›
@@ -148,6 +151,11 @@ pub(crate) struct Prefs {
     pub(crate) hidden_files: bool,
     /// How wide the sidebar was dragged to (ROAD-32): its default until it is.
     pub(crate) sidebar_width: f32,
+    /// First-run setup was finished or skipped (ROAD-38): it never shows again.
+    pub(crate) onboarded: bool,
+    /// The agent versions the person chose not to be told about (ROAD-38), by executor id. The
+    /// agents-updates island hides an update to exactly that version; a newer one shows again.
+    pub(crate) skipped_updates: BTreeMap<String, String>,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -167,6 +175,8 @@ impl Default for Prefs {
             escape_stops: false,
             hidden_files: true,
             sidebar_width: crate::ui::sidebar::WIDTH,
+            onboarded: false,
+            skipped_updates: BTreeMap::new(),
             rest: Map::new(),
         }
     }
@@ -247,6 +257,19 @@ impl Prefs {
             .map_or(prefs.sidebar_width, |w| {
                 (w as f32).clamp(crate::ui::sidebar::MIN_WIDTH, crate::ui::sidebar::MAX_WIDTH)
             });
+        // A settings file written before setup existed means the app was already in use: no
+        // setup for someone who has been working in it. Only a missing file is a first run.
+        prefs.onboarded = flag("onboarded", true);
+        prefs.skipped_updates = map
+            .get("skippedUpdates")
+            .and_then(Value::as_object)
+            .map(|skipped| {
+                skipped
+                    .iter()
+                    .filter_map(|(id, version)| Some((id.clone(), version.as_str()?.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
         prefs.rest = map
             .into_iter()
             .filter(|(key, _)| {
@@ -272,6 +295,16 @@ impl Prefs {
         put("escapeStops", self.escape_stops.into());
         put("hiddenFiles", self.hidden_files.into());
         put("sidebarWidth", f64::from(self.sidebar_width).into());
+        put("onboarded", self.onboarded.into());
+        put(
+            "skippedUpdates",
+            Value::Object(
+                self.skipped_updates
+                    .iter()
+                    .map(|(id, version)| (id.clone(), Value::String(version.clone())))
+                    .collect(),
+            ),
+        );
         serde_json::to_vec_pretty(&Value::Object(map)).unwrap_or_default()
     }
 }
@@ -490,6 +523,74 @@ mod tests {
             update(cx, |p| p.theme = ThemeName::Slate);
             assert_eq!(current(cx).theme, ThemeName::Slate);
         });
+    }
+
+    #[test]
+    fn onboarded_defaults_to_false_and_is_written_and_read_back() {
+        assert!(!Prefs::default().onboarded, "no settings file: a first run");
+        assert!(
+            Prefs::from_json(br#"{"mode": "dark"}"#).onboarded,
+            "a settings file from before setup existed: the app was already in use"
+        );
+        assert!(
+            !Prefs::from_json(br#"{"onboarded": false}"#).onboarded,
+            "an explicit false stays"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            !PrefStore::at(tmp.path().join("missing.json"))
+                .prefs()
+                .onboarded,
+            "no file on disk: setup shows"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        store.update(|p| p.onboarded = true);
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["onboarded"], true, "the file is camelCase");
+        assert!(
+            PrefStore::at(path).prefs().onboarded,
+            "once done, always done"
+        );
+    }
+
+    #[test]
+    fn skipped_updates_are_kept_per_agent_and_survive_other_changes() {
+        assert!(Prefs::default().skipped_updates.is_empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        store.update(|p| {
+            p.skipped_updates
+                .insert("pi".to_owned(), "1.6.0".to_owned());
+        });
+        store.update(|p| p.mode = Mode::Dark);
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["skippedUpdates"]["pi"], "1.6.0");
+        let again = PrefStore::at(path.clone());
+        assert_eq!(
+            again.prefs().skipped_updates.get("pi").map(String::as_str),
+            Some("1.6.0")
+        );
+        std::fs::write(
+            &path,
+            br#"{"skippedUpdates": {"pi": 3, "codex": "0.171.0"}, "x": 1}"#,
+        )
+        .unwrap();
+        let odd = PrefStore::at(path);
+        assert_eq!(
+            odd.prefs().skipped_updates.len(),
+            1,
+            "a version that is not a string is not a skip"
+        );
+        std::fs::write(tmp.path().join("b.json"), br#"{"skippedUpdates": [1]}"#).unwrap();
+        assert!(
+            PrefStore::at(tmp.path().join("b.json"))
+                .prefs()
+                .skipped_updates
+                .is_empty()
+        );
     }
 
     #[test]

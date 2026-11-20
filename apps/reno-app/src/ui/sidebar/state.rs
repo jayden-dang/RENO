@@ -408,6 +408,13 @@ impl State {
                     menu.copy = true;
                 }
             }
+            Item::CopyLink => {
+                cx.write_to_clipboard(ClipboardItem::new_string(crate::vm::thread_link::link(
+                    &thread,
+                )));
+                toast::push(cx, Tone::Info, "Copied", "Copied the link to this thread.");
+                self.menu = None;
+            }
             Item::CopyPath | Item::CopyThreadId | Item::CopySession => {
                 let what = match item {
                     Item::CopyPath => "path",

@@ -17,6 +17,7 @@ use reno_client::ConnectionStatus;
 
 use super::icon::{Icon, icon};
 use super::kit::{self, MONO, Tone};
+use super::restart::{self, RestartBar};
 use super::sidebar::{MARK_INSET, daemon_label};
 use super::theme::Theme;
 use crate::actions::{OpenPalette, TogglePanel, ToggleTheme};
@@ -50,10 +51,12 @@ pub(crate) struct Bar<'a> {
     pub(crate) on_run: bool,
     pub(crate) more_at: Anchor_,
     pub(crate) updates_at: Anchor_,
+    /// The restart pill.
+    pub(crate) restart: RestartBar,
 }
 
 /// Reports where its parent was painted into `at`.
-fn track(at: &Anchor_) -> impl IntoElement {
+pub(crate) fn track(at: &Anchor_) -> impl IntoElement {
     let at = at.clone();
     canvas(move |bounds, _, _| at.set(Some(bounds)), |_, _, _, _| {})
         .absolute()
@@ -135,6 +138,15 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
             .debug_selector(|| "bar-chip".to_owned())
             .into_any_element()
     };
+
+    let restarting = bar.restart.phase == crate::vm::daemon_restart::Phase::Restarting;
+    let daemon_dot = if restarting { theme.warning } else { dot };
+    let daemon_chip = kit::chip(theme, daemon_label(bar.connection))
+        .id("bar-daemon")
+        .debug_selector(|| "bar-daemon".to_owned())
+        .flex_row_reverse()
+        .child(kit::dot(daemon_dot, 7.0));
+    let restart_pill = restart::pill(root, theme, &bar.restart);
 
     let island = (!bar.updates.is_empty()).then(|| {
         let logos = bar
@@ -248,13 +260,8 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
                 .focus_visible(kit::focus_ring(theme))
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPalette), cx)),
         )
-        .child(
-            kit::chip(theme, daemon_label(bar.connection))
-                .id("bar-daemon")
-                .debug_selector(|| "bar-daemon".to_owned())
-                .flex_row_reverse()
-                .child(kit::dot(dot, 7.0)),
-        )
+        .child(daemon_chip)
+        .children(restart_pill)
         .children(island)
         .when(bar.on_run, |b| {
             b.child(
@@ -266,7 +273,7 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
 }
 
 /// A popover hung under the control painted at `at`, closed by a click anywhere else.
-fn popover(
+pub(crate) fn popover(
     root: &Entity<RootView>,
     at: &Anchor_,
     corner: Anchor,
@@ -300,7 +307,7 @@ fn popover(
     )
 }
 
-fn panel(theme: &Theme, id: &'static str, width: f32) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn panel(theme: &Theme, id: &'static str, width: f32) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -365,6 +372,9 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
             }));
         out.extend(popover(root, &bar.more_at, Anchor::TopLeft, menu));
     }
+    if let Some(content) = restart::content(root, theme, &bar.restart) {
+        out.extend(popover(root, &bar.restart.at, Anchor::TopRight, content));
+    }
     if bar.updates_open && !bar.updates.is_empty() {
         let any_available = bar
             .updates
@@ -373,20 +383,47 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
         let rows = bar.updates.iter().map(|(u, phase)| {
             let id = u.id.clone();
             let root = root.clone();
+            let skip_id = u.id.clone();
+            let skip_root = root.clone();
+            let skip_name = u.name.clone();
             let right = match phase {
-                UpdatePhase::Available => kit::line_button(
-                    theme,
-                    SharedString::from(format!("update-{}", u.id)),
-                    None,
-                    "Update",
-                    Tone::Primary,
-                    true,
-                )
-                .on_click(move |_, _, cx| {
-                    let id = id.clone();
-                    root.update(cx, |root, cx| root.update_agent(&id, cx));
-                })
-                .into_any_element(),
+                UpdatePhase::Available => div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        kit::line_button(
+                            theme,
+                            SharedString::from(format!("skip-{}", u.id)),
+                            None,
+                            "Skip this version",
+                            Tone::Quiet,
+                            true,
+                        )
+                        .aria_label(SharedString::from(format!(
+                            "Skip this version of {skip_name}"
+                        )))
+                        .on_click(move |_, _, cx| {
+                            let id = skip_id.clone();
+                            skip_root.update(cx, |root, cx| root.skip_update(&id, cx));
+                        }),
+                    )
+                    .child(
+                        kit::line_button(
+                            theme,
+                            SharedString::from(format!("update-{}", u.id)),
+                            None,
+                            "Update",
+                            Tone::Primary,
+                            true,
+                        )
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            root.update(cx, |root, cx| root.update_agent(&id, cx));
+                        }),
+                    )
+                    .into_any_element(),
                 UpdatePhase::Updating => div()
                     .flex()
                     .items_center()
@@ -441,7 +478,7 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
                 .child(right)
         });
         let all = root.clone();
-        let menu = panel(theme, "updates-menu", 360.0)
+        let menu = panel(theme, "updates-menu", 440.0)
             .child(
                 div()
                     .flex()

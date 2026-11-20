@@ -813,3 +813,136 @@ fn executors() -> Result<Vec<ExecutorInfo>, IdError> {
         )?,
     ])
 }
+
+/// The five executors of the ROAD-38 first-run world, taken from `demo` and bent to the plan:
+/// Claude Code and Codex are ready, Grok is installed and signed out (it signs in from the app,
+/// in the browser), Cursor is not installed (the daemon fetches it), and Pi has an update to take
+/// that its own auto-update is off for, so the island offers it. Everything else the demo has is
+/// left out.
+pub(super) fn first_run_executors(demo: &[ExecutorInfo]) -> Vec<ExecutorInfo> {
+    use reno_proto::{AuthMethod, AuthMethodKind, ExecutorSource};
+    let mut out = Vec::new();
+    for id in ["claude-code", "codex", "acp.grok", "cursor", "pi"] {
+        let Some(mut info) = demo
+            .iter()
+            .find(|e| e.descriptor.id.as_str() == id)
+            .cloned()
+        else {
+            continue;
+        };
+        let at = NOW_MS - 5 * MINUTE;
+        match id {
+            "codex" => {
+                if let Some(health) = &mut info.health {
+                    health.signed_in = SignedIn::Yes {
+                        account: Some("ada@example.com".to_owned()),
+                    };
+                    health.version_gate = VersionGate::Ok;
+                }
+                if let Some(updater) = info.maintenance.as_mut().and_then(|m| m.updater.as_mut()) {
+                    updater.latest = None;
+                }
+            }
+            "acp.grok" => {
+                info.source = ExecutorSource::Registry;
+                if let Some(health) = &mut info.health {
+                    health.installed = InstallStatus::Installed {
+                        path: "/usr/local/bin/grok".into(),
+                        version: Some("0.12.0".to_owned()),
+                    };
+                    health.version_gate = VersionGate::Ok;
+                    health.signed_in = SignedIn::No {
+                        hint: "run `grok login`".to_owned(),
+                    };
+                    health.checked_at_ms = at;
+                }
+                if let Some(maintenance) = &mut info.maintenance {
+                    maintenance.updater = None;
+                }
+                info.auth_methods = vec![AuthMethod {
+                    id: "browser".to_owned(),
+                    name: "Sign in with x.ai".to_owned(),
+                    description: None,
+                    kind: AuthMethodKind::Agent,
+                    vars: Vec::new(),
+                    link: None,
+                    command: None,
+                    unusable: None,
+                }];
+            }
+            "cursor" => {
+                // The version the daemon fetches is the one Reno verified.
+                info.descriptor.cli_verified = VersionRange {
+                    min: "1.0.0".to_owned(),
+                    verified: "1.0.0".to_owned(),
+                };
+                if let Some(health) = &mut info.health {
+                    health.installed = InstallStatus::NotInstalled {
+                        why: NotInstalledReason::NeedsInstall {
+                            what: "the Cursor adapter".to_owned(),
+                        },
+                    };
+                    health.version_gate = VersionGate::Unchecked;
+                    health.signed_in = SignedIn::Unknown;
+                    health.checked_at_ms = at;
+                }
+            }
+            "pi" => {
+                if let Some(maintenance) = &mut info.maintenance {
+                    maintenance.updater = Some(UpdaterInfo {
+                        command: "npm install -g @pi/cli".to_owned(),
+                        self_updating: false,
+                        can_pin: false,
+                        latest: Some("1.6.0".to_owned()),
+                        checked_at_ms: None,
+                    });
+                    maintenance.auto_update = AutoUpdate {
+                        on: false,
+                        verified_only: false,
+                    };
+                }
+            }
+            _ => {}
+        }
+        out.push(info);
+    }
+    out
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+
+    #[test]
+    fn the_first_run_roster_is_the_plans_five() {
+        let all = executors().unwrap();
+        let five = first_run_executors(&all);
+        let ids: Vec<&str> = five.iter().map(|e| e.descriptor.id.as_str()).collect();
+        assert_eq!(ids, ["claude-code", "codex", "acp.grok", "cursor", "pi"]);
+        let health = |id: &str| {
+            five.iter()
+                .find(|e| e.descriptor.id.as_str() == id)
+                .and_then(|e| e.health.clone())
+                .unwrap()
+        };
+        assert!(matches!(health("codex").signed_in, SignedIn::Yes { .. }));
+        assert!(matches!(health("acp.grok").signed_in, SignedIn::No { .. }));
+        assert!(matches!(
+            health("cursor").installed,
+            InstallStatus::NotInstalled { .. }
+        ));
+        let pi = five
+            .iter()
+            .find(|e| e.descriptor.id.as_str() == "pi")
+            .unwrap();
+        let maintenance = pi.maintenance.as_ref().unwrap();
+        assert!(!maintenance.auto_update.on, "an update the person takes");
+        assert_eq!(
+            maintenance
+                .updater
+                .as_ref()
+                .and_then(|u| u.latest.as_deref()),
+            Some("1.6.0")
+        );
+    }
+}

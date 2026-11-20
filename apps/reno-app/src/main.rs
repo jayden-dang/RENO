@@ -11,6 +11,7 @@ mod app;
 mod attach;
 mod banners;
 mod desktop;
+mod folder_picker;
 mod lifecycle;
 mod links;
 mod local;
@@ -33,6 +34,7 @@ mod composer_surface_tests;
 #[cfg(test)]
 mod composer_tests;
 #[cfg(test)]
+#[cfg(test)]
 mod new_thread_tests;
 #[cfg(test)]
 mod notify_tests;
@@ -46,6 +48,8 @@ mod question_tests;
 mod screen_tests;
 #[cfg(test)]
 mod settings_pages_tests;
+#[cfg(test)]
+mod setup_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]

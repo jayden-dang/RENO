@@ -250,7 +250,10 @@ fn the_updates_island_shows_only_agents_with_an_update_and_update_runs_the_job(
     wait_drawn(vcx, |vcx| painted(vcx, "updates-menu"));
     assert!(painted(vcx, "update-all"));
     assert!(painted(vcx, "update-acp.grok"));
-    assert!(!painted(vcx, "skip-acp.grok"), "Skip has nothing behind it");
+    assert!(
+        painted(vcx, "skip-acp.grok"),
+        "Skip this version sits on the agent it names"
+    );
     click(vcx, "update-acp.grok");
     // The job runs on the daemon; the agent leaves the list and the row says it is up to date.
     wait_drawn(vcx, |vcx| !listed(vcx).iter().any(|id| id == "acp.grok"));

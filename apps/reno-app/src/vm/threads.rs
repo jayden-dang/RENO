@@ -127,6 +127,8 @@ pub(crate) enum Item {
     Pin,
     Unpin,
     Archive,
+    /// Puts the thread's link, `reno://thread/<id>`, on the clipboard (ROAD-38).
+    CopyLink,
     /// Opens the Copy sub-list.
     Copy,
     CopyPath,
@@ -213,6 +215,7 @@ pub(crate) fn menu(facts: Facts) -> Vec<Entry> {
         out.push(hinted(item(pin, label), "\u{2318}\u{21e7}P"));
         out.push(hinted(item(Item::Archive, "Archive"), "\u{2318}\u{21e7}A"));
     }
+    out.push(item(Item::CopyLink, "Copy link"));
     out.push(item(Item::Copy, "Copy"));
     out.push(Entry::Divider);
     // It always asks first; a live run is said there.

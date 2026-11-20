@@ -34,9 +34,10 @@ use gpui_tokio::Tokio;
 use reno_client::activity::{ActivityDesk, RunActivity, StopError};
 use reno_client::answers::{AnswerError, AnswerRequest, QuestionDesk, QuestionRules};
 use reno_client::completions::{CommandsError, CompletionDesk, HarnessCommand, ProjectFile};
+use reno_client::daemon_desk::{DaemonDesk, DaemonVersions, RestartError};
 use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
-use reno_client::places::{Place, PlaceDesk};
+use reno_client::places::{AddProjectError, Place, PlaceDesk, Project, ProjectFacts};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
 use reno_client::{
@@ -682,6 +683,23 @@ impl Store {
         self.fake.as_deref().map(|fake| fake as &dyn PlaceDesk)
     }
 
+    /// Takes a folder in as a project (the mocked places contract; `None` without the place
+    /// chooser, so only the fake can).
+    pub(crate) fn place_add_project(
+        &mut self,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Project, AddProjectError>> {
+        let result = self.place_desk().map(|desk| desk.add_project(path));
+        cx.notify();
+        result
+    }
+
+    /// What is in a project's folder, when the places contract can say.
+    pub(crate) fn place_project_facts(&self, path: &std::path::Path) -> Option<ProjectFacts> {
+        self.place_desk().map(|desk| desk.project_facts(path))
+    }
+
     /// Where `run` was started, when it was started from the place chooser.
     pub(crate) fn run_place(&self, run: &RunId) -> Option<Place> {
         self.place_desk().and_then(|desk| desk.run_place(run))
@@ -739,6 +757,45 @@ impl Store {
         cx: &mut Context<Self>,
     ) -> Result<(), ThreadEditError> {
         self.thread_change(cx, |desk| desk.set_archived(thread, archived))
+    }
+
+    /// The ONE seam to the daemon-desk contract (ROAD-38); `None` without `daemon_restart`.
+    fn daemon_desk(&self) -> Option<&dyn DaemonDesk> {
+        if !self.capabilities.daemon_restart {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn DaemonDesk)
+    }
+
+    /// The running and the installed `renod`; `None` when this connection cannot restart it.
+    pub(crate) fn daemon_versions(&self) -> Option<DaemonVersions> {
+        self.daemon_desk().map(DaemonDesk::versions)
+    }
+
+    /// How long a restart takes, in ms.
+    pub(crate) fn daemon_restart_ms(&self) -> Option<u64> {
+        self.daemon_desk().map(DaemonDesk::restart_duration_ms)
+    }
+
+    /// Restarts `renod` onto the installed version and redraws, whatever became of it.
+    pub(crate) fn daemon_restart(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<String, RestartError> {
+        let result = self
+            .daemon_desk()
+            .ok_or(RestartError::UpToDate)
+            .and_then(DaemonDesk::restart);
+        cx.notify();
+        result
+    }
+
+    /// The next restart of the fake daemon does not come back.
+    #[cfg(test)]
+    pub(crate) fn fail_next_restart_for_test(&self) {
+        if let Some(fake) = &self.fake {
+            fake.fail_next_restart();
+        }
     }
 
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
@@ -909,12 +966,13 @@ impl Store {
     }
 
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
-    /// The `--fake` demo world, with the sidebar's demo threads (pinned, archived, a project with
-    /// fourteen).
+    /// The `--fake` demo world: a first run (five agents, three of them ready; `renod` 0.4.1
+    /// running with 0.4.2 installed), with the sidebar's demo threads (pinned, archived, a
+    /// project with fourteen).
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
-                registry_agents: true,
+                first_run: true,
                 question_run: true,
                 question_demo_runs: true,
                 activity_runs: true,

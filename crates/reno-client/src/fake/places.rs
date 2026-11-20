@@ -3,13 +3,16 @@
 //! GitHub-looking URL and fails for anything else.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use reno_proto::RunId;
 
 use super::FakeDaemon;
-use crate::places::{Branch, BranchPage, CloneError, Place, PlaceDesk, Project, Worktree};
+use crate::places::{
+    AddProjectError, Branch, BranchPage, CloneError, Place, PlaceDesk, Project, ProjectFacts,
+    Worktree,
+};
 
 /// A clone that works takes this long; one that fails is found out sooner.
 const CLONE_MS: u64 = 1_500;
@@ -22,7 +25,20 @@ struct Inner {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct Sim(Mutex<Inner>);
+pub(super) struct Sim {
+    inner: Mutex<Inner>,
+    /// Starts with no project known (a true first run).
+    none: bool,
+}
+
+impl Sim {
+    pub(super) fn new(none: bool) -> Self {
+        Self {
+            inner: Mutex::default(),
+            none,
+        }
+    }
+}
 
 fn project(name: &str) -> Project {
     Project {
@@ -86,7 +102,7 @@ fn github_repo(url: &str) -> Option<String> {
 impl FakeDaemon {
     fn places(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.places
-            .0
+            .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -94,15 +110,31 @@ impl FakeDaemon {
 
 impl PlaceDesk for FakeDaemon {
     fn projects(&self) -> Vec<Project> {
-        let mut all: Vec<Project> = ["reno", "web-console", "atlas-api"].map(project).into();
-        all.extend(self.places().cloned.clone());
+        let mut all: Vec<Project> = if self.places.none {
+            Vec::new()
+        } else {
+            ["reno", "web-console", "atlas-api"].map(project).into()
+        };
+        for added in self.places().cloned.clone() {
+            if !all.iter().any(|p| p.path == added.path) {
+                all.push(added);
+            }
+        }
         all
     }
 
     fn recent_projects(&self) -> Vec<Project> {
         let mut recent = self.places().cloned.clone();
         recent.reverse();
-        recent.extend(["reno", "atlas-api"].map(project));
+        if !self.places.none {
+            recent.extend(["reno", "atlas-api"].map(project));
+        }
+        let mut seen = Vec::new();
+        recent.retain(|p| {
+            let fresh = !seen.contains(&p.path);
+            seen.push(p.path.clone());
+            fresh
+        });
         recent
     }
 
@@ -151,6 +183,45 @@ impl PlaceDesk for FakeDaemon {
             inner.cloned.push(cloned.clone());
         }
         Ok(cloned)
+    }
+
+    /// Rules: a path whose last part has an extension is a file (`NotAFolder`); one with
+    /// "locked" in it is not readable (`NotReadable`); anything else is a folder, named by its
+    /// last part. Taking one in twice lists it once.
+    fn add_project(&self, path: &Path) -> Result<Project, AddProjectError> {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .ok_or(AddProjectError::NotAFolder)?;
+        if path.extension().is_some() {
+            return Err(AddProjectError::NotAFolder);
+        }
+        if name.contains("locked") {
+            return Err(AddProjectError::NotReadable);
+        }
+        let added = Project {
+            name: name.to_owned(),
+            path: path.to_path_buf(),
+        };
+        let mut inner = self.places();
+        if !inner.cloned.iter().any(|p| p.path == added.path) {
+            inner.cloned.push(added.clone());
+        }
+        Ok(added)
+    }
+
+    /// A folder named `notes…` or `plain…` is not a git repository; every other is, on `main`.
+    fn project_facts(&self, path: &Path) -> ProjectFacts {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let git = !(name.starts_with("notes") || name.starts_with("plain"));
+        ProjectFacts {
+            git,
+            branch: git.then(|| "main".to_owned()),
+        }
     }
 
     fn record_place(&self, run: &RunId, place: Place) {
@@ -240,6 +311,55 @@ mod tests {
         );
         assert_eq!(d.clone_project("  "), Err(CloneError::Empty));
         assert_eq!(d.projects().len(), 3);
+    }
+
+    #[test]
+    fn a_folder_is_taken_in_a_file_and_a_locked_folder_are_not() {
+        let d = daemon();
+        let added = d.add_project(Path::new("/demo/notes")).unwrap();
+        assert_eq!(added.name, "notes");
+        assert!(d.projects().iter().any(|p| p.name == "notes"));
+        assert_eq!(d.recent_projects()[0].name, "notes");
+        d.add_project(Path::new("/demo/notes")).unwrap();
+        assert_eq!(d.projects().iter().filter(|p| p.name == "notes").count(), 1);
+        let err = d.add_project(Path::new("/demo/todo.txt")).unwrap_err();
+        assert_eq!(err, AddProjectError::NotAFolder);
+        assert_eq!(err.to_string(), "That is not a folder");
+        assert_eq!(
+            d.add_project(Path::new("/")),
+            Err(AddProjectError::NotAFolder)
+        );
+        let err = d.add_project(Path::new("/demo/locked-vault")).unwrap_err();
+        assert_eq!(err, AddProjectError::NotReadable);
+        assert_eq!(err.to_string(), "Reno cannot read that folder");
+        assert_eq!(d.projects().len(), 4, "a refusal adds nothing");
+        d.add_project(Path::new("/demo/reno")).unwrap();
+        assert_eq!(
+            d.projects().len(),
+            4,
+            "a project already known is not listed twice"
+        );
+    }
+
+    #[test]
+    fn a_plain_folder_has_no_repository_and_the_rest_are_on_main() {
+        let d = daemon();
+        let git = d.project_facts(Path::new("/demo/reno"));
+        assert_eq!((git.git, git.branch.as_deref()), (true, Some("main")));
+        let plain = d.project_facts(Path::new("/demo/notes"));
+        assert_eq!((plain.git, plain.branch), (false, None));
+    }
+
+    #[test]
+    fn a_true_first_run_knows_no_project() {
+        let d = FakeDaemon::start(super::super::FakeConfig {
+            no_projects: true,
+            ..super::super::FakeConfig::default()
+        })
+        .unwrap();
+        assert!(d.projects().is_empty() && d.recent_projects().is_empty());
+        d.add_project(Path::new("/demo/notes")).unwrap();
+        assert_eq!(d.projects().len(), 1);
     }
 
     #[test]

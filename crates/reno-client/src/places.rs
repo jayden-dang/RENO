@@ -5,7 +5,7 @@
 //! implements [`PlaceDesk`]; the app reads it only through the `Store::place_*` entries.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use reno_proto::RunId;
 
@@ -81,6 +81,35 @@ impl fmt::Display for CloneError {
 
 impl std::error::Error for CloneError {}
 
+/// Why a folder was not taken in as a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddProjectError {
+    /// The path is not a folder (a file, or nothing there).
+    NotAFolder,
+    /// The folder exists and Reno may not read it.
+    NotReadable,
+}
+
+impl fmt::Display for AddProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotAFolder => "That is not a folder",
+            Self::NotReadable => "Reno cannot read that folder",
+        })
+    }
+}
+
+impl std::error::Error for AddProjectError {}
+
+/// What Reno finds in a project's folder: how a run there is given its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectFacts {
+    /// A git repository: runs get their own worktree. Otherwise they work in the folder itself.
+    pub git: bool,
+    /// The repository's default branch, for a git folder.
+    pub branch: Option<String>,
+}
+
 /// The seam.
 pub trait PlaceDesk: Send + Sync {
     /// Every project, by name.
@@ -97,6 +126,11 @@ pub trait PlaceDesk: Send + Sync {
     fn clone_duration_ms(&self, url: &str) -> u64;
     /// Clones `url`; the project is known afterwards.
     fn clone_project(&self, url: &str) -> Result<Project, CloneError>;
+    /// Takes the folder at `path` in as a project (MOCKED: no such RPC yet; a real one would be
+    /// `project.add { path }`). It is known afterwards, and listed first among the recents.
+    fn add_project(&self, path: &Path) -> Result<Project, AddProjectError>;
+    /// What is in the project's folder: a git repository on which branch, or a plain folder.
+    fn project_facts(&self, path: &Path) -> ProjectFacts;
     /// Binds the place a task was started in to its run.
     fn record_place(&self, run: &RunId, place: Place);
     /// The place the run was started in; `None` for a run that was not started from here.

@@ -125,6 +125,7 @@ fn the_row_menu_lists_rename_pin_archive_copy_a_divider_and_close_in_the_danger_
             ("Rename", false),
             ("Pin", false),
             ("Archive", false),
+            ("Copy link", false),
             ("Copy", false),
             ("-", false),
             ("Close thread\u{2026}", true),
@@ -461,7 +462,7 @@ fn the_real_daemon_hides_rename_pin_archive_pinned_and_archived_and_keeps_copy_a
             Entry::Divider => None,
         })
         .collect();
-    assert_eq!(labels, ["Copy", "Close thread\u{2026}"]);
+    assert_eq!(labels, ["Copy link", "Copy", "Close thread\u{2026}"]);
     act(vcx, &root, Act::Menu(thread("atlas01"), None));
     assert!(painted(vcx, "sidebar-menu-copy") && painted(vcx, "sidebar-menu-close-thread\u{2026}"));
     assert!(

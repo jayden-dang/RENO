@@ -117,6 +117,9 @@ pub(crate) struct Options {
     /// `close:atlas01`, a run's suffix; with `--fake`): act on the "fix the ACP v2 handshake"
     /// thread's row once the screen is up (screenshots, reviews).
     pub(crate) sidebar_open: Option<String>,
+    /// `RENO_SETUP=skip|welcome|look|agents|project|done` (with `--fake`): skip first-run setup,
+    /// or open it at that step even when it was done (screenshots, reviews).
+    pub(crate) setup: Option<crate::vm::first_run::Hook>,
 }
 
 impl Options {
@@ -141,6 +144,14 @@ impl Options {
                 "--fake" => options.fake = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if options.fake
+            && let Some(word) = env("RENO_SETUP").filter(|v| !v.is_empty())
+        {
+            options.setup = Some(
+                crate::vm::first_run::Hook::parse(&word)
+                    .ok_or_else(|| format!("RENO_SETUP: unknown value {word}"))?,
+            );
         }
         if options.fake
             && let Some(open) = env("RENO_SIDEBAR_OPEN").filter(|v| !v.is_empty())
@@ -244,7 +255,7 @@ impl Options {
 }
 
 /// Registers Geist and Geist Mono (SIL OFL, see `assets/fonts/Geist-OFL.txt`).
-fn register_fonts(cx: &mut App) {
+pub(crate) fn register_fonts(cx: &mut App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Medium.ttf").as_slice()),
@@ -296,6 +307,8 @@ pub(crate) struct Start {
     pub(crate) composer_open: Option<String>,
     /// The sidebar's start hook.
     pub(crate) sidebar_open: Option<String>,
+    /// `RENO_SETUP`.
+    pub(crate) setup: Option<crate::vm::first_run::Hook>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -315,6 +328,11 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        crate::ui::restart::bind_keys(cx);
+        if options.fake {
+            // A demo against the fake daemon never opens a browser.
+            crate::links::mute();
+        }
 
         if let Some(path) = options.panel_state_path() {
             crate::panel::saved::Saved::install(path, cx);
@@ -361,6 +379,7 @@ pub(crate) fn run(options: Options) {
             composer_type: options.composer_type.clone(),
             composer_open: options.composer_open.clone(),
             sidebar_open: options.sidebar_open.clone(),
+            setup: options.setup,
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -414,7 +433,15 @@ pub(crate) fn open_window(
         composer_type,
         composer_open,
         sidebar_open,
+        setup,
     } = start;
+    let named = open.is_some()
+        || open_run.is_some()
+        || open_project.is_some()
+        || open_new_thread.is_some()
+        || open_settings.is_some()
+        || sidebar_open.is_some()
+        || composer_open.is_some();
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -457,6 +484,7 @@ pub(crate) fn open_window(
                     })
                     .detach();
                 }
+                root.init_first_run(setup, named, window, cx);
                 if let Some(nav) = open {
                     root.navigate(nav, window, cx);
                 }
@@ -682,6 +710,14 @@ pub(crate) struct RootView {
     pending_fired: Option<RunId>,
     /// The sidebar's interaction state: menu, rename, confirm, "Show more", width.
     sidebar: sidebar::State,
+    /// First-run setup while it shows, the connecting gate, and the restart of `renod`.
+    setup: Option<Entity<crate::ui::setup::flow::SetupFlow>>,
+    gate: Option<crate::ui::gate::Phase>,
+    restart: crate::vm::daemon_restart::Restart,
+    /// The panel under the restart affordance is open.
+    restart_open: bool,
+    restart_at: Anchor_,
+    _first_run_subscriptions: Vec<Subscription>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -711,6 +747,7 @@ impl RootView {
             cx.subscribe_in(&executors, window, Self::on_screen_event),
             cx.observe(&store, |this, _, cx| {
                 this.remember_updates(cx);
+                this.lift_gate(cx);
                 cx.notify();
             }),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
@@ -828,6 +865,12 @@ impl RootView {
             settings,
             pending_fired: None,
             sidebar: sidebar::State::new(crate::prefs::current(cx).sidebar_width),
+            setup: None,
+            gate: None,
+            restart: crate::vm::daemon_restart::Restart::default(),
+            restart_open: false,
+            restart_at: Rc::new(Cell::new(None)),
+            _first_run_subscriptions: Vec::new(),
             toasts,
             screen: Screen::Home,
             before_settings: None,
@@ -847,6 +890,247 @@ impl RootView {
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    // --- First run: the connecting gate and setup (ROAD-38) ----------------------------------
+
+    /// What a window opens with: the connecting gate when the daemon has not answered yet (it is
+    /// drawn on the first frame and never waits for the daemon), and first-run setup on a first
+    /// run. `hook` (`RENO_SETUP`, with `--fake`) skips setup or opens it at a step; `named` says a
+    /// screen was asked for by name, which is shown instead of setup.
+    pub(crate) fn init_first_run(
+        &mut self,
+        hook: Option<crate::vm::first_run::Hook>,
+        named: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::vm::first_run::{Hook, should_show};
+        if self.store.read(cx).connection() == reno_client::ConnectionStatus::Connecting {
+            self.gate = Some(crate::ui::gate::Phase::Up);
+        }
+        let forced = matches!(hook, Some(Hook::At(_)));
+        let onboarded = crate::prefs::current(cx).onboarded;
+        let skipped = hook == Some(Hook::Skip) || (named && !forced);
+        if !should_show(onboarded, forced) || skipped {
+            return;
+        }
+        let store = self.store.clone();
+        let flow = cx.new(|cx| crate::ui::setup::flow::SetupFlow::new(store, cx));
+        self._first_run_subscriptions
+            .push(cx.subscribe_in(&flow, window, Self::on_setup_event));
+        if let Some(Hook::At(step)) = hook {
+            flow.update(cx, |flow, cx| flow.go(step, cx));
+        }
+        self.setup = Some(flow);
+    }
+
+    /// The daemon has answered, or failed to: the gate fades, then goes.
+    fn lift_gate(&mut self, cx: &mut Context<Self>) {
+        use crate::ui::gate::Phase;
+        if self.gate != Some(Phase::Up)
+            || !crate::vm::first_run::gate_lifts(self.store.read(cx).connection())
+        {
+            return;
+        }
+        self.gate = Some(Phase::Fading);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(crate::vm::first_run::GATE_FADE_MS))
+                .await;
+            this.update(cx, |this, cx| {
+                this.gate = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The gate's phase, for tests.
+    #[cfg(test)]
+    pub(crate) fn gate_phase(&self) -> Option<crate::ui::gate::Phase> {
+        self.gate
+    }
+
+    /// Setup is over: it never shows again.
+    fn end_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.setup = None;
+        crate::prefs::update(cx, |p| p.onboarded = true);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    fn on_setup_event(
+        &mut self,
+        _: &Entity<crate::ui::setup::flow::SetupFlow>,
+        event: &crate::ui::setup::flow::FlowEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::setup::flow::FlowEvent;
+        match event {
+            FlowEvent::Over { .. } => self.end_setup(window, cx),
+            FlowEvent::Project(path) => {
+                self.set_home_folder(Some(crate::vm::projects::FolderKey::Repo(path.clone())), cx);
+            }
+            FlowEvent::Review(id) => {
+                // The install of this agent is reviewed where it is reviewed.
+                self.end_setup(window, cx);
+                self.navigate(Nav::Executors, window, cx);
+                self.executors
+                    .update(cx, |screen, cx| screen.review_install(id, cx));
+            }
+        }
+    }
+
+    /// Setup is showing, for tests.
+    #[cfg(test)]
+    pub(crate) fn setup(&self) -> Option<&Entity<crate::ui::setup::flow::SetupFlow>> {
+        self.setup.as_ref()
+    }
+
+    // --- Skip this version (ROAD-38) ----------------------------------------------------------
+
+    /// "Skip this version" on one agent: its update to this version is not offered again, and a
+    /// newer one is. Remembered in the app-local `skippedUpdates`.
+    pub(crate) fn skip_update(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(update) = self
+            .agent_updates(cx)
+            .into_iter()
+            .find(|u| u.id == id && !u.updating)
+        else {
+            return;
+        };
+        crate::prefs::update(cx, |p| {
+            p.skipped_updates
+                .insert(update.id.clone(), update.to.clone());
+        });
+        self.updates_shown.retain(|u| u.id != id);
+        if self.agent_updates(cx).is_empty() {
+            self.updates_open = false;
+            self.updates_shown.clear();
+        }
+        cx.notify();
+    }
+
+    // --- Thread links (ROAD-38) ---------------------------------------------------------------
+
+    /// Opens a `reno://thread/<id>` link: focuses that thread's latest run. The URL scheme is not
+    /// registered with the OS (that needs the app bundle), so nothing calls this yet but a test;
+    /// it is the one entry a link will reach. `false` (and a toast, for a link that was meant) when it did
+    /// not open anything.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn open_link(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(thread) = crate::vm::thread_link::parse(url) else {
+            toast::push(
+                cx,
+                toast::Tone::Info,
+                "Not a Reno link",
+                "Reno opens links to threads.",
+            );
+            return false;
+        };
+        let latest = self
+            .store
+            .read(cx)
+            .state()
+            .thread(&thread)
+            .and_then(|info| info.latest_run())
+            .map(|run| run.run_id.clone());
+        match latest {
+            Some(run) => {
+                self.open_run(run, window, cx);
+                true
+            }
+            None => {
+                toast::push(
+                    cx,
+                    toast::Tone::Info,
+                    "Thread not found",
+                    "The daemon does not know this thread.",
+                );
+                false
+            }
+        }
+    }
+
+    // --- Restarting renod (ROAD-38) -----------------------------------------------------------
+
+    /// The pill was pressed: the question, or the failure again.
+    pub(crate) fn restart_press(&mut self, cx: &mut Context<Self>) {
+        use crate::vm::daemon_restart::Phase;
+        match self.restart.phase {
+            Phase::Idle => self.restart_ask(cx),
+            Phase::Asking | Phase::Failed(_) => self.restart_open = !self.restart_open,
+            Phase::Restarting => {}
+        }
+        cx.notify();
+    }
+
+    /// "Restart renod?" is put up.
+    pub(crate) fn restart_ask(&mut self, cx: &mut Context<Self>) {
+        self.restart.ask();
+        self.restart_open = true;
+        cx.notify();
+    }
+
+    /// "Not now", Esc, a click elsewhere, or "Close" on the failure.
+    pub(crate) fn restart_cancel(&mut self, cx: &mut Context<Self>) {
+        self.restart_open = false;
+        if self.restart.phase == crate::vm::daemon_restart::Phase::Asking {
+            self.restart.cancel();
+        }
+        cx.notify();
+    }
+
+    /// "Try again" on the failure.
+    pub(crate) fn restart_go_again(&mut self, cx: &mut Context<Self>) {
+        self.restart.ask();
+        self.restart_go(cx);
+    }
+
+    /// "Restart": renod restarts. Takes the time the daemon says, then reads its answer.
+    pub(crate) fn restart_go(&mut self, cx: &mut Context<Self>) {
+        if !self.restart.begin() {
+            return;
+        }
+        self.restart_open = false;
+        let wait = self.store.read(cx).daemon_restart_ms().unwrap_or(2_000);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            this.update(cx, |this, cx| {
+                let result = this.store.update(cx, |store, cx| store.daemon_restart(cx));
+                let failed = result.is_err();
+                this.restart.finish(result);
+                // A failure stays on show until it is closed.
+                this.restart_open = failed;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What the confirm says of the runs that are live now, for tests.
+    #[cfg(test)]
+    pub(crate) fn restart_live_words(&self, cx: &App) -> String {
+        crate::vm::daemon_restart::live_words(shell::live_runs(self.store.read(cx).state()).len())
+    }
+
+    /// The restart's state, for tests.
+    #[cfg(test)]
+    pub(crate) fn restart_phase(&self) -> &crate::vm::daemon_restart::Phase {
+        &self.restart.phase
     }
 
     /// The picker's Account row: look at the harness's login on the Executors screen.
@@ -1191,6 +1475,9 @@ impl RootView {
     }
 
     pub(crate) fn close_menus(&mut self, cx: &mut Context<Self>) {
+        if self.restart_open {
+            self.restart_cancel(cx);
+        }
         if self.more_open || self.updates_open {
             self.more_open = false;
             self.updates_open = false;
@@ -1202,11 +1489,13 @@ impl RootView {
     /// The agents with an update to take, as the bar lists them.
     fn agent_updates(&self, cx: &App) -> Vec<AgentUpdate> {
         let store = self.store.read(cx);
-        executors::agent_updates(
+        let all = executors::agent_updates(
             store.state(),
             store.now_ms(),
             store.registry().listing.as_ref(),
-        )
+        );
+        // A version the person skipped is not offered again.
+        executors::without_skipped(all, &crate::prefs::current(cx).skipped_updates)
     }
 
     /// While the list is open, keeps its rows so one that finishes reads "Up to date".
@@ -1442,7 +1731,7 @@ impl RootView {
         let state = store.state();
         let runs = state.runs();
         let toggled = std::collections::HashSet::new();
-        let folders = projects::folders(
+        let mut folders = projects::folders(
             &runs,
             |dir| store.root_of(dir),
             &projects::Inputs {
@@ -1454,6 +1743,10 @@ impl RootView {
                 edit: None,
             },
         );
+        // Archived threads are not places to jump to.
+        if let Some(marks) = store.thread_marks() {
+            palette::without_archived(&mut folders, &marks.archived);
+        }
         let threads = palette::threads(&folders, |run| {
             state.run(run).map_or(0, |r| r.updated_at_ms)
         });
@@ -1598,6 +1891,14 @@ impl Render for RootView {
         });
 
         let on_run = matches!(self.screen, Screen::Run(_));
+        // Setup (the wizard) and the connecting gate are overlays under the status bar.
+        let setup_wizard = self
+            .setup
+            .clone()
+            .map(|flow| crate::ui::setup::wizard::overlay(&flow, &theme, cx));
+        let gate_splash = self
+            .gate
+            .map(|phase| crate::ui::gate::splash(&theme, phase));
         let panel = div()
             .id("canvas-panel")
             .debug_selector(|| "canvas-panel".to_owned())
@@ -1670,6 +1971,26 @@ impl Render for RootView {
             on_run,
             more_at: self.more_at.clone(),
             updates_at: self.updates_at.clone(),
+            restart: {
+                let (versions, live) = {
+                    let store = self.store.read(cx);
+                    // Nothing to restart until renod has answered.
+                    (
+                        store
+                            .daemon_versions()
+                            .filter(|_| connection == reno_client::ConnectionStatus::Connected),
+                        shell::live_runs(store.state()).len(),
+                    )
+                };
+                crate::ui::restart::RestartBar {
+                    phase: self.restart.phase.clone(),
+                    offered: crate::vm::daemon_restart::offered(versions.as_ref(), &self.restart),
+                    open: self.restart_open,
+                    versions,
+                    live,
+                    at: self.restart_at.clone(),
+                }
+            },
         };
         let this = cx.entity();
         let status_bar = bar::status_bar(&this, &bar);
@@ -1687,6 +2008,9 @@ impl Render for RootView {
             .key_context(if self.sidebar.any_open() {
                 gpui::KeyContext::parse(&format!("Root {}", actions::SIDEBAR_OPEN))
                     .unwrap_or_default()
+            } else if self.restart_open {
+                gpui::KeyContext::parse(&format!("Root {}", crate::ui::restart::OPEN_CONTEXT))
+                    .unwrap_or_default()
             } else {
                 gpui::KeyContext::parse("Root").unwrap_or_default()
             })
@@ -1695,6 +2019,9 @@ impl Render for RootView {
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(
+                cx.listener(|this, _: &crate::ui::restart::Dismiss, _, cx| this.restart_cancel(cx)),
+            )
             .on_action(cx.listener(|this, _: &actions::DismissSidebar, w, cx| {
                 this.sidebar_act(sidebar::Act::Dismiss, w, cx);
             }))
@@ -1782,6 +2109,8 @@ impl Render for RootView {
                     })
                     .child(main),
             )
+            .children(setup_wizard)
+            .children(gate_splash)
             .children(popovers)
             .children(sidebar_overlays)
             .children(self.palette.clone())
@@ -1843,6 +2172,30 @@ mod tests {
         ] {
             assert!(parse(&["--fake"], &[hook(h)]).is_ok(), "{h}");
         }
+    }
+
+    #[test]
+    fn the_setup_hook_exists_only_with_the_fake_daemon_and_is_checked() {
+        use crate::vm::first_run::{Hook, Step};
+        let hook = |h: &'static str| ("RENO_SETUP", h);
+        assert_eq!(parse(&[], &[hook("skip")]).unwrap().setup, None);
+        assert_eq!(
+            parse(&["--fake"], &[hook("skip")]).unwrap().setup,
+            Some(Hook::Skip)
+        );
+        for (word, step) in [
+            ("welcome", Step::Welcome),
+            ("look", Step::Look),
+            ("agents", Step::Agents),
+            ("project", Step::Project),
+            ("done", Step::Done),
+        ] {
+            assert_eq!(
+                parse(&["--fake"], &[hook(word)]).unwrap().setup,
+                Some(Hook::At(step))
+            );
+        }
+        assert!(parse(&["--fake"], &[hook("sideways")]).is_err());
     }
 
     #[test]
