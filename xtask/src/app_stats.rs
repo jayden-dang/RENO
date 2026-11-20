@@ -117,33 +117,41 @@ pub(crate) fn parse_size_mib(text: &str) -> Option<f64> {
     Some(bytes / (1024.0 * 1024.0))
 }
 
-/// What `top -l 2 -pid PID -stats pid,cpu,idlew` said about the process in its last sample.
+/// What `top -l 2 -s SECONDS -pid PID -stats pid,cpu,idlew` said about the process.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub(crate) struct TopSample {
+    /// CPU over the last interval.
     pub(crate) cpu_pct: f64,
-    /// Idle wakeups per second (`top` prints a rate; a trailing `+` marks a rising count).
+    /// Idle wakeups per second over the interval between the two samples. `IDLEW` is a count
+    /// since the process started (a trailing `+` marks a rising one), so the rate is the
+    /// difference between the samples over the time between them.
     pub(crate) idle_wakeups_per_s: f64,
 }
 
-pub(crate) fn parse_top(out: &str, pid: u32) -> Option<TopSample> {
-    let mut found = None;
+/// `seconds` is the interval `top` was asked to wait between its two samples.
+pub(crate) fn parse_top(out: &str, pid: u32, seconds: f64) -> Option<TopSample> {
+    let mut rows = Vec::new();
     for line in out.lines() {
         let mut parts = line.split_whitespace();
         if parts.next().and_then(|p| p.parse::<u32>().ok()) != Some(pid) {
             continue;
         }
         let cpu = parts.next().and_then(|v| v.parse::<f64>().ok());
-        let wakeups = parts
+        let count = parts
             .next()
             .and_then(|v| v.trim_end_matches(['+', '-']).parse::<f64>().ok());
-        if let (Some(cpu_pct), Some(idle_wakeups_per_s)) = (cpu, wakeups) {
-            found = Some(TopSample {
-                cpu_pct,
-                idle_wakeups_per_s,
-            });
+        if let (Some(cpu), Some(count)) = (cpu, count) {
+            rows.push((cpu, count));
         }
     }
-    found
+    let (first, last) = (rows.first()?, rows.last()?);
+    if rows.len() < 2 || seconds <= 0.0 {
+        return None;
+    }
+    Some(TopSample {
+        cpu_pct: last.0,
+        idle_wakeups_per_s: ((last.1 - first.1) / seconds).max(0.0),
+    })
 }
 
 /// The physical footprint of a process, and the part of it that is GPU memory.
@@ -573,24 +581,32 @@ TOTAL                            386.8G   135.9M    2624K       0K       0K     
     }
 
     #[test]
-    fn top_gives_the_last_sample_of_the_process() {
+    fn top_gives_the_cpu_of_the_last_sample_and_the_wakeups_between_the_two() {
+        // IDLEW is a running count since the process started, not a rate: 40 wakeups in the
+        // 20 s between the samples is 2 a second, whatever the count was at the start.
         let out = "\
 PID    %CPU IDLEW
-4242   12.5 0
+4242   12.5 17
 Processes: 400 total
 PID    %CPU IDLEW
-4242   0.3  2+
+4242   0.3  57+
 ";
         assert_eq!(
-            parse_top(out, 4242),
+            parse_top(out, 4242, 20.0),
             Some(TopSample {
                 cpu_pct: 0.3,
                 idle_wakeups_per_s: 2.0
             })
         );
-        assert_eq!(parse_top(out, 7), None, "another pid is not ours");
-        assert_eq!(parse_top("PID %CPU IDLEW\n", 4242), None);
-        assert_eq!(parse_top("4242 abc 1", 4242), None);
+        assert_eq!(parse_top(out, 7, 20.0), None, "another pid is not ours");
+        assert_eq!(parse_top("PID %CPU IDLEW\n", 4242, 20.0), None);
+        assert_eq!(parse_top("4242 abc 1", 4242, 20.0), None);
+        let one = "PID %CPU IDLEW\n4242 0.3 9\n";
+        assert_eq!(
+            parse_top(one, 4242, 20.0),
+            None,
+            "one sample has no interval"
+        );
     }
 
     #[test]

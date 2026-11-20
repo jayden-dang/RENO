@@ -44,22 +44,28 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the scripted scroll may take, from the app's start.
 const SCROLL_TIMEOUT: Duration = Duration::from_secs(240);
 
-pub(crate) const USAGE: &str = "usage: cargo xtask bench --app [--quick] [--compare-allocators]";
+pub(crate) const USAGE: &str =
+    "usage: cargo xtask bench --app [--quick] [--idle-only] [--compare-allocators]";
 
 /// What to build and measure.
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
     quick: bool,
+    /// Cold start and idle only: no scenario that streams or scrolls, which need the window drawn
+    /// and so keep it in front of everything for minutes.
+    idle_only: bool,
     /// `(label, cargo flags for reno-app)`.
     variants: Vec<(&'static str, Vec<&'static str>)>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options> {
     let mut quick = false;
+    let mut idle_only = false;
     let mut compare = false;
     for arg in args {
         match arg.as_str() {
             "--quick" => quick = true,
+            "--idle-only" => idle_only = true,
             "--compare-allocators" => compare = true,
             other => return Err(format!("unknown bench --app option {other}")),
         }
@@ -70,7 +76,11 @@ fn parse_args(args: &[String]) -> Result<Options> {
     } else {
         vec![system]
     };
-    Ok(Options { quick, variants })
+    Ok(Options {
+        quick,
+        idle_only,
+        variants,
+    })
 }
 
 /// How long each scenario runs.
@@ -148,8 +158,8 @@ fn bench(options: &Options) -> Result<Report> {
     let plan = Plan::new(options.quick);
 
     println!(
-        "The benchmark opens a real Reno window. Keep it on screen and uncovered while it runs:\n\
-         a window that is hidden, covered or behind a full-screen app is not drawn, and the\n\
+        "The benchmark brings Reno to the front for a few minutes. Leave the machine alone\n\
+         meanwhile: a window that is hidden, covered or behind a full-screen app is not drawn, and the\n\
          scenarios that need frames are then marked \"window not drawn\" instead of reporting a number.\n"
     );
 
@@ -181,7 +191,14 @@ fn bench(options: &Options) -> Result<Report> {
         let dir = out_dir.join("bin").join(format!("app-{label}"));
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let app = copy("reno-app", &dir)?;
-        variants.push(measure(&plan, label, &app, &bins, &scratch.join(label))?);
+        variants.push(measure(
+            &plan,
+            options.idle_only,
+            label,
+            &app,
+            &bins,
+            &scratch.join(label),
+        )?);
     }
 
     let report = Report {
@@ -369,7 +386,8 @@ fn top_window(pid: u32, seconds: u64) -> Result<app_stats::TopSample> {
         .output()
         .map_err(|e| format!("top: {e}"))?;
     let text = String::from_utf8_lossy(&output.stdout);
-    app_stats::parse_top(&text, pid).ok_or_else(|| format!("cannot read top's output: {text}"))
+    app_stats::parse_top(&text, pid, seconds as f64)
+        .ok_or_else(|| format!("cannot read top's output: {text}"))
 }
 
 /// A data directory the app and daemon share, marked as set up so the first-run wizard does not
@@ -384,7 +402,14 @@ fn data_dir(scratch: &Path, name: &str) -> Result<PathBuf> {
 
 // --- the scenarios ---------------------------------------------------------------------------
 
-fn measure(plan: &Plan, label: &str, app: &Path, bins: &Bins, scratch: &Path) -> Result<Variant> {
+fn measure(
+    plan: &Plan,
+    idle_only: bool,
+    label: &str,
+    app: &Path,
+    bins: &Bins,
+    scratch: &Path,
+) -> Result<Variant> {
     // Idle and cold start share a quiet daemon.
     let quiet = data_dir(scratch, "quiet")?;
     let (daemon, _) = Daemon::start(bins, &quiet, DaemonOptions::default())?;
@@ -392,8 +417,17 @@ fn measure(plan: &Plan, label: &str, app: &Path, bins: &Bins, scratch: &Path) ->
     let idle = idle(plan, app, &quiet)?;
     daemon.stop()?;
 
-    let streaming = streaming(plan, app, bins, &data_dir(scratch, "stream")?)?;
-    let long_transcript = long_transcript(app, bins, &data_dir(scratch, "long")?)?;
+    let (streaming, long_transcript) = if idle_only {
+        (
+            Scenario::NotDrawn("not run (--idle-only)".into()),
+            Scenario::NotDrawn("not run (--idle-only)".into()),
+        )
+    } else {
+        (
+            streaming(plan, app, bins, &data_dir(scratch, "stream")?)?,
+            long_transcript(app, bins, &data_dir(scratch, "long")?)?,
+        )
+    };
     Ok(Variant {
         allocator: label.to_owned(),
         cold_start,
@@ -674,6 +708,16 @@ mod tests {
         let labels: Vec<_> = options.variants.iter().map(|v| v.0).collect();
         assert_eq!(labels, ["system", "mimalloc"]);
         assert_eq!(options.variants[1].1, ["--features", "mimalloc"]);
+    }
+
+    #[test]
+    fn idle_only_leaves_out_the_scenarios_that_need_the_window_drawn() {
+        assert!(!parse_args(&args(&[])).expect("parse").idle_only);
+        assert!(
+            parse_args(&args(&["--idle-only"]))
+                .expect("parse")
+                .idle_only
+        );
     }
 
     #[test]

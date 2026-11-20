@@ -114,4 +114,73 @@ Apple silicon, release builds, the system allocator won on every measure (two fu
 
 Hypothesis (not isolated): mimalloc returns memory to the OS only while the process allocates, so a daemon that goes quiet
 after a burst keeps the burst's pages. Revisit the decision if the daemon gets a periodic allocator
-collect, or if the Linux numbers say otherwise. The app was not measured.
+collect, or if the Linux numbers say otherwise. The app was not measured; see "App" below, where its allocator is still to measure.
+
+## App
+
+`cargo xtask bench --app` measures `reno-app` the way the daemon is measured, but only on a Mac, by
+hand, and never in CI or under `cargo test`: shared runners are too noisy to hold a UI budget. It
+builds `renod`, `reno` and `reno-app` in release, starts its own `renod` on a temporary data
+directory (mock executor only), and starts the app against it through `RENO_DATA_DIR`. It never
+uses `--fake`, because the fake daemon runs inside the app and would be counted as the app's cost,
+and it never reaches the installed daemon. It writes `target/bench/app-report.json` and
+`app-report.txt`, and exits 1 when a number is past a budget.
+
+```
+cargo xtask bench --app                       # full: 30 s settle, 120 s idle, 60 s streaming, long transcript
+cargo xtask bench --app --quick               # shorter windows, 3 cold starts
+cargo xtask bench --app --quick --idle-only   # cold start and idle only (no scenario that streams or scrolls)
+cargo xtask bench --app --compare-allocators  # system and mimalloc, built and measured one after the other
+```
+
+**The bench opens a real window and brings it to the front.** GPUI draws no frame for a window that
+is covered, hidden or behind a full-screen app, and a covered window's CPU is a falsely low number.
+Under `RENO_BENCH=1`, and only then, the app activates itself and orders its window to the front
+when it opens. The scenarios that need frames take the screen for a few minutes: do not use the
+machine meanwhile. Where frames still do not arrive, the scenario says "window not drawn" and
+reports no number.
+
+### Method
+
+| Scenario | How it is measured | Proposed budget |
+|---|---|---|
+| Cold start to first frame | Spawn the app and time from the spawn to the first frame. Under `RENO_BENCH=1` the app prints `first-frame <ms>` after its first paint (and the same time from the start of `main`). Median of 5 after one throwaway start | < 400 ms |
+| Idle CPU | CPU seconds of the process (`ps -o time=`) over the idle window, after the settle time, on Home with nothing live | < 1 % of a core |
+| Idle wakeups | `top -l 2 -s <window> -stats idlew`, no sudo. `IDLEW` is a running count since the process started, so the rate is the difference between the two samples over the window | < 1 per second |
+| Idle footprint | `footprint` (or `vmmap --summary`): physical footprint, which includes the GPU's `IOAccelerator` memory that RSS misses | baseline + 25 %, at most 200 MiB |
+| Streaming | `renod --stream-mock`, a bench-only script that emits text deltas at a steady rate (about 20 events a second for 60 s, markdown with code blocks); the app shows that run. CPU and peak footprint over the window; fails as "window not drawn" if it drew fewer frames than seconds | CPU <= 15 % · footprint <= 350 MiB |
+| Long transcript | `renod --stream-mock=burst` finishes a run of 2,000 messages; under `RENO_BENCH=1` with `RENO_OPEN=run_<id>` the app scrolls the transcript from end to start and back by a fixed step a frame. Peak footprint and frame time p95 | footprint: baseline + 25 %; frame time recorded, it informs the transcript's row model |
+| Allocator | `--compare-allocators`: idle plus streaming, once with the system allocator and once with mimalloc | decision recorded, as for the daemon |
+| GPU memory | The `IOAccelerator` share of the footprint, on its own | recorded, no budget |
+
+The budgets are proposed, not signed off. Each is the measured baseline plus a stated margin, and
+none is looser than the figures in ARCHITECTURE 12. The report prints numbers and marks the
+budgets "proposed" until they are signed off after the first full measurement.
+
+### Measured (quick, idle only)
+
+2026-11-20, Apple M5 Pro, macOS 27.0.1, release build of the `feat/app-bench` branch, system
+allocator, `cargo xtask bench --app --quick --idle-only` (5 s settle, 20 s idle window).
+
+| Metric | Measured | Proposed budget |
+|---|---|---|
+| Cold start to first frame (median of 3) | 142 ms (the app's own clock from `main`: 126 to 132 ms) | < 400 ms |
+| Idle CPU | 0.4 % of a core | < 1 % |
+| Idle wakeups | 0.05 per second | < 1 per second |
+| Idle footprint | 53 MiB | baseline + 25 %, at most 200 MiB |
+| GPU memory in the footprint | 4 MiB | recorded |
+| Streaming CPU and peak footprint | to measure | <= 15 % · <= 350 MiB |
+| Long transcript footprint and frame time p95 | to measure | footprint: baseline + 25 % |
+| App allocator (system against mimalloc) | to measure | decision recorded |
+
+Two things in the first, hand-run numbers were the bench's, not the app's, and are fixed:
+
+- An earlier run reported 17 idle wakeups a second. `IDLEW` is a count since the process started,
+  and the bench read it as a rate. Idle, the app wakes about once every 5 to 20 s; no timer runs on
+  Home with nothing live (the 250 ms activity ticker exists only with `--fake`).
+- That run also had its window behind another app, so it drew nothing: 329 ms to the first frame
+  and 32 MiB were the numbers of a window that was not on screen. With the window in front they
+  are 142 ms and 53 MiB.
+
+Quick mode's 5 s settle is short, which is why its idle CPU (0.4 %) reads above the 0.0 to 0.1 %
+a settled window shows; the full run settles for 30 s.

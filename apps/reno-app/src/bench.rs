@@ -62,6 +62,16 @@ pub(crate) fn frame() {
     }
 }
 
+/// Under `RENO_BENCH=1`: activates the app and orders its window to the front. GPUI draws no
+/// frame for a window that is covered, and a bare binary started from a terminal opens behind the
+/// terminal's own window. Without the hooks the window opens as it always did.
+pub(crate) fn bring_to_front(window: &gpui::Window, cx: &mut gpui::App) {
+    if enabled() {
+        cx.activate(true);
+        window.activate_window();
+    }
+}
+
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1e3
 }

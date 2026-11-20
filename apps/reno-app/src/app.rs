@@ -460,6 +460,7 @@ pub(crate) fn open_window(
         },
         |window, cx| {
             crate::bench::first_frame(window);
+            crate::bench::bring_to_front(window, cx);
             let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
             root.update(cx, |root, cx| {
                 root.focus_composer(window, cx);
