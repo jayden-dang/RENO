@@ -96,6 +96,7 @@ pub(crate) fn label(theme: &Theme, cx: &App) -> Option<AnyElement> {
             .id("draft32-label")
             .debug_selector(|| "draft32-label".to_owned())
             .flex_none()
+            .relative()
             .mx(px(10.0))
             .mb(px(6.0))
             .px(px(10.0))
@@ -106,6 +107,20 @@ pub(crate) fn label(theme: &Theme, cx: &App) -> Option<AnyElement> {
             .rounded(px(9.0))
             .border_1()
             .border_color(theme.hairline)
+            // The list scrolls under this note: a fade, so no row is shown half cut.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(-20.0))
+                    .left(px(-10.0))
+                    .right(px(-10.0))
+                    .h(px(20.0))
+                    .bg(gpui::linear_gradient(
+                        180.0,
+                        gpui::linear_color_stop(theme.shell.opacity(0.0), 0.0),
+                        gpui::linear_color_stop(theme.shell, 1.0),
+                    )),
+            )
             .child(
                 div()
                     .text_size(px(13.0))

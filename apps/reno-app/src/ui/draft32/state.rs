@@ -451,7 +451,6 @@ impl State {
                 } else {
                     self.close_all();
                 }
-                self.page = self.page && !had_rename;
                 had_rename
             }
             Act::Blur => {
