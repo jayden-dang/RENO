@@ -99,6 +99,25 @@ pub(crate) fn keeps(
     ))
 }
 
+/// Why a live thread cannot be closed (the Session tab's line).
+pub(crate) const BUSY: &str = "A run is going in this thread. Stop it before closing.";
+
+/// What closing says before it is asked, always: what stays when the worktree holds unmerged
+/// work ([`keeps`]), else that nothing is lost. `info` is `None` while the thread is unknown.
+pub(crate) fn close_question(
+    info: &ThreadInfo,
+    changes: Option<&reno_proto::WorkspaceChanges>,
+) -> String {
+    if info.status == reno_proto::ThreadStatus::Active {
+        return BUSY.to_owned();
+    }
+    if info.worktree.is_none() || worktree_gone(info) {
+        return "This thread has no worktree: closing only ends it.".to_owned();
+    }
+    keeps(info, changes)
+        .unwrap_or_else(|| "Closing releases the worktree; nothing in it is unmerged.".to_owned())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -148,6 +167,47 @@ mod tests {
             keeps(&info, Some(&held(1, true)))
                 .unwrap()
                 .contains("1 commit not merged and uncommitted changes")
+        );
+    }
+
+    #[test]
+    fn the_close_question_always_has_something_to_say() {
+        let mut info = ThreadInfo {
+            thread_id: ThreadId::from_suffix("a").unwrap(),
+            status: reno_proto::ThreadStatus::Idle,
+            cwd: None,
+            project: None,
+            worktree: Some("/w/a".into()),
+            branch: Some("reno/thr_a".to_owned()),
+            base_sha: None,
+            workspace: Some(WorkspaceStatus::Kept),
+            runs: Vec::new(),
+            idle_expires_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let held = WorkspaceChanges {
+            commits: 3,
+            dirty: true,
+        };
+        assert!(
+            close_question(&info, Some(&held)).starts_with("reno/thr_a with 3 commits"),
+            "unmerged work: what stays"
+        );
+        let clean = WorkspaceChanges {
+            commits: 0,
+            dirty: false,
+        };
+        let nothing = "Closing releases the worktree; nothing in it is unmerged.";
+        assert_eq!(close_question(&info, Some(&clean)), nothing);
+        assert_eq!(close_question(&info, None), nothing, "not read yet");
+        info.worktree = None;
+        assert!(close_question(&info, Some(&held)).contains("no worktree"));
+        info.status = reno_proto::ThreadStatus::Active;
+        assert_eq!(
+            close_question(&info, Some(&held)),
+            BUSY,
+            "a live run is said first"
         );
     }
 }

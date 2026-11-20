@@ -37,6 +37,7 @@ use crate::screens::triggers::TriggersScreen;
 use crate::store::{Store, StoreEvent};
 use crate::ui::bar::{self, Anchor_, Bar};
 use crate::ui::composer;
+use crate::ui::draft32;
 use crate::ui::icon::Assets;
 use crate::ui::kit::SANS;
 use crate::ui::motion::{self, ReduceMotion};
@@ -45,6 +46,7 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
+use crate::vm::draft32::Variant as Draft32Variant;
 use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
 use crate::vm::shell::{self, Chip, History, Place};
@@ -113,6 +115,13 @@ pub(crate) struct Options {
     pub(crate) composer_open: Option<String>,
     /// `RENO_COMPOSER_FAIL=commands` (with `--fake`): the harness's commands cannot be read.
     pub(crate) composer_fail: Option<String>,
+    /// `--fake --draft32` (`RENO_DRAFT32=a|b|c`, default `a`): the ROAD-32 sidebar draft, with its
+    /// variant. Without the flag the sidebar is exactly as it was.
+    pub(crate) draft32: Option<Draft32Variant>,
+    /// `RENO_DRAFT32_OPEN=menu|rename|hover|archived|archive|more|resize|close` (optionally
+    /// `close:atlas01`, a run's suffix): with `--draft32`, act on the "fix the ACP v2 handshake"
+    /// row (or that run's) once the screen is up (screenshots, reviews).
+    pub(crate) draft32_open: Option<String>,
 }
 
 impl Options {
@@ -132,10 +141,33 @@ impl Options {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         let mut options = Self::default();
+        let mut draft32 = false;
         for arg in args {
             match arg.as_str() {
                 "--fake" => options.fake = true,
+                "--draft32" => draft32 = true,
                 other => return Err(format!("unknown argument: {other}")),
+            }
+        }
+        if draft32 {
+            if !options.fake {
+                return Err("--draft32 needs --fake".to_owned());
+            }
+            options.draft32 = Some(match env("RENO_DRAFT32").filter(|v| !v.is_empty()) {
+                None => Draft32Variant::A,
+                Some(key) => Draft32Variant::parse(&key)
+                    .ok_or_else(|| format!("RENO_DRAFT32: {key} is not a, b or c"))?,
+            });
+            if let Some(open) = env("RENO_DRAFT32_OPEN").filter(|v| !v.is_empty()) {
+                let what = open.split(':').next().unwrap_or_default();
+                if ![
+                    "menu", "rename", "hover", "archived", "archive", "more", "resize", "close",
+                ]
+                .contains(&what)
+                {
+                    return Err(format!("RENO_DRAFT32_OPEN: unknown hook {open}"));
+                }
+                options.draft32_open = Some(open);
             }
         }
         if options.fake {
@@ -277,6 +309,8 @@ pub(crate) struct Start {
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: text to type and a picker to open.
     pub(crate) composer_type: Option<String>,
     pub(crate) composer_open: Option<String>,
+    /// The ROAD-32 draft's start hook.
+    pub(crate) draft32_open: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -296,6 +330,9 @@ pub(crate) fn run(options: Options) {
         composer::bind_keys(cx);
         crate::screens::run::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        if let Some(variant) = options.draft32 {
+            draft32::install(variant, cx);
+        }
 
         if let Some(path) = options.panel_state_path() {
             crate::panel::saved::Saved::install(path, cx);
@@ -312,7 +349,7 @@ pub(crate) fn run(options: Options) {
         let store = cx.new(|cx| {
             let mut store = Store::connecting();
             if options.fake {
-                store.start_fake(cx);
+                store.start_fake_demo(options.draft32.is_some(), cx);
                 if options.composer_fail.as_deref() == Some("commands") {
                     store.set_commands_unreadable(true);
                 }
@@ -341,6 +378,7 @@ pub(crate) fn run(options: Options) {
             open_settings: options.open_settings,
             composer_type: options.composer_type.clone(),
             composer_open: options.composer_open.clone(),
+            draft32_open: options.draft32_open.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -393,6 +431,7 @@ pub(crate) fn open_window(
         open_settings,
         composer_type,
         composer_open,
+        draft32_open,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -418,6 +457,19 @@ pub(crate) fn open_window(
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.composer_hooks(composer_type, composer_open, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                if let Some(hook) = draft32_open {
+                    // After the runs and their threads are read and the rows are painted.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(3000))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.draft32_hook(&hook, window, cx);
                         })
                         .ok();
                     })
@@ -646,6 +698,8 @@ pub(crate) struct RootView {
     _run_events: Vec<Subscription>,
     /// The run a trigger just started; the Triggers screen keeps showing, the toast says so.
     pending_fired: Option<RunId>,
+    /// ROAD-32: the sidebar draft's interaction state (idle without `--draft32`).
+    draft32: draft32::State,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -791,6 +845,7 @@ impl RootView {
             executors,
             settings,
             pending_fired: None,
+            draft32: draft32::State::new(crate::prefs::current(cx).sidebar_width),
             toasts,
             screen: Screen::Home,
             before_settings: None,
@@ -928,6 +983,64 @@ impl RootView {
         window.focus(&handle, cx);
     }
 
+    /// One click, key or timer of the ROAD-32 sidebar draft (see `ui::draft32`).
+    pub(crate) fn draft32_act(
+        &mut self,
+        act: draft32::Act,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(variant) = draft32::current(cx) else {
+            return;
+        };
+        let store = self.store.clone();
+        let refocus = match act {
+            draft32::Act::ResizeEnd if !self.draft32.resizing => false,
+            act => self.draft32.apply(act, variant, &store, window, cx),
+        };
+        if refocus {
+            self.focus_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The draft's interaction state, for tests.
+    #[cfg(test)]
+    pub(crate) fn draft32_state(&self) -> &draft32::State {
+        &self.draft32
+    }
+
+    /// The pointer rested (or left); the draft decides what that opens or closes.
+    pub(crate) fn draft32_timer(&mut self, gen_: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.draft32.on_timer(gen_, window);
+        cx.notify();
+    }
+
+    /// ⌘⇧P and ⌘⇧A.
+    fn draft32_key(&mut self, archive: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(variant) = draft32::current(cx) else {
+            return;
+        };
+        let store = self.store.clone();
+        self.draft32.key_act(archive, variant, &store, window, cx);
+        cx.notify();
+    }
+
+    /// `RENO_DRAFT32_OPEN`: acts on the "fix the ACP v2 handshake" thread (or the run the hook
+    /// names after a colon).
+    fn draft32_hook(&mut self, hook: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(variant) = draft32::current(cx) else {
+            return;
+        };
+        let (what, suffix) = hook.split_once(':').unwrap_or((hook, "plan1"));
+        let Ok(thread) = reno_proto::ThreadId::from_suffix(suffix) else {
+            return;
+        };
+        let store = self.store.clone();
+        self.draft32.hook(what, thread, variant, &store, window, cx);
+        cx.notify();
+    }
+
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: act on the composer that is showing.
     fn composer_hooks(
         &mut self,
@@ -984,6 +1097,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         self.store.update(cx, |store, cx| store.look_at(None, cx));
+        self.draft32.page = false;
         self.leave_home(cx);
         self.close_menus(cx);
         let into_settings = matches!(nav, Nav::Settings | Nav::Executors);
@@ -1209,6 +1323,7 @@ impl RootView {
             return;
         }
         self.pending_fired = None;
+        self.draft32.page = false;
         self.store
             .update(cx, |store, cx| store.look_at(Some(run.clone()), cx));
         let store = self.store.clone();
@@ -1371,6 +1486,7 @@ impl RootView {
                 looking_at: store.looking_at(),
                 now_ms: store.now_ms(),
                 thread_of: &|run| store.thread_of(run),
+                edit: None,
             },
         );
         let threads = palette::threads(&folders, |run| {
@@ -1406,6 +1522,7 @@ impl RootView {
             PaletteAction::Go(nav) => self.navigate(nav, window, cx),
             PaletteAction::ToggleTheme => self.toggle_theme(window, cx),
             PaletteAction::ToggleSidebar => self.toggle_sidebar(cx),
+            PaletteAction::Archived => self.draft32_act(draft32::Act::Page(true), window, cx),
         }
     }
 
@@ -1475,12 +1592,28 @@ impl Render for RootView {
         );
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
+        // ROAD-32 draft: its variant, how wide its sidebar is, and what its clicks call.
+        let draft_variant = draft32::current(cx);
+        if let Some(variant) = draft_variant {
+            self.draft32.sync(variant);
+        }
+        let sidebar_width = if draft_variant.is_some() {
+            self.draft32.width
+        } else {
+            sidebar::WIDTH
+        };
+        let draft_act: draft32::ActHandler = {
+            let this = cx.entity();
+            Rc::new(move |act, window, cx| {
+                this.update(cx, |root, cx| root.draft32_act(act, window, cx));
+            })
+        };
         // What the run screen's panel needs to fit itself on its first frame: the sidebar and
         // the insets around the canvas.
         cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
             2.0 * GUTTER
         } else {
-            sidebar::WIDTH + GUTTER
+            sidebar_width + GUTTER
         }));
         let in_settings = matches!(self.screen, Screen::Settings);
         let (needing, connection) = {
@@ -1510,6 +1643,18 @@ impl Render for RootView {
         });
 
         let on_run = matches!(self.screen, Screen::Run(_));
+        // C's archived page replaces the screen in the canvas.
+        let archived_page = draft_variant.filter(|_| self.draft32.page).map(|variant| {
+            let store = self.store.read(cx);
+            let d = draft32::Draft::new(
+                variant,
+                store,
+                &self.folders_toggled,
+                &self.draft32,
+                Rc::clone(&draft_act),
+            );
+            draft32::archived_page(&theme, &d, &handlers.recent_run)
+        });
         let panel = div()
             .id("canvas-panel")
             .debug_selector(|| "canvas-panel".to_owned())
@@ -1521,20 +1666,21 @@ impl Render for RootView {
             .mr(px(GUTTER))
             .when(self.sidebar_hidden, |p| p.ml(px(GUTTER)))
             // A run draws its own two canvases; every other screen sits on this one.
-            .when(!on_run, |p| {
+            .when(!on_run || archived_page.is_some(), |p| {
                 p.rounded(px(14.0))
                     .bg(theme.canvas)
                     .border_1()
                     .border_color(theme.hairline)
                     .overflow_hidden()
             })
-            .child(match &self.screen {
-                Screen::Home => self.home.clone().into_any_element(),
-                Screen::Runs => self.runs.clone().into_any_element(),
-                Screen::Run(run) => run.clone().into_any_element(),
-                Screen::Project(project) => project.clone().into_any_element(),
-                Screen::Triggers => self.triggers.clone().into_any_element(),
-                Screen::Settings => self.settings.clone().into_any_element(),
+            .child(match (&self.screen, archived_page) {
+                (_, Some(page)) => page,
+                (Screen::Home, _) => self.home.clone().into_any_element(),
+                (Screen::Runs, _) => self.runs.clone().into_any_element(),
+                (Screen::Run(run), _) => run.clone().into_any_element(),
+                (Screen::Project(project), _) => project.clone().into_any_element(),
+                (Screen::Triggers, _) => self.triggers.clone().into_any_element(),
+                (Screen::Settings, _) => self.settings.clone().into_any_element(),
             });
 
         let main = div()
@@ -1545,6 +1691,12 @@ impl Render for RootView {
             .flex_col()
             .child(panel);
 
+        // C reaches the archive from the "\u{2026}" menu and the palette.
+        let archived_count = (draft_variant == Some(Draft32Variant::C))
+            .then(|| self.store.read(cx))
+            .filter(|store| store.capabilities().thread_edit)
+            .and_then(|store| store.thread_marks())
+            .map(|marks| marks.archived.len());
         let bar_state = {
             let place = self.place(cx);
             let store = self.store.read(cx);
@@ -1582,19 +1734,64 @@ impl Render for RootView {
             on_run,
             more_at: self.more_at.clone(),
             updates_at: self.updates_at.clone(),
+            archived: archived_count,
         };
         let this = cx.entity();
         let status_bar = bar::status_bar(&this, &bar);
         let popovers = bar::popovers(&this, &bar);
+        let draft = draft_variant.map(|variant| {
+            draft32::Draft::new(
+                variant,
+                self.store.read(cx),
+                &self.folders_toggled,
+                &self.draft32,
+                Rc::clone(&draft_act),
+            )
+        });
+        let draft_overlays = draft
+            .as_ref()
+            .map(|d| draft32::overlays(&theme, d, window))
+            .unwrap_or_default();
+        let draft_label = draft32::label(&theme, cx);
 
         div()
             .id("root")
-            .key_context("Root")
+            .key_context(if self.draft32.any_open() {
+                gpui::KeyContext::parse("Root Draft32Open").unwrap_or_default()
+            } else {
+                gpui::KeyContext::parse("Root").unwrap_or_default()
+            })
             .track_focus(&self.focus_handle)
             .on_action(
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &draft32::Dismiss, w, cx| {
+                this.draft32_act(draft32::Act::Dismiss, w, cx);
+            }))
+            // The composer lets Escape go when it has nothing to cancel: the draft takes it.
+            .on_action(cx.listener(|this, _: &composer::Cancel, w, cx| {
+                if this.draft32.any_open() {
+                    this.draft32_act(draft32::Act::Dismiss, w, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &draft32::PinCurrent, w, cx| {
+                this.draft32_key(false, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &draft32::ArchiveCurrent, w, cx| {
+                this.draft32_key(true, w, cx);
+            }))
+            .on_drag_move(cx.listener(
+                |this, e: &gpui::DragMoveEvent<draft32::SidebarDrag>, w, cx| {
+                    this.draft32_act(draft32::Act::Resize(f32::from(e.event.position.x)), w, cx);
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, w, cx| this.draft32_act(draft32::Act::ResizeEnd, w, cx)),
+            )
             .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
                 this.panel_action(PanelAction::Toggle, w, cx);
             }))
@@ -1650,12 +1847,18 @@ impl Render for RootView {
                                 needing,
                                 &self.folders_toggled,
                                 &handlers,
+                                sidebar::Frame {
+                                    draft: draft.as_ref(),
+                                    label: draft_label,
+                                    width: sidebar_width,
+                                },
                             ))
                         }
                     })
                     .child(main),
             )
             .children(popovers)
+            .children(draft_overlays)
             .children(self.palette.clone())
             .child(self.toasts.clone())
     }
@@ -1701,6 +1904,46 @@ mod tests {
         assert_eq!(on.composer_type.as_deref(), Some("@src/"));
         assert_eq!(on.composer_open.as_deref(), Some("branch"));
         assert_eq!(on.composer_fail.as_deref(), Some("commands"));
+    }
+
+    #[test]
+    fn the_sidebar_draft_needs_the_fake_daemon_and_takes_a_variant_and_a_hook() {
+        assert!(
+            parse(&["--draft32"], &[]).is_err(),
+            "without --fake it is a parse error"
+        );
+        let off = parse(
+            &["--fake"],
+            &[("RENO_DRAFT32", "c"), ("RENO_DRAFT32_OPEN", "menu")],
+        )
+        .unwrap();
+        assert_eq!(
+            (off.draft32, off.draft32_open),
+            (None, None),
+            "the env alone does nothing"
+        );
+        let a = parse(&["--fake", "--draft32"], &[]).unwrap();
+        assert_eq!((a.draft32, a.draft32_open), (Some(Draft32Variant::A), None));
+        let c = parse(
+            &["--fake", "--draft32"],
+            &[
+                ("RENO_DRAFT32", "C"),
+                ("RENO_DRAFT32_OPEN", "close:atlas01"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(c.draft32, Some(Draft32Variant::C));
+        assert_eq!(c.draft32_open.as_deref(), Some("close:atlas01"));
+        assert!(parse(&["--fake", "--draft32"], &[("RENO_DRAFT32", "d")]).is_err());
+        assert!(parse(&["--fake", "--draft32"], &[("RENO_DRAFT32_OPEN", "dance")]).is_err());
+        for hook in [
+            "menu", "rename", "hover", "archived", "archive", "more", "resize", "close",
+        ] {
+            assert!(
+                parse(&["--fake", "--draft32"], &[("RENO_DRAFT32_OPEN", hook)]).is_ok(),
+                "{hook}"
+            );
+        }
     }
 
     #[test]

@@ -173,12 +173,7 @@ impl RunScreen {
             )
             .into_any_element()
         } else if info.status == reno_proto::ThreadStatus::Active {
-            line(
-                "thread-busy",
-                "A run is going in this thread. Stop it before closing.".to_owned(),
-                theme.muted,
-            )
-            .into_any_element()
+            line("thread-busy", threads::BUSY.to_owned(), theme.muted).into_any_element()
         } else if self.close_confirm {
             let keeps = threads::keeps(&info, held.as_ref()).unwrap_or_default();
             let ask = thread.clone();

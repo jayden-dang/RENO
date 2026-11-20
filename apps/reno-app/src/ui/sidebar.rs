@@ -10,6 +10,7 @@ use gpui::{App, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px
 use reno_client::ConnectionStatus;
 use reno_proto::RunId;
 
+use super::draft32::{self, Draft};
 use super::icon::{Icon, icon};
 use super::kit;
 use super::theme::Theme;
@@ -155,6 +156,7 @@ fn folder_view(
     folder: &Folder,
     selected: Option<&RunId>,
     handlers: &SidebarHandlers,
+    draft: Option<&Draft<'_>>,
 ) -> Div {
     let toggle = Rc::clone(&handlers.toggle_folder);
     let key = folder.key.clone();
@@ -230,12 +232,11 @@ fn folder_view(
                 .child(shield)
                 .children(plus),
         )
-        .children(
-            folder
-                .rows
-                .iter()
-                .map(|row| thread_row(theme, row, selected, handlers)),
-        )
+        .children(folder.rows.iter().map(|row| match draft {
+            Some(d) => draft32::folder_row(theme, d, row, selected, handlers),
+            None => thread_row(theme, row, selected, handlers).into_any_element(),
+        }))
+        .children(draft.and_then(|d| draft32::folder_extras(theme, d, folder)))
 }
 
 /// The footer's Settings row: a compact 28 pt rounded row, the gear (marked while the daemon is
@@ -317,6 +318,14 @@ pub(crate) fn settings_row(
         })
 }
 
+/// What the ROAD-32 draft adds around the sidebar: its list and controls, the note saying which
+/// variant shows, and the width (the draft's sidebar can be dragged).
+pub(crate) struct Frame<'a> {
+    pub(crate) draft: Option<&'a Draft<'a>>,
+    pub(crate) label: Option<gpui::AnyElement>,
+    pub(crate) width: f32,
+}
+
 /// The sidebar column. `active` marks the current destination; `needing` is how many executors
 /// can't take runs.
 pub(crate) fn sidebar(
@@ -326,20 +335,31 @@ pub(crate) fn sidebar(
     needing: usize,
     toggled: &HashSet<FolderKey>,
     handlers: &SidebarHandlers,
+    frame: Frame<'_>,
 ) -> impl IntoElement {
+    let Frame {
+        draft,
+        label,
+        width,
+    } = frame;
     let state = store.state();
     let runs = state.runs();
-    let folders = projects::folders(
-        &runs,
-        |dir| store.root_of(dir),
-        &projects::Inputs {
-            seen: store.seen(),
-            toggled,
-            looking_at: store.looking_at(),
-            now_ms: store.now_ms(),
-            thread_of: &|run| store.thread_of(run),
-        },
-    );
+    // The draft arranges its own list (pinned, archived, "Show more"); without it, as ever.
+    let folders = match draft {
+        Some(_) => Vec::new(),
+        None => projects::folders(
+            &runs,
+            |dir| store.root_of(dir),
+            &projects::Inputs {
+                seen: store.seen(),
+                toggled,
+                looking_at: store.looking_at(),
+                now_ms: store.now_ms(),
+                thread_of: &|run| store.thread_of(run),
+                edit: None,
+            },
+        ),
+    };
     let selected_run = store.looking_at().cloned();
 
     let start = {
@@ -378,7 +398,7 @@ pub(crate) fn sidebar(
         .children(
             folders
                 .iter()
-                .map(|folder| folder_view(theme, folder, selected_run.as_ref(), handlers)),
+                .map(|folder| folder_view(theme, folder, selected_run.as_ref(), handlers, None)),
         )
         .when(folders.is_empty(), |list| {
             list.child(
@@ -391,6 +411,18 @@ pub(crate) fn sidebar(
                     .child("No threads yet"),
             )
         });
+
+    let scroll = div()
+        .id("sidebar-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(10.0));
+    // The draft keeps hold of the scroll, so a hook can bring "Show 6 more" into view.
+    let scroll = match draft {
+        Some(d) => scroll.track_scroll(&d.state.scroll),
+        None => scroll,
+    };
 
     let foot = div()
         .flex_none()
@@ -408,32 +440,35 @@ pub(crate) fn sidebar(
     div()
         .id("sidebar")
         .debug_selector(|| "sidebar".to_owned())
-        .w(px(WIDTH))
+        .relative()
+        .w(px(width))
         .h_full()
         .flex_none()
         .flex()
         .flex_col()
         .bg(theme.shell)
-        .child(
-            div()
-                .id("sidebar-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(10.0))
-                .child(start)
-                .child(
-                    div()
-                        .px(px(10.0))
-                        .pt(px(16.0))
-                        .pb(px(6.0))
-                        .text_size(px(11.5))
-                        .text_color(theme.faint)
-                        .child("Threads"),
-                )
-                .child(threads),
-        )
+        .child(scroll.child(start).children(match draft {
+            Some(d) => vec![
+                        draft32::section(theme, d, selected_run.as_ref(), handlers, |folder| {
+                            folder_view(theme, folder, selected_run.as_ref(), handlers, Some(d))
+                        })
+                        .into_any_element(),
+                    ],
+            None => vec![
+                        div()
+                            .px(px(10.0))
+                            .pt(px(16.0))
+                            .pb(px(6.0))
+                            .text_size(px(11.5))
+                            .text_color(theme.faint)
+                            .child("Threads")
+                            .into_any_element(),
+                        threads.into_any_element(),
+                    ],
+        }))
+        .children(label)
         .child(foot)
+        .children(draft.map(|d| draft32::resize_handle(theme, d.state.resizing, &d.act)))
 }
 
 #[cfg(test)]

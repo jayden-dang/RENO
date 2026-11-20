@@ -114,7 +114,7 @@ impl Word for SendWith {
 }
 
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "mode",
     "theme",
     "accent",
@@ -122,6 +122,7 @@ const KEYS: [&str; 7] = [
     "sendWith",
     "escapeStops",
     "hiddenFiles",
+    "sidebarWidth",
 ];
 
 /// The switches of Settings → Notifications (all default to on), and the choices of Settings ›
@@ -145,6 +146,8 @@ pub(crate) struct Prefs {
     pub(crate) escape_stops: bool,
     /// The Files tab lists dotfiles.
     pub(crate) hidden_files: bool,
+    /// How wide the sidebar was dragged to (ROAD-32): its default until it is.
+    pub(crate) sidebar_width: f32,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -163,6 +166,7 @@ impl Default for Prefs {
             send_with: SendWith::Enter,
             escape_stops: false,
             hidden_files: true,
+            sidebar_width: crate::ui::draft32::DEFAULT_WIDTH,
             rest: Map::new(),
         }
     }
@@ -237,6 +241,12 @@ impl Prefs {
         prefs.send_with = SendWith::from_word(word("sendWith"));
         prefs.escape_stops = flag("escapeStops", prefs.escape_stops);
         prefs.hidden_files = flag("hiddenFiles", prefs.hidden_files);
+        prefs.sidebar_width = map
+            .get("sidebarWidth")
+            .and_then(Value::as_f64)
+            .map_or(prefs.sidebar_width, |w| {
+                (w as f32).clamp(crate::ui::draft32::MIN_WIDTH, crate::ui::draft32::MAX_WIDTH)
+            });
         prefs.rest = map
             .into_iter()
             .filter(|(key, _)| {
@@ -261,6 +271,7 @@ impl Prefs {
         put("sendWith", self.send_with.word().into());
         put("escapeStops", self.escape_stops.into());
         put("hiddenFiles", self.hidden_files.into());
+        put("sidebarWidth", f64::from(self.sidebar_width).into());
         serde_json::to_vec_pretty(&Value::Object(map)).unwrap_or_default()
     }
 }
@@ -407,6 +418,20 @@ mod tests {
         assert_eq!(p.send_with, SendWith::Enter);
         assert!(!p.escape_stops, "Escape does not stop a run today");
         assert!(p.hidden_files, "dotfiles are listed today");
+    }
+
+    #[test]
+    fn the_sidebar_width_defaults_to_the_old_width_and_is_kept_within_bounds() {
+        assert!((Prefs::default().sidebar_width - 248.0).abs() < 0.01);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        store.update(|p| p.sidebar_width = 300.0);
+        assert!((PrefStore::at(path.clone()).prefs().sidebar_width - 300.0).abs() < 0.01);
+        std::fs::write(&path, br#"{"sidebarWidth": 9000}"#).unwrap();
+        assert!((PrefStore::at(path.clone()).prefs().sidebar_width - 380.0).abs() < 0.01);
+        std::fs::write(&path, br#"{"sidebarWidth": "wide"}"#).unwrap();
+        assert!((PrefStore::at(path).prefs().sidebar_width - 248.0).abs() < 0.01);
     }
 
     #[test]

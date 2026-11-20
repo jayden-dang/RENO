@@ -50,6 +50,8 @@ pub(crate) struct Bar<'a> {
     pub(crate) on_run: bool,
     pub(crate) more_at: Anchor_,
     pub(crate) updates_at: Anchor_,
+    /// ROAD-32 variant C: how many threads are archived; the "\u{2026}" menu opens their page.
+    pub(crate) archived: Option<usize>,
 }
 
 /// Reports where its parent was painted into `at`.
@@ -323,7 +325,7 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
     if bar.more_open {
         let item =
             |id: &'static str,
-             label: &'static str,
+             label: SharedString,
              run: fn(&mut RootView, &mut gpui::Window, &mut gpui::Context<RootView>)| {
                 let root = root.clone();
                 let hover = theme.raised;
@@ -338,7 +340,7 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
                     .text_size(px(13.0))
                     .cursor_pointer()
                     .role(Role::Button)
-                    .aria_label(label)
+                    .aria_label(label.clone())
                     .hover(move |s| s.bg(hover))
                     .child(label)
                     .on_click(move |_, window, cx| {
@@ -349,19 +351,36 @@ pub(crate) fn popovers(root: &Entity<RootView>, bar: &Bar<'_>) -> Vec<AnyElement
                     })
             };
         let menu = panel(theme, "more-menu", 210.0)
-            .child(item("more-palette", "Command palette", |_, w, cx| {
-                w.dispatch_action(Box::new(OpenPalette), cx);
-            }))
-            .child(item("more-theme", "Toggle theme", |_, w, cx| {
+            .child(item(
+                "more-palette",
+                "Command palette".into(),
+                |_, w, cx| {
+                    w.dispatch_action(Box::new(OpenPalette), cx);
+                },
+            ))
+            .child(item("more-theme", "Toggle theme".into(), |_, w, cx| {
                 w.dispatch_action(Box::new(ToggleTheme), cx);
             }))
             .when(bar.on_run, |m| {
-                m.child(item("more-panel", "Toggle side panel", |_, w, cx| {
-                    w.dispatch_action(Box::new(TogglePanel), cx);
-                }))
+                m.child(item(
+                    "more-panel",
+                    "Toggle side panel".into(),
+                    |_, w, cx| {
+                        w.dispatch_action(Box::new(TogglePanel), cx);
+                    },
+                ))
             })
-            .child(item("more-triggers", "Triggers", |root, w, cx| {
+            .child(item("more-triggers", "Triggers".into(), |root, w, cx| {
                 root.navigate(Nav::Triggers, w, cx);
+            }))
+            .children(bar.archived.map(|count| {
+                item(
+                    "more-archived",
+                    crate::vm::draft32::archived_label(count).into(),
+                    |root, w, cx| {
+                        root.draft32_act(crate::ui::draft32::Act::Page(true), w, cx);
+                    },
+                )
             }));
         out.extend(popover(root, &bar.more_at, Anchor::TopLeft, menu));
     }

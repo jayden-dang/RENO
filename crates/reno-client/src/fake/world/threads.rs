@@ -72,6 +72,12 @@ impl World {
         Ok(())
     }
 
+    /// Whether `thread` has a run that is not over: `None` for a thread with no run at all.
+    pub(in crate::fake) fn thread_live(&self, thread: &ThreadId) -> Option<bool> {
+        let runs = self.thread_run_ids(thread);
+        (!runs.is_empty()).then(|| runs.iter().any(|r| !r.summary.status.is_terminal()))
+    }
+
     /// A run was added to `thread`: it is open again.
     pub(in crate::fake) fn reopen_thread(&mut self, thread: &ThreadId) {
         self.threads.closed.remove(thread);
