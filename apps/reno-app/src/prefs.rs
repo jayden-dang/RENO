@@ -257,7 +257,9 @@ impl Prefs {
             .map_or(prefs.sidebar_width, |w| {
                 (w as f32).clamp(crate::ui::sidebar::MIN_WIDTH, crate::ui::sidebar::MAX_WIDTH)
             });
-        prefs.onboarded = flag("onboarded", prefs.onboarded);
+        // A settings file written before setup existed means the app was already in use: no
+        // setup for someone who has been working in it. Only a missing file is a first run.
+        prefs.onboarded = flag("onboarded", true);
         prefs.skipped_updates = map
             .get("skippedUpdates")
             .and_then(Value::as_object)
@@ -525,11 +527,21 @@ mod tests {
 
     #[test]
     fn onboarded_defaults_to_false_and_is_written_and_read_back() {
-        assert!(!Prefs::default().onboarded, "an existing file has no key");
-        assert!(!Prefs::from_json(br#"{"mode": "dark"}"#).onboarded);
+        assert!(!Prefs::default().onboarded, "no settings file: a first run");
         assert!(
-            !Prefs::from_json(br#"{"onboarded": "yes"}"#).onboarded,
-            "a value that is not a boolean is the default"
+            Prefs::from_json(br#"{"mode": "dark"}"#).onboarded,
+            "a settings file from before setup existed: the app was already in use"
+        );
+        assert!(
+            !Prefs::from_json(br#"{"onboarded": false}"#).onboarded,
+            "an explicit false stays"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            !PrefStore::at(tmp.path().join("missing.json"))
+                .prefs()
+                .onboarded,
+            "no file on disk: setup shows"
         );
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("app-settings.json");
