@@ -504,10 +504,10 @@ mod tests {
     #[test]
     fn the_caret_inside_a_token_replaces_the_whole_token() {
         let a = find_active("see @src/main.rs now", 8).unwrap();
-        assert_eq!((a.start, a.end), (4, 15));
+        assert_eq!((a.start, a.end), (4, 16));
         assert_eq!(a.query, "src");
         // After the space the caret is in no token.
-        assert_eq!(find_active("see @src/main.rs now", 16), None);
+        assert_eq!(find_active("see @src/main.rs now", 17), None);
         assert_eq!(find_active("\u{e9}@x", 1), None);
     }
 

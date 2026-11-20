@@ -1704,6 +1704,33 @@ mod tests {
     }
 
     #[test]
+    fn draft31_needs_fake_in_either_order_and_defaults_to_a() {
+        assert!(parse(&["--draft31"], &[]).is_err());
+        let a = parse(&["--fake", "--draft31"], &[]).unwrap();
+        let b = parse(&["--draft31", "--fake"], &[("RENO_DRAFT31", "C")]).unwrap();
+        assert_eq!(a.draft31, Some(Variant::A));
+        assert_eq!(b.draft31, Some(Variant::C));
+        assert!(parse(&["--fake", "--draft31"], &[("RENO_DRAFT31", "z")]).is_err());
+        // The hooks and the variant are ignored without the flag.
+        let off = parse(
+            &["--fake"],
+            &[("RENO_DRAFT31", "b"), ("RENO_DRAFT31_TYPE", "@")],
+        )
+        .unwrap();
+        assert_eq!((off.draft31, off.draft31_type), (None, None));
+        let hooks = parse(
+            &["--fake", "--draft31"],
+            &[
+                ("RENO_DRAFT31_TYPE", "@src/"),
+                ("RENO_DRAFT31_OPEN", "branch"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(hooks.draft31_type.as_deref(), Some("@src/"));
+        assert_eq!(hooks.draft31_open.as_deref(), Some("branch"));
+    }
+
+    #[test]
     fn no_flags_means_the_socket() {
         assert_eq!(parse(&[], &[]), Ok(Options::default()));
         assert!(!Options::default().fake);
@@ -1743,6 +1770,7 @@ mod tests {
                 registry_demo: None,
                 open_settings: None,
                 data_dir: None,
+                ..Options::default()
             })
         );
         let thread = parse(&[], &[("RENO_OPEN", "newthread:/work/atlas-api")]).unwrap();

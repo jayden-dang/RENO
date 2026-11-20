@@ -2009,11 +2009,6 @@ impl Render for Composer {
                 .pb(px(12.0))
                 .children(self.plus_button(&theme, cx))
                 .children(self.permission_chip(&theme, cx))
-                .children(
-                    (draft == Some(crate::vm::draft31::Variant::C))
-                        .then(|| self.road31_queue_chip(&theme, cx))
-                        .flatten(),
-                )
                 .child(div().flex_1())
                 .children(self.road31_queue_button(&theme, cx))
                 .child(self.model_chip(&theme, cx))
@@ -2046,7 +2041,7 @@ impl Render for Composer {
             },
             _ => None,
         };
-        let note = note.or_else(|| self.road31_queue_note(&theme, cx));
+        let note = note.or_else(|| self.road31_queue_note(&theme));
         let note = note.map(|(text, tone)| {
             div()
                 .id("composer-note")
@@ -2143,6 +2138,7 @@ impl Render for Composer {
             Some(V::A) if home => self.road31_chip_strip(&theme, cx).into_iter().collect(),
             Some(V::C) if home => self.road31_sentence(&theme, cx).into_iter().collect(),
             Some(V::A) => self.road31_queue_card(&theme, cx).into_iter().collect(),
+            Some(V::C) => self.road31_queue_line(&theme, cx).into_iter().collect(),
             _ => Vec::new(),
         };
         let crumb = (draft == Some(V::B) && home)

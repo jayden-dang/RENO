@@ -100,7 +100,12 @@ impl RunScreen {
             value: format!("{} on {}", p.project, p.branch),
             sub: Some(crate::vm::draft31::checkout_phrase(&p.checkout)),
         });
-        let workspace: Vec<KvRow> = sections.workspace.iter().cloned().chain(place_row).collect();
+        let workspace: Vec<KvRow> = sections
+            .workspace
+            .iter()
+            .cloned()
+            .chain(place_row)
+            .collect();
 
         body.children(self.activity_sections(theme, cx))
             .children(failed.map(|failed| {

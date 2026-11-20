@@ -94,6 +94,36 @@ impl Composer {
         draft31::current(cx)
     }
 
+    /// The labels of the open completion's rows (tests).
+    #[cfg(test)]
+    pub(crate) fn draft_labels(&self) -> Option<Vec<String>> {
+        self.road31
+            .complete
+            .as_ref()
+            .map(|c| c.listing.entries.iter().map(|e| e.label.clone()).collect())
+    }
+
+    /// Whether the open completion says its source could not be read (tests).
+    #[cfg(test)]
+    pub(crate) fn draft_failure(&self) -> Option<String> {
+        self.road31
+            .complete
+            .as_ref()
+            .and_then(|c| c.listing.failure.clone())
+    }
+
+    /// Enter on the open completion (tests).
+    #[cfg(test)]
+    pub(crate) fn draft_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.road31_accept(None, window, cx)
+    }
+
+    /// Esc on the open completion (tests).
+    #[cfg(test)]
+    pub(crate) fn draft_dismiss(&mut self, cx: &mut Context<Self>) -> bool {
+        self.road31_dismiss(cx)
+    }
+
     /// The variant drawing where a new task runs, when the draft's place chooser is on here.
     pub(crate) fn draft_place(&self, cx: &App) -> Option<Variant> {
         self.road31_place_view(cx).and_then(|_| self.road31(cx))

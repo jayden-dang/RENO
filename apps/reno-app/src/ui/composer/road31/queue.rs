@@ -17,7 +17,7 @@ use crate::ui::composer::menu::menu;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, Tone};
 use crate::ui::theme::Theme;
-use crate::vm::draft31::{Variant, drop_place, queue_chip, queue_finding};
+use crate::vm::draft31::{drop_place, queue_chip, queue_finding};
 
 pub(in crate::ui::composer) struct QueueState {
     /// C's list is open.
@@ -110,15 +110,44 @@ impl Composer {
     pub(in crate::ui::composer) fn road31_queue_note(
         &self,
         theme: &Theme,
-        cx: &gpui::App,
     ) -> Option<(SharedString, Hsla)> {
         if let Some(error) = &self.road31.queue.error {
             return Some((error.clone().into(), theme.warning));
         }
-        (self.road31(cx) == Some(Variant::C))
-            .then(|| queue_finding(self.road31_queue_items(cx).len()))
-            .flatten()
-            .map(|finding| (finding.into(), theme.muted))
+        None
+    }
+
+    /// C: the finding in words, with the "2 queued" chip that opens the list at its end.
+    pub(in crate::ui::composer) fn road31_queue_line(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let finding = queue_finding(self.road31_queue_items(cx).len())?;
+        let chip = self.road31_queue_chip(theme, cx)?;
+        Some(
+            div()
+                .id("queue-line")
+                .debug_selector(|| "queue-line".to_owned())
+                .px(px(8.0))
+                .pb(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .id("queue-finding")
+                        .debug_selector(|| "queue-finding".to_owned())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted)
+                        .child(SharedString::from(finding)),
+                )
+                .child(chip)
+                .into_any_element(),
+        )
     }
 
     // ---- changes, all through the store ------------------------------------------------------

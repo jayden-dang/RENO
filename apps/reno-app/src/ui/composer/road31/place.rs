@@ -700,15 +700,20 @@ impl Composer {
                             .map_or(String::new(), |(a, _)| a.to_owned()),
                     )),
                 )
-                .child(word(
-                    "place-checkout",
-                    PlaceMenu::Checkout,
-                    checkout_phrase(&view.checkout)
-                        .split_once(' ')
-                        .map_or_else(String::new, |(_, rest)| rest.to_owned()),
-                    cx,
-                ))
-                .child(plain("?"))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .child(word(
+                            "place-checkout",
+                            PlaceMenu::Checkout,
+                            checkout_phrase(&view.checkout)
+                                .split_once(' ')
+                                .map_or_else(String::new, |(_, rest)| rest.to_owned()),
+                            cx,
+                        ))
+                        .child(plain("?")),
+                )
                 .into_any_element(),
         )
     }
@@ -968,7 +973,7 @@ impl Composer {
                     .child(
                         div()
                             .id("place-list")
-                            .max_h(px(320.0))
+                            .max_h(px(230.0))
                             .p(px(6.0))
                             .overflow_y_scroll()
                             .child(list),
@@ -983,7 +988,7 @@ impl Composer {
                     .child(
                         div()
                             .id("place-list")
-                            .max_h(px(300.0))
+                            .max_h(px(210.0))
                             .p(px(6.0))
                             .overflow_y_scroll()
                             .child(list),
