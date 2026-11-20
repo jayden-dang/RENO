@@ -90,6 +90,9 @@ pub(crate) struct Options {
     /// `RENO_DEMO_MENU=plus|permission|effort|approval-more|approval-note`: with `RENO_OPEN=run_<id>`, open that
     /// composer menu (screenshots, reviews).
     pub(crate) demo_menu: Option<String>,
+    /// `RENO_ACTIVITY_OPEN=plan,tasks,stop:dev`: with `--fake` and `RENO_OPEN=run_plan1`, open the
+    /// plan and background trays and press Stop on a task (screenshots, reviews).
+    pub(crate) activity_open: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: open Settings › Add from registry and put the registry
     /// group in a state once it has loaded (screenshots, reviews). Steps on an added agent's line
@@ -180,6 +183,14 @@ impl Options {
                 Some(Surface::Commit(other["commit:".len()..].to_owned()))
             }
             Some("terminal") => Some(Surface::Terminal(0)),
+            // A subagent's tab (`agent:researcher`), with the fake's run activity.
+            Some(other) if other.starts_with("agent:") && other.len() > "agent:".len() => {
+                RunId::from_suffix(&reno_client::activity::agent_run_suffix(
+                    &other["agent:".len()..],
+                ))
+                .ok()
+                .map(Surface::SideChat)
+            }
             Some(other) if other.starts_with("file:") && other.len() > "file:".len() => {
                 Some(Surface::File(other["file:".len()..].to_owned()))
             }
@@ -193,6 +204,7 @@ impl Options {
         options.follow_up = env("RENO_FOLLOW_UP").filter(|v| !v.is_empty());
         options.open_folds = env("RENO_OPEN_FOLDS").is_some_and(|v| v == "1");
         options.demo_menu = env("RENO_DEMO_MENU").filter(|v| !v.is_empty());
+        options.activity_open = env("RENO_ACTIVITY_OPEN").filter(|v| !v.is_empty());
         options.registry_demo = env("RENO_REGISTRY_DEMO").filter(|v| !v.is_empty());
         options.data_dir = env("RENO_DATA_DIR")
             .filter(|v| !v.is_empty())
@@ -241,6 +253,8 @@ pub(crate) struct Start {
     /// `RENO_DEMO_MENU=plus|permission|effort|approval-more`: with `RENO_OPEN=run_<id>`, open that
     /// composer menu (screenshots, reviews).
     pub(crate) demo_menu: Option<String>,
+    /// `RENO_ACTIVITY_OPEN`: trays to open and a task to stop once the run is open.
+    pub(crate) activity_open: Option<String>,
     /// `RENO_REGISTRY_DEMO=open:auggie,filter:cant-run,search:go,signin:terminal,add:goose,
     /// remove:acp.cline,offline,own`: with `RENO_OPEN=executors`, put the registry group in a
     /// state once it has loaded (screenshots, reviews).
@@ -303,6 +317,7 @@ pub(crate) fn run(options: Options) {
             follow_up: options.follow_up.clone(),
             open_folds: options.open_folds,
             demo_menu: options.demo_menu.clone(),
+            activity_open: options.activity_open.clone(),
             registry_demo: options.registry_demo.clone(),
             open_settings: options.open_settings,
         };
@@ -352,6 +367,7 @@ pub(crate) fn open_window(
         follow_up,
         open_folds,
         demo_menu,
+        activity_open,
         registry_demo,
         open_settings,
     } = start;
@@ -478,6 +494,17 @@ pub(crate) fn open_window(
                             root.update(cx, |root, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {
                                     screen.update(cx, |screen, cx| screen.open_all_folds(cx));
+                                }
+                            })
+                            .ok();
+                        }
+                        if let Some(hook) = activity_open {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(1200))
+                                .await;
+                            root.update_in(cx, |root, _, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |s, cx| s.open_activity_demo(&hook, cx));
                                 }
                             })
                             .ok();
@@ -1635,6 +1662,7 @@ mod tests {
                 follow_up: None,
                 open_folds: false,
                 demo_menu: None,
+                activity_open: None,
                 registry_demo: None,
                 open_settings: None,
                 data_dir: None,

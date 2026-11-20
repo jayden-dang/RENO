@@ -35,6 +35,7 @@ use crate::vm::convo;
 use crate::vm::executors as executor_facts;
 use crate::vm::routing::{self, RoutingView};
 
+mod activity;
 mod changes;
 mod dock;
 mod files;
@@ -157,6 +158,13 @@ pub(crate) struct RunScreen {
     menu_open: Option<ApprovalId>,
     /// "Deny with a note…" was chosen: the approval, its one-line field and the field's events.
     note: Option<(ApprovalId, Entity<Composer>, Subscription)>,
+    /// The plan tray and the background tray over the composer are open, and the background task
+    /// whose full output the Session tab shows.
+    activity_plan_open: bool,
+    activity_tasks_open: bool,
+    activity_output: Option<String>,
+    /// How many agents the transcript's chips were measured for (a chip changes a row's height).
+    activity_chips: usize,
     _store: Subscription,
 }
 
@@ -236,6 +244,10 @@ impl RunScreen {
             pending_focus_panel: false,
             menu_open: None,
             note: None,
+            activity_plan_open: false,
+            activity_tasks_open: false,
+            activity_output: None,
+            activity_chips: 0,
         };
         screen.refresh(cx);
         screen
@@ -358,10 +370,26 @@ impl RunScreen {
             .cloned()
             .collect();
         self.rebuild_rows(routing, &pending, cx);
+        self.measure_activity_chips(cx);
         self.keep_menu(&pending);
         self.resolve_panel_key(cx);
         self.follow_changes(cx);
         self.follow_thread(cx);
+    }
+
+    /// Chips under the transcript's agent text change those rows' height: measure them again when
+    /// the run's agents appear or go.
+    fn measure_activity_chips(&mut self, cx: &gpui::App) {
+        let chips = self
+            .store
+            .read(cx)
+            .run_activity(&self.run)
+            .map_or(0, |a| a.agents.len());
+        if chips != self.activity_chips {
+            self.activity_chips = chips;
+            let rows = self.rows.len();
+            self.list.splice(0..rows, rows);
+        }
     }
 
     /// The runs the transcript shows, oldest first, ending with this screen's run.

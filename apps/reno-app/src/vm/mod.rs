@@ -5,6 +5,7 @@
 //! only draw what these return.
 
 pub(crate) mod accounts;
+pub(crate) mod activity;
 pub(crate) mod approval_panel;
 pub(crate) mod capabilities;
 pub(crate) mod changes;
