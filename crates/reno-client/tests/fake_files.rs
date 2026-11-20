@@ -45,6 +45,7 @@ async fn the_fake_lists_reads_and_pages_its_tree() {
             "docs",
             "many",
             "src",
+            ".env.example",
             "Cargo.toml",
             "notes.txt",
             "README.md"
