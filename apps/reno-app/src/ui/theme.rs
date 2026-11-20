@@ -131,6 +131,36 @@ pub(crate) const fn palette_for(
     let base = Palette::for_appearance(appearance);
     let mut p = match (theme, appearance) {
         (ThemeName::Reno, _) => base,
+        // Vercel's Geist tokens (vercel.com/geist/colors): its greys, and its amber, red and
+        // green for the semantic roles.
+        (ThemeName::Vercel, Appearance::Dark) => Palette {
+            shell: 0x000000,
+            canvas: 0x0a0a0a,
+            card: 0x0a0a0a,
+            surface: 0x1a1a1a,
+            raised: 0x292929,
+            text: 0xededed,
+            muted: 0xa1a1a1,
+            faint: 0x7d7d7d,
+            warning: 0xff9300,
+            danger: 0xff565f,
+            success: 0x00ca50,
+            ..base
+        },
+        (ThemeName::Vercel, Appearance::Light) => Palette {
+            shell: 0xfafafa,
+            canvas: 0xffffff,
+            card: 0xffffff,
+            surface: 0xffffff,
+            raised: 0xebebeb,
+            text: 0x171717,
+            muted: 0x4c4c4c,
+            faint: 0x7d7d7d,
+            warning: 0xaa4d00,
+            danger: 0xd8001b,
+            success: 0x107d32,
+            ..base
+        },
         (ThemeName::Slate, Appearance::Dark) => Palette {
             shell: 0x0a0d14,
             canvas: 0x0e121b,
@@ -157,8 +187,9 @@ pub(crate) const fn palette_for(
     p.accent = match (accent, appearance) {
         (AccentName::Teal, Appearance::Dark) => 0x2dd4bf,
         (AccentName::Teal, Appearance::Light) => 0x0f766e,
-        (AccentName::Blue, Appearance::Dark) => 0x60a5fa,
-        (AccentName::Blue, Appearance::Light) => 0x1d4ed8,
+        // Geist blue-900 (dark) and blue-700 (light).
+        (AccentName::Blue, Appearance::Dark) => 0x47a8ff,
+        (AccentName::Blue, Appearance::Light) => 0x006bff,
         (AccentName::Violet, Appearance::Dark) => 0xa78bfa,
         (AccentName::Violet, Appearance::Light) => 0x6d28d9,
     };
@@ -394,16 +425,48 @@ mod tests {
         assert_eq!(d.danger, reno_dark().danger, "semantic colours are shared");
         assert_eq!(d.ansi, reno_dark().ansi, "so is the terminal's set");
         let accent = |a, t| palette_for(ThemeName::Reno, a, t).accent;
-        assert_eq!(accent(Appearance::Dark, AccentName::Blue), 0x60a5fa);
-        assert_eq!(accent(Appearance::Light, AccentName::Blue), 0x1d4ed8);
+        assert_eq!(accent(Appearance::Dark, AccentName::Blue), 0x47a8ff);
+        assert_eq!(accent(Appearance::Light, AccentName::Blue), 0x006bff);
         assert_eq!(accent(Appearance::Dark, AccentName::Violet), 0xa78bfa);
         assert_eq!(accent(Appearance::Light, AccentName::Violet), 0x6d28d9);
     }
 
     #[test]
+    fn vercel_is_geists_palette() {
+        // Vercel's Geist tokens (vercel.com/geist/colors, read 2026-11-20): background-200 and
+        // -100, gray-100, -300 (light -200), -1000, -900, -800, blue, amber, red and green.
+        let d = palette_for(ThemeName::Vercel, Appearance::Dark, AccentName::Blue);
+        assert_eq!(
+            [
+                d.shell, d.canvas, d.card, d.surface, d.raised, d.text, d.muted, d.faint
+            ],
+            [
+                0x000000, 0x0a0a0a, 0x0a0a0a, 0x1a1a1a, 0x292929, 0xededed, 0xa1a1a1, 0x7d7d7d
+            ]
+        );
+        assert_eq!(
+            [d.accent, d.warning, d.danger, d.success],
+            [0x47a8ff, 0xff9300, 0xff565f, 0x00ca50]
+        );
+        let l = palette_for(ThemeName::Vercel, Appearance::Light, AccentName::Blue);
+        assert_eq!(
+            [
+                l.shell, l.canvas, l.card, l.surface, l.raised, l.text, l.muted, l.faint
+            ],
+            [
+                0xfafafa, 0xffffff, 0xffffff, 0xffffff, 0xebebeb, 0x171717, 0x4c4c4c, 0x7d7d7d
+            ]
+        );
+        assert_eq!(
+            [l.accent, l.warning, l.danger, l.success],
+            [0x006bff, 0xaa4d00, 0xd8001b, 0x107d32]
+        );
+    }
+
+    #[test]
     fn every_theme_and_accent_reads_in_both_appearances() {
         use crate::vm::terminal::contrast_ratio;
-        for name in [ThemeName::Reno, ThemeName::Slate] {
+        for name in [ThemeName::Vercel, ThemeName::Reno, ThemeName::Slate] {
             for a in [Appearance::Dark, Appearance::Light] {
                 for accent in [AccentName::Teal, AccentName::Blue, AccentName::Violet] {
                     let t = Theme::from_palette(a, &palette_for(name, a, accent));

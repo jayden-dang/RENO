@@ -105,7 +105,10 @@ fn appearance_saves_each_choice(cx: &mut TestAppContext) {
     vcx.update(|_, cx| motion::init(ReduceMotion::System, false, cx));
     for id in [
         "mode-system",
+        "theme-vercel",
         "theme-reno",
+        "theme-slate",
+        "accent-blue",
         "accent-teal",
         "reduce-motion-system",
     ] {

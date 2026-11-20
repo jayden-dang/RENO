@@ -123,6 +123,31 @@ reduce; Accounts — account, usage, plan, limit, session, week, signed in.
 
 ## Themes and accents (shared content)
 
+**Default (owner, 2026-11-20): the Vercel theme with the Blue accent.** "I want to use the
+color scheme of the vercel - I think is match with me (for default theme)". Its values are
+Vercel's Geist tokens, read from vercel.com/geist/colors on 2026-11-20:
+
+| Token | Vercel dark | Vercel light | Geist token |
+|---|---|---|---|
+| shell | `#000000` | `#fafafa` | background-200 |
+| canvas | `#0a0a0a` | `#ffffff` | background-100 |
+| card | `#0a0a0a` | `#ffffff` | background-100 |
+| surface | `#1a1a1a` | `#ffffff` | gray-100 / background-100 |
+| raised | `#292929` | `#ebebeb` | gray-300 / gray-200 |
+| text | `#ededed` | `#171717` | gray-1000 |
+| muted | `#a1a1a1` | `#4c4c4c` | gray-900 |
+| faint | `#7d7d7d` | `#7d7d7d` | gray-800 |
+| warning | `#ff9300` | `#aa4d00` | amber-900 |
+| danger | `#ff565f` | `#d8001b` | red-900 |
+| success | `#00ca50` | `#107d32` | green-900 |
+
+Unlike Reno and Slate, the Vercel theme brings Geist's own semantic colours. The Blue accent is
+Geist's blue in every theme: `#47a8ff` dark (blue-900), `#006bff` light (blue-700). The theme
+choice lists Vercel, Reno, Slate; the accents list Blue, Teal, Violet. A saved choice is kept:
+a file that says `"theme": "reno"` still shows Reno.
+
+The Reno and Slate tables below are unchanged.
+
 | Token | Reno dark | Reno light | Slate dark | Slate light |
 |---|---|---|---|---|
 | shell | `#080a0c` | `#e6edef` | `#0a0d14` | `#e2e8f0` |
@@ -138,8 +163,8 @@ Semantic colours and the terminal's ANSI set are the same in both themes.
 
 | Accent | Dark | Light |
 |---|---|---|
-| Teal (default) | `#2dd4bf` | `#0f766e` |
-| Blue | `#60a5fa` | `#1d4ed8` |
+| Blue (default) | `#47a8ff` | `#006bff` |
+| Teal | `#2dd4bf` | `#0f766e` |
 | Violet | `#a78bfa` | `#6d28d9` |
 
 Contrast, checked on every theme and mode:
@@ -174,6 +199,11 @@ its title.
    - The composer switches are real.
    - Every default is today's behaviour.
    - Accounts shows usage only.
+
+## Amendments after the build
+
+- 2026-11-20 (owner): the Vercel theme (Geist tokens) is the default, with Geist blue as the
+  default accent. See "Themes and accents".
 
 ## Built differently from the lock (2026-11-19)
 

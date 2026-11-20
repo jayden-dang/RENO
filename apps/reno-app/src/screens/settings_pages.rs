@@ -182,6 +182,7 @@ impl SettingsScreen {
         kit::segmented(theme)
             .children(
                 [
+                    (ThemeName::Vercel, "vercel", "Vercel"),
                     (ThemeName::Reno, "reno", "Reno"),
                     (ThemeName::Slate, "slate", "Slate"),
                 ]
@@ -217,8 +218,8 @@ impl SettingsScreen {
             .gap(px(10.0))
             .children(
                 [
-                    (AccentName::Teal, "teal", "Teal accent"),
                     (AccentName::Blue, "blue", "Blue accent"),
+                    (AccentName::Teal, "teal", "Teal accent"),
                     (AccentName::Violet, "violet", "Violet accent"),
                 ]
                 .map(|(name, key, label)| {

@@ -22,7 +22,9 @@ pub(crate) enum Mode {
 /// A curated theme (its neutrals).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ThemeName {
+    /// Vercel's Geist palette: neutral greys on black or white. The default.
     #[default]
+    Vercel,
     Reno,
     Slate,
 }
@@ -30,8 +32,8 @@ pub(crate) enum ThemeName {
 /// The accent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum AccentName {
-    #[default]
     Teal,
+    #[default]
     Blue,
     Violet,
 }
@@ -64,7 +66,11 @@ impl Word for Mode {
 }
 
 impl Word for ThemeName {
-    const ALL: &'static [(Self, &'static str)] = &[(Self::Reno, "reno"), (Self::Slate, "slate")];
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::Vercel, "vercel"),
+        (Self::Reno, "reno"),
+        (Self::Slate, "slate"),
+    ];
 }
 
 impl Word for AccentName {
@@ -151,8 +157,8 @@ impl Default for Prefs {
             finished: true,
             dock_badge: true,
             mode: Mode::System,
-            theme: ThemeName::Reno,
-            accent: AccentName::Teal,
+            theme: ThemeName::Vercel,
+            accent: AccentName::Blue,
             reduce_motion: Motion::System,
             send_with: SendWith::Enter,
             escape_stops: false,
@@ -395,8 +401,8 @@ mod tests {
     fn the_new_choices_default_to_todays_look_and_behaviour() {
         let p = Prefs::default();
         assert_eq!(p.mode, Mode::System);
-        assert_eq!(p.theme, ThemeName::Reno);
-        assert_eq!(p.accent, AccentName::Teal);
+        assert_eq!(p.theme, ThemeName::Vercel, "the default theme is Vercel's");
+        assert_eq!(p.accent, AccentName::Blue, "with its blue");
         assert_eq!(p.reduce_motion, Motion::System);
         assert_eq!(p.send_with, SendWith::Enter);
         assert!(!p.escape_stops, "Escape does not stop a run today");
@@ -436,13 +442,19 @@ mod tests {
     #[test]
     fn an_unknown_value_is_the_default_and_kept_out_of_the_rest() {
         let p = Prefs::from_json(br#"{"theme": "graphite", "accent": 3, "mode": "light"}"#);
-        assert_eq!(p.theme, ThemeName::Reno);
-        assert_eq!(p.accent, AccentName::Teal);
+        assert_eq!(p.theme, ThemeName::Vercel);
+        assert_eq!(p.accent, AccentName::Blue);
         assert_eq!(p.mode, Mode::Light);
         let json: Value = serde_json::from_slice(&p.to_json()).unwrap();
         assert_eq!(
-            json["theme"], "reno",
+            json["theme"], "vercel",
             "a known key is rewritten, not carried as unknown"
+        );
+        let saved = Prefs::from_json(br#"{"theme": "reno", "accent": "teal"}"#);
+        assert_eq!(
+            (saved.theme, saved.accent),
+            (ThemeName::Reno, AccentName::Teal),
+            "a saved choice stays"
         );
     }
 
