@@ -28,6 +28,7 @@ pub mod paths;
 pub mod places;
 pub mod queue;
 pub mod state;
+pub mod thread_desk;
 
 #[cfg(feature = "fake")]
 pub mod fake;

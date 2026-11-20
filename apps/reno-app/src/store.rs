@@ -38,6 +38,7 @@ use reno_client::fake::{FakeConfig, FakeDaemon};
 use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::places::{Place, PlaceDesk};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
+use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, State, Transcript, Update, Updates,
@@ -686,6 +687,60 @@ impl Store {
         self.place_desk().and_then(|desk| desk.run_place(run))
     }
 
+    /// The ONE seam to the thread-desk contract (ROAD-32); `None` without `thread_edit`.
+    fn thread_desk(&self) -> Option<&dyn ThreadDesk> {
+        if !self.capabilities.thread_edit {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn ThreadDesk)
+    }
+
+    /// Titles, pins and the archive; `None` when this connection cannot change them.
+    pub(crate) fn thread_marks(&self) -> Option<ThreadMarks> {
+        self.thread_desk().map(ThreadDesk::marks)
+    }
+
+    /// Runs one thread-desk change and redraws, whatever became of it.
+    fn thread_change<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&dyn ThreadDesk) -> Result<T, ThreadEditError>,
+    ) -> Result<T, ThreadEditError> {
+        let result = self
+            .thread_desk()
+            .ok_or(ThreadEditError::UnknownThread)
+            .and_then(change);
+        cx.notify();
+        result
+    }
+
+    pub(crate) fn thread_rename(
+        &mut self,
+        thread: &ThreadId,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, ThreadEditError> {
+        self.thread_change(cx, |desk| desk.rename(thread, title))
+    }
+
+    pub(crate) fn thread_set_pinned(
+        &mut self,
+        thread: &ThreadId,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ThreadEditError> {
+        self.thread_change(cx, |desk| desk.set_pinned(thread, pinned))
+    }
+
+    pub(crate) fn thread_set_archived(
+        &mut self,
+        thread: &ThreadId,
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ThreadEditError> {
+        self.thread_change(cx, |desk| desk.set_archived(thread, archived))
+    }
+
     pub(crate) fn is_deciding(&self, id: &ApprovalId) -> bool {
         self.deciding.contains(id)
     }
@@ -854,6 +909,8 @@ impl Store {
     }
 
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
+    /// The `--fake` demo world, with the sidebar's demo threads (pinned, archived, a project with
+    /// fourteen).
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
@@ -861,6 +918,7 @@ impl Store {
                 question_run: true,
                 question_demo_runs: true,
                 activity_runs: true,
+                sidebar_threads: true,
                 ..FakeConfig::default()
             },
             cx,

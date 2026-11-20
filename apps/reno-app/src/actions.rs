@@ -22,9 +22,16 @@ actions!(
         NextPanelTab,
         PrevPanelTab,
         // Hands the keyboard to the approval panel waiting in the run.
-        JumpToPanel
+        JumpToPanel,
+        // The sidebar's thread menu: Escape closes what is open; the others act on the thread.
+        DismissSidebar,
+        PinThread,
+        ArchiveThread
     ]
 );
+
+/// The key context the root view carries while something of the sidebar is open.
+pub(crate) const SIDEBAR_OPEN: &str = "SidebarOpen";
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -41,5 +48,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-t", ReopenPanelTab, None),
         KeyBinding::new("ctrl-tab", NextPanelTab, None),
         KeyBinding::new("ctrl-shift-tab", PrevPanelTab, None),
+        // Only while a menu, confirm or rename of the sidebar is open (the root view says so).
+        KeyBinding::new("escape", DismissSidebar, Some(SIDEBAR_OPEN)),
+        KeyBinding::new("cmd-shift-p", PinThread, None),
+        KeyBinding::new("cmd-shift-a", ArchiveThread, None),
     ]);
 }

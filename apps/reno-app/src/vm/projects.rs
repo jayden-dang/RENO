@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use reno_client::thread_desk::ThreadMarks;
 use reno_proto::{ExecutorId, RunId, RunStatus, RunSummary, ThreadId};
 
 use crate::summary::{self, Problem};
@@ -168,6 +169,8 @@ pub(crate) struct ThreadRow {
     pub(crate) badge: Option<Badge>,
     /// "2m", "1h", "1d": since the latest run started.
     pub(crate) age: String,
+    /// The folder's name: the project the thread is in.
+    pub(crate) project: String,
 }
 
 /// One project folder.
@@ -179,6 +182,10 @@ pub(crate) struct Folder {
     /// Threads waiting for you inside, listed even while the folder is closed.
     pub(crate) waiting: usize,
     pub(crate) rows: Vec<ThreadRow>,
+    /// Threads the folder has but does not list: "Show 6 more".
+    pub(crate) hidden: usize,
+    /// Every thread is listed although there are more than a page: "Show less".
+    pub(crate) expanded: bool,
 }
 
 /// What the sidebar needs besides the runs.
@@ -191,6 +198,24 @@ pub(crate) struct Inputs<'a> {
     pub(crate) now_ms: u64,
     /// The thread a run belongs to (always `None` on a daemon without threads).
     pub(crate) thread_of: &'a dyn Fn(&RunId) -> Option<ThreadId>,
+    /// What the sidebar's thread controls change about the list; `None` lists as it always did.
+    pub(crate) edit: Option<&'a Edit<'a>>,
+}
+
+/// What the thread controls (pin, archive, rename, "Show more") change about the list.
+pub(crate) struct Edit<'a> {
+    pub(crate) marks: &'a ThreadMarks,
+    /// Folders listed whole, not a page.
+    pub(crate) expanded: &'a HashSet<FolderKey>,
+}
+
+/// The sidebar's list: the folders, and the threads that are listed apart from them.
+pub(crate) struct Listing {
+    pub(crate) folders: Vec<Folder>,
+    /// Pinned threads, in pin order: the "Pinned" section. They leave their folders.
+    pub(crate) pinned: Vec<ThreadRow>,
+    /// Archived threads, the most recently archived first, from every project.
+    pub(crate) archived: Vec<ThreadRow>,
 }
 
 /// A thread's runs the app knows, oldest first. A run with no known thread is one of its own.
@@ -242,6 +267,15 @@ pub(crate) fn folders(
     root_of: impl Fn(&Path) -> Option<PathBuf>,
     inputs: &Inputs<'_>,
 ) -> Vec<Folder> {
+    listing(runs, root_of, inputs).folders
+}
+
+/// [`folders`], and with [`Inputs::edit`] the pinned and archived threads taken out of them.
+pub(crate) fn listing(
+    runs: &[&RunSummary],
+    root_of: impl Fn(&Path) -> Option<PathBuf>,
+    inputs: &Inputs<'_>,
+) -> Listing {
     let mut groups: Vec<(FolderKey, Vec<Entry<'_>>)> = Vec::new();
     for entry in entries(runs, inputs) {
         let key = entry
@@ -267,51 +301,92 @@ pub(crate) fn folders(
             .then_with(|| latest(lb).cmp(&latest(la)))
             .then_with(|| ka.cmp(kb))
     });
-    groups
-        .into_iter()
-        .map(|(key, mut list)| {
-            list.sort_by(|a, b| {
-                is_waiting(b.latest())
-                    .cmp(&is_waiting(a.latest()))
-                    .then_with(|| b.latest().created_at_ms.cmp(&a.latest().created_at_ms))
-                    .then_with(|| a.latest().run_id.cmp(&b.latest().run_id))
-            });
-            let open = key.open_by_default() != inputs.toggled.contains(&key);
-            let waiting = list.iter().filter(|e| is_waiting(e.latest())).count();
-            let shown = if open {
-                waiting.max(PER_FOLDER.min(list.len()))
-            } else {
-                waiting
-            };
-            let rows = list
-                .iter()
-                .take(shown)
-                .map(|entry| {
-                    let latest = entry.latest();
-                    let looking = inputs
-                        .looking_at
-                        .is_some_and(|l| entry.runs.iter().any(|r| &r.run_id == l));
-                    ThreadRow {
-                        thread: entry.thread.clone(),
-                        run: latest.run_id.clone(),
-                        members: entry.runs.iter().map(|r| r.run_id.clone()).collect(),
-                        title: entry.first().title.clone(),
-                        executor: latest.executor.clone(),
-                        dot: dot(latest, inputs.seen, looking),
-                        badge: badge(latest),
-                        age: summary::age_label(inputs.now_ms.saturating_sub(latest.created_at_ms)),
-                    }
-                })
-                .collect();
-            Folder {
-                name: key.name(),
-                open,
-                waiting,
-                rows,
-                key,
+    let index_in = |list: &[ThreadId], entry: &Entry<'_>| {
+        entry
+            .thread
+            .as_ref()
+            .and_then(|t| list.iter().position(|p| p == t))
+    };
+    let mut out = Listing {
+        folders: Vec::new(),
+        pinned: Vec::new(),
+        archived: Vec::new(),
+    };
+    // (rank in the pin or archive order, the row)
+    let mut pinned_apart: Vec<(usize, ThreadRow)> = Vec::new();
+    let mut archived: Vec<(usize, ThreadRow)> = Vec::new();
+    for (key, mut list) in groups {
+        let name = key.name();
+        let row_of = |entry: &Entry<'_>| {
+            let latest = entry.latest();
+            let looking = inputs
+                .looking_at
+                .is_some_and(|l| entry.runs.iter().any(|r| &r.run_id == l));
+            let marks = inputs.edit.map(|e| e.marks);
+            let title = entry
+                .thread
+                .as_ref()
+                .and_then(|t| marks.and_then(|m| m.titles.get(t)))
+                .unwrap_or(&entry.first().title);
+            ThreadRow {
+                thread: entry.thread.clone(),
+                run: latest.run_id.clone(),
+                members: entry.runs.iter().map(|r| r.run_id.clone()).collect(),
+                title: title.clone(),
+                executor: latest.executor.clone(),
+                dot: dot(latest, inputs.seen, looking),
+                badge: badge(latest),
+                age: summary::age_label(inputs.now_ms.saturating_sub(latest.created_at_ms)),
+                project: name.clone(),
             }
-        })
-        .collect()
+        };
+        if let Some(edit) = inputs.edit {
+            list.retain(|entry| {
+                if let Some(at) = index_in(&edit.marks.archived, entry) {
+                    archived.push((at, row_of(entry)));
+                    return false;
+                }
+                if let Some(at) = index_in(&edit.marks.pinned, entry) {
+                    pinned_apart.push((at, row_of(entry)));
+                    return false;
+                }
+                true
+            });
+        }
+        list.sort_by(|a, b| {
+            is_waiting(b.latest())
+                .cmp(&is_waiting(a.latest()))
+                .then_with(|| b.latest().created_at_ms.cmp(&a.latest().created_at_ms))
+                .then_with(|| a.latest().run_id.cmp(&b.latest().run_id))
+        });
+        let open = key.open_by_default() != inputs.toggled.contains(&key);
+        let waiting = list.iter().filter(|e| is_waiting(e.latest())).count();
+        let expanded = open
+            && list.len() > PER_FOLDER
+            && inputs.edit.is_some_and(|e| e.expanded.contains(&key));
+        let shown = if !open {
+            waiting
+        } else if expanded {
+            list.len()
+        } else {
+            waiting.max(PER_FOLDER.min(list.len()))
+        };
+        let rows = list.iter().take(shown).map(row_of).collect();
+        out.folders.push(Folder {
+            name: name.clone(),
+            open,
+            waiting,
+            rows,
+            hidden: if open { list.len() - shown } else { 0 },
+            expanded,
+            key,
+        });
+    }
+    pinned_apart.sort_by_key(|(at, _)| *at);
+    archived.sort_by_key(|(at, _)| *at);
+    out.pinned = pinned_apart.into_iter().map(|(_, row)| row).collect();
+    out.archived = archived.into_iter().map(|(_, row)| row).collect();
+    out
 }
 
 /// The project a run belongs to (`None`: a run not known yet, which shows as "No project").
@@ -377,6 +452,7 @@ mod tests {
             looking_at: None,
             now_ms: 1_000_000,
             thread_of: &|_| None,
+            edit: None,
         }
     }
 
@@ -614,5 +690,130 @@ mod tests {
         )[0];
         assert_eq!(f.rows.len(), 1);
         assert_eq!(f.rows[0].badge, None);
+    }
+
+    /// A thread named `t<n>` for each run `r<n>`.
+    fn named<'a>(table: &'a [(String, String)]) -> impl Fn(&RunId) -> Option<ThreadId> + 'a {
+        move |run: &RunId| {
+            table
+                .iter()
+                .find(|(r, _)| run.as_str().ends_with(r.as_str()))
+                .map(|(_, t)| ThreadId::from_suffix(t).unwrap())
+        }
+    }
+
+    fn many(n: u64) -> (Vec<RunSummary>, Vec<(String, String)>) {
+        let runs = (0..n)
+            .map(|i| run(&format!("r{i}"), RunStatus::Succeeded, Some("/w/reno"), i))
+            .collect();
+        let table = (0..n).map(|i| (format!("r{i}"), format!("t{i}"))).collect();
+        (runs, table)
+    }
+
+    fn marks(pinned: &[&str], archived: &[&str]) -> ThreadMarks {
+        let ids = |v: &[&str]| {
+            v.iter()
+                .map(|t| ThreadId::from_suffix(t).unwrap())
+                .collect()
+        };
+        ThreadMarks {
+            pinned: ids(pinned),
+            archived: ids(archived),
+            ..ThreadMarks::default()
+        }
+    }
+
+    fn list(
+        runs: &[RunSummary],
+        table: &[(String, String)],
+        marks: &ThreadMarks,
+        expanded: &HashSet<FolderKey>,
+    ) -> Listing {
+        let refs: Vec<&RunSummary> = runs.iter().collect();
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let of = named(table);
+        let edit = Edit { marks, expanded };
+        listing(
+            &refs,
+            roots,
+            &Inputs {
+                thread_of: &of,
+                edit: Some(&edit),
+                ..inputs(&seen, &toggled)
+            },
+        )
+    }
+
+    #[test]
+    fn a_long_project_says_how_many_it_hides_and_lists_them_all_when_asked() {
+        let (runs, table) = many(14);
+        let none = HashSet::new();
+        let l = list(&runs, &table, &ThreadMarks::default(), &none);
+        let f = &l.folders[0];
+        assert_eq!((f.rows.len(), f.hidden, f.expanded), (8, 6, false));
+        let open: HashSet<_> = [f.key.clone()].into();
+        let l = list(&runs, &table, &ThreadMarks::default(), &open);
+        let f = &l.folders[0];
+        assert_eq!((f.rows.len(), f.hidden, f.expanded), (14, 0, true));
+        // A page or less has nothing to show or hide.
+        let (few, table) = many(8);
+        let l = list(&few, &table, &ThreadMarks::default(), &open);
+        assert_eq!((l.folders[0].hidden, l.folders[0].expanded), (0, false));
+        // Without the controls a folder lists a page, as ever.
+        let refs: Vec<&RunSummary> = runs.iter().collect();
+        let seen = Seen::new(0);
+        let toggled = HashSet::new();
+        let of = named(&table);
+        let plain = folders(
+            &refs,
+            roots,
+            &Inputs {
+                thread_of: &of,
+                ..inputs(&seen, &toggled)
+            },
+        );
+        assert_eq!(plain[0].rows.len(), 8);
+    }
+
+    #[test]
+    fn archived_threads_leave_their_folder_and_are_listed_apart_most_recent_first() {
+        let (runs, table) = many(14);
+        let m = marks(&[], &["t3", "t1"]);
+        let l = list(&runs, &table, &m, &HashSet::new());
+        let f = &l.folders[0];
+        assert!(
+            f.rows
+                .iter()
+                .all(|r| r.run.as_str() != "run_r3" && r.run.as_str() != "run_r1")
+        );
+        assert_eq!(f.hidden, 12 - 8, "the archive is not counted as hidden");
+        let archived: Vec<_> = l.archived.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(archived, ["run_r3", "run_r1"]);
+        assert_eq!(l.archived[0].project, "reno");
+    }
+
+    #[test]
+    fn pinned_threads_stand_apart_from_their_folder_in_pin_order() {
+        let (runs, table) = many(14);
+        let m = marks(&["t2", "t9"], &[]);
+        let l = list(&runs, &table, &m, &HashSet::new());
+        let pins: Vec<_> = l.pinned.iter().map(|r| r.run.as_str()).collect();
+        assert_eq!(pins, ["run_r2", "run_r9"]);
+        assert!(l.folders[0].rows.iter().all(|r| r.run.as_str() != "run_r2"));
+        assert_eq!(l.folders[0].hidden, 12 - 8);
+    }
+
+    #[test]
+    fn a_renamed_thread_shows_its_own_title() {
+        let (runs, table) = many(2);
+        let mut m = ThreadMarks::default();
+        m.titles.insert(
+            ThreadId::from_suffix("t1").unwrap(),
+            "ACP, properly".to_owned(),
+        );
+        let l = list(&runs, &table, &m, &HashSet::new());
+        let titles: Vec<_> = l.folders[0].rows.iter().map(|r| r.title.as_str()).collect();
+        assert!(titles.contains(&"ACP, properly") && titles.contains(&"title r0"));
     }
 }

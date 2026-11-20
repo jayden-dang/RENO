@@ -52,6 +52,7 @@ mod registry;
 mod script;
 mod signin;
 pub mod terminals;
+mod thread_desk;
 mod world;
 
 use std::collections::HashMap;
@@ -112,6 +113,11 @@ pub struct FakeConfig {
     /// plan, background tasks and subagents (see [`crate::activity`]). Off for tests that count
     /// runs. Default false.
     pub activity_runs: bool,
+    /// ROAD-32: add the sidebar's demo threads (an `atlas-api` with 14, four archived ones
+    /// in `reno` and `web-console`) and start with two threads pinned and four archived, in the
+    /// mocked thread desk (see [`crate::thread_desk`]). Off for tests that count runs. Default
+    /// false.
+    pub sidebar_threads: bool,
 }
 
 impl Default for FakeConfig {
@@ -128,6 +134,7 @@ impl Default for FakeConfig {
             question_run: false,
             question_demo_runs: false,
             activity_runs: false,
+            sidebar_threads: false,
         }
     }
 }
@@ -230,6 +237,8 @@ pub struct FakeDaemon {
     completions: completions::Sim,
     queue: queue::Sim,
     places: places::Sim,
+    /// The mocked thread desk (see [`crate::thread_desk`]).
+    thread_desk: thread_desk::Sim,
 }
 
 impl std::fmt::Debug for Shared {
@@ -272,6 +281,17 @@ impl FakeDaemon {
             let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
             seed.runs.extend(data::activity_runs().map_err(proto)?);
         }
+        if config.sidebar_threads && !config.empty {
+            let proto = |e: reno_proto::IdError| ClientError::Protocol(e.to_string());
+            seed.runs.extend(data::sidebar_runs().map_err(proto)?);
+            // So "Copy harness session ID" has an id to copy.
+            for run in &mut seed.runs {
+                let id = run.summary.run_id.as_str().trim_start_matches("run_");
+                run.summary
+                    .session
+                    .get_or_insert_with(|| reno_proto::SessionRef(format!("sess-{id}")));
+            }
+        }
         let config_activity = config.activity_runs && !config.empty;
         let mut world = World::from_seed(seed, &cancel);
         if config.registry_agents {
@@ -311,6 +331,7 @@ impl FakeDaemon {
             completions: completions::Sim::default(),
             queue: queue::seed(config_activity),
             places: places::Sim::default(),
+            thread_desk: thread_desk::seed(config.sidebar_threads),
         })
     }
 

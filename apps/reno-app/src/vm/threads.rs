@@ -99,6 +99,193 @@ pub(crate) fn keeps(
     ))
 }
 
+/// Why a live thread cannot be closed (the Session tab's line).
+pub(crate) const BUSY: &str = "A run is going in this thread. Stop it before closing.";
+
+/// What closing says before it is asked, always: what stays when the worktree holds unmerged
+/// work ([`keeps`]), else that nothing is lost. `info` is `None` while the thread is unknown.
+pub(crate) fn close_question(
+    info: &ThreadInfo,
+    changes: Option<&reno_proto::WorkspaceChanges>,
+) -> String {
+    if info.status == reno_proto::ThreadStatus::Active {
+        return BUSY.to_owned();
+    }
+    if info.worktree.is_none() || worktree_gone(info) {
+        return "This thread has no worktree: closing only ends it.".to_owned();
+    }
+    keeps(info, changes)
+        .unwrap_or_else(|| "Closing releases the worktree; nothing in it is unmerged.".to_owned())
+}
+
+// ---- the sidebar row menu (ROAD-32) ---------------------------------------------------------
+
+/// What one entry of a thread row's menu does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Item {
+    Rename,
+    Pin,
+    Unpin,
+    Archive,
+    /// Opens the Copy sub-list.
+    Copy,
+    CopyPath,
+    CopyThreadId,
+    CopySession,
+    /// Asks, then closes the thread (the real `thread.close`).
+    Close,
+}
+
+/// One line of the menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Entry {
+    Item {
+        item: Item,
+        label: &'static str,
+        /// A key that does the same on the thread, drawn right-aligned.
+        hint: Option<&'static str>,
+        enabled: bool,
+        /// Why it is off, said in words beside it.
+        note: Option<&'static str>,
+        danger: bool,
+    },
+    Divider,
+}
+
+/// What the menu needs to know about the thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Facts {
+    /// The thread is known to the daemon (a row with no thread has nothing to act on).
+    pub(crate) known: bool,
+    /// Renaming, pinning and archiving exist (`Capabilities::thread_edit`).
+    pub(crate) edit: bool,
+    pub(crate) pinned: bool,
+    pub(crate) has_path: bool,
+    pub(crate) has_session: bool,
+}
+
+fn item(item: Item, label: &'static str) -> Entry {
+    Entry::Item {
+        item,
+        label,
+        hint: None,
+        enabled: true,
+        note: None,
+        danger: false,
+    }
+}
+
+fn hinted(entry: Entry, key: &'static str) -> Entry {
+    match entry {
+        Entry::Item {
+            item,
+            label,
+            enabled,
+            note,
+            danger,
+            ..
+        } => Entry::Item {
+            item,
+            label,
+            hint: Some(key),
+            enabled,
+            note,
+            danger,
+        },
+        divider => divider,
+    }
+}
+
+/// The row menu: Rename, Pin or Unpin, Archive, Copy \u{25b8}, a divider, "Close thread\u{2026}".
+/// Without `edit` (the real daemon) Rename, Pin and Archive are not there at all.
+pub(crate) fn menu(facts: Facts) -> Vec<Entry> {
+    if !facts.known {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if facts.edit {
+        out.push(item(Item::Rename, "Rename"));
+        let (pin, label) = if facts.pinned {
+            (Item::Unpin, "Unpin")
+        } else {
+            (Item::Pin, "Pin")
+        };
+        out.push(hinted(item(pin, label), "\u{2318}\u{21e7}P"));
+        out.push(hinted(item(Item::Archive, "Archive"), "\u{2318}\u{21e7}A"));
+    }
+    out.push(item(Item::Copy, "Copy"));
+    out.push(Entry::Divider);
+    // It always asks first; a live run is said there.
+    out.push(Entry::Item {
+        item: Item::Close,
+        label: "Close thread\u{2026}",
+        hint: None,
+        enabled: true,
+        note: None,
+        danger: true,
+    });
+    out
+}
+
+/// The Copy sub-list: a value the thread does not have yet is off, with the reason.
+pub(crate) fn copy_entries(facts: Facts) -> Vec<Entry> {
+    let mut path = item(Item::CopyPath, "Path");
+    let mut session = item(Item::CopySession, "Harness session ID");
+    for (entry, has, why) in [
+        (&mut path, facts.has_path, "no worktree"),
+        (&mut session, facts.has_session, "not started"),
+    ] {
+        if let Entry::Item { enabled, note, .. } = entry {
+            *enabled = has;
+            *note = (!has).then_some(why);
+        }
+    }
+    vec![path, item(Item::CopyThreadId, "Thread ID"), session]
+}
+
+/// The count that says what the archive holds, in words.
+pub(crate) fn archived_label(count: usize) -> String {
+    format!("Archived \u{b7} {count}")
+}
+
+/// "Show 6 more", or "Show less" once the folder lists them all.
+pub(crate) fn more_label(hidden: usize, expanded: bool) -> Option<String> {
+    if expanded {
+        Some("Show less".to_owned())
+    } else {
+        (hidden > 0).then(|| format!("Show {hidden} more"))
+    }
+}
+
+/// What resting on a row says: the full title, project, branch, harness and status.
+pub(crate) fn hover_text(
+    row: &super::projects::ThreadRow,
+    info: Option<&ThreadInfo>,
+    title: &str,
+) -> String {
+    use super::projects::Dot;
+    let status = if info.is_some_and(|i| i.status == reno_proto::ThreadStatus::Closed) {
+        "Closed"
+    } else {
+        match row.dot {
+            Dot::Running => "Running",
+            Dot::Waiting => row.badge.map_or("Waiting", |b| b.label()),
+            Dot::New | Dot::Seen => "Finished",
+            Dot::Failed => "Failed",
+            Dot::Stopped => "Stopped",
+        }
+    };
+    [
+        title.to_owned(),
+        row.project.clone(),
+        info.and_then(|i| i.branch.clone())
+            .unwrap_or_else(|| "no worktree".to_owned()),
+        crate::summary::executor_name(row.executor.as_str()),
+        status.to_owned(),
+    ]
+    .join(" \u{b7} ")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -148,6 +335,47 @@ mod tests {
             keeps(&info, Some(&held(1, true)))
                 .unwrap()
                 .contains("1 commit not merged and uncommitted changes")
+        );
+    }
+
+    #[test]
+    fn the_close_question_always_has_something_to_say() {
+        let mut info = ThreadInfo {
+            thread_id: ThreadId::from_suffix("a").unwrap(),
+            status: reno_proto::ThreadStatus::Idle,
+            cwd: None,
+            project: None,
+            worktree: Some("/w/a".into()),
+            branch: Some("reno/thr_a".to_owned()),
+            base_sha: None,
+            workspace: Some(WorkspaceStatus::Kept),
+            runs: Vec::new(),
+            idle_expires_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let held = WorkspaceChanges {
+            commits: 3,
+            dirty: true,
+        };
+        assert!(
+            close_question(&info, Some(&held)).starts_with("reno/thr_a with 3 commits"),
+            "unmerged work: what stays"
+        );
+        let clean = WorkspaceChanges {
+            commits: 0,
+            dirty: false,
+        };
+        let nothing = "Closing releases the worktree; nothing in it is unmerged.";
+        assert_eq!(close_question(&info, Some(&clean)), nothing);
+        assert_eq!(close_question(&info, None), nothing, "not read yet");
+        info.worktree = None;
+        assert!(close_question(&info, Some(&held)).contains("no worktree"));
+        info.status = reno_proto::ThreadStatus::Active;
+        assert_eq!(
+            close_question(&info, Some(&held)),
+            BUSY,
+            "a live run is said first"
         );
     }
 }

@@ -29,6 +29,10 @@ pub(crate) struct Capabilities {
     /// Choosing where a new task runs: project, branch, checkout, clone (ROAD-31, mocked). Also
     /// the project-scoped `@` files of a new thread.
     pub(crate) place_chooser: bool,
+    /// Renaming, pinning and archiving a thread, and the archive's list (ROAD-32: the fake's
+    /// mocked thread desk). Closing, copying, hover details, "Show more" and resizing the
+    /// sidebar are real and need no capability.
+    pub(crate) thread_edit: bool,
 }
 
 /// One row of the "+" menu.
@@ -79,6 +83,7 @@ impl Capabilities {
         harness_commands: false,
         message_queue: false,
         place_chooser: false,
+        thread_edit: false,
     };
 
     /// The fake daemon: every not-yet control is on.
@@ -92,6 +97,7 @@ impl Capabilities {
         harness_commands: true,
         message_queue: true,
         place_chooser: true,
+        thread_edit: true,
     };
 
     /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
@@ -141,6 +147,7 @@ mod tests {
                 && !real.harness_commands
                 && !real.message_queue
                 && !real.place_chooser
+                && !real.thread_edit
         );
     }
 
@@ -172,5 +179,6 @@ mod tests {
         let fake = Capabilities::FAKE;
         assert!(fake.permission_modes && fake.allow_similar && fake.answer_questions);
         assert!(fake.harness_commands && fake.message_queue && fake.place_chooser);
+        assert!(fake.thread_edit);
     }
 }

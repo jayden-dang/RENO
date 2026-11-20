@@ -648,3 +648,77 @@ pub(super) fn activity_runs() -> Ids<Vec<SeedRun>> {
         },
     ])
 }
+
+/// One finished run of the sidebar demo: it worked, said so, and ended.
+fn finished_run(name: &str, title: &str, age: u64, ok: bool) -> Ids<SeedRun> {
+    let (status, stop) = if ok {
+        (RunStatus::Succeeded, StopReason::Completed)
+    } else {
+        (RunStatus::Failed, StopReason::Error)
+    };
+    Ok(SeedRun {
+        summary: summary(
+            name,
+            "claude-code",
+            status,
+            Some(stop),
+            title,
+            age,
+            age - 20 * MINUTE,
+        )?,
+        journal: vec![
+            started(),
+            text("I read the code around this and made the change."),
+            done(
+                stop,
+                ok.then_some("Done."),
+                (!ok).then_some("the test still fails"),
+            ),
+        ],
+    })
+}
+
+/// ROAD-32: the sidebar's demo threads. `atlas-api` gets eleven more (fourteen in all, none
+/// pinned or archived, so "Show 6 more" reads the same in every variant), and `reno` and
+/// `web-console` get two archived ones each (see [`crate::thread_desk`]).
+pub(super) fn sidebar_runs() -> Ids<Vec<SeedRun>> {
+    const DAY: u64 = 24 * HOUR;
+    let atlas = [
+        "builder \u{b7} atlas-api: add cursor pagination to /v1/events",
+        "scout \u{b7} atlas-api: audit the rate limiter",
+        "builder \u{b7} atlas-api: split the billing module",
+        "reviewer \u{b7} atlas-api: review PR 188, retry middleware",
+        "builder \u{b7} atlas-api: move config to typed settings",
+        "architect \u{b7} atlas-api: sketch the webhook fan-out",
+        "builder \u{b7} atlas-api: drop the legacy v0 routes",
+        "scout \u{b7} atlas-api: map the slow queries",
+        "builder \u{b7} atlas-api: add request ids to the logs",
+        "keeper \u{b7} atlas-api: refresh the lockfile",
+        "builder \u{b7} atlas-api: document the error codes",
+    ];
+    let archived = [
+        "builder \u{b7} reno: trim the CI cache keys",
+        "reviewer \u{b7} reno: review PR 201, sandbox flags",
+        "builder \u{b7} web-console: remove the unused banner",
+        "scout \u{b7} web-console: check the bundle size",
+    ];
+    let mut runs = Vec::new();
+    for (n, title) in atlas.iter().enumerate() {
+        let age = (n as u64 + 2) * DAY;
+        runs.push(finished_run(
+            &format!("atlas{:02}", n + 1),
+            title,
+            age,
+            n != 6,
+        )?);
+    }
+    for (n, title) in archived.iter().enumerate() {
+        runs.push(finished_run(
+            &format!("arch{}", n + 1),
+            title,
+            (n as u64 + 3) * DAY,
+            true,
+        )?);
+    }
+    Ok(runs)
+}

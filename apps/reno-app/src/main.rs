@@ -49,6 +49,8 @@ mod settings_pages_tests;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
+mod sidebar_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod thread_tests;

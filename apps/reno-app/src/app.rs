@@ -113,6 +113,10 @@ pub(crate) struct Options {
     pub(crate) composer_open: Option<String>,
     /// `RENO_COMPOSER_FAIL=commands` (with `--fake`): the harness's commands cannot be read.
     pub(crate) composer_fail: Option<String>,
+    /// `RENO_SIDEBAR_OPEN=menu|copy|rename|archived|more|archive|resize|close` (optionally
+    /// `close:atlas01`, a run's suffix; with `--fake`): act on the "fix the ACP v2 handshake"
+    /// thread's row once the screen is up (screenshots, reviews).
+    pub(crate) sidebar_open: Option<String>,
 }
 
 impl Options {
@@ -137,6 +141,19 @@ impl Options {
                 "--fake" => options.fake = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
+        }
+        if options.fake
+            && let Some(open) = env("RENO_SIDEBAR_OPEN").filter(|v| !v.is_empty())
+        {
+            let what = open.split(':').next().unwrap_or_default();
+            if ![
+                "menu", "copy", "rename", "archived", "more", "archive", "resize", "close",
+            ]
+            .contains(&what)
+            {
+                return Err(format!("RENO_SIDEBAR_OPEN: unknown hook {open}"));
+            }
+            options.sidebar_open = Some(open);
         }
         if options.fake {
             options.composer_type = env("RENO_COMPOSER_TYPE").filter(|v| !v.is_empty());
@@ -277,6 +294,8 @@ pub(crate) struct Start {
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: text to type and a picker to open.
     pub(crate) composer_type: Option<String>,
     pub(crate) composer_open: Option<String>,
+    /// The sidebar's start hook.
+    pub(crate) sidebar_open: Option<String>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -341,6 +360,7 @@ pub(crate) fn run(options: Options) {
             open_settings: options.open_settings,
             composer_type: options.composer_type.clone(),
             composer_open: options.composer_open.clone(),
+            sidebar_open: options.sidebar_open.clone(),
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -393,6 +413,7 @@ pub(crate) fn open_window(
         open_settings,
         composer_type,
         composer_open,
+        sidebar_open,
     } = start;
     cx.open_window(
         WindowOptions {
@@ -418,6 +439,19 @@ pub(crate) fn open_window(
                             .await;
                         root.update_in(cx, |root, window, cx| {
                             root.composer_hooks(composer_type, composer_open, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                if let Some(hook) = sidebar_open {
+                    // After the runs and their threads are read and the rows are painted.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(3000))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.sidebar_hook(&hook, window, cx);
                         })
                         .ok();
                     })
@@ -646,6 +680,8 @@ pub(crate) struct RootView {
     _run_events: Vec<Subscription>,
     /// The run a trigger just started; the Triggers screen keeps showing, the toast says so.
     pending_fired: Option<RunId>,
+    /// The sidebar's interaction state: menu, rename, confirm, "Show more", width.
+    sidebar: sidebar::State,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -791,6 +827,7 @@ impl RootView {
             executors,
             settings,
             pending_fired: None,
+            sidebar: sidebar::State::new(crate::prefs::current(cx).sidebar_width),
             toasts,
             screen: Screen::Home,
             before_settings: None,
@@ -926,6 +963,49 @@ impl RootView {
             _ => self.focus_handle.clone(),
         };
         window.focus(&handle, cx);
+    }
+
+    /// One click or key of the sidebar's thread controls (see `ui::sidebar`).
+    pub(crate) fn sidebar_act(
+        &mut self,
+        act: sidebar::Act,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let refocus = match act {
+            sidebar::Act::ResizeEnd if !self.sidebar.resizing => false,
+            act => self.sidebar.apply(act, &store, window, cx),
+        };
+        if refocus {
+            self.focus_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The sidebar's interaction state, for tests.
+    #[cfg(test)]
+    pub(crate) fn sidebar_state(&self) -> &sidebar::State {
+        &self.sidebar
+    }
+
+    /// ⌘⇧P and ⌘⇧A.
+    fn sidebar_key(&mut self, archive: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        self.sidebar.key_act(archive, &store, window, cx);
+        cx.notify();
+    }
+
+    /// `RENO_SIDEBAR_OPEN`: acts on the "fix the ACP v2 handshake" thread (or the run the hook
+    /// names after a colon).
+    fn sidebar_hook(&mut self, hook: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (what, suffix) = hook.split_once(':').unwrap_or((hook, "plan1"));
+        let Ok(thread) = reno_proto::ThreadId::from_suffix(suffix) else {
+            return;
+        };
+        let store = self.store.clone();
+        self.sidebar.hook(what, thread, &store, window, cx);
+        cx.notify();
     }
 
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: act on the composer that is showing.
@@ -1371,6 +1451,7 @@ impl RootView {
                 looking_at: store.looking_at(),
                 now_ms: store.now_ms(),
                 thread_of: &|run| store.thread_of(run),
+                edit: None,
             },
         );
         let threads = palette::threads(&folders, |run| {
@@ -1475,12 +1556,19 @@ impl Render for RootView {
         );
         theme::set_current(theme, cx);
         let handlers = self.handlers(cx);
+        let sidebar_width = self.sidebar.width;
+        let act: sidebar::ActHandler = {
+            let this = cx.entity();
+            Rc::new(move |act, window, cx| {
+                this.update(cx, |root, cx| root.sidebar_act(act, window, cx));
+            })
+        };
         // What the run screen's panel needs to fit itself on its first frame: the sidebar and
         // the insets around the canvas.
         cx.set_global(crate::panel::view::StageInset(if self.sidebar_hidden {
             2.0 * GUTTER
         } else {
-            sidebar::WIDTH + GUTTER
+            sidebar_width + GUTTER
         }));
         let in_settings = matches!(self.screen, Screen::Settings);
         let (needing, connection) = {
@@ -1586,15 +1674,53 @@ impl Render for RootView {
         let this = cx.entity();
         let status_bar = bar::status_bar(&this, &bar);
         let popovers = bar::popovers(&this, &bar);
+        let view = sidebar::View::new(
+            self.store.read(cx),
+            &self.folders_toggled,
+            &self.sidebar,
+            Rc::clone(&act),
+        );
+        let sidebar_overlays = sidebar::overlays(&theme, &view);
 
         div()
             .id("root")
-            .key_context("Root")
+            .key_context(if self.sidebar.any_open() {
+                gpui::KeyContext::parse(&format!("Root {}", actions::SIDEBAR_OPEN))
+                    .unwrap_or_default()
+            } else {
+                gpui::KeyContext::parse("Root").unwrap_or_default()
+            })
             .track_focus(&self.focus_handle)
             .on_action(
                 cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &actions::DismissSidebar, w, cx| {
+                this.sidebar_act(sidebar::Act::Dismiss, w, cx);
+            }))
+            // The composer lets Escape go when it has nothing to cancel: the draft takes it.
+            .on_action(cx.listener(|this, _: &composer::Cancel, w, cx| {
+                if this.sidebar.any_open() {
+                    this.sidebar_act(sidebar::Act::Dismiss, w, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::PinThread, w, cx| {
+                this.sidebar_key(false, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::ArchiveThread, w, cx| {
+                this.sidebar_key(true, w, cx);
+            }))
+            .on_drag_move(cx.listener(
+                |this, e: &gpui::DragMoveEvent<sidebar::SidebarDrag>, w, cx| {
+                    this.sidebar_act(sidebar::Act::Resize(f32::from(e.event.position.x)), w, cx);
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, w, cx| this.sidebar_act(sidebar::Act::ResizeEnd, w, cx)),
+            )
             .on_action(cx.listener(|this, _: &TogglePanel, w, cx| {
                 this.panel_action(PanelAction::Toggle, w, cx);
             }))
@@ -1648,14 +1774,16 @@ impl Render for RootView {
                                 self.store.read(cx),
                                 self.nav(),
                                 needing,
-                                &self.folders_toggled,
                                 &handlers,
+                                &view,
+                                sidebar_width,
                             ))
                         }
                     })
                     .child(main),
             )
             .children(popovers)
+            .children(sidebar_overlays)
             .children(self.palette.clone())
             .child(self.toasts.clone())
     }
@@ -1701,6 +1829,20 @@ mod tests {
         assert_eq!(on.composer_type.as_deref(), Some("@src/"));
         assert_eq!(on.composer_open.as_deref(), Some("branch"));
         assert_eq!(on.composer_fail.as_deref(), Some("commands"));
+    }
+
+    #[test]
+    fn the_sidebar_start_hook_exists_only_with_the_fake_daemon_and_is_checked() {
+        let hook = |h: &'static str| ("RENO_SIDEBAR_OPEN", h);
+        assert_eq!(parse(&[], &[hook("menu")]).unwrap().sidebar_open, None);
+        let on = parse(&["--fake"], &[hook("close:atlas01")]).unwrap();
+        assert_eq!(on.sidebar_open.as_deref(), Some("close:atlas01"));
+        assert!(parse(&["--fake"], &[hook("dance")]).is_err());
+        for h in [
+            "menu", "copy", "rename", "archived", "more", "archive", "resize", "close",
+        ] {
+            assert!(parse(&["--fake"], &[hook(h)]).is_ok(), "{h}");
+        }
     }
 
     #[test]
