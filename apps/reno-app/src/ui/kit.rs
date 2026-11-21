@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Div, ElementId, FontWeight, Hsla, ImageFormat, Role,
-    SharedString, Stateful, Toggled, Transformation, div, percentage, prelude::*, px,
+    AnyElement, App, Div, ElementId, FontWeight, Hsla, ImageFormat, Role, SharedString, Stateful,
+    Toggled, Transformation, Window, div, percentage, prelude::*, px,
 };
 use reno_proto::RunStatus;
 
@@ -406,14 +406,28 @@ pub(crate) fn checkbox(
         .child(label.into())
 }
 
-/// A turning ring: a job is running. Reduced motion stops it (GPUI snaps a repeating animation
-/// to its first frame).
-pub(crate) fn spinner(id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
-    icon(Icon::PhSpinner, size, color).with_animation(
-        id,
-        Animation::new(Duration::from_millis(900)).repeat(),
-        |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
-    )
+/// How long a spinner takes to turn once.
+const SPIN_PERIOD: Duration = Duration::from_millis(900);
+
+/// A turning ring: a job is running. It turns on the shared pulse clock (30 fps at most, nothing
+/// scheduled while the window is in the background), not on GPUI's per-vsync repeat, which would
+/// redraw the whole window at the display's refresh rate. Reduced motion stops it in place.
+pub(crate) fn spinner(_id: impl Into<ElementId>, size: f32, color: Hsla) -> impl IntoElement {
+    Spinner { size, color }
+}
+
+#[derive(IntoElement)]
+struct Spinner {
+    size: f32,
+    color: Hsla,
+}
+
+impl RenderOnce for Spinner {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let turn = super::motion::spin_phase(window.current_view(), SPIN_PERIOD, cx);
+        icon(Icon::PhSpinner, self.size, self.color)
+            .with_transformation(Transformation::rotate(percentage(turn.unwrap_or(0.0))))
+    }
 }
 
 /// The mark of an executor on the Executors screen: its own coloured logo (a light twin on dark
@@ -493,6 +507,79 @@ pub(crate) fn tip(
 mod tests {
     use super::*;
     use crate::ui::theme::{Appearance, Theme};
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window};
+    use std::time::Duration;
+
+    /// A cached child view holding the spinner: it re-renders only when something notifies it,
+    /// which is what a frame the spinner asked for looks like.
+    struct Spinning {
+        renders: usize,
+    }
+
+    impl Render for Spinning {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            div().child(spinner(
+                "t-spin",
+                12.0,
+                Theme::for_appearance(Appearance::Dark).accent,
+            ))
+        }
+    }
+
+    struct Host(gpui::Entity<Spinning>);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .child(gpui::AnyView::from(self.0.clone()).cached(gpui::StyleRefinement::default()))
+        }
+    }
+
+    /// How many times the spinner's view is rendered over `seconds` on a 120 Hz display that
+    /// draws every vsync.
+    fn frames_wanted(
+        cx: &mut gpui::VisualTestContext,
+        view: &gpui::Entity<Spinning>,
+        seconds: u64,
+    ) -> usize {
+        let before = view.read_with(cx, |s, _| s.renders);
+        for _ in 0..seconds * 120 {
+            cx.executor().advance_clock(Duration::from_micros(8_333));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+        view.read_with(cx, |s, _| s.renders) - before
+    }
+
+    fn host(cx: &mut TestAppContext) -> (gpui::Entity<Spinning>, &mut gpui::VisualTestContext) {
+        let mut spinning = None;
+        let (_host, vcx) = cx.add_window_view(|_, cx| {
+            let child = cx.new(|_| Spinning { renders: 0 });
+            spinning = Some(child.clone());
+            Host(child)
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        (spinning.expect("child"), vcx)
+    }
+
+    #[gpui::test]
+    fn a_spinner_asks_for_at_most_thirty_frames_a_second(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let wanted = frames_wanted(cx, &view, 2);
+        assert!(wanted >= 20, "the spinner turns: {wanted} frames in 2 s");
+        assert!(wanted <= 62, "30 fps at most: {wanted} frames in 2 s");
+    }
+
+    #[gpui::test]
+    fn a_spinner_at_rest_asks_for_no_frames_when_motion_is_reduced(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::ui::motion::set_reduced_motion(cx, true));
+        let (view, cx) = host(cx);
+        assert_eq!(frames_wanted(cx, &view, 2), 0);
+    }
 
     #[test]
     fn a_disabled_button_has_no_hover_fill() {

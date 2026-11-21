@@ -202,7 +202,9 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
                         .filter_map(|(view, lease)| lease.take_tick(tick).then_some(*view))
                         .collect();
                     for view in views {
-                        cx.notify(view);
+                        if !crate::bench::off("pulse") {
+                            cx.notify(view);
+                        }
                     }
                     false
                 });
@@ -1454,6 +1456,49 @@ mod tests {
             half_rgba.r > 0.99 && half_rgba.g > 0.99 && half_rgba.b > 0.99,
             "white wash keeps its hue: {half_rgba:?}"
         );
+    }
+
+    /// How many times `view` is notified over `seconds` of simulated time while it asks for the
+    /// pulse on every render (the thinking shimmer's shape), rendering whenever it is notified.
+    fn pulse_notifies(cx: &mut gpui::TestAppContext, seconds: u64) -> usize {
+        use gpui::AppContext as _;
+        let view = cx.update(|cx| cx.new(|_| ()));
+        let count = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let seen = count.clone();
+        let _observed = cx.update(|cx| {
+            cx.observe(&view, move |view, cx| {
+                seen.set(seen.get() + 1);
+                // The re-render that follows a notify asks again.
+                pulse_delta(&PULSE, view.entity_id(), cx);
+            })
+        });
+        cx.update(|cx| pulse_delta(&PULSE, view.entity_id(), cx));
+        for _ in 0..seconds * 120 {
+            cx.executor().advance_clock(Duration::from_micros(8_333));
+            cx.run_until_parked();
+        }
+        count.get()
+    }
+
+    #[gpui::test]
+    fn the_shimmer_clock_ticks_at_thirty_a_second_at_most(cx: &mut gpui::TestAppContext) {
+        let ticks = pulse_notifies(cx, 2);
+        assert!(ticks >= 40, "the shimmer moves: {ticks} notifies in 2 s");
+        assert!(ticks <= 62, "30 per second at most: {ticks} in 2 s");
+    }
+
+    #[gpui::test]
+    fn the_shimmer_clock_stops_in_the_background_and_when_reduced(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init(ReduceMotion::Off, true, cx);
+            window_activation_changed(false, cx);
+        });
+        assert_eq!(pulse_notifies(cx, 2), 0, "background pause");
+        cx.update(|cx| {
+            window_activation_changed(true, cx);
+            set_preference(ReduceMotion::On, cx);
+        });
+        assert_eq!(pulse_notifies(cx, 2), 0, "reduced motion");
     }
 
     #[gpui::test]

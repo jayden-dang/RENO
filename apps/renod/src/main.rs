@@ -27,6 +27,14 @@ const WORKER_THREADS: usize = 2;
 /// The blocking pool: store opens and journal replay, nothing else.
 const BLOCKING_THREADS: usize = 8;
 
+fn parse_stream_mock(value: &str) -> Result<executors::StreamMock, String> {
+    match value {
+        "steady" => Ok(executors::StreamMock::Steady),
+        "burst" => Ok(executors::StreamMock::Burst),
+        other => Err(format!("want steady or burst, got {other}")),
+    }
+}
+
 /// The Reno daemon.
 #[derive(Debug, Parser)]
 #[command(name = "renod", version, about)]
@@ -48,6 +56,20 @@ struct Args {
     /// Make the mock executor wait to be steered or cancelled, for tests and demos.
     #[arg(long, env = "RENO_MOCK_HOLD", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
     mock_hold: bool,
+    /// Bench only: make the mock stream text at a steady rate (`steady`, the default: about 20
+    /// events a second for 60 s) or play 2,000 messages at once (`burst`). Used by the app
+    /// benchmark; it wins over `--mock-hold`.
+    #[arg(
+        long,
+        env = "RENO_STREAM_MOCK",
+        hide = true,
+        value_name = "KIND",
+        num_args = 0..=1,
+        default_missing_value = "steady",
+        require_equals = true,
+        value_parser = parse_stream_mock
+    )]
+    stream_mock: Option<executors::StreamMock>,
     /// Register only the mock executor: look for no harness CLI, for tests.
     #[arg(long, env = "RENO_NO_HARNESSES", hide = true, value_parser = clap::builder::BoolishValueParser::new())]
     no_harnesses: bool,
@@ -115,7 +137,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         .context("cannot start the async runtime")?;
     let outcome = runtime.block_on(serve(
         paths,
-        args.mock_hold,
+        (args.mock_hold, args.stream_mock),
         !args.no_harnesses,
         args.claude_executable,
         args.max_concurrent,
@@ -130,7 +152,7 @@ fn run(args: Args) -> anyhow::Result<()> {
 
 async fn serve(
     paths: Paths,
-    mock_hold: bool,
+    (mock_hold, stream_mock): (bool, Option<executors::StreamMock>),
     harnesses: bool,
     claude_executable: Option<PathBuf>,
     max_concurrent: Option<usize>,
@@ -141,6 +163,7 @@ async fn serve(
         Some(program) => ExecutorSource::Given(pinned_claude(mock_hold, program)?),
         None => ExecutorSource::Discover {
             hold_mock: mock_hold,
+            stream_mock,
             harnesses,
         },
     };

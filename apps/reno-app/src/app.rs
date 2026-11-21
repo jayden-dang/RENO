@@ -120,6 +120,9 @@ pub(crate) struct Options {
     /// `RENO_SETUP=skip|welcome|look|agents|project|done` (with `--fake`): skip first-run setup,
     /// or open it at that step even when it was done (screenshots, reviews).
     pub(crate) setup: Option<crate::vm::first_run::Hook>,
+    /// `RENO_BENCH=1`: print the lines `cargo xtask bench --app` reads (`bench.rs`), and scroll
+    /// the open run's transcript. Off, nothing changes.
+    pub(crate) bench: bool,
 }
 
 impl Options {
@@ -180,6 +183,7 @@ impl Options {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis);
         options.reduce_motion = env("RENO_REDUCE_MOTION").is_some_and(|v| v == "1");
+        options.bench = env("RENO_BENCH").is_some_and(|v| v == "1");
         options.open = match env("RENO_OPEN").as_deref() {
             None | Some("" | "home") => None,
             Some("runs") => Some(Nav::Runs),
@@ -455,6 +459,8 @@ pub(crate) fn open_window(
             ..Default::default()
         },
         |window, cx| {
+            crate::bench::first_frame(window);
+            crate::bench::bring_to_front(window, cx);
             let root = cx.new(|cx| RootView::new(store, toasts, appearance, window, cx));
             root.update(cx, |root, cx| {
                 root.focus_composer(window, cx);
@@ -592,6 +598,14 @@ pub(crate) fn open_window(
                             root.update(cx, |root, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {
                                     screen.update(cx, |screen, cx| screen.open_all_folds(cx));
+                                }
+                            })
+                            .ok();
+                        }
+                        if crate::bench::scroll_script() {
+                            root.update_in(cx, |root, window, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |screen, cx| screen.bench_scroll(window, cx));
                                 }
                             })
                             .ok();
@@ -748,7 +762,9 @@ impl RootView {
             cx.observe(&store, |this, _, cx| {
                 this.remember_updates(cx);
                 this.lift_gate(cx);
-                cx.notify();
+                if !crate::bench::off("store") {
+                    cx.notify();
+                }
             }),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
@@ -1839,6 +1855,7 @@ impl Focusable for RootView {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::bench::frame();
         // Settings › Appearance: the saved mode, theme and accent.
         let prefs = crate::prefs::current(cx);
         self.mode = prefs.mode;
@@ -2128,6 +2145,13 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| (*v).to_owned())
         })
+    }
+
+    #[test]
+    fn bench_is_off_unless_reno_bench_is_one() {
+        assert!(!parse(&[], &[]).unwrap().bench);
+        assert!(!parse(&[], &[("RENO_BENCH", "0")]).unwrap().bench);
+        assert!(parse(&[], &[("RENO_BENCH", "1")]).unwrap().bench);
     }
 
     #[test]

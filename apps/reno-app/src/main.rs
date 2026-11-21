@@ -10,6 +10,7 @@ mod actions;
 mod app;
 mod attach;
 mod banners;
+mod bench;
 mod desktop;
 mod folder_picker;
 mod lifecycle;
@@ -68,6 +69,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[allow(clippy::print_stderr)]
 fn main() -> ExitCode {
+    let started = std::time::Instant::now();
     let options = match app::Options::parse(std::env::args().skip(1), |key| std::env::var(key).ok())
     {
         Ok(options) => options,
@@ -76,6 +78,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    bench::init(options.bench, started);
     app::run(options);
     ExitCode::SUCCESS
 }
