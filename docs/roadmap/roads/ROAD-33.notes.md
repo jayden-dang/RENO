@@ -11,3 +11,10 @@ License: (GPL) = learn the pattern, never copy code; (Apache) = may be ported wi
 - Tool-call content materialized lazily on restore (`ToolCallSync::{Live, Restore, Materialize}`).
 - Reno already uses `ListState`/`uniform_list`; check the event granularity and where markdown parses.
 - Measure with `#[gpui::bench]` (see ROAD-29 notes): 10k entries plus a live stream.
+
+## Frame-time target from ROAD-29 (2026-11-21)
+
+`cargo xtask bench --app` measures a 2,000-message transcript at p50 29.7 ms, p95 31.4 ms per
+frame while scrolling: the messages fold into 4 turn rows, each laid out whole. The signed-off
+target is p95 ≤ 16.7 ms (one 60 Hz frame), reported as "over (ROAD-33)" until this item lands
+(`docs/BENCHMARKS.md`, App). Evidence for one row per markdown block rather than per turn.

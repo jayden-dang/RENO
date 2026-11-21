@@ -21,8 +21,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 
 ## Focus
 
-**Now:** MILE-10
-**Next:** MILE-1
+**Now:** ROAD-33
+**Next:** ROAD-53, MILE-1
 
 | ID | Milestone | Depends-on | Commitment |
 |---|---|---|---|
@@ -152,6 +152,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-36** project-actions — After: ROAD-7, MILE-10 — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno-app/`
 - **ROAD-39** browser-tab-for-a-person — After: ROAD-35 — Surfaces: None — needs a new boundary crate for the web view, decided when it starts
 - **ROAD-56** bounded-queues-enforced — After: none — Surfaces: `clippy.toml`, `apps/reno-app/`, `crates/reno-harness/src/drivers/opencode/`, `docs/architecture/runtime.md` — Notes: [ROAD-56](roads/ROAD-56.notes.md)
+- **ROAD-57** thread-links-open-the-app — After: none — Surfaces: `xtask/src/bundle.rs`, `apps/reno-app/src/lifecycle.rs` — Notes: [ROAD-57](roads/ROAD-57.notes.md)
 **Depends-on:** MILE-10, MILE-2, MILE-3, MILE-4, MILE-5
 **Commitment:** Planned
 **Closed:** None
