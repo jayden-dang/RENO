@@ -29,9 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::app_stats::{
-    self, BUDGETS_SIGNED_OFF, ColdStart, Footprint, LongTranscript, Report, Scenario, Variant,
-};
+use crate::app_stats::{self, ColdStart, Footprint, LongTranscript, Report, Scenario, Variant};
 use crate::bench::{
     Bins, Daemon, DaemonOptions, cargo_build, cpu_seconds, pause, reno_command, socket,
 };
@@ -45,7 +43,7 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 const SCROLL_TIMEOUT: Duration = Duration::from_secs(240);
 
 pub(crate) const USAGE: &str =
-    "usage: cargo xtask bench --app [--quick] [--idle-only] [--compare-allocators]";
+    "usage: cargo xtask bench --app [--quick] [--idle-only] [--stream-only] [--compare-allocators]";
 
 /// What to build and measure.
 #[derive(Debug, PartialEq, Eq)]
@@ -54,6 +52,8 @@ struct Options {
     /// Cold start and idle only: no scenario that streams or scrolls, which need the window drawn
     /// and so keep it in front of everything for minutes.
     idle_only: bool,
+    /// Streaming only, to count frames while a source is switched off (`RENO_BENCH_OFF`).
+    stream_only: bool,
     /// `(label, cargo flags for reno-app)`.
     variants: Vec<(&'static str, Vec<&'static str>)>,
 }
@@ -61,11 +61,13 @@ struct Options {
 fn parse_args(args: &[String]) -> Result<Options> {
     let mut quick = false;
     let mut idle_only = false;
+    let mut stream_only = false;
     let mut compare = false;
     for arg in args {
         match arg.as_str() {
             "--quick" => quick = true,
             "--idle-only" => idle_only = true,
+            "--stream-only" => stream_only = true,
             "--compare-allocators" => compare = true,
             other => return Err(format!("unknown bench --app option {other}")),
         }
@@ -79,6 +81,7 @@ fn parse_args(args: &[String]) -> Result<Options> {
     Ok(Options {
         quick,
         idle_only,
+        stream_only,
         variants,
     })
 }
@@ -157,6 +160,16 @@ fn bench(options: &Options) -> Result<Report> {
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let plan = Plan::new(options.quick);
 
+    // A display that sleeps mid-run stops drawing the window, and a full run outlasts the usual
+    // ten minutes of the display's idle timer. `caffeinate` keeps it awake and exits with us.
+    let _awake = Command::new("/usr/bin/caffeinate")
+        .args(["-d", "-i", "-w", &std::process::id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+
     println!(
         "The benchmark brings Reno to the front for a few minutes. Leave the machine alone\n\
          meanwhile: a window that is hidden, covered or behind a full-screen app is not drawn, and the\n\
@@ -194,6 +207,7 @@ fn bench(options: &Options) -> Result<Report> {
         variants.push(measure(
             &plan,
             options.idle_only,
+            options.stream_only,
             label,
             &app,
             &bins,
@@ -205,7 +219,6 @@ fn bench(options: &Options) -> Result<Report> {
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         quick: options.quick,
-        budgets_signed_off: BUDGETS_SIGNED_OFF,
         variants,
     };
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
@@ -254,7 +267,7 @@ impl App {
         let mut command = Command::new(binary);
         // No RENO_* variable of the benchmarker's own reaches the app.
         for (name, _) in std::env::vars() {
-            if name.starts_with("RENO_") {
+            if name.starts_with("RENO_") && name != "RENO_BENCH_OFF" {
                 command.env_remove(name);
             }
         }
@@ -405,6 +418,7 @@ fn data_dir(scratch: &Path, name: &str) -> Result<PathBuf> {
 fn measure(
     plan: &Plan,
     idle_only: bool,
+    stream_only: bool,
     label: &str,
     app: &Path,
     bins: &Bins,
@@ -413,8 +427,14 @@ fn measure(
     // Idle and cold start share a quiet daemon.
     let quiet = data_dir(scratch, "quiet")?;
     let (daemon, _) = Daemon::start(bins, &quiet, DaemonOptions::default())?;
-    let cold_start = cold_start(plan, app, &quiet)?;
-    let idle = idle(plan, app, &quiet)?;
+    let (cold_start, idle) = if stream_only {
+        (
+            Scenario::NotDrawn("not run (--stream-only)".into()),
+            Scenario::NotDrawn("not run (--stream-only)".into()),
+        )
+    } else {
+        (cold_start(plan, app, &quiet)?, idle(plan, app, &quiet)?)
+    };
     daemon.stop()?;
 
     let (streaming, long_transcript) = if idle_only {
@@ -425,7 +445,11 @@ fn measure(
     } else {
         (
             streaming(plan, app, bins, &data_dir(scratch, "stream")?)?,
-            long_transcript(app, bins, &data_dir(scratch, "long")?)?,
+            if stream_only {
+                Scenario::NotDrawn("not run (--stream-only)".into())
+            } else {
+                long_transcript(app, bins, &data_dir(scratch, "long")?)?
+            },
         )
     };
     Ok(Variant {
@@ -634,6 +658,7 @@ fn long_transcript(app: &Path, bins: &Bins, dir: &Path) -> Result<Scenario<LongT
                 &format!("run_{}", run.trim_start_matches("run_")),
             ),
             ("RENO_OPEN_FOLDS", "1"),
+            ("RENO_BENCH_SCROLL", "1"),
         ],
     )?;
     if started.first_frame()?.is_none() {
@@ -652,10 +677,11 @@ fn long_transcript(app: &Path, bins: &Bins, dir: &Path) -> Result<Scenario<LongT
             return Err(format!("reno-app exited during the scroll: {status}"));
         }
         if begun.elapsed() > SCROLL_TIMEOUT {
+            let drawn = started.frames();
             started.stop();
             daemon.stop()?;
             return Ok(Scenario::NotDrawn(format!(
-                "the scripted scroll did not finish in {} s",
+                "the scripted scroll did not finish in {} s ({drawn} frames drawn)",
                 SCROLL_TIMEOUT.as_secs()
             )));
         }

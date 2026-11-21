@@ -602,7 +602,7 @@ pub(crate) fn open_window(
                             })
                             .ok();
                         }
-                        if crate::bench::enabled() {
+                        if crate::bench::scroll_script() {
                             root.update_in(cx, |root, window, cx| {
                                 if let Some(screen) = root.run_screen().cloned() {
                                     screen.update(cx, |screen, cx| screen.bench_scroll(window, cx));
@@ -762,7 +762,9 @@ impl RootView {
             cx.observe(&store, |this, _, cx| {
                 this.remember_updates(cx);
                 this.lift_gate(cx);
-                cx.notify();
+                if !crate::bench::off("store") {
+                    cx.notify();
+                }
             }),
             cx.observe(&toasts, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),

@@ -114,7 +114,7 @@ Apple silicon, release builds, the system allocator won on every measure (two fu
 
 Hypothesis (not isolated): mimalloc returns memory to the OS only while the process allocates, so a daemon that goes quiet
 after a burst keeps the burst's pages. Revisit the decision if the daemon gets a periodic allocator
-collect, or if the Linux numbers say otherwise. The app was not measured; see "App" below, where its allocator is still to measure.
+collect, or if the Linux numbers say otherwise. The app was measured separately; see "App" below. It keeps the system allocator too.
 
 ## App
 
@@ -124,12 +124,13 @@ builds `renod`, `reno` and `reno-app` in release, starts its own `renod` on a te
 directory (mock executor only), and starts the app against it through `RENO_DATA_DIR`. It never
 uses `--fake`, because the fake daemon runs inside the app and would be counted as the app's cost,
 and it never reaches the installed daemon. It writes `target/bench/app-report.json` and
-`app-report.txt`, and exits 1 when a number is past a budget.
+`app-report.txt`, and exits 1 when a number is past a budget (the one marked as a target excepted).
 
 ```
 cargo xtask bench --app                       # full: 30 s settle, 120 s idle, 60 s streaming, long transcript
 cargo xtask bench --app --quick               # shorter windows, 3 cold starts
 cargo xtask bench --app --quick --idle-only   # cold start and idle only (no scenario that streams or scrolls)
+cargo xtask bench --app --quick --stream-only # the streaming scenario alone (RENO_BENCH_OFF=pulse,store switches a redraw source off)
 cargo xtask bench --app --compare-allocators  # system and mimalloc, built and measured one after the other
 ```
 
@@ -142,38 +143,94 @@ reports no number.
 
 ### Method
 
-| Scenario | How it is measured | Proposed budget |
+| Scenario | How it is measured | Budget |
 |---|---|---|
 | Cold start to first frame | Spawn the app and time from the spawn to the first frame. Under `RENO_BENCH=1` the app prints `first-frame <ms>` after its first paint (and the same time from the start of `main`). Median of 5 after one throwaway start | < 400 ms |
 | Idle CPU | CPU seconds of the process (`ps -o time=`) over the idle window, after the settle time, on Home with nothing live | < 1 % of a core |
 | Idle wakeups | `top -l 2 -s <window> -stats idlew`, no sudo. `IDLEW` is a running count since the process started, so the rate is the difference between the two samples over the window | < 1 per second |
-| Idle footprint | `footprint` (or `vmmap --summary`): physical footprint, which includes the GPU's `IOAccelerator` memory that RSS misses | baseline + 25 %, at most 200 MiB |
-| Streaming | `renod --stream-mock`, a bench-only script that emits text deltas at a steady rate (about 20 events a second for 60 s, markdown with code blocks); the app shows that run. CPU and peak footprint over the window; fails as "window not drawn" if it drew fewer frames than seconds | CPU <= 15 % · footprint <= 350 MiB |
-| Long transcript | `renod --stream-mock=burst` finishes a run of 2,000 messages; under `RENO_BENCH=1` with `RENO_OPEN=run_<id>` the app scrolls the transcript from end to start and back by a fixed step a frame. Peak footprint and frame time p95 | footprint: baseline + 25 %; frame time recorded, it informs the transcript's row model |
-| Allocator | `--compare-allocators`: idle plus streaming, once with the system allocator and once with mimalloc | decision recorded, as for the daemon |
+| Idle footprint | `footprint` (or `vmmap --summary`): physical footprint, which includes the GPU's `IOAccelerator` memory that RSS misses | <= 135 MiB |
+| Streaming | `renod --stream-mock`, a bench-only script that emits text deltas at a steady rate (about 20 events a second for 60 s, markdown with code blocks); the app shows that run. CPU and peak footprint over the window; fails as "window not drawn" if it drew fewer frames than seconds | CPU <= 15 % · peak footprint <= 260 MiB |
+| Long transcript | `renod --stream-mock=burst` finishes a run of 2,000 messages; with `RENO_BENCH=1`, `RENO_BENCH_SCROLL=1` and `RENO_OPEN=run_<id>` the app scrolls the transcript from end to start and back by a fixed step a frame. Peak footprint and frame time p95 | peak footprint <= 370 MiB · frame time p95 <= 16.7 ms, a **target** (below) |
+| Allocator | `--compare-allocators`: idle plus streaming, once with the system allocator and once with mimalloc | decision recorded |
 | GPU memory | The `IOAccelerator` share of the footprint, on its own | recorded, no budget |
 
-The budgets are proposed, not signed off. Each is the measured baseline plus a stated margin, and
-none is looser than the figures in ARCHITECTURE 12. The report prints numbers and marks the
-budgets "proposed" until they are signed off after the first full measurement.
+### Budgets (signed off 2026-11-21)
 
-### Measured (quick, idle only)
+The owner signed these off after the first full measurement. Each is the measured baseline plus
+25 %, rounded, and none is looser than the figures in ARCHITECTURE 12. They live in one table in
+`xtask/src/app_stats.rs`; a number past one fails `cargo xtask bench --app`.
 
-2026-11-20, Apple M5 Pro, macOS 27.0.1, release build of the `feat/app-bench` branch, system
-allocator, `cargo xtask bench --app --quick --idle-only` (5 s settle, 20 s idle window).
-
-| Metric | Measured | Proposed budget |
+| Metric | Budget | Measured baseline |
 |---|---|---|
-| Cold start to first frame (median of 3) | 142 ms (the app's own clock from `main`: 126 to 132 ms) | < 400 ms |
-| Idle CPU | 0.4 % of a core | < 1 % |
-| Idle wakeups | 0.05 per second | < 1 per second |
-| Idle footprint | 53 MiB | baseline + 25 %, at most 200 MiB |
-| GPU memory in the footprint | 4 MiB | recorded |
-| Streaming CPU and peak footprint | to measure | <= 15 % · <= 350 MiB |
-| Long transcript footprint and frame time p95 | to measure | footprint: baseline + 25 % |
-| App allocator (system against mimalloc) | to measure | decision recorded |
+| Cold start to first frame | < 400 ms | 114 to 150 ms |
+| Idle CPU | < 1 % of a core | 0.0 to 0.1 % |
+| Idle wakeups | < 1 per second | 0.2 per second |
+| Idle footprint | <= 135 MiB | 108 MiB |
+| Streaming CPU | <= 15 % of a core | 6.0 % after the redraw fix (20 to 21 % before) |
+| Streaming peak footprint | <= 260 MiB | 208 MiB |
+| Long transcript peak footprint | <= 370 MiB | 294 MiB |
+| Long transcript frame time p95 | <= 16.7 ms, **a target that ROAD-33 must meet** | 30 ms |
 
-Two things in the first, hand-run numbers were the bench's, not the app's, and are fixed:
+**The frame-time limit is a target, not a budget.** The 16.7 ms is one frame at 60 Hz. Measured,
+the long transcript draws a frame in about 30 ms (p50 29 ms, p95 30 ms), because the transcript
+is not virtualised by message: the 2,000 messages fold into 4 turn rows, and each row is laid out
+and painted whole. That is the row model ROAD-33 replaces, so the limit is ROAD-33's to meet. The
+report marks it "target, ROAD-33" and says "over (ROAD-33)" while it is over, and the run does not
+fail on it until ROAD-33 lands, when it becomes an ordinary budget.
+
+### Measured, 2026-11-21
+
+Apple M5 Pro (1512x948 built-in display), macOS 27.2, release build, `cargo xtask bench --app`
+(full: 30 s settle, 120 s idle, 50 s streaming window, long transcript).
+
+Before the redraw fix (the owner's morning run, system allocator, then mimalloc), and after:
+
+| Metric | System, before | mimalloc, before | System, after |
+|---|---|---|---|
+| Cold start | 138 ms | 132 ms | 141 ms |
+| Idle CPU | 0.0 % | 0.0 % | 0.1 % |
+| Idle wakeups | 0.0 to 0.2 per second | 0.2 per second | 0.2 per second |
+| Idle footprint | 108 MiB | 110 MiB | 108 MiB |
+| Streaming CPU | 21.3 % | 19.7 % | **6.0 %** |
+| Streaming frames drawn | 4,508 in 51 s (88 a second) | 4,508 in 51 s | 964 in 51 s (19 a second) |
+| Streaming peak footprint | 208 MiB | 211 MiB | 208 MiB |
+| Long transcript peak footprint | 294 MiB | 318 MiB | 293 MiB |
+| Long transcript frame time p95 | 30.3 ms | 30.1 ms | 31.4 ms (p50 29.7 ms), over the ROAD-33 target |
+
+### The streaming redraw
+
+The app drew 88 frames a second while the mock streamed about 20 events a second. The cause was
+the benchmark's own scripted scroll: under `RENO_BENCH=1` it started on every opened run, the
+streaming scenario's included, and it asks for a frame on every vsync (the display refreshes at
+120 Hz) until it has scrolled the run. It is now started only with `RENO_BENCH_SCROLL=1`, which
+only the long-transcript scenario sets. Streaming, the app then draws about 19 frames a second:
+one for each batch of daemon events, nothing in between. Switching the other sources off one at
+a time (`RENO_BENCH_OFF=pulse,store`) left that rate unchanged, so none of them redraws while
+text streams.
+
+| Source | Before | After |
+|---|---|---|
+| Scripted scroll, in the streaming scenario | 120 frames a second | 0 (bench only) |
+| Daemon events (store notify, run screen) | about 19 a second | about 19 a second, tracks the event rate |
+| Shared pulse clock: the "Thinking" shimmer, the live pill | capped at 30 (shimmer) and 15 (pill) a second; not mounted while text streams | unchanged |
+| `kit::spinner` (sidebar running row, updater, restart, registry) | GPUI's repeating animation: a redraw every vsync, 120 a second, for as long as one is on screen | on the pulse clock: 30 a second at most |
+
+The spinner was a real defect the benchmark does not reach (its sidebar shows no running spinner).
+It now turns on the shared 30 fps pulse clock, which schedules nothing when motion is reduced or
+the window is in the background. Two tests pin it (a spinner asked for 240 frames in 2 s before,
+at most 62 are allowed) and two more pin the shimmer clock.
+
+### Allocator decision
+
+The app keeps the **system allocator, like the daemon**. mimalloc was no faster to start (132 ms
+against 138 ms, inside the run-to-run noise), no cheaper at idle (110 MiB against 108 MiB) or
+streaming (211 MiB against 208 MiB), and it held more memory after the long transcript (318 MiB
+against 294 MiB, +8 %). Streaming CPU read 19.7 % against 21.3 %, a difference smaller than the
+scripted scroll's own noise. mimalloc stays an opt-in `mimalloc` feature of `reno-app`.
+
+### Notes on the first numbers
+
+Two things in the first, hand-run numbers (2026-11-20) were the bench's, not the app's, and are fixed:
 
 - An earlier run reported 17 idle wakeups a second. `IDLEW` is a count since the process started,
   and the bench read it as a rate. Idle, the app wakes about once every 5 to 20 s; no timer runs on
@@ -182,5 +239,11 @@ Two things in the first, hand-run numbers were the bench's, not the app's, and a
   and 32 MiB were the numbers of a window that was not on screen. With the window in front they
   are 142 ms and 53 MiB.
 
-Quick mode's 5 s settle is short, which is why its idle CPU (0.4 %) reads above the 0.0 to 0.1 %
-a settled window shows; the full run settles for 30 s.
+Quick mode's 5 s settle is short, which is why its idle CPU can read above the 0.0 to 0.1 %
+a settled window shows; the full run settles for 30 s. The bench holds the display awake with
+`caffeinate` while it runs.
+
+Two full runs on 2026-11-21 reported "window not drawn" for the long transcript (the scripted scroll
+did not finish in 240 s) while the machine was in use; the quick run and the final full run, left
+alone, did not. The bench says so instead of reporting a number, and the timeout message now
+includes how many frames were drawn.

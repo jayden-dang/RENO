@@ -8,10 +8,6 @@ use serde::Serialize;
 
 use crate::stats::percentile;
 
-/// Whether the owner has signed the budgets below off. Until then every budget is "proposed" and
-/// a number past one is reported but does not fail the run. Signing off is flipping this.
-pub(crate) const BUDGETS_SIGNED_OFF: bool = false;
-
 /// A budget: the number a measurement must stay at or under.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Budget {
@@ -20,16 +16,22 @@ pub(crate) struct Budget {
     pub(crate) unit: &'static str,
     /// `None`: recorded, no budget.
     pub(crate) limit: Option<f64>,
+    /// `Some(road)`: the limit is a target that roadmap item must meet, not a budget the app
+    /// holds today. A number past it is reported ("over (ROAD-33)") and does not fail the run.
+    pub(crate) target: Option<&'static str>,
     pub(crate) basis: &'static str,
 }
 
-/// The one table of app budgets. A limit here is read by the report and nowhere else.
+/// The one table of app budgets, signed off by the owner on 2026-11-21 (measured on an M5 Pro,
+/// macOS 27.2, release build, system allocator). A limit here is read by the report and nowhere
+/// else. A number past a budget fails the run, except the one marked as a target.
 pub(crate) const BUDGETS: &[Budget] = &[
     Budget {
         key: "cold_start_ms",
         label: "Cold start to first frame (median of 5)",
         unit: "ms",
         limit: Some(400.0),
+        target: None,
         basis: "ARCHITECTURE 12",
     },
     Budget {
@@ -37,6 +39,7 @@ pub(crate) const BUDGETS: &[Budget] = &[
         label: "Idle CPU (% of one core)",
         unit: "%",
         limit: Some(1.0),
+        target: None,
         basis: "no polling; frames only on change",
     },
     Budget {
@@ -44,48 +47,55 @@ pub(crate) const BUDGETS: &[Budget] = &[
         label: "Idle wakeups",
         unit: "/s",
         limit: Some(1.0),
+        target: None,
         basis: "no timers while nothing moves",
     },
     Budget {
         key: "idle_footprint_mib",
         label: "Idle footprint (physical, GPU included)",
         unit: "MiB",
-        limit: Some(200.0),
-        basis: "baseline + 25 %, at most 200 MiB",
+        limit: Some(135.0),
+        target: None,
+        basis: "measured 108 MiB, +25 %",
     },
     Budget {
         key: "streaming_cpu_pct",
         label: "Streaming CPU (% of one core)",
         unit: "%",
         limit: Some(15.0),
-        basis: "plan figure",
+        target: None,
+        basis: "plan figure; measured 6 % once the redraw was fixed",
     },
     Budget {
         key: "streaming_footprint_mib",
         label: "Streaming footprint (peak)",
         unit: "MiB",
-        limit: Some(350.0),
-        basis: "plan figure",
+        limit: Some(260.0),
+        target: None,
+        basis: "measured 208 MiB, +25 %",
     },
     Budget {
         key: "long_footprint_mib",
         label: "Long transcript footprint (peak)",
         unit: "MiB",
-        limit: None,
-        basis: "baseline + 25 %",
+        limit: Some(370.0),
+        target: None,
+        basis: "measured 294 MiB, +25 %",
     },
     Budget {
         key: "long_frame_p95_ms",
         label: "Long transcript frame time p95",
         unit: "ms",
-        limit: None,
-        basis: "recorded; informs the row model",
+        limit: Some(16.7),
+        target: Some("ROAD-33"),
+        basis: "one 60 Hz frame; measured p50 29 ms for 2,000 messages in 4 rows, ROAD-33 makes it",
     },
     Budget {
         key: "gpu_share_mib",
         label: "GPU memory (IOAccelerator, in the footprint)",
         unit: "MiB",
         limit: None,
+        target: None,
         basis: "recorded",
     },
 ];
@@ -306,7 +316,6 @@ pub(crate) struct Report {
     pub(crate) os: &'static str,
     pub(crate) arch: &'static str,
     pub(crate) quick: bool,
-    pub(crate) budgets_signed_off: bool,
     pub(crate) variants: Vec<Variant>,
 }
 
@@ -316,19 +325,28 @@ pub(crate) struct Line {
     pub(crate) key: &'static str,
     pub(crate) measured: Option<f64>,
     pub(crate) limit: Option<f64>,
+    pub(crate) target: Option<&'static str>,
     pub(crate) over: bool,
     pub(crate) note: Option<String>,
 }
 
 fn line(key: &'static str, scenario_note: Option<String>, measured: Option<f64>) -> Line {
-    let limit = budget(key).limit;
+    let Budget { limit, target, .. } = *budget(key);
     let over = matches!((measured, limit), (Some(m), Some(l)) if m > l);
     Line {
         key,
         measured,
         limit,
+        target,
         over,
         note: scenario_note,
+    }
+}
+
+impl Line {
+    /// Over a budget the app holds today.
+    fn fails(&self) -> bool {
+        self.over && self.target.is_none()
     }
 }
 
@@ -391,15 +409,13 @@ pub(crate) fn lines(v: &Variant) -> Vec<Line> {
 }
 
 impl Report {
-    /// Whether the run passes: with budgets still proposed, always; once signed off, no number
-    /// may be over its budget. A scenario that was not drawn is not a pass of anything, but it
-    /// is not a miss either: the table says so.
+    /// Whether the run passes: no number may be over its budget. A number over a target (a limit
+    /// another roadmap item must meet) is reported, not failed. A scenario that was not drawn is
+    /// not a pass of anything, but it is not a miss either: the table says so.
     pub(crate) fn passed(&self) -> bool {
-        !self.budgets_signed_off
-            || self
-                .variants
-                .first()
-                .is_none_or(|v| lines(v).iter().all(|l| !l.over))
+        self.variants
+            .first()
+            .is_none_or(|v| lines(v).iter().all(|l| !l.fails()))
     }
 }
 
@@ -413,14 +429,9 @@ fn number(value: Option<f64>, unit: &str) -> String {
 /// The text report.
 pub(crate) fn table(report: &Report) -> String {
     let mut out = String::new();
-    let status = if report.budgets_signed_off {
-        "budgets signed off"
-    } else {
-        "budgets are proposed, not signed off"
-    };
     let _ = writeln!(
         out,
-        "Reno app benchmark ({} {}, {} mode; {status})",
+        "Reno app benchmark ({} {}, {} mode)",
         report.os,
         report.arch,
         if report.quick { "quick" } else { "full" }
@@ -429,32 +440,25 @@ pub(crate) fn table(report: &Report) -> String {
         let _ = writeln!(out, "\nallocator: {}", v.allocator);
         let _ = writeln!(
             out,
-            "{:<48} {:>12}  {:<22} verdict",
+            "{:<48} {:>12}  {:<30} verdict",
             "metric", "measured", "budget"
         );
         for l in lines(v) {
             let b = budget(l.key);
-            let budget_text = match l.limit {
-                Some(limit) => format!(
-                    "<= {limit} {} ({})",
-                    b.unit,
-                    if report.budgets_signed_off {
-                        "signed off"
-                    } else {
-                        "proposed"
-                    }
-                ),
-                None => "no budget".to_owned(),
+            let budget_text = match (l.limit, l.target) {
+                (Some(limit), Some(road)) => format!("<= {limit} {} (target, {road})", b.unit),
+                (Some(limit), None) => format!("<= {limit} {}", b.unit),
+                (None, _) => "no budget".to_owned(),
             };
-            let verdict = match (&l.note, l.over) {
-                (Some(note), _) => note.clone(),
-                (None, true) if report.budgets_signed_off => "OVER".to_owned(),
-                (None, true) => "over (proposed)".to_owned(),
-                (None, false) => "ok".to_owned(),
+            let verdict = match (&l.note, l.over, l.target) {
+                (Some(note), _, _) => note.clone(),
+                (None, true, Some(road)) => format!("over ({road})"),
+                (None, true, None) => "OVER".to_owned(),
+                (None, false, _) => "ok".to_owned(),
             };
             let _ = writeln!(
                 out,
-                "{:<48} {:>12}  {:<22} {}",
+                "{:<48} {:>12}  {:<30} {}",
                 b.label,
                 number(l.measured, b.unit),
                 budget_text,
@@ -686,27 +690,70 @@ PID    %CPU IDLEW
         }
     }
 
-    fn report(signed_off: bool, v: Variant) -> Report {
+    fn report(v: Variant) -> Report {
         Report {
             os: "macos",
             arch: "aarch64",
             quick: true,
-            budgets_signed_off: signed_off,
             variants: vec![v],
         }
     }
 
     #[test]
-    fn a_number_past_its_budget_fails_only_once_the_budgets_are_signed_off() {
+    fn a_number_past_its_budget_fails_the_run() {
         let v = variant(Scenario::Drawn(load(4.0, 120.0)));
         let l = lines(&v);
         let idle_cpu = l.iter().find(|l| l.key == "idle_cpu_pct").unwrap();
         assert!(idle_cpu.over, "4 % is past 1 %");
-        assert!(
-            report(false, v.clone()).passed(),
-            "proposed: reported, not enforced"
+        assert!(!report(v).passed());
+    }
+
+    #[test]
+    fn the_signed_off_limits_are_these() {
+        let limits: Vec<(&str, Option<f64>)> = BUDGETS.iter().map(|b| (b.key, b.limit)).collect();
+        assert_eq!(
+            limits,
+            [
+                ("cold_start_ms", Some(400.0)),
+                ("idle_cpu_pct", Some(1.0)),
+                ("idle_wakeups_per_s", Some(1.0)),
+                ("idle_footprint_mib", Some(135.0)),
+                ("streaming_cpu_pct", Some(15.0)),
+                ("streaming_footprint_mib", Some(260.0)),
+                ("long_footprint_mib", Some(370.0)),
+                ("long_frame_p95_ms", Some(16.7)),
+                ("gpu_share_mib", None),
+            ]
         );
-        assert!(!report(true, v).passed(), "signed off: a miss fails");
+    }
+
+    #[test]
+    fn the_long_transcript_frame_time_is_a_target_that_does_not_fail_the_run() {
+        let mut v = variant(Scenario::Drawn(load(0.2, 100.0)));
+        v.long_transcript = Scenario::Drawn(LongTranscript {
+            rows: 4,
+            footprint_before_mib: 138.0,
+            footprint_peak_mib: 300.0,
+            gpu_mib: 6.0,
+            frames: 4000,
+            frame_ms: FrameStats {
+                p50: 29.0,
+                p95: 30.0,
+                p99: 33.0,
+                max: 54.0,
+            },
+        });
+        let l = lines(&v);
+        let frame = l.iter().find(|l| l.key == "long_frame_p95_ms").unwrap();
+        assert!(frame.over, "30 ms is past 16.7 ms");
+        assert!(
+            report(v.clone()).passed(),
+            "a target is reported, not failed"
+        );
+        let text = table(&report(v));
+        assert!(text.contains("over (ROAD-33)"), "{text}");
+        assert!(text.contains("target, ROAD-33"), "{text}");
+        assert!(!text.contains("proposed"), "{text}");
     }
 
     #[test]
@@ -717,9 +764,8 @@ PID    %CPU IDLEW
         assert_eq!(idle.measured, None);
         assert!(!idle.over);
         assert!(idle.note.as_deref().unwrap().contains("window not drawn"));
-        let text = table(&report(false, v));
+        let text = table(&report(v));
         assert!(text.contains("window not drawn: no first frame in 20 s"));
-        assert!(text.contains("proposed"));
     }
 
     #[test]

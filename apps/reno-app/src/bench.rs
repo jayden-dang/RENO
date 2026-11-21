@@ -48,6 +48,31 @@ pub(crate) fn first_frame(window: &gpui::Window) {
     });
 }
 
+/// Whether the scripted scroll runs: `RENO_BENCH=1` and `RENO_BENCH_SCROLL=1`. The streaming
+/// scenario opens a run too, and a script that redraws every frame there would be measured as the
+/// app's own streaming cost.
+pub(crate) fn scroll_script() -> bool {
+    enabled() && std::env::var("RENO_BENCH_SCROLL").is_ok_and(|v| v == "1")
+}
+
+/// Under `RENO_BENCH=1`, `RENO_BENCH_OFF=a,b` switches the named redraw sources off, so a run's
+/// frame count shows what each one costs. Sources: `pulse` (the shared animation clock's
+/// redraws) and `store` (a daemon event's redraw of the root). Always false otherwise.
+pub(crate) fn off(source: &str) -> bool {
+    static OFF: OnceLock<Vec<String>> = OnceLock::new();
+    enabled()
+        && OFF
+            .get_or_init(|| {
+                std::env::var("RENO_BENCH_OFF")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .iter()
+            .any(|name| name == source)
+}
+
 /// Called from a render: counts the frame, and reports the count once a second.
 #[allow(clippy::print_stdout)]
 pub(crate) fn frame() {
