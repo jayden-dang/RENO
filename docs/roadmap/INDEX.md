@@ -1,7 +1,7 @@
 # Roadmap: Reno
 
 Status: Approved
-Date: 2026-11-19
+Date: 2026-11-21
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -43,15 +43,16 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8, GOAL-9
 **Members:**
 - **ROAD-30** ui-direction — After: none — Surfaces: None — the new design is drafted with `draft-ui` first
-- **ROAD-29** app-budgets-and-profiling — After: none — Surfaces: `xtask/src/bench.rs`, `docs/BENCHMARKS.md`, `apps/reno-app/`
+- **ROAD-29** app-budgets-and-profiling — After: none — Surfaces: `xtask/src/bench.rs`, `docs/BENCHMARKS.md`, `apps/reno-app/` — Notes: [ROAD-29](roads/ROAD-29.notes.md)
 - **ROAD-52** mocked-contracts — After: none — Surfaces: `crates/reno-client/src/fake/`, `crates/reno-proto/`
 - **ROAD-31** composer — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/`
-- **ROAD-32** sidebar-and-sessions — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/`
-- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/`
-- **ROAD-34** palette-and-keymap — After: ROAD-30 — Surfaces: `apps/reno-app/`
-- **ROAD-35** panel-surfaces — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/src/panel/`
-- **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/`
+- **ROAD-32** sidebar-and-sessions — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/` — Notes: [ROAD-32](roads/ROAD-32.notes.md)
+- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/` — Notes: [ROAD-33](roads/ROAD-33.notes.md)
+- **ROAD-34** palette-and-keymap — After: ROAD-30 — Surfaces: `apps/reno-app/` — Notes: [ROAD-34](roads/ROAD-34.notes.md)
+- **ROAD-35** panel-surfaces — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/src/panel/` — Notes: [ROAD-35](roads/ROAD-35.notes.md)
+- **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/` — Notes: [ROAD-37](roads/ROAD-37.notes.md)
 - **ROAD-38** first-run-and-shell — After: ROAD-30 — Surfaces: `apps/reno-app/`
+- **ROAD-55** app-crate-split — After: ROAD-29, ROAD-32 — Surfaces: `apps/reno-app/`, `xtask/src/main.rs`, `docs/architecture/system.md` — Notes: [ROAD-55](roads/ROAD-55.notes.md)
 - **ROAD-53** workflow-review-and-contract-drafts — After: ROAD-31, ROAD-32, ROAD-33, ROAD-34, ROAD-35, ROAD-37, ROAD-38 — Surfaces: `docs/specs/`
 **Depends-on:** none
 **Commitment:** Planned
@@ -64,11 +65,11 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** A run the owner starts from Reno behaves as the same harness started in a terminal in that folder (its own settings, allow-list, hooks and MCP servers decide), the owner answers its questions from Reno, an "Always allow" given in Reno also holds in the terminal, and every daemon feature is reachable from the CLI.
 **Goals:** GOAL-2, GOAL-6, GOAL-8
 **Members:**
-- **ROAD-1** answer-harness-questions — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/src/supervisor.rs`, `crates/reno-harness/src/drivers/`, `apps/reno/` — Card: [ROAD-1](roads/ROAD-1.md)
+- **ROAD-1** answer-harness-questions — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/src/supervisor.rs`, `crates/reno-harness/src/drivers/`, `apps/reno/` — Card: [ROAD-1](roads/ROAD-1.md) — Notes: [ROAD-1](roads/ROAD-1.notes.md)
 - **ROAD-2** owner-started-vs-unattended-runs — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-kernel/`
-- **ROAD-3** terminal-parity-config — After: ROAD-2 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-harness/src/child_env.rs`, `crates/reno-harness/src/conformance/`
+- **ROAD-3** terminal-parity-config — After: ROAD-2 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-harness/src/child_env.rs`, `crates/reno-harness/src/conformance/` — Notes: [ROAD-3](roads/ROAD-3.notes.md)
 - **ROAD-4** harness-decides-permissions — After: ROAD-2 — Surfaces: `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/`, `crates/reno-harness/src/wire/`
-- **ROAD-5** always-allow-into-harness-settings — After: ROAD-4 — Surfaces: `crates/reno-harness/src/drivers/`, `apps/renod/`, `apps/reno/`
+- **ROAD-5** always-allow-into-harness-settings — After: ROAD-4 — Surfaces: `crates/reno-harness/src/drivers/`, `apps/renod/`, `apps/reno/` — Notes: [ROAD-5](roads/ROAD-5.notes.md)
 - **ROAD-6** cli-reaches-every-method — After: none — Surfaces: `apps/reno/`
 **Depends-on:** MILE-10
 **Commitment:** Planned
@@ -83,9 +84,9 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Members:**
 - **ROAD-7** projects — After: none — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno/`
 - **ROAD-8** branch-and-checkout-choice — After: ROAD-7 — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-harness/src/proc/git_workspace.rs`, `crates/reno-kernel/`
-- **ROAD-9** thread-names-pins-archive — After: none — Surfaces: `crates/reno-proto/src/thread.rs`, `crates/reno-store/`, `apps/reno/`
-- **ROAD-10** run-control — After: ROAD-4 — Surfaces: `crates/reno-kernel/src/supervisor.rs`, `crates/reno-store/`, `crates/reno-harness/src/drivers/`
-- **ROAD-11** workspace-and-git-views — After: none — Surfaces: `crates/reno-proto/src/workspace.rs`, `crates/reno-proto/src/files.rs`, `apps/renod/`
+- **ROAD-9** thread-names-pins-archive — After: none — Surfaces: `crates/reno-proto/src/thread.rs`, `crates/reno-store/`, `apps/reno/` — Notes: [ROAD-9](roads/ROAD-9.notes.md)
+- **ROAD-10** run-control — After: ROAD-4 — Surfaces: `crates/reno-kernel/src/supervisor.rs`, `crates/reno-store/`, `crates/reno-harness/src/drivers/` — Notes: [ROAD-10](roads/ROAD-10.notes.md)
+- **ROAD-11** workspace-and-git-views — After: none — Surfaces: `crates/reno-proto/src/workspace.rs`, `crates/reno-proto/src/files.rs`, `apps/renod/` — Notes: [ROAD-11](roads/ROAD-11.notes.md)
 **Depends-on:** MILE-10
 **Commitment:** Planned
 **Closed:** None
@@ -97,14 +98,14 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** The owner sees what a harness's subagents, background tasks and plan list are doing and can stop a background task, sends images as images, uses the harness's own slash commands and skills, picks its model options, and enables, signs in and checks usage of each harness from Reno.
 **Goals:** GOAL-1, GOAL-8
 **Members:**
-- **ROAD-12** subagent-and-child-events — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-harness/src/wire/`
+- **ROAD-12** subagent-and-child-events — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-harness/src/wire/` — Notes: [ROAD-12](roads/ROAD-12.notes.md)
 - **ROAD-13** background-tasks — After: ROAD-3 — Surfaces: `crates/reno-harness/src/drivers/claude/`, `crates/reno-proto/src/exec.rs`, `apps/renod/`
-- **ROAD-14** plan-and-todo-events — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-harness/src/wire/`
+- **ROAD-14** plan-and-todo-events — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-harness/src/wire/` — Notes: [ROAD-14](roads/ROAD-14.notes.md)
 - **ROAD-15** image-input — After: none — Surfaces: `crates/reno-proto/src/exec.rs`, `crates/reno-harness/src/drivers/`
 - **ROAD-16** model-options-and-effort — After: none — Surfaces: `crates/reno-harness/src/drivers/claude/`, `crates/reno-harness/src/drivers/codex/`, `crates/reno-proto/`
-- **ROAD-17** commands-and-skills-discovery — After: ROAD-3 — Surfaces: `crates/reno-harness/`, `crates/reno-proto/src/protocol.rs`
-- **ROAD-18** executor-catalog-depth — After: none — Surfaces: `crates/reno-harness/src/wire/acp/`, `crates/reno-harness/src/drivers/opencode/`
-- **ROAD-19** executor-enable-signin-usage — After: none — Surfaces: `crates/reno-harness/src/usage/`, `crates/reno-harness/src/exec/`, `apps/renod/`
+- **ROAD-17** commands-and-skills-discovery — After: ROAD-3 — Surfaces: `crates/reno-harness/`, `crates/reno-proto/src/protocol.rs` — Notes: [ROAD-17](roads/ROAD-17.notes.md)
+- **ROAD-18** executor-catalog-depth — After: none — Surfaces: `crates/reno-harness/src/wire/acp/`, `crates/reno-harness/src/drivers/opencode/` — Notes: [ROAD-18](roads/ROAD-18.notes.md)
+- **ROAD-19** executor-enable-signin-usage — After: none — Surfaces: `crates/reno-harness/src/usage/`, `crates/reno-harness/src/exec/`, `apps/renod/` — Notes: [ROAD-19](roads/ROAD-19.notes.md)
 **Depends-on:** MILE-1
 **Commitment:** Planned
 **Closed:** None
@@ -117,9 +118,9 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Goals:** GOAL-3, GOAL-7
 **Members:**
 - **ROAD-20** owner-session-as-lead — After: MILE-1 — Surfaces: `apps/reno/src/mcp.rs`, `crates/reno-rpc/src/transport.rs`
-- **ROAD-21** delegation-tools — After: ROAD-20, ROAD-12 — Surfaces: `apps/reno/src/mcp.rs`, `crates/reno-kernel/`
+- **ROAD-21** delegation-tools — After: ROAD-20, ROAD-12 — Surfaces: `apps/reno/src/mcp.rs`, `crates/reno-kernel/` — Notes: [ROAD-21](roads/ROAD-21.notes.md)
 - **ROAD-22** unforgeable-agent-messages — After: ROAD-21 — Surfaces: `apps/renod/`, `crates/reno-proto/src/agent.rs`
-- **ROAD-23** lead-answers-child-questions — After: ROAD-1, ROAD-21 — Surfaces: `apps/reno/src/mcp.rs`
+- **ROAD-23** lead-answers-child-questions — After: ROAD-1, ROAD-21 — Surfaces: `apps/reno/src/mcp.rs` — Notes: [ROAD-23](roads/ROAD-23.notes.md)
 - **ROAD-24** side-chat-and-fork — After: none — Surfaces: `crates/reno-proto/src/protocol.rs`, `crates/reno-kernel/`, `crates/reno-harness/src/drivers/`
 - **ROAD-25** lead-build-spike — After: ROAD-21 — Surfaces: None — a spike decides between a lead bot on an existing harness and a loop inside Reno
 **Depends-on:** MILE-1, MILE-3
@@ -134,8 +135,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Goals:** GOAL-2
 **Members:**
 - **ROAD-26** banners-from-the-daemon — After: none — Surfaces: `apps/renod/`, `crates/reno-notify/`
-- **ROAD-27** terminal-program-status — After: none — Surfaces: `crates/reno-term/`, `apps/renod/`
-- **ROAD-28** terminal-search-and-links — After: none — Surfaces: `crates/reno-term/`, `apps/reno-app/src/terminal.rs`
+- **ROAD-27** terminal-program-status — After: none — Surfaces: `crates/reno-term/`, `apps/renod/` — Notes: [ROAD-27](roads/ROAD-27.notes.md)
+- **ROAD-28** terminal-search-and-links — After: none — Surfaces: `crates/reno-term/`, `apps/reno-app/src/terminal.rs` — Notes: [ROAD-28](roads/ROAD-28.notes.md)
 **Depends-on:** MILE-10
 **Commitment:** Planned
 **Closed:** None
@@ -147,15 +148,16 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** Every workflow designed in MILE-10 runs on the real daemon instead of mocks, and the app stays inside its written idle, streaming and cold-start budgets.
 **Goals:** GOAL-1, GOAL-2, GOAL-7, GOAL-8
 **Members:**
-- **ROAD-54** replace-mocks-with-real-contracts — After: MILE-10 — Surfaces: `apps/reno-app/`, `crates/reno-client/`
+- **ROAD-54** replace-mocks-with-real-contracts — After: MILE-10 — Surfaces: `apps/reno-app/`, `crates/reno-client/` — Notes: [ROAD-54](roads/ROAD-54.notes.md)
 - **ROAD-36** project-actions — After: ROAD-7, MILE-10 — Surfaces: `crates/reno-store/`, `apps/renod/`, `apps/reno-app/`
 - **ROAD-39** browser-tab-for-a-person — After: ROAD-35 — Surfaces: None — needs a new boundary crate for the web view, decided when it starts
+- **ROAD-56** bounded-queues-enforced — After: none — Surfaces: `clippy.toml`, `apps/reno-app/`, `crates/reno-harness/src/drivers/opencode/`, `docs/architecture/runtime.md` — Notes: [ROAD-56](roads/ROAD-56.notes.md)
 **Depends-on:** MILE-10, MILE-2, MILE-3, MILE-4, MILE-5
 **Commitment:** Planned
 **Closed:** None
 **Deferred:**
 - **ROAD-40** pull-requests → MILE-6 (2026-11-19, large; over the owner's own git credentials, after the app exists)
-- **ROAD-41** app-and-daemon-self-update → MILE-6 (2026-11-19, needs a release pipeline, signing and notarization first)
+- **ROAD-41** app-and-daemon-self-update → MILE-6 (2026-11-19, needs a release pipeline, signing and notarization first) — Notes: [ROAD-41](roads/ROAD-41.notes.md)
 - **ROAD-42** edit-files-in-the-panel → MILE-6 (2026-11-19, editing was left for later; touches run protection)
 - **ROAD-43** split-chats → MILE-6 (2026-11-19, after the new shell exists)
 - **ROAD-44** agent-published-visuals → MILE-6 (2026-11-19, needs a renderer decision)
@@ -181,7 +183,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Members:**
 - **ROAD-47** shared-board — After: MILE-4 — Surfaces: `crates/reno-store/`, `crates/reno-kernel/`, `apps/reno/src/mcp.rs`
 - **ROAD-48** mailbox — After: ROAD-22 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/`
-- **ROAD-49** journaled-flows — After: ROAD-47, ROAD-48 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/`
+- **ROAD-49** journaled-flows — After: ROAD-47, ROAD-48 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/` — Notes: [ROAD-49](roads/ROAD-49.notes.md)
 **Depends-on:** MILE-4
 **Commitment:** Planned
 **Closed:** None
@@ -193,8 +195,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** A bot or flow that asks for it has its work checked by tests, then a verifier on a different harness, then the owner's verdict, and a definition change is replay-tested, approved by the owner and reverted if it does worse.
 **Goals:** GOAL-4, GOAL-5
 **Members:**
-- **ROAD-50** evaluations — After: MILE-8 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/`
-- **ROAD-51** gated-definition-improvement — After: ROAD-50 — Surfaces: `crates/reno-kernel/`, `crates/reno-proto/src/defs/`
+- **ROAD-50** evaluations — After: MILE-8 — Surfaces: `crates/reno-kernel/`, `crates/reno-store/` — Notes: [ROAD-50](roads/ROAD-50.notes.md)
+- **ROAD-51** gated-definition-improvement — After: ROAD-50 — Surfaces: `crates/reno-kernel/`, `crates/reno-proto/src/defs/` — Notes: [ROAD-51](roads/ROAD-51.notes.md)
 **Depends-on:** MILE-8
 **Commitment:** Planned
 **Closed:** None
