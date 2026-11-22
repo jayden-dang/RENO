@@ -3,7 +3,7 @@
 //! Sans-IO (ARCH-6): the gate's `call` line in, the subject out. The class is
 //! [`normalize::action_class`], so a call is classed as the `Tool` event for it is.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use reno_proto::{ActionClass, ApprovalSubject};
 use serde_json::{Value, json};
@@ -14,15 +14,16 @@ use super::normalize::action_class;
 ///
 /// A command is `input.command`. Edits and reads name `input.path`; `grep`, `find` and `ls` may
 /// omit it (meaning the working directory), which leaves no path. A path is spelled as Pi will
-/// open it (see [`opened_path`]), otherwise kept as written. A
-/// `find` pattern and a `grep` glob are not paths and stay only in `raw`, which is the call as
-/// the gate sent it.
+/// open it (see [`opened_paths`]), with `~` expanded against `home`, the daemon user's home
+/// directory (left as written when it is unknown). A `find` pattern and a `grep` glob are not
+/// paths and stay only in `raw`, which is the call as the gate sent it.
 #[cfg_attr(not(test), expect(dead_code, reason = "nothing reads gate calls yet"))]
 pub(crate) fn subject(
     tool: &str,
     call_id: &str,
     parent: Option<&str>,
     input: &Value,
+    home: Option<&Path>,
 ) -> ApprovalSubject {
     let action = action_class(tool);
     let text = |key: &str| input.get(key).and_then(Value::as_str);
@@ -30,9 +31,9 @@ pub(crate) fn subject(
         .then(|| text("command").map(str::to_owned))
         .flatten();
     let paths = match action {
-        ActionClass::Edit | ActionClass::Read => {
-            text("path").map(opened_path).into_iter().collect()
-        }
+        ActionClass::Edit | ActionClass::Read => text("path")
+            .map(|path| opened_paths(path, home))
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
     ApprovalSubject {
@@ -49,45 +50,76 @@ pub(crate) fn subject(
     }
 }
 
-/// The path Pi opens for a tool's `path` argument, as far as it changes which components the
-/// protection sees: one leading `@` is dropped, and a `file://` URL (empty or `localhost`
-/// authority) becomes its percent-decoded path. `~` is left, since `~/.reno` already names `.reno`.
-fn opened_path(path: &str) -> PathBuf {
+/// The paths the protection should judge for a tool's `path` argument, spelled as Pi will open
+/// it, in Pi's order: one leading `@` is dropped; with a known `home`, a leading `~` or `~/` is
+/// expanded; then a `file://` URL is read as node's `fileURLToPath` reads it. A URL that call
+/// would refuse (another host, an encoded `/`) still yields its decoded path and, besides, the
+/// text as written, so a protected component in either form is seen.
+fn opened_paths(path: &str, home: Option<&Path>) -> Vec<PathBuf> {
     let path = path.strip_prefix('@').unwrap_or(path);
-    let Some(rest) = path.strip_prefix("file://") else {
-        return PathBuf::from(path);
-    };
-    let (authority, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    if !(authority.is_empty() || authority == "localhost") || tail.is_empty() {
-        return PathBuf::from(path);
+    if let Some(home) = home {
+        if path == "~" {
+            return vec![home.to_path_buf()];
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return vec![home.join(rest)];
+        }
     }
-    let bytes = tail.as_bytes();
+    file_url_paths(path).unwrap_or_else(|| vec![PathBuf::from(path)])
+}
+
+/// The WHATWG reading of a `file://` URL that Pi hands to `fileURLToPath`: trailing control
+/// characters and spaces go, tab, newline and carriage return are deleted, `\` is a `/`, the query
+/// and fragment are dropped, a `localhost` host (any case) is the local one, and the path is
+/// percent-decoded. `None` when `path` is not such a URL.
+fn file_url_paths(path: &str) -> Option<Vec<PathBuf>> {
+    let rest = path.strip_prefix("file://")?;
+    let cleaned: String = rest
+        .trim_end_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    let cleaned = cleaned.split(['?', '#']).next().unwrap_or_default();
+    let (host, tail) = cleaned.split_at(cleaned.find('/').unwrap_or(cleaned.len()));
+    let tail = if tail.is_empty() { "/" } else { tail };
+    let decoded = PathBuf::from(percent_decode(tail));
+    let refused = !(host.is_empty() || host.eq_ignore_ascii_case("localhost"))
+        || tail.to_ascii_lowercase().contains("%2f");
+    Some(if refused {
+        vec![decoded, PathBuf::from(path)]
+    } else {
+        vec![decoded]
+    })
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
-        let hex = (bytes[at] == b'%')
+        let byte = (bytes[at] == b'%')
             .then(|| bytes.get(at + 1..at + 3))
             .flatten()
             .and_then(|pair| std::str::from_utf8(pair).ok())
             .and_then(|pair| u8::from_str_radix(pair, 16).ok());
-        match hex {
-            Some(byte) => {
-                decoded.push(byte);
-                at += 3;
-            }
-            None => {
-                decoded.push(bytes[at]);
-                at += 1;
-            }
-        }
+        decoded.push(byte.unwrap_or(bytes[at]));
+        at += if byte.is_some() { 3 } else { 1 };
     }
-    PathBuf::from(String::from_utf8_lossy(&decoded).into_owned())
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    /// A call as the driver makes it, with a constructed home.
+    fn subject(tool: &str, call_id: &str, parent: Option<&str>, input: &Value) -> ApprovalSubject {
+        super::subject(tool, call_id, parent, input, Some(Path::new("/home/u")))
+    }
 
     fn paths(subject: &ApprovalSubject) -> Vec<&str> {
         subject.paths.iter().map(|p| p.to_str().unwrap()).collect()
@@ -123,32 +155,67 @@ mod tests {
 
     #[test]
     fn a_path_is_what_pi_will_open_not_what_the_model_typed() {
-        let rows = [
-            ("@.reno/policy.toml", ".reno/policy.toml"),
-            ("@.git/hooks/pre-commit", ".git/hooks/pre-commit"),
-            ("@@x", "@x"),
-            ("@", ""),
-            ("src/lib.rs", "src/lib.rs"),
-            ("/work/.reno/x", "/work/.reno/x"),
-            ("docs/a@b/c", "docs/a@b/c"),
-            ("~/.reno/x", "~/.reno/x"),
-            ("file:///work/.reno/x", "/work/.reno/x"),
-            ("file:///work/%2Ereno/x", "/work/.reno/x"),
-            ("file://localhost/work/%2egit/x", "/work/.git/x"),
-            ("@file:///work/%2Ereno/x", "/work/.reno/x"),
-            ("file://other/work/x", "file://other/work/x"),
-            ("file:///work/%zz/x", "/work/%zz/x"),
+        let rows: [(&str, &[&str]); 31] = [
+            ("@.reno/policy.toml", &[".reno/policy.toml"]),
+            ("@.git/hooks/pre-commit", &[".git/hooks/pre-commit"]),
+            ("@@x", &["@x"]),
+            ("@", &[""]),
+            ("src/lib.rs", &["src/lib.rs"]),
+            ("/work/.reno/x", &["/work/.reno/x"]),
+            ("docs/a@b/c", &["docs/a@b/c"]),
+            ("~/.reno/x", &["/home/u/.reno/x"]),
+            ("@~/.git/x", &["/home/u/.git/x"]),
+            (
+                "~/Library/Application Support/Reno/x",
+                &["/home/u/Library/Application Support/Reno/x"],
+            ),
+            ("~", &["/home/u"]),
+            ("~/", &["/home/u/"]),
+            ("~x/.reno", &["~x/.reno"]),
+            ("file:///work/.reno/x", &["/work/.reno/x"]),
+            ("file:///work/%2Ereno/x", &["/work/.reno/x"]),
+            ("file://localhost/work/%2egit/x", &["/work/.git/x"]),
+            ("file://LOCALHOST/work/.git/x", &["/work/.git/x"]),
+            ("@file:///work/%2Ereno/x", &["/work/.reno/x"]),
+            (
+                "file:///work/.reno\\policy.toml",
+                &["/work/.reno/policy.toml"],
+            ),
+            ("file://\\work\\.reno\\x", &["/work/.reno/x"]),
+            ("file:///work/.re\tno/x", &["/work/.reno/x"]),
+            ("file:///work/.re\nno/x", &["/work/.reno/x"]),
+            ("file:///work/.reno\r/x", &["/work/.reno/x"]),
+            ("file:///work/.reno?x", &["/work/.reno"]),
+            ("file:///work/.git#x", &["/work/.git"]),
+            ("file:///work/.reno/x?y/z", &["/work/.reno/x"]),
+            (
+                "file:///work/a%2F.reno/x",
+                &["/work/a/.reno/x", "file:///work/a%2F.reno/x"],
+            ),
+            ("file:///work/%zz/x", &["/work/%zz/x"]),
+            (
+                "file://other/work/.reno/x",
+                &["/work/.reno/x", "file://other/work/.reno/x"],
+            ),
+            ("FILE:///work/.reno/x", &["FILE:///work/.reno/x"]),
+            ("file:/work/.reno/x", &["file:/work/.reno/x"]),
         ];
         for tool in ["read", "ls", "grep", "find", "edit", "write"] {
             for (typed, opened) in rows {
                 let subject = subject(tool, "c1", None, &json!({ "path": typed }));
-                assert_eq!(paths(&subject), [opened], "{tool} {typed}");
+                assert_eq!(paths(&subject), opened, "{tool} {typed:?}");
                 assert_eq!(
                     subject.raw["input"]["path"], typed,
                     "{tool}: raw is as sent"
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_home_path_is_left_as_written_when_the_home_is_unknown() {
+        let subject = super::subject("write", "c1", None, &json!({ "path": "~/.reno/x" }), None);
+        assert_eq!(paths(&subject), ["~/.reno/x"]);
     }
 
     #[test]

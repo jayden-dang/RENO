@@ -24,6 +24,7 @@ assert.doesNotMatch(readFileSync(process.argv[2], "utf8"), /setTimeout|setInterv
 const { default: extension, MAX_OUTSTANDING, MAX_WAITING } = await import(process.argv[2]);
 // A short directory, so the socket path stays within sun_path whatever TMPDIR is.
 const dir = mkdtempSync("/tmp/rg-");
+process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
 const NONCE = "nonce-1234";
 let sockets = 0;
 
@@ -280,5 +281,4 @@ for (const garbage of ["this is not json\n", "[1,2]\n", `{"t":"decision","id":99
 }
 
 assert.deepEqual(clock, [], "the gate never reads a clock or sets a timer");
-rmSync(dir, { recursive: true, force: true });
 process.exit(0);
