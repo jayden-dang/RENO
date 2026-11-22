@@ -55,6 +55,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/`
 - **ROAD-38** first-run-and-shell — After: ROAD-30 — Surfaces: `apps/reno-app/`
 - **ROAD-55** app-crate-split — After: ROAD-29, ROAD-32 — Surfaces: `apps/reno-app/`, `xtask/src/main.rs`, `docs/architecture/system.md` — Notes: [ROAD-55](roads/ROAD-55.notes.md)
+- **ROAD-60** comments-on-the-transcript — After: ROAD-33, ROAD-31 — Surfaces: `apps/reno-app/` — Notes: [ROAD-60](roads/ROAD-60.notes.md)
 - **ROAD-53** workflow-review-and-contract-drafts — After: ROAD-31, ROAD-32, ROAD-33, ROAD-34, ROAD-35, ROAD-37, ROAD-38 — Surfaces: `docs/specs/`
 **Depends-on:** none
 **Commitment:** Planned
