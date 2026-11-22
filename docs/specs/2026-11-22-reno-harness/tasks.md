@@ -338,7 +338,7 @@ Also (`subject`):
 
 **Depends-on:** Task 3
 
-- [ ] Write the failing node fixture, modelled on `tests/fixtures/pi-mcp-test.mjs`, and its Rust runner, modelled on
+- [x] Write the failing node fixture, modelled on `tests/fixtures/pi-mcp-test.mjs`, and its Rust runner, modelled on
   `tests/misc/pi_mcp.rs`. Like that runner, it reports and skips when node is absent. The fixture loads `gate.mjs`
   with a stub `pi` API, plays a scripted Unix socket, and asserts:
   - the hello carries the nonce;
@@ -350,20 +350,20 @@ Also (`subject`):
     the hook is still pending, and then allows;
   - with 16 outstanding, the 17th call waits;
   - with 16 outstanding and 256 waiting, the 273rd call is blocked with "too many calls are waiting for Reno".
-- [ ] Write failing table-driven unit tests for `subject`, one row per tool:
+- [x] Write failing table-driven unit tests for `subject`, one row per tool:
   - `bash` and `powershell` give `Command` with `input.command`;
   - `read`, `ls`, `grep` and `find` give `Read` with `input.path`, and with no path when it is omitted;
   - `edit` and `write` give `Edit` with `input.path`;
   - `mcp__x__y` gives `McpTool`;
   - `extension_tool` gives `Other`;
   - `raw` equals `{toolName, toolCallId, parentToolCallId, input}` verbatim.
-- [ ] Write failing unit tests for `lists_extension_command`: true only for a `reno-gate` entry with
+- [x] Write failing unit tests for `lists_extension_command`: true only for a `reno-gate` entry with
   `source: "extension"`. Confirm the field names against Pi `dist/modes/rpc/rpc-mode.js:540` before writing it.
-- [ ] Run `cargo test -p reno-harness --test misc pi_gate && cargo test -p reno-harness --lib wire::pi`. Expect the
+- [x] Run `cargo test -p reno-harness --test misc pi_gate && cargo test -p reno-harness --lib wire::pi`. Expect the
   stub to block everything, and `subject` / `lists_extension_command` to be unresolved.
-- [ ] Implement `gate.mjs`, `subject` and the frames functions, sans-IO.
-- [ ] Run, and expect a pass.
-- [ ] `git commit -m "feat(harness): the Reno gate extension and the subjects its calls become"`
+- [x] Implement `gate.mjs`, `subject` and the frames functions, sans-IO.
+- [x] Run, and expect a pass.
+- [x] `git commit -m "feat(harness): the Reno gate extension and the subjects its calls become"`
 
 _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.5, RENOHARNESS-3.8, RENOHARNESS-6.1, RENOHARNESS-6.2_
 
