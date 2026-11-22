@@ -92,7 +92,7 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-7.2** THE SYSTEM SHALL refuse, in the driver's writer, to send Pi's host RPC `bash` command on a run on `reno`. [Lock L15]
 - **RENOHARNESS-7.3** WHEN Pi starts for a run on `reno` THE SYSTEM SHALL load none of the owner's Pi extensions, skills, prompt templates or MCP servers, and name each extension it loads explicitly: Reno's MCP bridge, Pi's built-in MCP and codemode, and the gate. [Lock L15]
 - **RENOHARNESS-7.4** (guard) WHEN a call on `reno` is an edit of a path in `.git`, `.reno` or Reno's data directory, or a command that writes there in a form the built-in protection recognises, THE SYSTEM SHALL CONTINUE TO deny it in every access mode, before any allow, as the built-in protection does for every run.
-- **RENOHARNESS-7.5** WHEN an attempt of a run on `reno` starts THE SYSTEM SHALL write that attempt's gate extension and Pi agent directory afresh, never reusing files an earlier attempt could reach. [agent-decided]
+- **RENOHARNESS-7.5** WHEN an attempt of a run on `reno` starts THE SYSTEM SHALL write that attempt's gate extension and Pi agent directory afresh, never reusing files an earlier attempt could reach, other than the run's session directory (RENOHARNESS-8.4). [agent-decided]
 
 ## 8. The run goes on until the harness says it is done
 
@@ -177,7 +177,11 @@ System-doc consult: `docs/product/metrics.md`, `docs/ops/reliability.md` and `do
 - Argument rewrite by the gate, `auto_accept_edits` on `reno`, a new wire method, a migration or new persisted format, a new variant of a persisted or wire enum (`RejectReason`, `StartRefusal`, `ExecEvent`), and any new screen.
 - Redaction of Pi's own session files. Pi writes its session JSONL itself, and it never passes Reno's redactor, so a secret a tool printed stays in the run's session directory until the run is `done` or `cancelled`. [S10]
 - A retention limit for kept sessions. The session directories of runs left `failed` or `interrupted` are kept with no bound, so that a person can still resume them, until a retention rule exists. No time-based retention is added. [S11; agent-decided]
-- Writes that the built-in protection cannot recognise. A permitted command can still write the run's files by other means, for example through an interpreter script, because the gate is not a sandbox (L15). Such a write reaches no later attempt (RENOHARNESS-7.5), but it can reach the session directory that a resume reads. Isolating the run is the bot computer's (MILE-12).
+- Writes that the built-in protection cannot recognise. A permitted command can still write by other means, for example through an interpreter script, because the gate is not a sandbox (L15). Such a write can reach:
+  - the run's own files. It reaches no later attempt (RENOHARNESS-7.5), but it can reach the session directory that a resume reads;
+  - Reno's definitions, its data directory and the bot's policy.
+
+  So ROAD-63's "nothing inside a run can change Reno's definitions, data dir, the bot's own policy or its gate" (L19, `docs/roadmap/roads/ROAD-63.md:16`) is **not met by this feature alone**. Command parsing is ROAD-63's (`ROAD-63.md:19`), and isolating the run is the bot computer's (MILE-12). **Unverified:** whether Pi 1.5.0 re-reads, within one attempt, a file a run wrote into its agent directory (it has an `auth.json` reload on a revision change, a settings `reload()` and an extension `ctx.reload()`). Design checks that no reload path is reachable in RPC mode, by a source read or a test, before `design.md` is approved.
 - Exfiltration of the provider key. A model-run command can read the key from the run's environment, because secrets are environment variables of the run. This is an accepted risk handed to ROAD-63.
 
 ## Open Questions
