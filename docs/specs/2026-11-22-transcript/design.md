@@ -10,8 +10,10 @@ UI brief: ./ui-brief.md (Locked)
 
 **What exists.** `reno-app` draws a run's transcript as a GPUI `list()`. The pure row model (`apps/reno-app/src/transcript.rs`,
 `Row`, `Key`) folds a finished turn's interim steps into one `Row::Worked`. Before this branch, an open fold drew all its
-inner rows inside one list item, and every daemon event rebuilt the latest run and spliced a prefix diff. Together those
-cost 31.4 ms p95 on 2,000 messages with every fold open (docs/BENCHMARKS.md:198). The markdown parser (`crates/reno-markdown`)
+inner rows inside one list item, and every daemon event rebuilt the latest run and spliced a prefix diff. The bench measured
+31.4 ms p95 on 2,000 messages with every fold open (docs/BENCHMARKS.md:198). That cause is read from the code, and an
+unsymbolised run on the fake is consistent with it (RUN `ui/profile/U1-profile.md`); it is not profiled. U1 stays open
+until plan task 1 runs the real bench. The markdown parser (`crates/reno-markdown`)
 already recognised math and images but drew them as text. There was no selection, no ⌘F and no scroll restore.
 
 **What the branch already keeps.** The draft-ui stop left kept code on `feat/transcript` (lock d011985, brief
@@ -171,9 +173,24 @@ rest.
 
 The strip's toggles (case, whole word, regex) feed one `Query`. A regex that does not parse yields `Err(reason)`, and the
 strip shows its error state with no count (3.10). The recount is a 150 ms throttle, armed by a store change or an
-open/close; changes inside the window ride the armed deadline (3.11). The toggles and the error state are 3.9 and 3.10,
-which the operator's go sheet listed as "not in the draft yet (built after your go)". They join the locked strip inside the
-field's right edge, in the kit's own toggle style. Reasoning that is open only because it streams is held in neither set;
+open/close; changes inside the window ride the armed deadline (3.11).
+
+**Scan cost.** A recount rescans only the latest run. Hits in older runs are kept per segment, keyed by the same
+signature that already caches their rows (1.10, `older_builds`). Each recount is therefore bounded by one run's text, not
+the thread's. Plan task 1's bench adds a check that streams with a query held in the strip. Reopen trigger: if that check
+misses 16.7 ms p95, the recount moves to an owned background task (ARCH-11).
+
+**Regex.** The pattern compiles through `regex::RegexBuilder` with Unicode on, case-insensitive unless match case is on,
+and a 1 MiB `size_limit` (agent-decided). A pattern over the limit shows the error state (3.10). The crate matches in
+linear time.
+
+**Hit cap.** Hits stop at 10,000, and the count reads "10,000+" (agent-decided). That narrows 3.2: a hit past the cap is
+not counted and cannot be reached by Enter. Reopen trigger: a real thread whose query passes 10,000 hits.
+
+**Additions to the locked strip.** The toggles and the error state (3.9, 3.10) are built in the kit's toggle style. The
+operator's go covers that they exist (ui-pick.md listed them as "built after your go"), not how they look on the locked
+strip. They are shown at one UI stop before landing, together with the scrollbar (5.3) and the turn-end hover actions
+(5.4), which were never on the go sheet. Reasoning that is open only because it streams is held in neither set;
 closing search never closes it, and a stream ending never closes a row search opened while the strip is open (3.12).
 
 ### Selection and copy
@@ -292,7 +309,7 @@ u8)`.
 Depth: if `md/math.rs` (rung 7, new on this branch) vanished, callers would still need only `typeset(..)` returning a
 raster with its above-baseline and below-baseline heights.
 Locality: leave; typesetting stays synchronous on a cache miss (0.06 ms parse and layout, 0.2 ms raster in the spike;
-4 KiB source cap; LRU of 256 entries / 24 MiB). Reopen trigger: if the 16.2 bench misses its target, move it to an owned
+4 KiB source cap and an LRU of 256 entries / 24 MiB, both agent-decided). Reopen trigger: if the 16.2 bench misses its target, move it to an owned
 background task with a placeholder slot.
 
 ### Diagrams
@@ -308,12 +325,13 @@ states; the measurer, theme init and cache stay inside.
 Locality: extend `Cargo.toml` (merman features `diagram-class`, `diagram-state`, `diagram-er`, `diagram-gantt`,
 `diagram-pie`, with one test each; a type it cannot draw goes through reroute-plan) and `md/mermaid.rs` (keep the previous
 `Ready` while a changed source renders, 10.2) and the card (tabs; ⌘-scroll zoom from fit-to-width to 200 % with a reset;
-a re-raster 300 ms after the last zoom step, as an owned deadline task; pause following on zoom, 6.2).
+a re-raster 300 ms after the last zoom step (agent-decided), as an owned deadline task; pause following on zoom, 6.2).
 
 ### Images
 
 Satisfies: TRANSCRIPT-11.1, TRANSCRIPT-11.2, TRANSCRIPT-11.3, TRANSCRIPT-11.4, TRANSCRIPT-11.5
-Reuse: rung 2 — kept `md/image.rs` (`ImageSource`, `classify`, `resolve`, an LRU of 64 / 48 MiB, an 8 MiB cap), the
+Reuse: rung 2 — kept `md/image.rs` (`ImageSource`, `classify`, `resolve`, an LRU of 64 / 48 MiB and an 8 MiB cap, both
+agent-decided), the
 `fs.read_image` client call (`crates/reno-client/src/files.rs` `fs_read_image_all`), and the `no_files()` rasteriser for
 SVG.
 Respects: ARCH-2, ARCH-12, ARCH-16
@@ -419,12 +437,14 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 Respects: ARCH-12, ARCH-13, ARCH-16, ARCH-17
 Surface: `RunScreen.markdown`, `.probed` and `file_index.dirs` are unbounded today (scan-design §6). **replace** each with
 an `Lru`:
-- parsed trees: 512 entries, reparsed on demand. The live streaming row's entry is pinned and never evicted, since its
-  incremental parser holds state.
-- probed directories: 256 entries;
-- listed directories: 256 entries.
+- parsed trees: 512 entries (agent-decided), reparsed on demand. The live streaming row's entry is pinned and never
+  evicted, since its incremental parser holds state. A top-to-bottom scroll of 2,000 messages evicts and reparses
+  replies inside the frames that draw them, so 16.1's bench is the check. Reopen trigger: if 16.1 misses its target,
+  raise the bound, or hold the parse off-frame behind a placeholder, as Math would.
+- probed directories: 256 entries (agent-decided);
+- listed directories: 256 entries (agent-decided).
 Also bounded:
-- `Found.hits` stops at 10,000 hits, and the count reads "10,000+";
+- `Found.hits` stops at 10,000 hits, and the count reads "10,000+" (agent-decided; see Find);
 - text layout is GPUI's own per-frame line-layout cache, bounded by the viewport.
 Interface: none new.
 Depth: n/a — applies `Lru` to three maps.
