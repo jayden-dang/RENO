@@ -1107,11 +1107,52 @@ async fn reno_probe_does_not_ask_pi_for_the_owners_credentials() {
     assert!(bench.logged().is_empty(), "no Pi was started to be asked");
 }
 
+fn bot_spec(bench: &Bench) -> ExecSpec {
+    let mut spec = bench.spec("hello");
+    spec.env.insert("RENO_BOT".to_owned(), "keeper".to_owned());
+    spec
+}
+
+#[tokio::test]
+async fn reno_refuses_a_run_that_has_no_bot() {
+    let bench = Bench::new();
+    let (controls, _h) = ExecControls::new(4);
+    let error = reno_executor(&bench)
+        .start(bench.spec("hello"), controls)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, ExecError::InvalidSpec(why) if why.contains("runs bots only")),
+        "{error:?}"
+    );
+    assert!(bench.logged().is_empty(), "nothing was spawned");
+}
+
+#[tokio::test]
+async fn reno_refuses_a_bot_that_inherits_the_owners_config() {
+    let bench = Bench::new();
+    let mut spec = bot_spec(&bench);
+    spec.inherit_user_config = true;
+    let (controls, _h) = ExecControls::new(4);
+    let error = reno_executor(&bench)
+        .start(spec, controls)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, ExecError::InvalidSpec(why)
+            if why.contains("runs bots only") && why.contains("inherit_user_config")),
+        "{error:?}"
+    );
+    assert!(bench.logged().is_empty(), "nothing was spawned");
+}
+
 #[tokio::test]
 async fn reno_refuses_a_run_until_it_is_armed() {
     let bench = Bench::new();
     for access in [AccessMode::Supervised, AccessMode::FullAccess] {
-        let mut spec = bench.spec("hello");
+        let mut spec = bot_spec(&bench);
         spec.access = access;
         let (controls, _h) = ExecControls::new(4);
         let error = reno_executor(&bench)

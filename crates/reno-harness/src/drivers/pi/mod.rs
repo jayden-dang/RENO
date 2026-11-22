@@ -538,6 +538,18 @@ impl Executor for PiExecutor {
         require_access(spec.access, &self.flavor.access_modes())?;
         require_sandbox(spec.sandbox, &[SandboxLevel::Unrestricted])?;
         if matches!(self.flavor, Flavor::Reno { .. }) {
+            if !spec.env.contains_key("RENO_BOT") {
+                return Err(ExecError::InvalidSpec(
+                    "the Reno harness runs bots only; this run has no bot".into(),
+                ));
+            }
+            if spec.inherit_user_config {
+                return Err(ExecError::InvalidSpec(
+                    "the Reno harness runs bots only, and never loads the owner's config; \
+                     the bot sets inherit_user_config = true"
+                        .into(),
+                ));
+            }
             return Err(ExecError::InvalidSpec(
                 "the Reno harness is not armed in this build".into(),
             ));
