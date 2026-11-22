@@ -156,7 +156,7 @@ RENOHARNESS-10.1, RENOHARNESS-11.3
 Reuse: rung 2, in four places:
 - `launch_pi` (`drivers/pi/mod.rs:623-707`);
 - `ScratchDir` (`proc/scratch.rs:30-72`, 0700 and removed on drop);
-- `mcp::write_private` and `install` (`mcp.rs:34-49`, 0600 and never overwritten);
+- `mcp::write_private` (`mcp.rs:34-49`, 0600 and never overwritten) and `mcp::install` (`mcp.rs:52-70`);
 - `child_env::restrict` with a new `DriverEnv` (`child_env.rs:46,359`), and the `launch::args` table
   (`wire/pi/launch.rs:35-58`).
 Respects: ARCH-6, ARCH-15
@@ -371,7 +371,9 @@ Interface:
 pub(crate) fn subject(tool: &str, call_id: &str, parent: Option<&str>, input: &Value) -> ApprovalSubject
   action  = action_class(tool)
   command = input.command          for Command
-  paths   = input.path | file_path  for Edit and Read (resolved against nothing: as written, like every driver)
+  paths   = input.path when present, for Edit and Read (Pi's tools name it `path`; `grep`, `find` and `ls` may omit it,
+            meaning the working dir, so paths is empty). Paths are kept as written, like every driver. `find`'s
+            `pattern` and `grep`'s `glob` are not paths and stay only in `raw` (part of the lexical-path residual).
   raw     = {toolName, toolCallId, parentToolCallId, input}   (verbatim; the supervisor's redactor scrubs it)
 ```
 Depth: n/a. This extends `wire/pi`.
@@ -396,7 +398,7 @@ Depth: n/a. This reuses the shipped ladder.
 Locality: leave. No edit lands in these files. `supervisor/protect.rs` gets a doc change only (9.2).
 
 Notes:
-- **Reno's own MCP tools.** Step 6 records them in the approval history, not as a journal pair (`approval.rs:418-426`),
+- **Reno's own MCP tools.** Step 6 records them in the approval history, not as a journal pair (`approval.rs:348-359`),
   which is RENOHARNESS-4.3's exception to 4.1.
 - **Inherited behavior.** When the journal write after a decision fails, the run is cancelled, but an allow already
   committed to the approval history may reach the gate (`approval.rs:526-535`). The decision is on record in the
