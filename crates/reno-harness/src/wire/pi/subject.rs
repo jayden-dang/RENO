@@ -11,16 +11,17 @@ use serde_json::{Value, json};
 use super::normalize::action_class;
 
 /// The subject of the gate call `call_id` to `tool`, made by `parent` when another tool made it.
-/// `None` when the call cannot be read: a command, or the path of an edit or read, that is there
-/// but is not text. The caller denies such a call, since what it would run is not known.
+/// `None` when the call cannot be read: a shell tool with no command, or a command, or the path of
+/// an edit or read, that is there but is not text. The caller denies such a call, since what it
+/// would run is not known.
 ///
-/// A command is `input.command`. Edits and reads name `input.path`; `grep`, `find` and `ls` may
-/// omit it (meaning the working directory), which leaves no path. A path is spelled as Pi will
-/// open it (see [`opened_paths`]). Pi expands `~` with its child's `os.homedir()`, which is the
-/// `HOME` of the child's own environment, so the caller passes that as `home`; without it
-/// `~/Library/Application Support/Reno` would read as a path inside the working directory. A
-/// `find` pattern and a `grep` glob are not paths and stay only in `raw`, which is the call as
-/// the gate sent it.
+/// A command is `input.command`, which a shell tool always has. Edits and reads name `input.path`;
+/// `grep`, `find` and `ls` may omit it (meaning the working directory), which leaves no path. A
+/// path is spelled as Pi will open it (see [`opened_paths`]). Pi expands `~` with its child's
+/// `os.homedir()`, which is the `HOME` of the child's own environment, so the caller passes that
+/// as `home`; without it `~/Library/Application Support/Reno` would read as a path inside the
+/// working directory. A `find` pattern and a `grep` glob are not paths and stay only in `raw`,
+/// which is the call as the gate sent it.
 pub(crate) fn subject(
     tool: &str,
     call_id: &str,
@@ -30,7 +31,7 @@ pub(crate) fn subject(
 ) -> Option<ApprovalSubject> {
     let action = action_class(tool);
     let command = match action {
-        ActionClass::Command => text(input, "command")?.map(str::to_owned),
+        ActionClass::Command => Some(text(input, "command")??.to_owned()),
         _ => None,
     };
     let paths = match action {
@@ -315,6 +316,9 @@ mod tests {
     #[test]
     fn a_command_or_path_that_is_not_text_is_a_call_that_cannot_be_read() {
         let rows: &[(&str, Value)] = &[
+            ("bash", json!({})),
+            ("bash", json!({ "pattern": "ls" })),
+            ("powershell", json!({})),
             ("bash", json!({ "command": 7 })),
             ("bash", json!({ "command": null })),
             ("bash", json!({ "command": ["rm", "-rf"] })),
@@ -337,10 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_that_names_nothing_is_still_read() {
-        let bare_command = subject("bash", "c1", None, &json!({}));
-        assert_eq!(bare_command.action, ActionClass::Command);
-        assert_eq!(bare_command.command, None);
+    fn a_search_with_no_path_and_an_unknown_tool_are_still_read() {
         let no_path = subject("ls", "c2", None, &json!({}));
         assert!(no_path.paths.is_empty());
         let other = subject(

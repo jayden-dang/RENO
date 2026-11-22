@@ -2494,10 +2494,9 @@ async fn a_real_pi_behind_the_gate_arms_and_every_kind_of_call_reaches_a_decisio
     let agent_dir = agent["agentDir"]
         .as_str()
         .expect("Pi has an agent directory");
-    let home = std::env::var("HOME").unwrap();
     assert!(
-        !Path::new(agent_dir).starts_with(Path::new(&home).join(".pi")),
-        "the run used the owner's Pi directory: {agent_dir}"
+        !Path::new(agent_dir).starts_with(Path::new(&live_home(&bench)).join(".pi")),
+        "the run used the home's Pi directory: {agent_dir}"
     );
     let auth = agent["auth"]
         .as_str()

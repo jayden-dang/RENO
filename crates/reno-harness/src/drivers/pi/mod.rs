@@ -210,6 +210,9 @@ const RUN_STOPPED: &str = "Reno stopped the run before it decided this call.";
 /// What a gate call whose command or path is not text is told.
 const UNREADABLE_CALL: &str = "Reno could not read this call.";
 
+/// What a gate call is told when the child has no home to expand its paths against.
+const UNJUDGEABLE_CALL: &str = "Reno could not judge this call: Pi has no usable home directory.";
+
 /// The Pi CLI to launch: `PI_EXECUTABLE`, then our own PATH, the login-shell PATH and the known
 /// install locations. Resolved per call: cheap after the snapshot is cached.
 pub fn resolve_pi_executable() -> Option<PathBuf> {
@@ -1084,7 +1087,11 @@ fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                tracing::warn!(target: "reno_harness::pi", %error, "could not read a session entry");
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    %error,
+                    "could not read a session entry",
+                );
                 continue;
             }
         };
@@ -1098,7 +1105,12 @@ fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
         let kind = match entry.file_type() {
             Ok(kind) => kind,
             Err(error) => {
-                tracing::warn!(target: "reno_harness::pi", run, %error, "could not tell what a session entry is");
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    run,
+                    %error,
+                    "could not tell what a session entry is",
+                );
                 continue;
             }
         };
@@ -1111,10 +1123,19 @@ fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
         };
         match removed {
             Ok(()) => {
-                tracing::info!(target: "reno_harness::pi", run, "removed a session no run can resume");
+                tracing::info!(
+                    target: "reno_harness::pi",
+                    run,
+                    "removed a session no run can resume",
+                );
             }
             Err(error) => {
-                tracing::warn!(target: "reno_harness::pi", run, %error, "could not remove an unneeded session");
+                tracing::warn!(
+                    target: "reno_harness::pi",
+                    run,
+                    %error,
+                    "could not remove an unneeded session",
+                );
             }
         }
     }
@@ -1915,7 +1936,11 @@ impl<'a> Player<'a> {
         }
         let Some(home) = self.run.pi.home.as_deref() else {
             // A call whose paths cannot be judged is not run.
-            self.decide_call(call.id, crate::exec::Decision::Deny, None);
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(UNJUDGEABLE_CALL.into()),
+            );
             return Ok(());
         };
         let Some(subject) = subject(
@@ -3085,6 +3110,25 @@ mod tests {
                 let decision = rig.decision().await;
                 assert_eq!(decision["decision"], "deny");
                 assert_eq!(decision["reason"], UNREADABLE_CALL);
+                assert!(
+                    rig.emitted()
+                        .iter()
+                        .all(|event| !matches!(event, ExecEvent::NeedsApproval { .. }))
+                );
+            }
+
+            #[tokio::test]
+            async fn a_call_with_no_usable_home_is_denied_with_a_reason_and_never_raised() {
+                let mut rig = Rig::new().await;
+                rig.send_call(1, "c1").await;
+                let mut player = rig.player();
+                player.run.pi.home = None;
+                player.frame(tool_start("c1")).await.unwrap();
+                let call = next_call(&mut player).await;
+                player.hold(call).await.unwrap();
+                let decision = rig.decision().await;
+                assert_eq!(decision["decision"], "deny");
+                assert_eq!(decision["reason"], UNJUDGEABLE_CALL);
                 assert!(
                     rig.emitted()
                         .iter()
