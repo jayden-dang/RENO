@@ -230,7 +230,7 @@ _Requirements: RENOHARNESS-1.4, RENOHARNESS-1.5, RENOHARNESS-1.6, RENOHARNESS-10
 
 **Depends-on:** Task 1
 
-- [ ] Write failing unit tests:
+- [x] Write failing unit tests:
   - `args` for `Reno` is exactly the list above, with no `--no-mcp` and the gate the last `--extension`.
   - `args` for the default `Launch` is today's list, and the pinned `tests/pi.rs`
     `the_command_line_isolates_the_owners_tools_and_trusts_nothing` stays green.
@@ -240,12 +240,12 @@ _Requirements: RENOHARNESS-1.4, RENOHARNESS-1.5, RENOHARNESS-1.6, RENOHARNESS-10
   - With a 90-byte `TMPDIR` passed to the scratch builder, the socket path falls back to `/tmp/reno-gate-*`.
   - After the attempt is torn down (normally, and with the fake killed), its scratch is gone. Task 6 adds a failed
     attempt and Task 7 a cancelled one.
-- [ ] Run `cargo test -p reno-harness --lib drivers::pi && cargo test -p reno-harness --lib wire::pi::launch`, and
+- [x] Run `cargo test -p reno-harness --lib drivers::pi && cargo test -p reno-harness --lib wire::pi::launch`, and
   expect the new `Launch` fields and the `launch_pi` parameter to be unresolved.
-- [ ] Implement the `Launch` fields and `args`, `launch_pi(.., flavor)` with the layout, session dir (0700) and
+- [x] Implement the `Launch` fields and `args`, `launch_pi(.., flavor)` with the layout, session dir (0700) and
   socket path rule, and the `gate.mjs` stub shipped with `include_str!` and `mcp::write_private`.
-- [ ] Run those commands, then `cargo test -p reno-harness --test pi`. Expect a pass, `pi` included.
-- [ ] `git commit -m "feat(harness): lay out each Reno attempt under .reno with a durable session dir"`
+- [x] Run those commands, then `cargo test -p reno-harness --test pi`. Expect a pass, `pi` included.
+- [x] `git commit -m "feat(harness): lay out each Reno attempt under .reno with a durable session dir"`
 
 _Requirements: RENOHARNESS-1.3, RENOHARNESS-5.4, RENOHARNESS-7.3, RENOHARNESS-7.5, RENOHARNESS-8.4, RENOHARNESS-10.1, RENOHARNESS-11.3, RENOHARNESS-11.5_
 
