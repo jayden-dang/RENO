@@ -97,8 +97,10 @@ pub struct BotDef {
     /// default: a run is isolated from it, so the owner's own hooks, plugins, memory and
     /// instructions do not reach the bot. Only executors that declare
     /// `isolates_user_config` can isolate: Claude Code, Codex, Cursor, Pi (`pi`) and Reno's own
-    /// harness (`reno`), though a `reno` bot that sets it is refused when its run starts. Muse Code,
-    /// opencode, the ACP agents and `mock` load it either way, and say so on their descriptor. Reno's own MCP server and its policy apply in both modes.
+    /// harness (`reno`), which never loads it: routing leaves `reno` out for a bot that sets it,
+    /// and a run sent to it anyway (a named executor, or a resumed run) is refused when it
+    /// starts. Muse Code, opencode, the ACP agents and `mock` load it either way, and say so on
+    /// their descriptor. Reno's own MCP server and its policy apply in both modes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherit_user_config: bool,
     /// The model this bot's runs ask for, as its executor names models (`claude-sonnet-4-6`).
