@@ -34,6 +34,16 @@ The definition that decides what a run may do without asking.
 The executor Reno runs for bots: an existing agent harness that Reno drives with the owner's API keys and gates, so every tool call passes the **Policy** before it runs.
 _Avoid_: own loop, native agent, built-in agent
 
+**Gate**:
+Reno's extension inside the **Reno harness** that holds every tool call until the **Policy** has answered it, and
+blocks the call when Reno cannot answer.
+_Avoid_: hook, guard, sandbox
+
+**Arming**:
+Confirming, before a run's first prompt, that its **Gate** is loaded in the harness and connected to Reno for that run.
+A run that cannot be armed does not start.
+_Avoid_: handshake, gate check
+
 **Bot computer**:
 The Linux VM a bot on the **Reno harness** works in: a browser first, only its project mounted, network only through `renod`'s allowlist for that bot.
 _Avoid_: sandbox, desktop, VM (alone)
