@@ -121,7 +121,7 @@ mod gate {
         }
 
         pub(super) fn lost_because(&self) -> &'static str {
-            "the gate's connection closed"
+            super::GATE_CLOSED
         }
 
         pub(super) async fn close(&mut self, _grace: Duration) {}
@@ -129,6 +129,8 @@ mod gate {
 }
 
 use gate::{GateCall, GateHost};
+
+const GATE_CLOSED: &str = "the gate's connection closed";
 
 /// The oldest Pi this driver runs. Checked: 1.5.0 only (see the module docs). A Pi older than
 /// this is refused before a run instead of failing in the middle of one.
@@ -176,6 +178,24 @@ impl Flavor {
         match self {
             Self::Owner => vec![AccessMode::FullAccess],
             Self::Reno { .. } => vec![AccessMode::Supervised, AccessMode::FullAccess],
+        }
+    }
+
+    fn is_reno(&self) -> bool {
+        matches!(self, Self::Reno { .. })
+    }
+
+    fn sessions_root(&self) -> Option<&Path> {
+        match self {
+            Self::Owner => None,
+            Self::Reno { sessions_root } => Some(sessions_root),
+        }
+    }
+
+    fn child_env(&self) -> crate::child_env::DriverEnv {
+        match self {
+            Self::Owner => crate::child_env::PI,
+            Self::Reno { .. } => crate::child_env::RENO,
         }
     }
 }
@@ -584,7 +604,7 @@ impl Executor for PiExecutor {
                 verified: VERIFIED_CLI_VERSION.into(),
             },
         );
-        let owner = matches!(self.flavor, Flavor::Owner);
+        let owner = !self.flavor.is_reno();
         let (signed_in, models) = if !owner || matches!(version_gate, VersionGate::TooOld { .. }) {
             // A Pi this old is not launched, and the owner's credentials are never read for
             // `reno`: its models are the curated ones.
@@ -622,7 +642,7 @@ impl Executor for PiExecutor {
         // Fail closed before anything is resolved or spawned (ARCH-15).
         require_access(spec.access, &self.flavor.access_modes())?;
         require_sandbox(spec.sandbox, &[SandboxLevel::Unrestricted])?;
-        if matches!(self.flavor, Flavor::Reno { .. }) {
+        if self.flavor.is_reno() {
             if !spec.env.contains_key("RENO_BOT") {
                 return Err(ExecError::InvalidSpec(
                     "the Reno harness runs bots only; this run has no bot".into(),
@@ -637,7 +657,7 @@ impl Executor for PiExecutor {
             }
         }
         #[cfg(not(unix))]
-        if matches!(self.flavor, Flavor::Reno { .. }) {
+        if self.flavor.is_reno() {
             return Err(ExecError::InvalidSpec(
                 "the Reno harness needs Unix sockets and cannot run on this platform".into(),
             ));
@@ -704,7 +724,7 @@ impl Executor for PiExecutor {
         let run = Run {
             pi,
             gate,
-            gated: matches!(self.flavor, Flavor::Reno { .. }),
+            gated: self.flavor.is_reno(),
             arming_budget: self.arming_budget,
             spec,
             event_tx,
@@ -729,7 +749,7 @@ impl Executor for PiExecutor {
     }
 
     async fn run_closed(&self, run: &RunId) {
-        let Flavor::Reno { sessions_root } = &self.flavor else {
+        let Some(sessions_root) = self.flavor.sessions_root() else {
             return;
         };
         let watching = self
@@ -741,7 +761,7 @@ impl Executor for PiExecutor {
             // An attempt that was dropped with its task counts as over.
             let _ = watching.wait_for(|over| *over).await;
         }
-        let (root, name) = (sessions_root.clone(), run.to_string());
+        let (root, name) = (sessions_root.to_path_buf(), run.to_string());
         let removed = tokio::task::spawn_blocking(move || remove_session_dir(&root, &name)).await;
         match removed {
             Ok(Ok(())) => {}
@@ -755,10 +775,10 @@ impl Executor for PiExecutor {
     }
 
     async fn retain_runs(&self, keep: &HashSet<RunId>) {
-        let Flavor::Reno { sessions_root } = &self.flavor else {
+        let Some(sessions_root) = self.flavor.sessions_root() else {
             return;
         };
-        let root = sessions_root.clone();
+        let root = sessions_root.to_path_buf();
         let keep: HashSet<String> = keep.iter().map(ToString::to_string).collect();
         if let Err(error) = tokio::task::spawn_blocking(move || sweep_sessions(&root, &keep)).await
         {
@@ -1149,10 +1169,7 @@ const BLANKED_CREDENTIALS: [&str; 3] = [
 ];
 
 fn child_driver_env(flavor: &Flavor) -> crate::child_env::DriverEnv {
-    match flavor {
-        Flavor::Owner => crate::child_env::PI,
-        Flavor::Reno { .. } => crate::child_env::RENO,
-    }
+    flavor.child_env()
 }
 
 async fn launch_pi(
@@ -1162,7 +1179,7 @@ async fn launch_pi(
     processes: &ProcessSink,
     flavor: &Flavor,
 ) -> Result<(Pi, Option<GateHost>), std::io::Error> {
-    let reno = matches!(flavor, Flavor::Reno { .. });
+    let reno = flavor.is_reno();
     let (scratch, gate, session) = match flavor {
         Flavor::Owner => (ScratchDir::new("pi")?, None, None),
         Flavor::Reno { sessions_root } => {
@@ -1753,7 +1770,9 @@ impl<'a> Player<'a> {
                 }
                 () = self.run.cancel.cancelled(), if !self.interrupted => {
                     self.interrupt().await;
-                    return self.dismiss_all_and(self.norm.ending(true)).await;
+                    self.dismiss_all();
+                    let ending = self.norm.ending(true);
+                    return (ending.stop, ending.result, ending.diagnostic);
                 }
                 () = self.run.event_tx.closed() => {
                     self.dismiss_all();
@@ -1810,11 +1829,6 @@ impl<'a> Player<'a> {
             None => crash,
         };
         (StopReason::Error, None, Some(diagnostic))
-    }
-
-    async fn dismiss_all_and(&mut self, ending: crate::wire::pi::normalize::Ending) -> Ended {
-        self.dismiss_all();
-        (ending.stop, ending.result, ending.diagnostic)
     }
 
     fn steer(&mut self, text: &str) {
@@ -1984,7 +1998,6 @@ impl<'a> Player<'a> {
 
     /// The gate's connection is gone while the run goes on.
     async fn lost_watch(&mut self) -> Ended {
-        self.watching = false;
         if self.run.pi.exit_deadline.is_some()
             || self.run.pi.child.try_wait().ok().flatten().is_some()
         {
@@ -1998,23 +2011,15 @@ impl<'a> Player<'a> {
             .run
             .gate
             .as_ref()
-            .map_or("the gate's connection closed", GateHost::lost_because);
-        tracing::warn!(
-            target: "reno_harness::pi",
-            run = %self.run.spec.run_id,
-            "Reno lost its watch over the run: {because}"
-        );
-        (
-            StopReason::Error,
-            None,
-            Some(format!("Reno lost its watch over the run: {because}")),
-        )
+            .map_or(GATE_CLOSED, GateHost::lost_because);
+        let why = format!("Reno lost its watch over the run: {because}");
+        tracing::warn!(target: "reno_harness::pi", run = %self.run.spec.run_id, "{why}");
+        (StopReason::Error, None, Some(why))
     }
 
     /// The gate left more calls unanswered than it may: the extra one is denied and the
     /// connection is closed with the run's end.
     fn flooded(&mut self) -> Ended {
-        self.watching = false;
         tracing::warn!(
             target: "reno_harness::pi",
             run = %self.run.spec.run_id,

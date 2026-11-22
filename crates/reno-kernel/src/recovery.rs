@@ -98,10 +98,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
     // revoked, and the link's files are removed.
     crate::agent::revoke_orphans(shared).await?;
 
-    let ended: Vec<(RunId, ExecEvent)> = shared
-        .db
-        .list_runs(None)
-        .await?
+    let settled = shared.db.list_runs(None).await?;
+    let ended: Vec<(RunId, ExecEvent)> = settled
         .iter()
         .filter(|row| row.status.is_terminal() || row.status == RunStatus::Interrupted)
         .map(|row| (row.id.clone(), repair_done(row.status, row.stop.clone())))
@@ -125,7 +123,7 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         0
     });
 
-    retain_resumable(shared).await?;
+    retain_resumable(shared, settled).await?;
 
     // How long each run had been at it is read from the rows as they were before this recovery
     // wrote its own transitions, which would otherwise count the time the daemon was down.
@@ -167,11 +165,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
 /// Tells each executor which runs may still be resumed, and waits for it: whatever an executor
 /// kept for any other run is dropped before a run is re-queued or claimed, so no run made after
 /// this can lose what it keeps.
-async fn retain_resumable(shared: &Shared) -> Result<()> {
-    let keep: std::collections::HashSet<RunId> = shared
-        .db
-        .list_runs(None)
-        .await?
+async fn retain_resumable(shared: &Shared, rows: Vec<RunRecord>) -> Result<()> {
+    let keep: std::collections::HashSet<RunId> = rows
         .into_iter()
         .filter(|row| match row.status {
             RunStatus::Failed | RunStatus::Interrupted => true,

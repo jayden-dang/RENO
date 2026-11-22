@@ -110,7 +110,7 @@ enum Lost {
 impl Lost {
     fn text(self) -> &'static str {
         match self {
-            Self::Closed => "the gate's connection closed",
+            Self::Closed => super::GATE_CLOSED,
             Self::TooLong => "the gate sent a line that is too long",
             Self::NotACall => "the gate sent a line that is not a call",
             Self::RepeatedId => "the gate repeated or reused a call id",

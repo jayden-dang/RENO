@@ -8,7 +8,7 @@
 //! | Flag | Why |
 //! |---|---|
 //! | `--mode rpc --no-themes` | the RPC protocol, without loading a theme nobody sees |
-//! | `--no-extensions --no-skills --no-prompt-templates --no-mcp` | isolation from the owner's personal tools: their extensions, skills, prompt templates and `mcp.json` servers (unless `inherit_user_config`). Checked on Pi 1.5.0 with `get_commands`: 0 commands with the flags, the owner's whole skill list without. |
+//! | `--no-extensions --no-skills --no-prompt-templates --no-mcp` | isolation from the owner's personal tools: their extensions, skills, prompt templates and `mcp.json` servers (unless `inherit_user_config`); `--no-mcp` is dropped when `builtins` is set. Checked on Pi 1.5.0 with `get_commands`: 0 commands with the flags, the owner's whole skill list without. |
 //! | `--extension <file>` | Reno's MCP bridge; still loaded under `--no-extensions`, which only stops discovery |
 //! | `--no-approve` | a Reno attempt: the working folder's `.pi/` resources are ignored |
 //! | `--session-dir <dir>` | a Reno attempt: the run's own session directory, the same for every attempt |
