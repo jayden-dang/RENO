@@ -16,9 +16,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, Pixels, RenderOnce,
-    SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*,
-    px,
+    AnyElement, App, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, IntoElement,
+    Pixels, RenderOnce, SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
+    Window, div, prelude::*, px,
 };
 use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
@@ -31,9 +31,13 @@ use self::chrome::Card;
 use self::image::ImageHost;
 use self::link::{Action, LinkPolicy};
 use self::picture::{Overlay, Overlays, Picture};
+use self::select::{Map, Registry, Seg, Track, highlight_runs};
 use super::kit::MONO;
 use super::theme::Theme;
+use crate::transcript::Key;
+use crate::vm::anchor::Atom;
 use crate::vm::draft33::Variant;
+use crate::vm::selection::Slot;
 
 pub(crate) mod chrome;
 pub(crate) mod image;
@@ -42,6 +46,7 @@ pub(crate) mod lru;
 pub(crate) mod math;
 pub(crate) mod mermaid;
 pub(crate) mod picture;
+pub(crate) mod select;
 pub(crate) mod visual;
 
 pub(crate) use self::link::FileLinks;
@@ -51,6 +56,8 @@ pub(crate) use self::link::FileLinks;
 pub(crate) struct Streaming {
     parser: IncrementalParser,
     tree: BlockTree,
+    /// The drawn runs lined up with the source, made when selection first asks for them.
+    atoms: std::cell::RefCell<Option<Rc<Vec<Atom>>>>,
 }
 
 impl Streaming {
@@ -62,7 +69,18 @@ impl Streaming {
         }
         self.parser.set_text(text);
         self.tree = self.parser.display_tree();
+        self.atoms.take();
         true
+    }
+
+    /// The drawn runs, code lines, formulas and diagrams of the tree, with their source.
+    pub(crate) fn atoms(&self) -> Rc<Vec<Atom>> {
+        self.atoms
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                Rc::new(crate::vm::anchor::atoms(self.parser.source(), &self.tree))
+            })
+            .clone()
     }
 
     pub(crate) fn tree(&self) -> &BlockTree {
@@ -94,6 +112,39 @@ pub(crate) struct Host {
     /// shown as code until the next block starts (it would otherwise be drawn again for every
     /// chunk of its source).
     pub(crate) streaming: bool,
+    /// Find hits to paint in the text (TRANSCRIPT-3.5).
+    pub(crate) marks: Option<Rc<Marks>>,
+    /// Where the transcript tracks painted text for selection (TRANSCRIPT-2.1).
+    pub(crate) select: Option<Rc<SelectHost>>,
+}
+
+/// What to paint over a reply: the needle, and which of the reply's drawn matches is the one the
+/// find bar is on (counted from zero in drawing order; `None` when it is in another row).
+#[derive(Debug)]
+pub(crate) struct Marks {
+    pub(crate) needle: String,
+    pub(crate) current: Option<usize>,
+    pub(crate) variant: Variant,
+}
+
+/// A reply drawn for the transcript's selection.
+pub(crate) struct SelectHost {
+    pub(crate) registry: Registry,
+    pub(crate) key: Key,
+    /// The reply's runs lined up with its source.
+    pub(crate) atoms: Rc<Vec<Atom>>,
+    /// The selected bytes of the reply's source.
+    pub(crate) selected: Option<Range<usize>>,
+    pub(crate) style: HighlightStyle,
+}
+
+impl std::fmt::Debug for SelectHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectHost")
+            .field("key", &self.key)
+            .field("selected", &self.selected)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Host {
@@ -103,6 +154,8 @@ impl Host {
             links: LinkPolicy::Preview,
             images: None,
             streaming: false,
+            marks: None,
+            select: None,
         }
     }
 
@@ -118,13 +171,26 @@ impl Host {
             links: LinkPolicy::Transcript { files },
             images: Some(ImageHost { run, client }),
             streaming: false,
+            marks: None,
+            select: None,
         }
     }
 
     /// Says whether the text is still arriving (see [`Host::streaming`]).
-    #[allow(dead_code)] // The transcript sets it for a running reply (ROAD-33 wiring).
     pub(crate) fn while_streaming(mut self, streaming: bool) -> Self {
         self.streaming = streaming;
+        self
+    }
+
+    /// Paints the find hits `marks` names.
+    pub(crate) fn marked(mut self, marks: Option<Rc<Marks>>) -> Self {
+        self.marks = marks;
+        self
+    }
+
+    /// Tracks the painted text for selection and paints what is selected.
+    pub(crate) fn selectable(mut self, select: Option<Rc<SelectHost>>) -> Self {
+        self.select = select;
         self
     }
 }
@@ -144,7 +210,6 @@ pub(crate) fn settled(cx: &mut App) {
 }
 
 /// See [`Settled`].
-#[allow(dead_code)] // The transcript list reads it to measure rows again (ROAD-33 wiring).
 pub(crate) fn settled_generation(cx: &App) -> u64 {
     cx.try_global::<Settled>().map_or(0, |s| s.0)
 }
@@ -161,9 +226,18 @@ struct Env<'a> {
     math: Option<f32>,
     /// How many framed blocks this draw has made so far (their element ids differ by it).
     cards: std::cell::Cell<usize>,
+    /// How many runs and lines this draw has taken from the reply's atoms, and how many find
+    /// hits it has numbered: both in drawing order.
+    atom_at: std::cell::Cell<usize>,
+    hit_at: std::cell::Cell<usize>,
 }
 
 impl Env<'_> {
+    /// The place of the next `n` atoms in the reply's list.
+    fn take_atoms(&self, n: usize) -> usize {
+        self.atom_at.replace(self.atom_at.get() + n)
+    }
+
     fn next_card(&self) -> usize {
         self.cards.replace(self.cards.get() + 1)
     }
@@ -191,6 +265,8 @@ impl RenderOnce for Markdown {
             variant: super::draft33::current(cx).unwrap_or(Variant::A),
             math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
             cards: std::cell::Cell::new(0),
+            atom_at: std::cell::Cell::new(0),
+            hit_at: std::cell::Cell::new(0),
             base,
         };
         let last = self.tree.blocks.len().saturating_sub(1);
@@ -203,7 +279,14 @@ impl RenderOnce for Markdown {
                     Block::CodeBlock { code, language }
                         if self.host.streaming && at == last && is_mermaid(language) =>
                     {
-                        code_block(code.trim_end_matches('\n'), language.as_deref(), &env, cx)
+                        env.take_atoms(1);
+                        code_block(
+                            code.trim_end_matches('\n'),
+                            language.as_deref(),
+                            None,
+                            &env,
+                            cx,
+                        )
                     }
                     other => block(other, &env, cx),
                 })
@@ -254,12 +337,17 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
         Block::CodeBlock { code, language } => {
             let code = code.trim_end_matches('\n');
             if is_mermaid(language) {
-                diagram(code, env, cx)
+                let at = env.take_atoms(1);
+                diagram(code, at, env, cx)
             } else {
-                code_block(code, language.as_deref(), env, cx)
+                let at = env.take_atoms(code.split('\n').count());
+                code_block(code, language.as_deref(), Some(at), env, cx)
             }
         }
-        Block::Math { tex } => display_math(tex, env, cx),
+        Block::Math { tex } => {
+            let at = env.take_atoms(1);
+            display_math(tex, at, env, cx)
+        }
         Block::BlockQuote { children } => div()
             .pl(px(12.0))
             .border_l_2()
@@ -332,22 +420,27 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
 /// A paragraph. Where the host draws images, an image splits it: the text before, the picture,
 /// the text after.
 fn paragraph(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
+    let first = env.take_atoms(runs.len());
     let Some(images) = &env.host.images else {
-        return inline(runs, env, cx);
+        return inline_at(runs, first, env, cx);
     };
     if !runs.iter().any(|r| r.style.image.is_some()) {
-        return inline(runs, env, cx);
+        return inline_at(runs, first, env, cx);
     }
     let mut parts: Vec<AnyElement> = Vec::new();
     let mut text: Vec<InlineRun> = Vec::new();
-    for run in runs {
+    // Where in the reply's atoms the text collected so far starts.
+    let mut from = first;
+    for (n, run) in runs.iter().enumerate() {
         let Some(shown) = &run.style.image else {
             text.push(run.clone());
             continue;
         };
         if !text.is_empty() {
-            parts.push(inline(&std::mem::take(&mut text), env, cx));
+            let part = std::mem::take(&mut text);
+            parts.push(inline_at(&part, from, env, cx));
         }
+        from = first + n + 1;
         parts.push(image::view(
             &shown.alt,
             &shown.source,
@@ -359,7 +452,7 @@ fn paragraph(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
         ));
     }
     if !text.is_empty() {
-        parts.push(inline(&text, env, cx));
+        parts.push(inline_at(&text, from, env, cx));
     }
     div()
         .flex()
@@ -500,8 +593,104 @@ pub(crate) fn line_runs(
         .collect()
 }
 
-/// The lines of `code`, highlighted when the fence names a language this build knows.
-fn code_lines(code: &str, language: Option<&str>, env: &Env) -> Vec<AnyElement> {
+/// The highlights to put over one laid-out text: the selection first, then the find hits (which
+/// win where they meet). `segs` says which atoms the text is, `len` its length.
+fn layers(
+    env: &Env,
+    segs: &[Seg],
+    len: usize,
+    finds: &[(Range<usize>, bool)],
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let mut out = Vec::new();
+    if let Some(select) = &env.host.select
+        && let Some(selected) = &select.selected
+    {
+        let map = Map::Atoms {
+            atoms: select.atoms.clone(),
+            segs: segs.to_vec(),
+        };
+        if let Some(range) = map.layout_range(selected, len, false) {
+            out.push((range, select.style));
+        }
+    }
+    if let Some(marks) = &env.host.marks {
+        out.extend(finds.iter().map(|(range, current)| {
+            (
+                range.clone(),
+                super::find::hit_style(env.theme, marks.variant, *current),
+            )
+        }));
+    }
+    out
+}
+
+/// The find hits in `text`, which starts at byte `base` of its laid-out text, numbered in drawing
+/// order across the reply, with whether each is the one the bar is on.
+fn find_hits(env: &Env, text: &str, base: usize) -> Vec<(Range<usize>, bool)> {
+    let Some(marks) = &env.host.marks else {
+        return Vec::new();
+    };
+    crate::vm::find::matches(text, &marks.needle)
+        .into_iter()
+        .map(|range| {
+            let n = env.hit_at.replace(env.hit_at.get() + 1);
+            (
+                base + range.start..base + range.end,
+                marks.current == Some(n),
+            )
+        })
+        .collect()
+}
+
+/// Files a painted text with the transcript's selection, when the host tracks one.
+fn tracked(
+    env: &Env,
+    element: AnyElement,
+    layout: gpui::TextLayout,
+    segs: Vec<Seg>,
+) -> AnyElement {
+    match &env.host.select {
+        Some(select) if !segs.is_empty() => Track::new(
+            element,
+            layout,
+            (
+                select.key,
+                Slot::WHOLE,
+                Map::Atoms {
+                    atoms: select.atoms.clone(),
+                    segs,
+                },
+            ),
+            select.registry.clone(),
+        )
+        .into_any_element(),
+        _ => element,
+    }
+}
+
+/// Whether the selection touches atom `at` (a formula or diagram, which is selected whole).
+fn atom_selected(env: &Env, at: usize) -> bool {
+    let Some(select) = &env.host.select else {
+        return false;
+    };
+    let (Some(selected), Some(atom)) = (&select.selected, select.atoms.get(at)) else {
+        return false;
+    };
+    if atom.src.is_empty() {
+        selected.start <= atom.src.start && atom.src.start < selected.end
+    } else {
+        selected.start < atom.src.end && atom.src.start < selected.end
+    }
+}
+
+/// The lines of `code`, highlighted when the fence names a language this build knows. `atoms` is
+/// where the lines are in the reply's atoms (`None` for source shown in place of a diagram).
+fn code_lines(
+    code: &str,
+    language: Option<&str>,
+    atoms: Option<usize>,
+    env: &Env,
+) -> Vec<AnyElement> {
     let theme = env.theme;
     let lines: Vec<&str> = code.split('\n').collect();
     let doc = highlighted(code, language).filter(|d| d.lines.len() == lines.len());
@@ -513,18 +702,45 @@ fn code_lines(code: &str, language: Option<&str>, env: &Env) -> Vec<AnyElement> 
                 // An empty line still takes its height.
                 return div().h(px(19.0)).into_any_element();
             }
-            match &doc {
-                Some(doc) => StyledText::new(SharedString::from((*line).to_owned()))
-                    .with_runs(line_runs(line, &doc.lines[ix], theme, &env.base))
-                    .into_any_element(),
-                None => SharedString::from((*line).to_owned()).into_any_element(),
-            }
+            let runs = match &doc {
+                Some(doc) => line_runs(line, &doc.lines[ix], theme, &env.base),
+                None => {
+                    let mut font = env.base.font();
+                    font.family = MONO.into();
+                    vec![TextRun {
+                        len: line.len(),
+                        font,
+                        color: env.base.color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }]
+                }
+            };
+            let segs: Vec<Seg> = atoms
+                .map(|base| Seg {
+                    layout: 0..line.len(),
+                    atom: base + ix,
+                })
+                .into_iter()
+                .collect();
+            let finds = find_hits(env, line, 0);
+            let runs = highlight_runs(runs, &layers(env, &segs, line.len(), &finds));
+            let styled = StyledText::new(SharedString::from((*line).to_owned())).with_runs(runs);
+            let layout = styled.layout().clone();
+            tracked(env, styled.into_any_element(), layout, segs)
         })
         .collect()
 }
 
 /// The code area of a frame: mono, with its lines wrapped or scrolling sideways.
-fn code_body(code: &str, language: Option<&str>, wrapped: bool, key: u64, env: &Env) -> AnyElement {
+fn code_body(
+    code: &str,
+    (language, atoms): (Option<&str>, Option<usize>),
+    wrapped: bool,
+    key: u64,
+    env: &Env,
+) -> AnyElement {
     let area = div()
         .px(px(14.0))
         .py(px(10.0))
@@ -533,7 +749,7 @@ fn code_body(code: &str, language: Option<&str>, wrapped: bool, key: u64, env: &
         .line_height(px(19.0))
         .flex()
         .flex_col()
-        .children(code_lines(code, language, env));
+        .children(code_lines(code, language, atoms, env));
     if wrapped {
         area.w_full().min_w_0().into_any_element()
     } else {
@@ -547,7 +763,13 @@ fn code_body(code: &str, language: Option<&str>, wrapped: bool, key: u64, env: &
 }
 
 /// A code block in its frame, with Copy and wrap (TRANSCRIPT-7.1, 7.2).
-fn code_block(code: &str, language: Option<&str>, env: &Env, cx: &mut App) -> AnyElement {
+fn code_block(
+    code: &str,
+    language: Option<&str>,
+    atoms: Option<usize>,
+    env: &Env,
+    cx: &mut App,
+) -> AnyElement {
     let key = chrome::key_of(language, code);
     let ordinal = env.next_card();
     let wrapped = chrome::wraps(key, cx);
@@ -565,7 +787,7 @@ fn code_block(code: &str, language: Option<&str>, env: &Env, cx: &mut App) -> An
         },
         env.variant,
         env.theme,
-        code_body(code, language, wrapped, key ^ ordinal as u64, env),
+        code_body(code, (language, atoms), wrapped, key ^ ordinal as u64, env),
     )
 }
 
@@ -592,7 +814,7 @@ const DISPLAY_MATH_EM: f32 = 1.2;
 
 /// Display math on its own line, centred; its source when typesetting is off or fails
 /// (TRANSCRIPT-9.1, 9.3, 9.5).
-fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
+fn display_math(tex: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     let Some(size) = env.math else {
         return source_block(tex, env);
     };
@@ -609,6 +831,14 @@ fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
             .w_full()
             .flex()
             .py(px(4.0))
+            .when(atom_selected(env, atom), |d| {
+                d.rounded(px(6.0)).bg(env
+                    .host
+                    .select
+                    .as_ref()
+                    .and_then(|s| s.style.background_color)
+                    .unwrap_or(env.theme.raised))
+            })
             .child(Picture {
                 image: set.image.clone(),
                 width: set.width,
@@ -639,11 +869,12 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
 
 /// A Mermaid block: the drawing in the diagram frame, its source with "Rendering\u{2026}" while it is
 /// drawn, a plain code block when it cannot be (TRANSCRIPT-10.1, 10.3).
-fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
+fn diagram(source: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
     let key = chrome::key_of(Some("mermaid"), source);
     let ordinal = env.next_card();
+    let selected = atom_selected(env, atom);
     let frame = |body: AnyElement| {
-        chrome::card(
+        let card = chrome::card(
             &Card {
                 kind: chrome::Kind::Diagram,
                 copy: source,
@@ -655,13 +886,23 @@ fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
             env.variant,
             env.theme,
             body,
-        )
+        );
+        // A selected diagram is lifted whole: it has no text to paint over.
+        match (&env.host.select, selected) {
+            (Some(select), true) => div()
+                .rounded(px(10.0))
+                .bg(select.style.background_color.unwrap_or(env.theme.raised))
+                .p(px(3.0))
+                .child(card)
+                .into_any_element(),
+            _ => card,
+        }
     };
     match mermaid::drawing(source, env.theme, env.scale, cx) {
         mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key ^ ordinal as u64)),
         mermaid::Drawing::Rendering => frame(
             div()
-                .child(code_body(source, None, false, key ^ ordinal as u64, env))
+                .child(code_body(source, (None, None), false, key ^ ordinal as u64, env))
                 .child(
                     div()
                         .px(px(14.0))
@@ -673,7 +914,7 @@ fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
                 )
                 .into_any_element(),
         ),
-        mermaid::Drawing::Failed => code_block(source, Some("mermaid"), env, cx),
+        mermaid::Drawing::Failed => code_block(source, Some("mermaid"), None, env, cx),
     }
 }
 
@@ -737,6 +978,12 @@ fn gap_unit(font: &gpui::Font, size: Pixels, window: &Window) -> f32 {
 /// not is plain text. Inline math reserves a gap of no-break spaces in the text and is painted
 /// over it, its baseline on the text's.
 fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
+    let first = env.take_atoms(runs.len());
+    inline_at(runs, first, env, cx)
+}
+
+/// [`inline`] for runs that are atoms `first`, `first + 1`, ... of the reply.
+fn inline_at(runs: &[InlineRun], first: usize, env: &Env, cx: &mut App) -> AnyElement {
     let theme = env.theme;
     let base = &env.base;
     let policy = &env.host.links;
@@ -745,10 +992,13 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
     let mut spans = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, Action)> = Vec::new();
     let mut overlays: Vec<Overlay> = Vec::new();
-    for run in runs {
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut finds: Vec<(Range<usize>, bool)> = Vec::new();
+    for (n, run) in runs.iter().enumerate() {
         if run.text.is_empty() {
             continue;
         }
+        let from = text.len();
         let style = &run.style;
         let mut font = base.font();
         if style.bold {
@@ -777,6 +1027,10 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
                 strikethrough: None,
             });
             text.push_str(&gap);
+            segs.push(Seg {
+                layout: from..text.len(),
+                atom: first + n,
+            });
             continue;
         }
         let mut action = style
@@ -823,7 +1077,13 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
             }),
         });
         text.push_str(&run.text);
+        segs.push(Seg {
+            layout: from..text.len(),
+            atom: first + n,
+        });
+        finds.extend(find_hits(env, &run.text, from));
     }
+    let spans = highlight_runs(spans, &layers(env, &segs, text.len(), &finds));
     let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
     let layout = styled.layout().clone();
     let element = if links.is_empty() {
@@ -841,6 +1101,7 @@ fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
             })
             .into_any_element()
     };
+    let element = tracked(env, element, layout.clone(), segs);
     if overlays.is_empty() {
         element
     } else {
