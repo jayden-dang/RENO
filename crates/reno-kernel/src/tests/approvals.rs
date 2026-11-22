@@ -1900,6 +1900,8 @@ async fn full_access_under_a_narrower_sandbox_is_never_allowed_by_its_mode_excep
 // `NeedsApproval` is. The subjects below have the shape `subject()` gives a gate call: a
 // lower-case Pi tool, the paths as Pi will open them, and `raw` holding the call as sent.
 
+/// The action classes copy `action_class` in `reno-harness`'s `wire/pi/subject.rs` (it is crate-private):
+/// keep the two in step.
 pub(super) fn gate_call(
     tool: &str,
     call_id: &str,

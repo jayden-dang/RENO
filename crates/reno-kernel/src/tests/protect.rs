@@ -462,13 +462,19 @@ match = { action = "command", command = "*" }
                 edit(&["/Users/u/.reno/policy.toml"]),
             ),
             (
-                "a ~ left as written when no home is known",
-                edit(&["~/.reno/policy.toml"]),
+                "a ~user path, which Pi does not expand",
+                edit(&["~x/.reno/policy.toml"]),
+            ),
+            (
+                "a dot-dot that leaves the worktree into the data directory",
+                edit(&["../../Users/u/Library/Application Support/Reno/reno.db"]),
             ),
             (
                 "a refused URL: the decoded path first",
                 edit(&["/work/a/.reno/x", "file:///work/a%2F.reno/x"]),
             ),
+            // Defensive rows: `subject()` puts the decoded path first, but the protection judges
+            // every path, whatever its place.
             (
                 "a refused URL: the text as written first",
                 edit(&["file:///work/a%2F.reno/x", "/work/a/.reno/x"]),
@@ -478,7 +484,7 @@ match = { action = "command", command = "*" }
                 edit(&["/work/.git/x", "file://other/work/.git/x"]),
             ),
             (
-                "a protected path among several",
+                "a protected path among several (defensive: every path is judged)",
                 edit(&["src/lib.rs", "docs/a.md", ".reno/x"]),
             ),
         ]
@@ -512,6 +518,10 @@ match = { action = "command", command = "*" }
             (
                 "rm of the store",
                 bash(&format!("rm {DATA_ESCAPED}/reno.db")),
+            ),
+            (
+                "rm through a dot-dot that leaves the worktree into the data directory",
+                bash("rm ../../Users/u/Library/Application\\ Support/Reno/reno.db"),
             ),
             (
                 "a redirect onto the policy",
@@ -566,9 +576,14 @@ match = { action = "command", command = "*" }
         let subjects: Vec<_> = rows.iter().map(|(_, subject)| subject.clone()).collect();
         for (mode, extra) in MODES {
             let got = judged(extra, ALLOW_ALL, &subjects).await;
-            for ((name, _), (outcome, by, _)) in rows.iter().zip(got) {
+            for ((name, _), (outcome, by, message)) in rows.iter().zip(got) {
                 assert_eq!(outcome, ApprovalOutcome::Denied, "{name} at {mode}");
                 assert_eq!(by, protected(), "{name} at {mode}");
+                let message = message.unwrap_or_default();
+                assert!(
+                    message.starts_with("denied: `") && message.contains("is protected"),
+                    "{name}: {message}"
+                );
             }
         }
     }
