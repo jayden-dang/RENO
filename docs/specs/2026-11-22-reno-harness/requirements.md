@@ -41,6 +41,8 @@ run whose executor is the Reno harness.
 - **RENOHARNESS-2.5** (guard) IF a secret that a bot lists is not set THEN THE SYSTEM SHALL CONTINUE TO refuse to start the run, naming the secret, on `reno` as on every executor.
 - **RENOHARNESS-2.6** (guard) WHEN a run on `reno` prints to stderr or reaches the journal THE SYSTEM SHALL CONTINUE TO replace the run's secret values (exact match, 8 bytes or longer) with their `[secret:NAME]` mark in what is logged, kept or journaled.
 - **RENOHARNESS-2.7** IF the run's Pi agent directory holds an `auth.json` with any content other than an empty JSON object, when the attempt is armed or before a call on `reno` is raised, THEN THE SYSTEM SHALL end the run failed, denying any call that is waiting, with a reason naming the file. Pi writes `{}` there itself when the file is missing (Pi `core/auth-storage.js:40-43`), and a missing file or `{}` holds no credential. Pi ranks a stored `auth.json` above the environment key (Pi `docs/models.md:22`), so a stored credential would put the attempt on one that is not the bot's. [Lock L7; Weigh: check pick]
+- **RENOHARNESS-2.8** IF, before the first prompt of a run on `reno` that names no model, Pi's `get_available_models` lists no model, THEN THE SYSTEM SHALL fail the run with a reason naming the bot's secret names (never their values) and, as a hint, the provider variables Pi reads. [Weigh: F4 pick]
+- **RENOHARNESS-2.9** (guard) WHEN a bot on `reno` names a model that Pi does not list THE SYSTEM SHALL CONTINUE TO fail the run before any prompt, as the Pi driver's set-up does (`drivers/pi/mod.rs:812-818`; `bot.rs:104-106`).
 
 ## 3. Every tool call passes Reno's policy before it runs
 

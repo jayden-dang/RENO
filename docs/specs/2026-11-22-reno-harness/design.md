@@ -263,7 +263,7 @@ Rules the file implements:
 
 ### The gate host (in the driver)
 
-Satisfies: RENOHARNESS-2.7, RENOHARNESS-3.1, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-6.6, RENOHARNESS-7.2,
+Satisfies: RENOHARNESS-2.7, RENOHARNESS-2.8, RENOHARNESS-2.9, RENOHARNESS-3.1, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-6.6, RENOHARNESS-7.2,
 RENOHARNESS-8.2, RENOHARNESS-11.1, RENOHARNESS-11.2
 Reuse: rung 2 and rung 5:
 - the approval open/answer/deny-all pattern of the Claude driver (`drivers/claude/mod.rs:1070,1089-1225`) and
@@ -313,6 +313,12 @@ Flow:
     `GateHost::decide(id, .., message)`.
   - A cancel, or the end of the run, denies all open gate requests (`drain`) before Pi's process group goes, as
     `dismiss_all` does for dialogs.
+- **No usable model (2.8, 2.9).** In `Run::set_up`, for `Reno` only, when the spec names no model, the host sends one
+  `get_available_models`. Pi answers with its snapshot of the models that have auth (Pi `rpc-mode.js:381-383`). An
+  empty list fails the run before the first prompt with `"Pi has no model from this bot's secrets (<secret names>);
+  Pi reads provider keys such as <names from child_env::PI>"`. Values are never printed (2.6), and the variable
+  list is hint text only. A named model is already resolved against that list, and fails, by the existing
+  `set_up` (`drivers/pi/mod.rs:812-818`) (2.9).
 - **Credential check (2.7).** At arming, and before each call is raised, the host reads `<agent dir>/auth.json`.
   A missing file, or one that parses to an empty JSON object, is clean. Pi writes `{}` itself when the file is missing
   (Pi `core/auth-storage.js:40-43,62-64,314-322`). Anything else, an unparsable file included (fail closed), is a
@@ -479,7 +485,7 @@ Locality: leave. Text only.
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 7.1 (files laid out under `.reno`), 11.4 (driver-level `run_closed` removal), 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
+| `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 2.8, 2.9, 7.1 (files laid out under `.reno`), 11.4 (driver-level `run_closed` removal), 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
 | `gate.mjs` under node, against a scripted socket (new, beside `pi-mcp-test.mjs`) | unit | RENOHARNESS-3.2, 3.3, 3.4, 3.5, 6.1, 6.2 |
 | Kernel with `MockExecutor` (`crates/reno-kernel/src/tests/{approvals,protect,routing,resume}.rs` and recovery) | integration | RENOHARNESS-10.9, 10.10, 1.4, 1.5, 1.6, 2.5, 3.6, 3.7, 4.2, 4.3, 5.3, 6.3, 6.4, 6.5, 7.1, 7.4, 8.3, 8.5, 10.3, 10.4, 10.5, 11.4, 11.6 |
 | Proto definitions (`crates/reno-proto/src/defs/tests.rs`) | unit | RENOHARNESS-1.7, 10.7, 10.8 |
@@ -504,7 +510,7 @@ mapping by section:
 | Eligibility | 1.4, 1.5, 1.6, 10.5 |
 | Launch | 1.3, 2.1-2.6, 5.4, 5.5, 7.3, 7.5, 8.4, 10.1, 11.3 |
 | Gate | 3.2-3.5, 6.1, 6.2 |
-| Host | 2.7, 3.1, 5.1-5.3, 6.6, 7.2, 8.2, 11.1, 11.2 |
+| Host | 2.7, 2.8, 2.9, 3.1, 5.1-5.3, 6.6, 7.2, 8.2, 11.1, 11.2 |
 | Subjects | 3.8, 4.1 |
 | Ladder | 3.6, 3.7, 4.2-4.4, 6.3, 7.1, 7.4, 8.1, 8.3, 10.3, 10.4 |
 | Sessions | 8.5, 10.9, 10.10, 11.4-11.6 |

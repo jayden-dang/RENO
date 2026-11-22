@@ -376,6 +376,7 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
   - `launch_pi` binds the `GateHost` before spawning Pi;
   - `Run` (line 721) owns it;
   - `Run::start_up` (775-835) arms with `Run::query` (837);
+  - `Run::set_up` (812-818) gains the `Reno`-only empty-model-list check;
   - remove Task 1's not-armed refusal.
 - Modify: `crates/reno-harness/tests/fixtures/fake-pi.py`:
   - when `RENO_GATE_SOCKET` is set, read `FAKE_PI_GATE` at start-up, before any prompt:
@@ -410,6 +411,9 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
     logged, naming the check.
   - `second-client` is refused, and after arming, a connect to the socket path fails.
   - A resumed run arms again, with a new nonce.
+  - A bot secret named `OPENAI` with `FAKE_PI_NO_MODELS` set (an empty model list) and no `model` fails before any
+    prompt frame, with a reason naming `OPENAI` and `OPENAI_API_KEY` and never the secret's value.
+  - A bot naming a model the fake does not list still fails before any prompt (today's `set_up`).
   - An attempt that fails to arm (`no-hello`) leaves no scratch behind.
 - [ ] Write a failing unit test in `gate.rs`: a peer of another uid is refused, tested by injecting the uid
   comparison.
@@ -423,7 +427,7 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
 - [ ] Run `cargo test -p reno-harness --test pi`, and expect a pass.
 - [ ] `git commit -m "feat(harness): arm the Reno gate before the first prompt, failing the run otherwise"`
 
-_Requirements: RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.5, RENOHARNESS-11.1, RENOHARNESS-11.3_
+_Requirements: RENOHARNESS-2.8, RENOHARNESS-2.9, RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.5, RENOHARNESS-11.1, RENOHARNESS-11.3_
 
 ---
 
