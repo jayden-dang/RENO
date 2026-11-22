@@ -281,7 +281,7 @@ _Requirements: RENOHARNESS-1.3, RENOHARNESS-5.4, RENOHARNESS-7.3, RENOHARNESS-7.
 
 **Depends-on:** Task 3
 
-- [ ] Write failing unit tests:
+- [x] Write failing unit tests:
   - `child_env::allowed_from(RENO, env)`, with a constructed daemon env holding `ANTHROPIC_API_KEY`,
     `ANTHROPIC_OAUTH_TOKEN`, `PI_CODING_AGENT_DIR` and `HOME`, keeps `HOME` and drops the rest. No process env is
     mutated.
@@ -292,11 +292,11 @@ _Requirements: RENOHARNESS-1.3, RENOHARNESS-5.4, RENOHARNESS-7.3, RENOHARNESS-7.
   - The key is absent from the logged argv.
   - `scenario:leak-stderr` leaves the secret value scrubbed in the stderr tail.
   - The `Owner` child's environment is unchanged.
-- [ ] Run `cargo test -p reno-harness --lib child_env && cargo test -p reno-harness --lib drivers::pi`. Expect `RENO`
+- [x] Run `cargo test -p reno-harness --lib child_env && cargo test -p reno-harness --lib drivers::pi`. Expect `RENO`
   to be unresolved, and the `Reno` child to see today's `PI` list.
-- [ ] Implement `RENO` and the `Reno` env order in `launch_pi`.
-- [ ] Run, and expect a pass.
-- [ ] `git commit -m "feat(harness): launch the Reno harness with the bot's key only"`
+- [x] Implement `RENO` and the `Reno` env order in `launch_pi`.
+- [x] Run, and expect a pass.
+- [x] `git commit -m "feat(harness): launch the Reno harness with the bot's key only"`
 
 _Requirements: RENOHARNESS-2.1, RENOHARNESS-2.2, RENOHARNESS-2.3, RENOHARNESS-2.4, RENOHARNESS-2.6_
 
