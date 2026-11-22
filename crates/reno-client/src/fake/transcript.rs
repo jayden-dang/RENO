@@ -348,10 +348,10 @@ pub fn seeded_run_events(run: &str) -> Vec<(Seq, ExecEvent)> {
     let Ok(runs) = runs() else {
         return Vec::new();
     };
-    let Some(found) = runs
-        .into_iter()
-        .find(|r| r.summary.run_id.as_str().ends_with(run))
-    else {
+    let Ok(wanted) = reno_proto::RunId::from_suffix(run) else {
+        return Vec::new();
+    };
+    let Some(found) = runs.into_iter().find(|r| r.summary.run_id == wanted) else {
         return Vec::new();
     };
     found
@@ -786,6 +786,14 @@ mod tests {
         let mut all = runs().unwrap();
         all.truncate(TURNS);
         all
+    }
+
+    #[test]
+    fn a_seeded_run_is_found_by_its_exact_id_only() {
+        assert!(!seeded_run_events(RENDER2_RUN).is_empty());
+        // A tail of the id, or the id with a prefix, is another run, so there is none.
+        assert!(seeded_run_events("ender2").is_empty());
+        assert!(seeded_run_events("x_render2").is_empty());
     }
 
     #[test]
