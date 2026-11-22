@@ -53,7 +53,9 @@
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reno_proto::{AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, SandboxLevel};
+use reno_proto::{
+    AccessMode, ExecEvent, ExecSpec, ExecutorDescriptor, HealthProbe, RunId, SandboxLevel,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -147,6 +149,22 @@ pub trait Executor: Send + Sync {
     /// streams ended or were dropped: each task stops with its stream. The default has nothing
     /// to wait for.
     async fn shutdown(&self) {}
+
+    /// The kernel says `run` ended `succeeded` or `cancelled`, so it can never be resumed: an
+    /// executor that keeps anything for the run's resumes lets it go. Called once per such end,
+    /// from a task of the kernel's own; the run's last attempt may still be winding down, so an
+    /// executor that keeps files waits for it first. The default keeps nothing.
+    async fn run_closed(&self, run: &RunId) {
+        let _ = run;
+    }
+
+    /// The kernel awaits this once at start, before it re-queues or claims anything, with every
+    /// run that may still be resumed (`failed`, `interrupted`, and `queued` with a session). An
+    /// executor that keeps files per run drops those of every other run, one it has never heard
+    /// of included. The default keeps nothing.
+    async fn retain_runs(&self, keep: &std::collections::HashSet<RunId>) {
+        let _ = keep;
+    }
 
     /// How many frames the wire layer did not recognise, by kind, since this executor was built
     /// (`type:foo`, `method:bar`). A frame the driver knows and ignores on purpose is not

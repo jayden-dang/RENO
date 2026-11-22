@@ -19,6 +19,8 @@
 //! 4. **Journals, state to journal.** A run that is terminal, or interrupted, gets a `Done` in
 //!    its journal if the journal does not already end in one, with the stop reason its status
 //!    implies.
+//!    Then each executor is asked, and awaited, to keep only what the runs that may still resume
+//!    need (`failed`, `interrupted`, and `queued` with a session).
 //! 5. **Resume.** Each `interrupted` run nobody has judged yet (one the previous start left
 //!    behind at its shutdown, or step 2 just made) is decided by `resume::judge_auto`: queued
 //!    again, with a `Resumed` in its journal, or left with the reason stored.
@@ -123,6 +125,8 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         0
     });
 
+    retain_resumable(shared).await?;
+
     // How long each run had been at it is read from the rows as they were before this recovery
     // wrote its own transitions, which would otherwise count the time the daemon was down.
     let worked: std::collections::HashMap<RunId, i64> = rows
@@ -158,6 +162,30 @@ pub(crate) async fn recover(shared: &Shared) -> Result<Recovered> {
         tracing::info!(?report, "recovery finished");
     }
     Ok(report)
+}
+
+/// Tells each executor which runs may still be resumed, and waits for it: whatever an executor
+/// kept for any other run is dropped before a run is re-queued or claimed, so no run made after
+/// this can lose what it keeps.
+async fn retain_resumable(shared: &Shared) -> Result<()> {
+    let keep: std::collections::HashSet<RunId> = shared
+        .db
+        .list_runs(None)
+        .await?
+        .into_iter()
+        .filter(|row| match row.status {
+            RunStatus::Failed | RunStatus::Interrupted => true,
+            RunStatus::Queued => row.session_ref.is_some(),
+            _ => false,
+        })
+        .map(|row| row.id)
+        .collect();
+    for id in shared.executors.ids() {
+        if let Some(executor) = shared.executors.get(&id) {
+            executor.retain_runs(&keep).await;
+        }
+    }
+    Ok(())
 }
 
 /// Expires every pending approval, for the moment no supervisor is left to answer them (start-up

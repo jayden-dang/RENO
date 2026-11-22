@@ -55,8 +55,8 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use reno_proto::{
     AccessMode, ExecEvent, ExecSpec, ExecutorCaps, ExecutorDescriptor, ExecutorId, HealthProbe,
-    ModelCatalog, ModelInfo, SandboxLevel, SessionRef, SignedIn, Steering, StopReason, VersionGate,
-    VersionRange,
+    ModelCatalog, ModelInfo, RunId, SandboxLevel, SessionRef, SignedIn, Steering, StopReason,
+    VersionGate, VersionRange,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -305,6 +305,10 @@ pub struct PiExecutor {
     /// How long arming a run's gate may take.
     arming_budget: Duration,
     tracker: TaskTracker,
+    /// Each Reno run's latest attempt: `true` once the attempt is over and its Pi is gone. What
+    /// lets `run_closed` wait for it. Holds only attempts still running: finished ones are
+    /// dropped as the next one starts.
+    attempts: Arc<Mutex<HashMap<RunId, tokio::sync::watch::Receiver<bool>>>>,
     unknown: UnknownFrames,
 }
 
@@ -328,6 +332,7 @@ impl Default for PiExecutor {
             probe_budget: probe::WIRE_BUDGET,
             arming_budget: ARMING_BUDGET,
             tracker: TaskTracker::new(),
+            attempts: Arc::default(),
             unknown: UnknownFrames::new(),
         }
     }
@@ -341,7 +346,8 @@ impl PiExecutor {
     }
 
     /// The `reno` executor: the same Pi CLI, governed by Reno. Each run keeps its Pi sessions
-    /// under `sessions_root`.
+    /// under `sessions_root`, until it is closed (`run_closed`) or a start-up sweep finds it
+    /// can never resume (`retain_runs`).
     pub fn reno(sessions_root: PathBuf) -> Self {
         Self {
             flavor: Flavor::Reno { sessions_root },
@@ -388,6 +394,21 @@ impl PiExecutor {
     /// short-lived `pi --mode rpc --no-session`, reaped before this returns, in a scratch
     /// session: no prompt is sent, no model is asked anything. It runs offline and without
     /// telemetry, so the probe makes no network call of its own.
+    /// Runs the attempt on the tracker and remembers when it is over, for `run_closed`.
+    fn spawn_attempt(&self, run: Run) {
+        let id = run.spec.run_id.clone();
+        let (over, watching) = tokio::sync::watch::channel(false);
+        {
+            let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
+            attempts.retain(|_, watching| !*watching.borrow() && watching.has_changed().is_ok());
+            attempts.insert(id, watching);
+        }
+        self.tracker.spawn(async move {
+            run.drive().await;
+            over.send_replace(true);
+        });
+    }
+
     async fn query_models(
         &self,
         exe: &Path,
@@ -683,12 +704,55 @@ impl Executor for PiExecutor {
             kill_grace: self.kill_grace,
             unknown: self.unknown.clone(),
         };
-        self.tracker.spawn(run.drive());
+        match &self.flavor {
+            Flavor::Owner => {
+                self.tracker.spawn(run.drive());
+            }
+            Flavor::Reno { .. } => self.spawn_attempt(run),
+        }
 
         Ok(futures::stream::unfold(event_rx, |mut rx| async move {
             rx.recv().await.map(|event| (event, rx))
         })
         .boxed())
+    }
+
+    async fn run_closed(&self, run: &RunId) {
+        let Flavor::Reno { sessions_root } = &self.flavor else {
+            return;
+        };
+        let watching = self
+            .attempts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(run);
+        if let Some(mut watching) = watching {
+            // An attempt that was dropped with its task counts as over.
+            let _ = watching.wait_for(|over| *over).await;
+        }
+        let (root, name) = (sessions_root.clone(), run.to_string());
+        let removed = tokio::task::spawn_blocking(move || remove_session_dir(&root, &name)).await;
+        match removed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(target: "reno_harness::pi", %run, %error, "could not remove the run's session");
+            }
+            Err(error) => {
+                tracing::warn!(target: "reno_harness::pi", %run, %error, "the session removal task failed");
+            }
+        }
+    }
+
+    async fn retain_runs(&self, keep: &HashSet<RunId>) {
+        let Flavor::Reno { sessions_root } = &self.flavor else {
+            return;
+        };
+        let root = sessions_root.clone();
+        let keep: HashSet<String> = keep.iter().map(ToString::to_string).collect();
+        if let Err(error) = tokio::task::spawn_blocking(move || sweep_sessions(&root, &keep)).await
+        {
+            tracing::warn!(target: "reno_harness::pi", %error, "the session sweep task failed");
+        }
     }
 
     async fn shutdown(&self) {
@@ -920,6 +984,13 @@ fn lay_out(temp: &Path) -> std::io::Result<(ScratchDir, GateFiles)> {
 /// The run's session directory under `root`, owner-only, created when it is missing. The same
 /// for every attempt of the run.
 fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
+    let dir = session_dir(root, run)?;
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Where the run's session lives under `root`: only a single plain name can be one.
+fn session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
     let mut parts = Path::new(run).components();
     let one_name = matches!(
         (parts.next(), parts.next()),
@@ -930,9 +1001,68 @@ fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
             "{run:?} cannot name a session directory"
         )));
     }
-    let dir = root.join(run);
-    create_private_dir(&dir)?;
-    Ok(dir)
+    Ok(root.join(run))
+}
+
+/// Whether `path` itself is a directory and not a link to one. A sessions root that is a link
+/// is never removed from, so nothing outside the place Reno made goes.
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|found| found.is_dir())
+}
+
+/// Removes the run's session directory. A link there is removed itself and never followed, so
+/// nothing outside `root` goes; a `root` that is itself a link is left alone. Already gone is done.
+fn remove_session_dir(root: &Path, run: &str) -> std::io::Result<()> {
+    let dir = session_dir(root, run)?;
+    if !is_real_dir(root) {
+        return Ok(());
+    }
+    let removed = match std::fs::symlink_metadata(&dir) {
+        Ok(found) if found.is_dir() => std::fs::remove_dir_all(&dir),
+        Ok(_) => std::fs::remove_file(&dir),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Removes every session directory (or link) under `root` whose name is not in `keep`. Only the
+/// entries of a `root` that is a real directory are touched, and none is followed: what is not a directory or a link
+/// is left alone. A failure on one entry is logged and does not stop the others.
+fn sweep_sessions(root: &Path, keep: &HashSet<String>) {
+    if !is_real_dir(root) {
+        return;
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(target: "reno_harness::pi", %error, "could not list the sessions");
+            }
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| keep.contains(name)) {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let removed = if kind.is_dir() {
+            std::fs::remove_dir_all(entry.path())
+        } else if kind.is_symlink() {
+            std::fs::remove_file(entry.path())
+        } else {
+            continue;
+        };
+        if let Err(error) = removed {
+            tracing::warn!(target: "reno_harness::pi", %error, "could not remove an unneeded session");
+        }
+    }
 }
 
 /// Cloud credential files a Reno attempt points at missing paths.

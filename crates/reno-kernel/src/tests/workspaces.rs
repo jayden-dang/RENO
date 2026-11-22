@@ -688,3 +688,193 @@ async fn a_removed_workspace_has_an_empty_diff_not_an_error_and_an_unknown_run_i
         Err(crate::KernelError::WorkspaceNotFound(_))
     ));
 }
+
+// ---- a run's session ends with the run ------------------------------------------------------
+
+/// A mock that also remembers which runs the kernel told it were closed.
+#[derive(Clone)]
+struct Closing {
+    inner: reno_harness::exec::MockExecutor,
+    closed: Arc<std::sync::Mutex<Vec<RunId>>>,
+}
+
+impl Closing {
+    fn new(steps: impl IntoIterator<Item = MockStep>) -> Self {
+        Self {
+            inner: mock(steps),
+            closed: Arc::default(),
+        }
+    }
+
+    fn closed(&self) -> Vec<RunId> {
+        self.closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn registry(&self) -> crate::ExecutorRegistry {
+        crate::ExecutorRegistry::new().with(Arc::new(self.clone()))
+    }
+
+    async fn closed_includes(&self, run: &RunId) {
+        until(async || self.closed().contains(run).then_some(())).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl reno_harness::exec::Executor for Closing {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        self.inner.descriptor()
+    }
+    async fn probe(&self) -> reno_proto::HealthProbe {
+        self.inner.probe().await
+    }
+    async fn start(
+        &self,
+        spec: reno_proto::ExecSpec,
+        controls: reno_harness::exec::ExecControls,
+    ) -> Result<futures::stream::BoxStream<'static, ExecEvent>, reno_harness::exec::ExecError> {
+        self.inner.start(spec, controls).await
+    }
+    async fn run_closed(&self, run: &RunId) {
+        self.closed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(run.clone());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_that_succeeds_is_closed_once() {
+    let closing = Closing::new([]);
+    let fx = Fx::new(config(1), closing.registry()).await;
+
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    closing.closed_includes(&run).await;
+    fx.idle().await;
+
+    assert_eq!(closing.closed(), [run]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_cancelled_while_live_or_while_queued_is_closed() {
+    let closing = Closing::new([
+        MockStep::text("working"),
+        MockStep::Sleep(Duration::from_secs(3600)),
+    ]);
+    let fx = Fx::new(config(1), closing.registry()).await;
+    let live = fx.submit("long").await;
+    let queued = fx.submit("waiting").await;
+    fx.wait_status(&live, RunStatus::Running).await;
+
+    fx.kernel.cancel(&queued).await.unwrap();
+    closing.closed_includes(&queued).await;
+    assert!(
+        closing.closed() == std::slice::from_ref(&queued),
+        "the live run is not closed"
+    );
+
+    fx.kernel.cancel(&live).await.unwrap();
+    fx.wait_status(&live, RunStatus::Cancelled).await;
+    closing.closed_includes(&live).await;
+    fx.idle().await;
+    assert_eq!(closing.closed(), [queued, live]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_interrupted_run_is_closed_only_when_it_is_cancelled() {
+    let closing = Closing::new([MockStep::Sleep(Duration::from_secs(3600))]);
+    let cfg = KernelConfig {
+        default_wall_time: Duration::from_secs(30),
+        ..config(1)
+    };
+    let fx = Fx::new(cfg, closing.registry()).await;
+    let run = fx.submit("long").await;
+    fx.wait_status(&run, RunStatus::Running).await;
+    fx.wait_armed(crate::db::Armed::WallTime, 0).await;
+    fx.clock.advance(31_000);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    fx.wait_status(&run, RunStatus::Interrupted).await;
+    fx.journal_with_done(&run).await;
+    fx.idle().await;
+    assert!(closing.closed().is_empty(), "it may still be resumed");
+
+    fx.kernel.cancel(&run).await.unwrap();
+    fx.wait_status(&run, RunStatus::Cancelled).await;
+    closing.closed_includes(&run).await;
+    fx.idle().await;
+    assert_eq!(closing.closed(), [run]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_run_is_not_closed() {
+    let closing = Closing::new([MockStep::done(reno_proto::StopReason::Error)]);
+    let fx = Fx::new(config(1), closing.registry()).await;
+
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Failed).await;
+    fx.journal_with_done(&run).await;
+    fx.idle().await;
+
+    assert!(closing.closed().is_empty(), "a person may resume it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_a_run_leaves_its_threads_idle_clock_running() {
+    let closing = Closing::new([]);
+    let fx = Fx::new(config(1), closing.registry()).await;
+
+    let run = fx.submit("go").await;
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    closing.closed_includes(&run).await;
+    let thread = thread_of(&fx, &run).await;
+    until(async || {
+        let info = fx.kernel.thread(&thread).await.unwrap();
+        (info.status == reno_proto::ThreadStatus::Idle && info.idle_expires_at_ms.is_some())
+            .then_some(())
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_a_trigger_started_still_closes_its_thread_when_it_ends_for_good() {
+    let closing = Closing::new([]);
+    let ws = Arc::new(FakeWorkspace::new().with_repo("/repo"));
+    let dir = tempfile::tempdir().unwrap();
+    let store = reno_store::Store::open(dir.path().join("reno.db")).unwrap();
+    let (task, run) = (
+        reno_proto::TaskId::from_suffix("nightly").unwrap(),
+        RunId::from_suffix("nightly").unwrap(),
+    );
+    store
+        .create_task(
+            NewTask {
+                id: task.clone(),
+                goal: "g".into(),
+                class: None,
+                spec: serde_json::json!({"cwd": "/repo", "trigger": "nightly"}),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    store
+        .enqueue_run(&task, &run, &id("mock"), 1)
+        .await
+        .unwrap();
+    let fx = Fx::over_workspace(dir, store, config(1), closing.registry(), None, ws).await;
+
+    fx.wait_status(&run, RunStatus::Succeeded).await;
+    closing.closed_includes(&run).await;
+    until(async || {
+        (fx.kernel.workspace(&run).await.unwrap().status == WorkspaceStatus::Removed).then_some(())
+    })
+    .await;
+    let thread = thread_of(&fx, &run).await;
+    assert_eq!(
+        fx.kernel.thread(&thread).await.unwrap().status,
+        reno_proto::ThreadStatus::Closed
+    );
+}

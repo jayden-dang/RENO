@@ -2007,6 +2007,238 @@ async fn reno_calls_a_path_under_the_home_is_judged_against_the_childs_own_home(
 }
 
 // ---------------------------------------------------------------------------------------------
+// A run's session, kept for its resumes and only that long
+// ---------------------------------------------------------------------------------------------
+
+fn session_dir_of(bench: &Bench, run: &RunId) -> PathBuf {
+    bench.sessions().join(run.as_str())
+}
+
+/// A bot's run of `prompt` on the fake, with the gate in its default mode.
+fn bot_spec_for(bench: &Bench, prompt: &str) -> ExecSpec {
+    let mut spec = bench.spec(prompt);
+    spec.env.insert("RENO_BOT".to_owned(), "keeper".to_owned());
+    spec
+}
+
+fn run_named(suffix: &str) -> RunId {
+    RunId::from_suffix(suffix).unwrap()
+}
+
+#[tokio::test]
+async fn reno_session_a_closed_run_loses_its_session_only_after_its_pi_has_exited() {
+    let bench = Bench::new();
+    // A long grace: Pi stays up for about a second after the `Done`, however slow the machine.
+    let exec =
+        reno_executor(&bench).with_graces(Duration::from_millis(500), Duration::from_secs(2));
+    let spec = bot_spec_for(&bench, "scenario:wedged");
+    let run = spec.run_id.clone();
+    let mut live = start(&exec, spec).await;
+    let record = live.records.recv().await.unwrap();
+    let handle = live.handle.clone();
+    let mut cancelled = false;
+    let mut events = Vec::new();
+    // Read up to the `Done` and no further: the attempt is still ending its Pi.
+    while let Some(event) = live.stream.next().await {
+        if matches!(event, ExecEvent::Started { .. }) && !cancelled {
+            cancelled = true;
+            handle.cancel();
+        }
+        let last = matches!(event, ExecEvent::Done { .. });
+        events.push(event);
+        if last {
+            break;
+        }
+    }
+    assert_eq!(done(&events).0, StopReason::Interrupted);
+    assert!(session_dir_of(&bench, &run).is_dir());
+    assert!(
+        alive(record.pid as i32),
+        "the attempt is still ending its Pi"
+    );
+
+    exec.run_closed(&run).await;
+
+    assert!(
+        !alive(record.pid as i32),
+        "Pi was still running when the session went"
+    );
+    assert!(!session_dir_of(&bench, &run).exists());
+}
+
+#[tokio::test]
+async fn reno_session_a_run_keeps_its_session_until_it_is_closed() {
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let spec = bot_spec_for(&bench, "hello");
+    let run = spec.run_id.clone();
+    let mut live = start(&exec, spec).await;
+    drive(&mut live).await;
+    assert!(
+        session_dir_of(&bench, &run).is_dir(),
+        "the session outlives the attempt"
+    );
+
+    let never_started = run_named("01HZXA");
+    std::fs::create_dir_all(session_dir_of(&bench, &never_started)).unwrap();
+    exec.run_closed(&never_started).await;
+    assert!(!session_dir_of(&bench, &never_started).exists());
+    assert!(
+        session_dir_of(&bench, &run).is_dir(),
+        "another run's session stays"
+    );
+
+    exec.run_closed(&run).await;
+    assert!(!session_dir_of(&bench, &run).exists());
+    exec.run_closed(&run).await;
+}
+
+#[tokio::test]
+async fn reno_session_closing_a_run_whose_dir_is_a_link_removes_the_link_and_not_what_it_names() {
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let run = run_named("01HZXB");
+    let outside = bench.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious"), "keep").unwrap();
+    std::fs::create_dir_all(bench.sessions()).unwrap();
+    std::os::unix::fs::symlink(&outside, session_dir_of(&bench, &run)).unwrap();
+
+    exec.run_closed(&run).await;
+
+    assert!(std::fs::symlink_metadata(session_dir_of(&bench, &run)).is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("precious")).unwrap(),
+        "keep"
+    );
+}
+
+#[tokio::test]
+async fn reno_session_the_start_up_sweep_removes_unknown_and_closed_dirs_and_keeps_the_kept() {
+    use std::collections::HashSet;
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let kept = [run_named("01HZXC"), run_named("01HZXD")];
+    let gone = [run_named("01HZXE"), run_named("01HZXF")];
+    for run in kept.iter().chain(&gone) {
+        let dir = session_dir_of(&bench, run);
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("nested").join("s.jsonl"), "{}\n").unwrap();
+    }
+    let outside = bench.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious"), "keep").unwrap();
+    let linked = run_named("01HZXG");
+    std::os::unix::fs::symlink(&outside, session_dir_of(&bench, &linked)).unwrap();
+    std::fs::write(bench.sessions().join("stray.txt"), "x").unwrap();
+
+    let keep: HashSet<RunId> = kept.iter().cloned().collect();
+    exec.retain_runs(&keep).await;
+
+    for run in &kept {
+        assert!(session_dir_of(&bench, run).join("nested/s.jsonl").is_file());
+    }
+    for run in &gone {
+        assert!(!session_dir_of(&bench, run).exists(), "{run} was kept");
+    }
+    assert!(
+        std::fs::symlink_metadata(session_dir_of(&bench, &linked)).is_err(),
+        "the link goes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("precious")).unwrap(),
+        "keep"
+    );
+    assert!(
+        bench.sessions().join("stray.txt").is_file(),
+        "only session dirs are the sweep's"
+    );
+}
+
+#[tokio::test]
+async fn reno_session_a_sweep_with_no_sessions_root_does_nothing() {
+    let bench = Bench::new();
+    reno_executor(&bench).retain_runs(&Default::default()).await;
+    assert!(!bench.sessions().exists());
+}
+
+#[tokio::test]
+async fn reno_session_a_sessions_root_that_is_a_link_is_not_swept_or_closed_through() {
+    let bench = Bench::new();
+    let elsewhere = bench.dir.path().join("elsewhere");
+    let run = run_named("01HZXI");
+    std::fs::create_dir_all(elsewhere.join(run.as_str())).unwrap();
+    let precious = elsewhere.join(run.as_str()).join("precious");
+    std::fs::write(&precious, "keep").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, bench.sessions()).unwrap();
+    let exec = reno_executor(&bench);
+
+    exec.retain_runs(&Default::default()).await;
+    exec.run_closed(&run).await;
+
+    assert_eq!(std::fs::read_to_string(&precious).unwrap(), "keep");
+}
+
+#[tokio::test]
+async fn reno_session_the_owners_executor_closes_and_sweeps_nothing() {
+    let bench = Bench::new();
+    let run = run_named("01HZXH");
+    std::fs::create_dir_all(session_dir_of(&bench, &run)).unwrap();
+    let owner = executor();
+    owner.run_closed(&run).await;
+    owner.retain_runs(&Default::default()).await;
+    assert!(session_dir_of(&bench, &run).is_dir());
+}
+
+#[tokio::test]
+async fn reno_session_a_resumed_attempt_names_the_same_session_dir_and_finds_its_session() {
+    let bench = Bench::new();
+    let exec = reno_executor(&bench);
+    let first = bot_spec_for(&bench, "hello");
+    let run = first.run_id.clone();
+    let mut live = start(&exec, first).await;
+    let events = drive(&mut live).await;
+    done(&events);
+    let session = events
+        .iter()
+        .find_map(|event| match event {
+            ExecEvent::Started { session, .. } => Some(session.clone()),
+            _ => None,
+        })
+        .expect("a started session");
+
+    let mut second = bot_spec_for(&bench, "again");
+    second.resume = Some(session);
+    // A daemon that started again has no memory of the first attempt.
+    let mut live = start(&reno_executor(&bench), second).await;
+    let events = drive(&mut live).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+
+    let wanted = session_dir_of(&bench, &run).display().to_string();
+    let argv: Vec<Vec<String>> = logged_values(&bench, "argv")
+        .iter()
+        .map(|argv| {
+            argv.as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_owned())
+                .collect()
+        })
+        .collect();
+    assert_eq!(argv.len(), 2);
+    for argv in &argv {
+        let at = argv.iter().position(|a| a == "--session-dir").unwrap();
+        assert_eq!(argv[at + 1], wanted);
+    }
+    assert!(
+        !text(&events).contains("did not find session"),
+        "the second attempt found its session: {}",
+        text(&events)
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Live (a real Pi with a local mock provider; no model, no network, no API spend)
 // ---------------------------------------------------------------------------------------------
 

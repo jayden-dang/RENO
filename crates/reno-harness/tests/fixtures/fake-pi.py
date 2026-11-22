@@ -7,6 +7,8 @@ command frame received is appended to it as one JSON line, for the tests to read
 
 Never talks to a model, a network or a Pi settings directory.
 
+Session files live in `--session-dir` when it is given, else in FAKE_PI_SESSIONS.
+
 With RENO_GATE_SOCKET set the fake plays the gate before it reads any command. FAKE_PI_GATE picks
 how: `ok` (the default), `no-hello`, `never-connect`, `wrong-nonce`, `no-command` (a hello, but
 `get_commands` does not list the gate) or `second-client` (a hello, then a second connection that
@@ -63,6 +65,9 @@ args = sys.argv[1:]
 
 def flag(name):
     return args[args.index(name) + 1] if name in args else None
+
+
+SESSIONS = flag("--session-dir") or SESSIONS
 
 
 def credential_env():

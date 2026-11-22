@@ -297,3 +297,232 @@ async fn start_backfills_the_report_of_a_run_that_ended_before_reports_were_stor
     assert_eq!(report.status, ReportStatus::Failed);
     assert_eq!(report.summary, "could not finish");
 }
+
+// ---- which runs keep their harness session --------------------------------------------------
+
+/// What a recording executor saw when the kernel asked it which runs to keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Sweep {
+    keep: std::collections::HashSet<RunId>,
+    /// Each watched run's status when the call came in, and when it returned.
+    before: Vec<(RunId, RunStatus)>,
+    after: Vec<(RunId, RunStatus)>,
+    started_before: usize,
+    started_after: usize,
+}
+
+#[derive(Clone)]
+struct Sweeping {
+    inner: reno_harness::exec::MockExecutor,
+    store: Store,
+    watched: Vec<RunId>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Sweep>>>,
+}
+
+impl Sweeping {
+    fn seen(&self) -> Vec<Sweep> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn statuses(&self) -> Vec<(RunId, RunStatus)> {
+        let mut found = Vec::new();
+        for run in &self.watched {
+            let status = self.store.get_run(run).await.unwrap().unwrap().status;
+            found.push((run.clone(), status));
+        }
+        found
+    }
+}
+
+#[async_trait::async_trait]
+impl reno_harness::exec::Executor for Sweeping {
+    fn descriptor(&self) -> reno_proto::ExecutorDescriptor {
+        self.inner.descriptor()
+    }
+    async fn probe(&self) -> reno_proto::HealthProbe {
+        self.inner.probe().await
+    }
+    async fn start(
+        &self,
+        spec: reno_proto::ExecSpec,
+        controls: reno_harness::exec::ExecControls,
+    ) -> Result<futures::stream::BoxStream<'static, ExecEvent>, reno_harness::exec::ExecError> {
+        self.inner.start(spec, controls).await
+    }
+    async fn retain_runs(&self, keep: &std::collections::HashSet<RunId>) {
+        let before = self.statuses().await;
+        let started_before = self.inner.log().specs.len();
+        // Recovery must wait for this call: give anything that does not wait the time to run.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_millis(50)))
+            .await
+            .unwrap();
+        let after = self.statuses().await;
+        let started_after = self.inner.log().specs.len();
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Sweep {
+                keep: keep.clone(),
+                before,
+                after,
+                started_before,
+                started_after,
+            });
+    }
+}
+
+/// A run in `status`, made through the store the way a daemon that died would have left it.
+async fn left_as(store: &Store, n: &str, at: i64, status: &str, session: bool) -> RunId {
+    let (_, run) = queue(store, n, at).await;
+    if status == "queued" {
+        return run;
+    }
+    if status == "cancelled" {
+        store
+            .transition(&run, 0, RunStatus::Cancelled, at)
+            .await
+            .unwrap();
+        return run;
+    }
+    let claim = store.claim_next("old", at, 60_000).await.unwrap().unwrap();
+    assert_eq!(claim.run_id, run);
+    if status == "leased" {
+        return run;
+    }
+    store
+        .transition(&run, claim.fence, RunStatus::Running, at)
+        .await
+        .unwrap();
+    if session {
+        store
+            .record_session(
+                &run,
+                claim.fence,
+                &reno_proto::SessionRef("sess".into()),
+                at,
+            )
+            .await
+            .unwrap();
+    }
+    match status {
+        "running" => {}
+        "interrupted" => {
+            store
+                .transition(&run, claim.fence, RunStatus::Interrupted, at)
+                .await
+                .unwrap();
+        }
+        "requeued" => {
+            store
+                .transition(&run, claim.fence, RunStatus::Interrupted, at)
+                .await
+                .unwrap();
+            store.resume_run(&run, claim.fence, None, at).await.unwrap();
+        }
+        "failed" | "succeeded" => {
+            let end = if status == "failed" {
+                RunStatus::Failed
+            } else {
+                RunStatus::Succeeded
+            };
+            for to in [RunStatus::Evaluating, end] {
+                store.transition(&run, claim.fence, to, at).await.unwrap();
+            }
+        }
+        other => panic!("no such state {other}"),
+    }
+    run
+}
+
+async fn sweeping_start(
+    dir: tempfile::TempDir,
+    store: Store,
+    watched: Vec<RunId>,
+) -> (Fx, Sweeping) {
+    let sweeping = Sweeping {
+        inner: mock([]),
+        store: store.clone(),
+        watched,
+        seen: Default::default(),
+    };
+    let registry = crate::ExecutorRegistry::new().with(std::sync::Arc::new(sweeping.clone()));
+    (Fx::over(dir, store, config(1), registry).await, sweeping)
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_asks_each_executor_to_keep_only_the_runs_that_can_still_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("reno.db")).unwrap();
+    let failed = left_as(&store, "failed", 1, "failed", true).await;
+    let interrupted = left_as(&store, "interrupted", 2, "interrupted", true).await;
+    let running = left_as(&store, "running", 3, "running", false).await;
+    let succeeded = left_as(&store, "succeeded", 4, "succeeded", true).await;
+    let cancelled = left_as(&store, "cancelled", 5, "cancelled", false).await;
+    let leased = left_as(&store, "leased", 6, "leased", false).await;
+    // Queued again, so it goes last: the next claim would take it before any younger run.
+    let requeued = left_as(&store, "requeued", 7, "requeued", true).await;
+    let plain = left_as(&store, "plain", 8, "queued", false).await;
+    let watched = [
+        &failed,
+        &interrupted,
+        &running,
+        &requeued,
+        &succeeded,
+        &cancelled,
+        &leased,
+        &plain,
+    ]
+    .map(Clone::clone)
+    .to_vec();
+
+    let (_fx, sweeping) = sweeping_start(dir, store, watched).await;
+
+    let seen = sweeping.seen();
+    assert_eq!(seen.len(), 1, "asked once per executor: {seen:?}");
+    let keep: std::collections::HashSet<RunId> = [&failed, &interrupted, &running, &requeued]
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(seen[0].keep, keep);
+    for gone in [&succeeded, &cancelled, &leased, &plain] {
+        assert!(!seen[0].keep.contains(gone));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sweep_is_awaited_after_the_state_repair_and_before_any_resume_or_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("reno.db")).unwrap();
+    let running = left_as(&store, "running", 1, "running", true).await;
+    let leased = left_as(&store, "leased", 2, "leased", false).await;
+    let waiting = left_as(&store, "waiting", 3, "queued", false).await;
+    let watched = vec![running.clone(), leased.clone(), waiting.clone()];
+
+    let (fx, sweeping) = sweeping_start(dir, store, watched).await;
+
+    let seen = sweeping.seen();
+    assert_eq!(seen.len(), 1);
+    let sweep = &seen[0];
+    // Step 2 had run: the live run is interrupted and the leased one is queued again.
+    assert_eq!(
+        sweep.before,
+        [
+            (running.clone(), RunStatus::Interrupted),
+            (leased.clone(), RunStatus::Queued),
+            (waiting.clone(), RunStatus::Queued),
+        ]
+    );
+    // Nothing moved while the executor was still at it: no resume, no claim.
+    assert_eq!(sweep.after, sweep.before);
+    assert_eq!((sweep.started_before, sweep.started_after), (0, 0));
+    // Afterwards the work went on as before: the interrupted run was resumed, all three ran.
+    for run in [&running, &leased, &waiting] {
+        fx.wait_status(run, RunStatus::Succeeded).await;
+    }
+}
