@@ -47,7 +47,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-52** mocked-contracts — After: none — Surfaces: `crates/reno-client/src/fake/`, `crates/reno-proto/`
 - **ROAD-31** composer — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/`
 - **ROAD-32** sidebar-and-sessions — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/` — Notes: [ROAD-32](roads/ROAD-32.notes.md)
-- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/` — Notes: [ROAD-33](roads/ROAD-33.notes.md)
+- **ROAD-33** transcript — After: ROAD-30, ROAD-29 — Surfaces: `apps/reno-app/`, `crates/reno-markdown/`, `crates/reno-client/` — Notes: [ROAD-33](roads/ROAD-33.notes.md) — Card: [ROAD-33](roads/ROAD-33.md)
 - **ROAD-34** palette-and-keymap — After: ROAD-30 — Surfaces: `apps/reno-app/` — Notes: [ROAD-34](roads/ROAD-34.notes.md)
 - **ROAD-35** panel-surfaces — After: ROAD-30, ROAD-52 — Surfaces: `apps/reno-app/src/panel/` — Notes: [ROAD-35](roads/ROAD-35.notes.md)
 - **ROAD-37** settings-and-design-system — After: ROAD-30 — Surfaces: `apps/reno-app/src/ui/` — Notes: [ROAD-37](roads/ROAD-37.notes.md)
@@ -161,7 +161,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 - **ROAD-41** app-and-daemon-self-update → MILE-6 (2026-11-19, needs a release pipeline, signing and notarization first) — Notes: [ROAD-41](roads/ROAD-41.notes.md)
 - **ROAD-42** edit-files-in-the-panel → MILE-6 (2026-11-19, editing was left for later; touches run protection)
 - **ROAD-43** split-chats → MILE-6 (2026-11-19, after the new shell exists)
-- **ROAD-44** agent-published-visuals → MILE-6 (2026-11-19, needs a renderer decision)
+- ~~**ROAD-44**~~ agent-published-visuals → MILE-6 (2026-11-19) — retired 2026-11-22: static visuals an agent posts moved into ROAD-33, scripted ones into ROAD-58
+- **ROAD-58** agent-scripted-visuals → MILE-6 (2026-11-22, reverses the earlier ruling that Reno renders harness output, not agent-written UI; needs a vision edit and an ADR first) — Notes: [ROAD-58](roads/ROAD-58.notes.md)
 - **ROAD-45** window-capture-into-composer → MILE-6 (2026-11-19, a person's tool in its own boundary crate, after the redesign)
 **Blockers:** None
 
