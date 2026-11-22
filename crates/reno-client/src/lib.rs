@@ -30,6 +30,7 @@ pub mod places;
 pub mod queue;
 pub mod state;
 pub mod thread_desk;
+pub mod visuals;
 
 #[cfg(feature = "fake")]
 pub mod fake;

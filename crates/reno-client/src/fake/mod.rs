@@ -57,6 +57,7 @@ mod signin;
 pub mod terminals;
 mod thread_desk;
 pub mod transcript;
+mod visuals;
 mod world;
 
 use std::collections::HashMap;
@@ -263,6 +264,8 @@ pub struct FakeDaemon {
     thread_desk: thread_desk::Sim,
     /// The mocked daemon desk (see [`crate::daemon_desk`]).
     daemon_desk: daemon_desk::Sim,
+    /// The mocked agent-posted visuals (see [`crate::visuals`]).
+    visuals: visuals::Sim,
 }
 
 impl std::fmt::Debug for Shared {
@@ -367,6 +370,7 @@ impl FakeDaemon {
             places: places::Sim::new(config.no_projects),
             thread_desk: thread_desk::seed(config.sidebar_threads),
             daemon_desk: daemon_desk::seed(config.first_run),
+            visuals: visuals::seed(config.transcript_threads && !config.empty),
         })
     }
 

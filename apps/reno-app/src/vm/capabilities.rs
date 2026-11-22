@@ -36,6 +36,9 @@ pub(crate) struct Capabilities {
     /// Restarting `renod` onto a newer installed version (ROAD-38: the fake's mocked daemon
     /// desk). Without it the app never offers a restart.
     pub(crate) daemon_restart: bool,
+    /// Images and diagrams an agent posts into a run (ROAD-33: the fake's mocked visual desk, see
+    /// `reno_client::visuals`). Without it the transcript shows none and no placeholder.
+    pub(crate) agent_visuals: bool,
 }
 
 /// One row of the "+" menu.
@@ -88,6 +91,7 @@ impl Capabilities {
         place_chooser: false,
         thread_edit: false,
         daemon_restart: false,
+        agent_visuals: false,
     };
 
     /// The fake daemon: every not-yet control is on.
@@ -103,6 +107,7 @@ impl Capabilities {
         place_chooser: true,
         thread_edit: true,
         daemon_restart: true,
+        agent_visuals: true,
     };
 
     /// The approval panel's ▾ menu: the note needs a daemon that takes one; the similar-command
@@ -154,6 +159,7 @@ mod tests {
                 && !real.place_chooser
                 && !real.thread_edit
                 && !real.daemon_restart
+                && !real.agent_visuals
         );
     }
 
@@ -185,6 +191,6 @@ mod tests {
         let fake = Capabilities::FAKE;
         assert!(fake.permission_modes && fake.allow_similar && fake.answer_questions);
         assert!(fake.harness_commands && fake.message_queue && fake.place_chooser);
-        assert!(fake.thread_edit && fake.daemon_restart);
+        assert!(fake.thread_edit && fake.daemon_restart && fake.agent_visuals);
     }
 }

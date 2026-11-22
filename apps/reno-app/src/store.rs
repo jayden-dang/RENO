@@ -40,6 +40,7 @@ use reno_client::launcher::{DaemonKeeper, KeeperConfig, Launcher};
 use reno_client::places::{AddProjectError, Place, PlaceDesk, Project, ProjectFacts};
 use reno_client::queue::{MessageQueue, QueueError, QueuedMessage};
 use reno_client::thread_desk::{ThreadDesk, ThreadEditError, ThreadMarks};
+use reno_client::visuals::{Visual, VisualDesk};
 use reno_client::{
     Changed, Client, ClientError, ConnectionStatus, Connector, Feed, FeedState, Mirror,
     MirrorConfig, Offline, OfflineKind, State, Transcript, Update, Updates,
@@ -525,6 +526,23 @@ impl Store {
             return None;
         }
         self.fake.as_deref().map(|fake| fake as &dyn ActivityDesk)
+    }
+
+    /// The mocked agent-posted visuals (ROAD-33): only where [`Capabilities::agent_visuals`] is
+    /// on. The real daemon has no such contract, so this is `None` there and the transcript
+    /// shows no visuals and no placeholder.
+    fn visual_desk(&self) -> Option<&dyn VisualDesk> {
+        if !self.capabilities.agent_visuals {
+            return None;
+        }
+        self.fake.as_deref().map(|fake| fake as &dyn VisualDesk)
+    }
+
+    /// The visuals `run` posted, in order; empty when this connection offers none.
+    pub(crate) fn run_visuals(&self, run: &RunId) -> Vec<Visual> {
+        self.visual_desk()
+            .map(|desk| desk.visuals(run))
+            .unwrap_or_default()
     }
 
     /// The run's plan, background tasks and agents; `None` when this connection has no such
