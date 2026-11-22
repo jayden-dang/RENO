@@ -1,7 +1,7 @@
 # ROAD-62 [RENOHARNESS] Bots run on Reno's own harness, with every tool call seen by Reno
 
 Assignee: Jayden Đặng
-Status: enhancement, ready-for-agent
+Status: enhancement, status:building
 Priority: high
 Estimate: 5
 Blocked by: none
@@ -55,3 +55,5 @@ Roadmap: ROAD-62 (MILE-11)
 **2026-11-22.** The spec is written and waits for Jayden's review and approval. Five choices need his word: how strict a supervised bot on the new harness should be before the per-bot policy lands, keeping each run's session files for resumes, the executor's name, and two gaps later roads close (per-call usage and the 45-minute cap). Nothing is built yet.
 
 **2026-11-22.** Jayden approved the spec; it is ready to build.
+
+**2026-11-22.** Building on `feat/reno-harness` (/go run).
