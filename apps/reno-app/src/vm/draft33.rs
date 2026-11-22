@@ -77,6 +77,11 @@ pub(crate) enum OpenHook {
     Stream,
     /// As `Stream`, then scroll the view up, so that "jump to latest" shows.
     Latest,
+    /// Open "Render check", select from the middle of the prompt to the middle of the reply's
+    /// first paragraph, copy it (⌘C) and print the clipboard text.
+    Select,
+    /// Open "Render check", press the Rust code block's Copy and print the clipboard text.
+    CopyCode,
 }
 
 impl OpenHook {
@@ -87,6 +92,8 @@ impl OpenHook {
             "render" => Some(Self::Render),
             "stream" => Some(Self::Stream),
             "latest" => Some(Self::Latest),
+            "select" => Some(Self::Select),
+            "copycode" => Some(Self::CopyCode),
             _ => None,
         }
     }

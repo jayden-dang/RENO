@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, Focusable as _, FontWeight, ListOffset, StyledText, Subscription,
+    AnyElement, Context, Entity, Focusable as _, FontWeight, ListOffset, Subscription,
     Task, Window, div, prelude::*, px,
 };
 
@@ -400,29 +400,25 @@ impl RunScreen {
             .collect()
     }
 
-    /// Whether a row holds a match, and whether the current one is in it: for rows whose text
-    /// cannot be painted over (rendered prose).
-    pub(super) fn find_row_mark(&self, key: Key) -> Option<bool> {
-        let hits = self.find.by_row.get(&key)?;
-        Some(hits.iter().any(|&at| self.find.found.current == Some(at)))
-    }
-
-    /// `text` as one styled run with its matches painted. `ranges` are bytes of `text`; those
-    /// beyond it (the cut part of a message) are left out.
-    pub(super) fn find_paint(
-        theme: &Theme,
+    /// What the markdown view paints over a reply (TRANSCRIPT-3.5): the needle, and which of the
+    /// reply's matches is the one the bar is on. `None` unless the bar is open and the reply
+    /// holds a match.
+    pub(super) fn find_marks(
+        &self,
+        key: Key,
         variant: Variant,
-        text: impl Into<gpui::SharedString>,
-        ranges: &[(Range<usize>, bool)],
-    ) -> StyledText {
-        let text: gpui::SharedString = text.into();
-        let len = text.len();
-        let highlights = ranges
-            .iter()
-            .filter(|(r, _)| r.end <= len && r.start < r.end)
-            .map(|(r, current)| (r.clone(), look::hit_style(theme, variant, *current)))
-            .collect::<Vec<_>>();
-        StyledText::new(text).with_highlights(highlights)
+    ) -> Option<std::rc::Rc<crate::ui::markdown_view::Marks>> {
+        if !self.find.open || self.find.query.is_empty() {
+            return None;
+        }
+        let hits = self.find.by_row.get(&key)?;
+        Some(std::rc::Rc::new(crate::ui::markdown_view::Marks {
+            needle: self.find.query.clone(),
+            current: hits
+                .iter()
+                .position(|&at| self.find.found.current == Some(at)),
+            variant,
+        }))
     }
 
     // --- the demo hooks ------------------------------------------------------------------------

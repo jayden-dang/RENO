@@ -9,6 +9,7 @@ use reno_proto::ToolOutput;
 
 use super::RunScreen;
 use crate::transcript::{Key, Outcome, ToolEntry};
+use super::select::Spot;
 use crate::ui::find as find_look;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::MONO;
@@ -18,6 +19,7 @@ use crate::vm::changes as facts;
 use crate::vm::convo;
 use crate::vm::draft33::Variant;
 use crate::vm::find;
+use crate::vm::selection::{Kind, Slot};
 
 /// Puts `text` on the clipboard and says so.
 pub(super) fn copy(cx: &mut gpui::App, text: String, what: &'static str) {
@@ -49,7 +51,7 @@ impl RunScreen {
         &self,
         theme: &Theme,
         variant: Variant,
-        key: Key,
+        (key, ln): (Key, usize),
         line: &convo::StepLine,
         calls: &[ToolEntry],
         cx: &mut Context<Self>,
@@ -142,12 +144,19 @@ impl RunScreen {
                     .truncate()
                     .opacity(opacity)
                     .when(line.live, |d| d.debug_selector(|| "step-live".to_owned()))
-                    .child(if painted.is_empty() {
-                        SharedString::from(line.text.clone()).into_any_element()
-                    } else {
-                        Self::find_paint(theme, variant, line.text.clone(), &painted)
-                            .into_any_element()
-                    }),
+                    .child(self.text_piece(
+                        theme,
+                        variant,
+                        Spot {
+                            key,
+                            slot: Slot::new(ln, Kind::Step),
+                            base: 0,
+                            len: 0,
+                            total: None,
+                        },
+                        &line.text,
+                        &painted,
+                    )),
             )
             .when(output.is_some(), |d| {
                 d.child(icon(
@@ -159,7 +168,9 @@ impl RunScreen {
         let block = output.filter(|_| shown).and_then(|c| {
             c.output
                 .as_ref()
-                .map(|out| self.output_block(theme, variant, key, (at.unwrap_or(0), c), out, cx))
+                .map(|out| {
+                self.output_block(theme, variant, (key, ln), (at.unwrap_or(0), c), out, cx)
+            })
         });
         div()
             .flex()
@@ -174,7 +185,7 @@ impl RunScreen {
         &self,
         theme: &Theme,
         variant: Variant,
-        key: Key,
+        (key, ln): (Key, usize),
         (at, call): (usize, &ToolEntry),
         out: &ToolOutput,
         cx: &mut Context<Self>,
@@ -253,14 +264,29 @@ impl RunScreen {
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .text_color(ink)
-                    .children(lines_with(body, &hits).into_iter().map(|(line, here)| {
-                        div().min_h(px(18.0)).child(if here.is_empty() {
-                            SharedString::from(line.to_owned()).into_any_element()
-                        } else {
-                            Self::find_paint(theme, variant, line.to_owned(), &here)
-                                .into_any_element()
-                        })
-                    })),
+                    .children({
+                        let mut start = 0;
+                        lines_with(body, &hits)
+                            .into_iter()
+                            .map(|(line, here)| {
+                                let base = start;
+                                start += line.len() + 1;
+                                div().min_h(px(18.0)).child(self.text_piece(
+                                    theme,
+                                    variant,
+                                    Spot {
+                                        key,
+                                        slot: Slot::new(ln, Kind::Output),
+                                        base,
+                                        len: line.len(),
+                                        total: Some(body.len()),
+                                    },
+                                    line,
+                                    &here,
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
             )
             .child(
                 div()
@@ -279,7 +305,19 @@ impl RunScreen {
                                 })
                                 .text_size(px(12.5))
                                 .text_color(theme.faint)
-                                .child(note),
+                                .child(self.text_piece(
+                                    theme,
+                                    variant,
+                                    Spot {
+                                        key,
+                                        slot: Slot::new(ln, Kind::Cut),
+                                        base: 0,
+                                        len: 0,
+                                        total: None,
+                                    },
+                                    &note,
+                                    &[],
+                                )),
                         )
                     })
                     .child(div().flex_1())

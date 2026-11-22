@@ -78,6 +78,7 @@ impl Atom {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_exact(&self) -> bool {
         self.shape == Shape::Exact
     }

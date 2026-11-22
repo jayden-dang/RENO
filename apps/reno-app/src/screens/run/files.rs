@@ -196,7 +196,7 @@ impl RunScreen {
 
     // --- talking to the daemon ----------------------------------------------------------------
 
-    fn files_call<T, Fut>(
+    pub(super) fn files_call<T, Fut>(
         &mut self,
         cx: &mut Context<Self>,
         call: impl FnOnce(Client, RunId) -> Fut,

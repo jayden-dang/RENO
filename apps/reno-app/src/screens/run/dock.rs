@@ -39,6 +39,7 @@ pub(crate) fn bind_keys(cx: &mut gpui::App) {
         KeyBinding::new("enter", AllowHeld, Some(CONTEXT)),
     ]);
     super::question::bind_keys(cx);
+    super::select::bind_keys(cx);
 }
 
 impl RunScreen {

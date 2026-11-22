@@ -5,11 +5,15 @@
 //! raised bubble, tool activity as one muted line each, and a finished turn folded behind
 //! "Worked for Ns".
 
+use std::rc::Rc;
+
+use super::select::Spot;
 use super::*;
-use crate::ui::find as find_look;
+use crate::ui::markdown_view::{Host, SelectHost, select as pick, visual::visual_view};
 use crate::ui::motion;
 use crate::vm::draft33::Variant;
 use crate::vm::find;
+use crate::vm::selection::{self, Slot};
 
 impl RunScreen {
     /// One list item: its row, with the space below it, the subagent chips that hang on it and,
@@ -25,9 +29,16 @@ impl RunScreen {
         let Some(item) = self.items.items.get(ix).copied() else {
             return div().into_any_element();
         };
+        if let Some(v) = item.visual {
+            return self.visual_item(ix, v, item.decor.last, &theme, cx);
+        }
         // A reply's markdown is parsed when its item is first drawn, not when the row arrives.
         if let Some(Row::Prose { key, text }) = items::row_of(&self.rows, 0, &item) {
-            self.markdown.entry(*key).or_default().set_text(text);
+            let (key, len) = (*key, text.len());
+            let stream = self.markdown.entry(key).or_default();
+            stream.set_text(text);
+            let tree = stream.tree().clone();
+            self.probe_files(key, len, &tree, cx);
         }
         let Some(row) = items::row_of(&self.rows, 0, &item) else {
             return div().into_any_element();
@@ -52,6 +63,48 @@ impl RunScreen {
             .child(body)
             .children(self.activity_chips(&theme, item.decor.prose_at, cx))
             .when(thinking, |d| d.child(self.thinking_line(&theme, cx)))
+            .into_any_element()
+    }
+
+    /// Whether the run is live: its last reply may still be arriving.
+    pub(super) fn is_live(&self, cx: &Context<Self>) -> bool {
+        self.summary(cx)
+            .is_some_and(|r| r.status == RunStatus::Running)
+    }
+
+    /// The run a row belongs to: the thread's `n`th, in the high bits of its key.
+    fn run_of(&self, key: Key) -> RunId {
+        usize::try_from(key.0 >> 40)
+            .ok()
+            .and_then(|n| self.runs.get(n))
+            .unwrap_or(&self.run)
+            .clone()
+    }
+
+    /// An agent-posted visual, titled with its caption (TRANSCRIPT-12.1).
+    fn visual_item(
+        &self,
+        ix: usize,
+        v: usize,
+        last: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(visual) = self.visuals.get(v) else {
+            return div().into_any_element();
+        };
+        let run = self
+            .items
+            .items
+            .get(ix)
+            .and_then(|i| self.rows.get(i.top))
+            .map_or_else(|| self.run.clone(), |row| self.run_of(row.key()));
+        let client = self.store.read(cx).client();
+        let host = Host::transcript(Some(run), client, Some(self.file_links(cx)));
+        div()
+            .w_full()
+            .pb(px(if last { 26.0 } else { 16.0 }))
+            .child(visual_view(visual, host, theme))
             .into_any_element()
     }
 
@@ -103,37 +156,38 @@ impl RunScreen {
                 let Some(stream) = self.markdown.get(key) else {
                     return div().into_any_element();
                 };
-                let actions = top
-                    .and_then(|ix| self.items.items.get(ix))
+                let item = top.and_then(|ix| self.items.items.get(ix));
+                let actions = item
                     .filter(|item| item.decor.final_message)
                     .map(|_| self.message_actions(theme, *key, text));
-                // The prose is drawn by the markdown view, which cannot paint a match over its
-                // text: a row that holds one is tinted, and the one the bar is on has a rule.
-                let mark = self.find_row_mark(*key);
+                let streaming = item.is_some_and(|i| i.decor.last) && self.is_live(cx);
+                // The reply is drawn for this run's worktree, with its find hits painted over the
+                // words and its texts tracked for selection.
+                let client = self.store.read(cx).client();
+                let host = Host::transcript(
+                    Some(self.run_of(*key)),
+                    client,
+                    Some(self.file_links(cx)),
+                )
+                .while_streaming(streaming)
+                .marked(self.find_marks(*key, variant))
+                .selectable(Some(Rc::new(SelectHost {
+                    registry: self.select.registry.clone(),
+                    key: *key,
+                    atoms: stream.atoms(),
+                    selected: self.selected_in_prose(*key, text.len()),
+                    style: pick::selection_style(theme, variant),
+                })));
+                let _ = window;
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .when_some(mark, |d, current| {
-                        let tint = find_look::hit_style(theme, variant, false)
-                            .background_color
-                            .unwrap_or(theme.raised);
-                        d.bg(tint)
-                            .rounded(px(6.0))
-                            .px(px(8.0))
-                            .mx(px(-8.0))
-                            .border_l_2()
-                            .border_color(if current {
-                                theme.accent
-                            } else {
-                                gpui::transparent_black()
-                            })
-                    })
                     .child(
                         div()
                             .text_size(px(15.0))
                             .line_height(px(24.0))
-                            .child(markdown_view::blocks(stream.tree(), theme, window)),
+                            .child(markdown_view::blocks_with(stream.tree(), theme, host)),
                     )
                     .children(actions)
                     .into_any_element()
@@ -225,7 +279,7 @@ impl RunScreen {
     ) -> AnyElement {
         let open = self.open.contains(&key);
         let text = theme.text;
-        let label = SharedString::from(convo::worked_label(secs));
+        let label = convo::worked_label(secs);
         let head = div()
             .id(SharedString::from(format!("worked-{}", key.0)))
             .debug_selector({
@@ -239,7 +293,19 @@ impl RunScreen {
             .text_color(theme.muted)
             .cursor_pointer()
             .hover(move |s| s.text_color(text))
-            .child(label)
+            .child(self.text_piece(
+                theme,
+                variant,
+                Spot {
+                    key,
+                    slot: Slot::HEAD,
+                    base: 0,
+                    len: 0,
+                    total: None,
+                },
+                &label,
+                &[],
+            ))
             .when(variant == Variant::B, |d| {
                 d.child(
                     div()
@@ -300,6 +366,7 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shown = convo::user_text(text, self.open.contains(&key));
+        let kept = selection::kept_len(&shown);
         let group = SharedString::from(format!("user-{}", key.0));
         let copy_text = text.to_owned();
         let toggle = shown.toggle.map(|label| {
@@ -358,11 +425,19 @@ impl RunScreen {
                     .bg(theme.raised)
                     .text_size(px(15.0))
                     .line_height(px(23.0))
-                    .child(if hits.is_empty() {
-                        SharedString::from(shown.shown).into_any_element()
-                    } else {
-                        Self::find_paint(theme, variant, shown.shown, &hits).into_any_element()
-                    })
+                    .child(self.text_piece(
+                        theme,
+                        variant,
+                        Spot {
+                            key,
+                            slot: Slot::WHOLE,
+                            base: 0,
+                            len: kept,
+                            total: Some(kept),
+                        },
+                        &shown.shown,
+                        &hits,
+                    ))
                     .children(toggle),
             )
             .child(
@@ -423,7 +498,8 @@ impl RunScreen {
             .children(
                 lines
                     .iter()
-                    .map(|line| self.step_row(theme, variant, key, line, calls, cx)),
+                    .enumerate()
+                    .map(|(ln, line)| self.step_row(theme, variant, (key, ln), line, calls, cx)),
             )
             .into_any_element()
     }
@@ -618,7 +694,19 @@ impl RunScreen {
                     theme,
                     SharedString::from(format!("reasoning-{}", key.0)),
                     open,
-                    "Reasoning".to_owned(),
+                    self.text_piece(
+                        theme,
+                        variant,
+                        Spot {
+                            key,
+                            slot: Slot::HEAD,
+                            base: 0,
+                            len: 0,
+                            total: None,
+                        },
+                        "Reasoning",
+                        &[],
+                    ),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx))),
             )
@@ -629,12 +717,19 @@ impl RunScreen {
                         .text_size(px(13.5))
                         .line_height(px(21.0))
                         .text_color(theme.muted)
-                        .child(if hits.is_empty() {
-                            SharedString::from(text.to_owned()).into_any_element()
-                        } else {
-                            Self::find_paint(theme, variant, text.to_owned(), &hits)
-                                .into_any_element()
-                        }),
+                        .child(self.text_piece(
+                            theme,
+                            variant,
+                            Spot {
+                                key,
+                                slot: Slot::WHOLE,
+                                base: 0,
+                                len: text.len(),
+                                total: Some(text.len()),
+                            },
+                            text,
+                            &hits,
+                        )),
                 )
             })
             .into_any_element()
@@ -749,7 +844,7 @@ pub(super) fn disclosure(
     theme: &Theme,
     id: SharedString,
     open: bool,
-    label: String,
+    label: impl IntoElement,
 ) -> gpui::Stateful<gpui::Div> {
     let selector = id.to_string();
     div()

@@ -229,9 +229,54 @@ pub(crate) fn looks_like_path(text: &str) -> bool {
         })
 }
 
+/// The worktree files a reply's links and inline-code spans name, without repeats: what the
+/// host is asked to resolve.
+pub(crate) fn paths_in(tree: &reno_markdown::BlockTree) -> Vec<String> {
+    use reno_markdown::{Block, InlineRun};
+    fn runs(runs: &[InlineRun], out: &mut Vec<String>) {
+        for run in runs {
+            let target = match run.style.link.as_deref() {
+                Some(dest) if !links::is_web_link(dest.trim()) => file_target(dest),
+                Some(_) => None,
+                None if run.style.code && looks_like_path(&run.text) => file_target(&run.text),
+                None => None,
+            };
+            if let Some(target) = target
+                && !out.contains(&target.path)
+            {
+                out.push(target.path);
+            }
+        }
+    }
+    fn block(b: &Block, out: &mut Vec<String>) {
+        match b {
+            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
+            Block::BlockQuote { children } => children.iter().for_each(|c| block(c, out)),
+            Block::List { items, .. } => items.iter().flatten().for_each(|c| block(c, out)),
+            Block::Table { header, rows, .. } => {
+                header.iter().for_each(|c| runs(c, out));
+                rows.iter().flatten().for_each(|c| runs(c, out));
+            }
+            Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
+        }
+    }
+    let mut out = Vec::new();
+    tree.blocks.iter().for_each(|t| block(&t.block, &mut out));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_names_the_worktree_files_its_links_and_code_spans_point_at_once_each() {
+        let tree = reno_markdown::parse_full(
+            "See [a](src/a.rs:4) and `src/a.rs:9` and `b.txt`, [web](https://x.org/y.rs), `cargo`.\n\n- `docs/g.png`",
+        );
+        assert_eq!(paths_in(&tree), ["src/a.rs", "b.txt", "docs/g.png"]);
+    }
+
 
     fn target(path: &str, line: Option<u32>) -> Option<FileTarget> {
         Some(FileTarget {

@@ -18,6 +18,7 @@ use gpui::{
     ListOffset, ListState, Render, SharedString, Subscription, Task, Window, div, list, prelude::*,
     px,
 };
+use reno_client::visuals::Visual;
 use reno_proto::{
     Approval, ApprovalDecision, ApprovalId, ExecutorId, Remember, RememberScope, RunId, RunStatus,
     RunSummary, StopReason, ThreadId,
@@ -47,9 +48,11 @@ mod dock;
 mod files;
 mod find;
 mod history;
+mod links;
 mod output;
 mod panel;
 mod question;
+mod select;
 mod session;
 mod syntax;
 mod terminal;
@@ -70,6 +73,8 @@ const COLUMN: f32 = 760.0;
 const RAIL: f32 = 16.0;
 /// Rows the list keeps measured beyond the viewport.
 const OVERDRAW: f32 = 600.0;
+/// How many items from the top of the view are measured again when the renderers settle.
+const SETTLED_ITEMS: usize = 40;
 
 /// What one older run of the thread contributed to the transcript, and what it was built from:
 /// a finished run is not built again until its events (or its summary) change.
@@ -184,6 +189,18 @@ pub(crate) struct RunScreen {
     activity_output: Option<String>,
     /// How many agents the transcript's chips were measured for (a chip changes a row's height).
     activity_chips: usize,
+    /// Selecting text across the transcript, and the node that holds the keyboard for ⌘C.
+    select: select::Select,
+    transcript_focus: FocusHandle,
+    /// The runs of the thread shown, oldest first; a row's run is in the high bits of its key.
+    runs: Vec<RunId>,
+    /// The agent-posted visuals of those runs (none with the real daemon).
+    visuals: Vec<Visual>,
+    /// The worktree's files a reply names, and the replies already looked through.
+    file_index: links::Index,
+    probed: HashMap<Key, usize>,
+    /// The last renderer-settled generation seen: when it moves, drawn rows are measured again.
+    settled_seen: u64,
     _store: Subscription,
 }
 
@@ -277,6 +294,13 @@ impl RunScreen {
             activity_tasks_open: false,
             activity_output: None,
             activity_chips: 0,
+            select: select::Select::default(),
+            transcript_focus: cx.focus_handle(),
+            runs: Vec::new(),
+            visuals: Vec::new(),
+            file_index: links::Index::default(),
+            probed: HashMap::new(),
+            settled_seen: markdown_view::settled_generation(cx),
         };
         screen.refresh(cx);
         screen
@@ -496,6 +520,7 @@ impl RunScreen {
 
     /// The rows changed: the tick rail is worked out again, once, not on every frame.
     fn rail_changed(&mut self) {
+        self.reorder();
         self.ticks = convo::tick_marks(&self.rows);
         self.row_starts = convo::row_starts(&self.rows);
     }
@@ -519,6 +544,7 @@ impl RunScreen {
             .cloned()
             .collect();
         self.rebuild_rows(routing, &pending, cx);
+        self.sync_visuals(cx);
         self.measure_activity_chips(cx);
         self.keep_menu(&pending);
         self.resolve_panel_key(cx);
@@ -546,6 +572,50 @@ impl RunScreen {
         }
     }
 
+    /// Puts the agent-posted visuals after the entries they were posted with, once each: none with
+    /// a connection that offers none (TRANSCRIPT-12.1, 12.3).
+    fn sync_visuals(&mut self, cx: &mut Context<Self>) {
+        let mut visuals = Vec::new();
+        let mut posted: HashMap<Key, Vec<usize>> = HashMap::new();
+        let store = self.store.read(cx);
+        for (segment, run) in self.runs.iter().enumerate() {
+            for visual in store.run_visuals(run) {
+                if let Some(host) = items::host_of(&self.rows, segment, visual.after.0) {
+                    posted.entry(host).or_default().push(visuals.len());
+                    visuals.push(visual);
+                }
+            }
+        }
+        let moved = self.items.set_posted(posted);
+        if moved || visuals != self.visuals {
+            self.visuals = visuals;
+            self.reproject(cx);
+        }
+    }
+
+    /// The renderers settled something (a diagram, an image, a wrap): a row they drew may be taller
+    /// or shorter now, so the rows in view that hold their output are measured again and none is
+    /// drawn over the one below.
+    fn remeasure_settled(&mut self, cx: &gpui::App) {
+        let seen = markdown_view::settled_generation(cx);
+        if seen == self.settled_seen {
+            return;
+        }
+        self.settled_seen = seen;
+        let top = self.list.logical_scroll_top().item_ix;
+        let end = (top + SETTLED_ITEMS).min(self.items.len());
+        for ix in top..end {
+            let holds_output = self.items.items[ix].visual.is_some()
+                || matches!(
+                    self.items.row(&self.rows, ix),
+                    Some(Row::Prose { .. })
+                );
+            if holds_output {
+                self.list.remeasure_items(ix..ix + 1);
+            }
+        }
+    }
+
     /// The runs the transcript shows, oldest first, ending with this screen's run.
     fn thread_runs(&self, cx: &gpui::App) -> Vec<RunId> {
         let all = self.store.read(cx).thread_run_ids(&self.run);
@@ -565,6 +635,7 @@ impl RunScreen {
         cx: &mut Context<Self>,
     ) {
         let ids = self.thread_runs(cx);
+        self.runs.clone_from(&ids);
         let (older, anchor) = ids.split_at(ids.len() - 1);
         let segment_at = ids.len() - 1;
         let state = self.store.read(cx).state();
@@ -987,6 +1058,9 @@ impl Render for RunScreen {
         }
         let variant = Self::variant(cx);
         self.sync_find_tab(variant);
+        self.remeasure_settled(cx);
+        // The texts file themselves again as the list paints them.
+        self.begin_paint();
         let rail = self.tick_rail(&theme, variant, cx);
         let transcript = div()
             .id("transcript")
@@ -997,7 +1071,14 @@ impl Render for RunScreen {
             .w_full()
             .max_w(px(COLUMN))
             .child(
-                div().size_full().pl(px(RAIL)).child(
+                div()
+                    .size_full()
+                    .pl(px(RAIL))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event, _, cx| this.select_down(event, cx)),
+                    )
+                    .child(
                     list(
                         self.list.clone(),
                         cx.processor(|this, ix, window, cx| this.render_row(ix, window, cx)),
@@ -1006,6 +1087,7 @@ impl Render for RunScreen {
                 ),
             )
             // After the list, so it is on top of it and takes the clicks.
+            .children(self.select_nodes(cx))
             .children(rail)
             .children(self.jump_control(&theme, variant, cx))
             .children(self.find_bar_over(&theme, variant, window, cx));
@@ -1085,6 +1167,8 @@ mod convo_tests;
 mod files_tests;
 #[cfg(test)]
 mod find_tests;
+#[cfg(test)]
+mod select_tests;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]

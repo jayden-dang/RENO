@@ -299,13 +299,6 @@ fn is_mermaid(language: &Option<String>) -> bool {
     language.as_deref().map(str::trim) == Some("mermaid")
 }
 
-/// The elements of a whole tree, stacked, for the transcript's host with no run behind it: web
-/// links through the link opener, no file links, worktree images "not loaded". A transcript that
-/// knows its run draws with [`blocks_with`] and [`Host::transcript`].
-pub(crate) fn blocks(tree: &BlockTree, theme: &Theme, _window: &Window) -> AnyElement {
-    blocks_with(tree, theme, Host::transcript(None, None, None))
-}
-
 /// The elements of a whole tree, stacked, for `host`.
 pub(crate) fn blocks_with(tree: &BlockTree, theme: &Theme, host: Host) -> AnyElement {
     Markdown {
@@ -1239,6 +1232,47 @@ mod tests {
         assert_eq!(first_paragraph(&stream), "A bold");
         stream.set_text("A **bold** move");
         assert_eq!(first_paragraph(&stream), "A bold move");
+    }
+
+    #[gpui::test]
+    fn every_hit_in_the_drawn_text_is_numbered_in_drawing_order_and_the_current_one_apart(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ui::theme::{Appearance, Theme};
+        let (_view, vcx) = cx.add_window_view(|_, _| gpui::Empty);
+        let theme = Theme::for_appearance(Appearance::Dark);
+        let host = Host::preview().marked(Some(Rc::new(Marks {
+            needle: "draw".to_owned(),
+            current: Some(1),
+            variant: Variant::A,
+        })));
+        vcx.update(|window, _| {
+            let env = Env {
+                theme: &theme,
+                host: &host,
+                window,
+                base: window.text_style(),
+                scale: 1.0,
+                variant: Variant::A,
+                math: None,
+                cards: std::cell::Cell::new(0),
+                atom_at: std::cell::Cell::new(0),
+                hit_at: std::cell::Cell::new(0),
+            };
+            // Two runs, as `inline` goes through them: one match in the first, two in the second.
+            let first = find_hits(&env, "draws it", 0);
+            let second = find_hits(&env, "a Draw and draw", 8);
+            assert_eq!(first, vec![(0..4, false)]);
+            assert_eq!(second, vec![(10..14, true), (19..23, false)], "the second hit is the current one");
+            // What is painted over the text: the hits, the current one with its own style.
+            let hits: Vec<_> = first.into_iter().chain(second).collect();
+            let layers = layers(&env, &[], 23, &hits);
+            assert_eq!(layers.len(), 3);
+            let hit = |cur| crate::ui::find::hit_style(&theme, Variant::A, cur);
+            assert_eq!(layers[0].1, hit(false));
+            assert_eq!(layers[1].1, hit(true));
+            assert_ne!(layers[0].1, layers[1].1);
+        });
     }
 
     #[test]

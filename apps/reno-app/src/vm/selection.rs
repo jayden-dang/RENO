@@ -160,17 +160,23 @@ pub(crate) struct Shown<'a> {
     pub(crate) tree: &'a dyn Fn(Key, &str) -> BlockTree,
 }
 
+/// How many bytes of a user message's source are shown: all of it, or what is left of it before
+/// the ellipsis a collapsed one ends with.
+pub(crate) fn kept_len(view: &convo::UserText) -> usize {
+    if view.toggle == Some("Show more") {
+        view.shown.trim_end_matches('\u{2026}').len()
+    } else {
+        view.shown.len()
+    }
+}
+
 /// The texts `row` shows, in reading order.
 pub(crate) fn texts_of(row: &Row, shown: &Shown<'_>) -> Vec<Text> {
     match row {
         Row::User { key, text, .. } => {
             let view = convo::user_text(text, (shown.open)(*key));
-            let kept = if view.toggle == Some("Show more") {
-                view.shown.trim_end_matches('\u{2026}').to_owned()
-            } else {
-                view.shown
-            };
-            vec![Text::plain(Slot::WHOLE, &kept)]
+            let kept = kept_len(&view);
+            vec![Text::plain(Slot::WHOLE, &view.shown[..kept])]
         }
         Row::Prose { key, text } => {
             let tree = (shown.tree)(*key, text);
@@ -256,6 +262,7 @@ pub(crate) fn reading<'a>(rows: &'a [Row], open: &dyn Fn(Key) -> bool) -> Vec<En
 }
 
 /// What a selection covers of one entry (TRANSCRIPT-2.13).
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Anchor {
     pub(crate) key: Key,
@@ -286,6 +293,7 @@ fn covered<'a>(
 }
 
 /// The key and source range of each text the selection covers, in reading order.
+#[allow(dead_code)] // The comments item anchors to these (TRANSCRIPT-2.13); the tests read them.
 pub(crate) fn anchors(sel: &Selection, entries: &[Entry<'_>], shown: &Shown<'_>) -> Vec<Anchor> {
     covered(sel, entries, shown)
         .map(|(e, t, range)| Anchor {

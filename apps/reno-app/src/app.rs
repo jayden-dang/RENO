@@ -580,6 +580,21 @@ pub(crate) fn open_window(
                                 }
                             }
                         }
+                        if matches!(hook, Draft33Hook::Select | Draft33Hook::CopyCode) {
+                            // The reply has to be drawn (and its diagram and picture landed)
+                            // before there is anything to select.
+                            cx.background_executor()
+                                .timer(Duration::from_millis(5000))
+                                .await;
+                            root.update_in(cx, |root, window, cx| {
+                                if let Some(screen) = root.run_screen().cloned() {
+                                    screen.update(cx, |screen, cx| {
+                                        screen.demo_copy(hook == Draft33Hook::Select, window, cx);
+                                    });
+                                }
+                            })
+                            .ok();
+                        }
                         if hook == Draft33Hook::Folds {
                             // A long thread's runs arrive one after another: open what is there,
                             // twice (an open fold stays open).
@@ -1434,7 +1449,7 @@ impl RootView {
                     self.open_run(run, window, cx);
                 }
             }
-            Draft33Hook::Render => {
+            Draft33Hook::Render | Draft33Hook::Select | Draft33Hook::CopyCode => {
                 if let Some(run) = open(reno_client::fake::transcript::RENDER_RUN) {
                     self.open_run(run, window, cx);
                 }
