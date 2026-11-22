@@ -124,7 +124,7 @@ Reuse: rung 2, in three places:
 - `ExecError::InvalidSpec`, which maps to `StartRefusal::Invalid` with no fallback (`dispatcher.rs:639`), gives 1.6.
 Respects: ARCH-15, ARCH-13
 Surface:
-- `RouteRequest` (`router.rs:59-76`) and all ten of its construction sites (`plan_route` at `kernel.rs:1586-1597`,
+- `RouteRequest` (`router.rs:59-76`) and every one of its construction sites (`plan_route` at `kernel.rs:1586-1597`,
   and the router and kernel tests, `router.rs:345` and others; the list is a `rg 'RouteRequest \{'` at build time):
   **replace**. It gains `unfit_config: Vec<(ExecutorId, String)>`, and every site sets it.
 - The excluded-only failure text (`dispatcher.rs:828-845`): **replace**. For a run with a bot, it reads
@@ -196,7 +196,8 @@ Details:
   config only at `session_start` (Pi `extensions/mcp/index.js:971`). `--no-approve` makes Pi ignore the working
   folder's `.pi/` resources (Pi `cli/args.js:232,335`;
   `docs/security.md:37-42`). The explicit `--session-dir` outranks a project `sessionDir` setting, which Pi reads before
-  trust (`docs/security.md:31`). `AGENTS.md` context files still load (`launch.rs:20-22`), as they do for `pi`.
+  trust (`docs/security.md:31`). `AGENTS.md` context files still load, as they do for `pi`: `--no-approve` sets `projectTrustOverride = false` (Pi
+  `cli/args.js:232-233`), and Pi's trust-protected list does not include context files (`docs/security.md:37-42`).
 - **Built-in MCP.** `--no-mcp` is not passed on `Reno`. With an agent dir that holds no `mcp.json`, Pi's built-in
   MCP loads no server, and Reno's bridge is the only source of MCP tools.
 - **Codemode.** Pi 1.5.0 registers the codemode tool inactive by default (Pi `extensions/codemode/index.js:28`,
@@ -415,7 +416,7 @@ Notes:
 
 ### Session directories
 
-Satisfies: RENOHARNESS-8.5, RENOHARNESS-11.4, RENOHARNESS-11.5, RENOHARNESS-11.6
+Satisfies: RENOHARNESS-8.5, RENOHARNESS-10.9, RENOHARNESS-10.10, RENOHARNESS-11.4, RENOHARNESS-11.5, RENOHARNESS-11.6
 Reuse: rung 2. It hooks the kernel's one run-end seam, `workspaces::run_ended` (`crates/reno-kernel/src/workspaces.rs:179`),
 which every end path calls: a supervised run's finish (`supervisor.rs:1006`), a cancel of a queued or interrupted run
 (`kernel.rs:641`), and a run that never got a supervisor (`dispatcher.rs:1059`). Its sibling `close_if_unattended`
@@ -454,7 +455,11 @@ Keep set:
   `resume.rs:163`), and `queued` runs with a session (one recovery re-queued for auto-resume). Everything else is
   removed, including a directory whose run is unknown.
 - Ordering. Recovery awaits `retain_runs` before it re-queues and before the dispatcher claims anything
-  (`recovery.rs:1-2`). So no run created after the sweep can lose its directory to it.
+  (`recovery.rs:1-2`). So no run created after the sweep can lose its directory to it. The step is one directory
+  listing and removal per `reno` session dir, inside the boot that `docs/BENCHMARKS.md:28` holds to 300 ms "after
+  recovery"; the bench's boot scenario covers it.
+- Guards. `run_ended` keeps its idle-clock task and `close_if_unattended` exactly as they are, with `run_closed`
+  added beside them (10.9). Recovery's existing steps keep their order (10.10).
 - A person's resume of a run whose directory is gone falls back to Pi's existing "did not find session" notice
   (`drivers/pi/mod.rs:785-803`).
 
@@ -476,7 +481,7 @@ Locality: leave. Text only.
 |---|---|---|
 | `PiExecutor` driven against the fake Pi (`crates/reno-harness/tests/pi.rs` + `tests/fixtures/fake-pi.py`; the fake plays the gate over `RENO_GATE_SOCKET`) | integration | RENOHARNESS-1.3, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 7.1 (files laid out under `.reno`), 11.4 (driver-level `run_closed` removal), 3.1, 3.2, 3.3, 3.4, 3.5, 3.8, 4.1, 4.4, 5.1, 5.2, 5.4, 5.5, 6.1, 6.6, 7.2, 7.3, 7.5, 8.1, 8.2, 8.4, 10.1, 10.2, 11.1, 11.2, 11.3, 11.5 |
 | `gate.mjs` under node, against a scripted socket (new, beside `pi-mcp-test.mjs`) | unit | RENOHARNESS-3.2, 3.3, 3.4, 3.5, 6.1, 6.2 |
-| Kernel with `MockExecutor` (`crates/reno-kernel/src/tests/{approvals,protect,routing,resume}.rs` and recovery) | integration | RENOHARNESS-1.4, 1.5, 1.6, 2.5, 3.6, 3.7, 4.2, 4.3, 5.3, 6.3, 6.4, 6.5, 7.1, 7.4, 8.3, 8.5, 10.3, 10.4, 10.5, 11.4, 11.6 |
+| Kernel with `MockExecutor` (`crates/reno-kernel/src/tests/{approvals,protect,routing,resume}.rs` and recovery) | integration | RENOHARNESS-10.9, 10.10, 1.4, 1.5, 1.6, 2.5, 3.6, 3.7, 4.2, 4.3, 5.3, 6.3, 6.4, 6.5, 7.1, 7.4, 8.3, 8.5, 10.3, 10.4, 10.5, 11.4, 11.6 |
 | Proto definitions (`crates/reno-proto/src/defs/tests.rs`) | unit | RENOHARNESS-1.7, 10.7, 10.8 |
 | `apps/renod/src/executors.rs` tests (`built_in_ids_are_valid` and discover) | unit | RENOHARNESS-1.1, 1.2, 10.6 |
 | Conformance `reno_target()` (`crates/reno-harness/tests/conformance/targets.rs`) with an approval plan | integration | RENOHARNESS-3.1, 3.3, 3.4 |
@@ -502,7 +507,7 @@ mapping by section:
 | Host | 2.7, 3.1, 5.1-5.3, 6.6, 7.2, 8.2, 11.1, 11.2 |
 | Subjects | 3.8, 4.1 |
 | Ladder | 3.6, 3.7, 4.2-4.4, 6.3, 7.1, 7.4, 8.1, 8.3, 10.3, 10.4 |
-| Sessions | 8.5, 11.4-11.6 |
+| Sessions | 8.5, 10.9, 10.10, 11.4-11.6 |
 | Docs | 9.1-9.3 |
 
 Unmapped on purpose:

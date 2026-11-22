@@ -165,7 +165,7 @@ _Requirements: RENOHARNESS-1.1, RENOHARNESS-1.2, RENOHARNESS-1.7, RENOHARNESS-10
 
 **Interfaces:**
 - Produces: the `RouteRequest` field `unfit_config: Vec<(ExecutorId, String)>`, set at every construction site
-  (`rg 'RouteRequest \{'`, ten sites); the exclusion text
+  (every `rg 'RouteRequest \{'` construction site); the exclusion text
   `"bot <name> sets inherit_user_config = true, which the Reno harness never loads"`.
 - Consumes: `RENO_EXECUTOR_ID` (Task 1).
 
@@ -610,6 +610,8 @@ already reads whether the run ended for good. The sweep follows recovery's per-r
   - Through `start` against the fake Pi, `run_closed` removes `<sessions_root>/<run>` only after the attempt's Pi has
     exited.
   - `retain_runs` removes unknown and closed dirs, and keeps the kept ones.
+  - Guards: a run's end still starts its thread's idle clock, and still closes a trigger-started run's thread once it
+    ended for good. Recovery's existing steps still run in order, to the end, before any claim.
   - A second attempt with `spec.resume` passes the same `--session-dir <sessions_root>/<run_id>` (asserted on the
     fake's logged argv), and finds its session there with no "did not find session" notice.
 - [ ] Run `cargo test -p reno-kernel workspaces && cargo test -p reno-kernel recovery && cargo test -p reno-harness --test pi reno_session`,
@@ -619,7 +621,7 @@ already reads whether the run ended for good. The sweep follows recovery's per-r
 - [ ] Run, then `cargo check --workspace --all-targets`, and expect a pass, with every other `Executor` impl unedited.
 - [ ] `git commit -m "feat(kernel): remove a Reno-harness run's Pi session once it can never resume"`
 
-_Requirements: RENOHARNESS-8.5, RENOHARNESS-11.4, RENOHARNESS-11.6_
+_Requirements: RENOHARNESS-8.5, RENOHARNESS-10.9, RENOHARNESS-10.10, RENOHARNESS-11.4, RENOHARNESS-11.6_
 
 ---
 

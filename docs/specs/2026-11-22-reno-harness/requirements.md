@@ -124,21 +124,24 @@ Files the change touches, and what each guards:
 | `crates/reno-harness/src/drivers/pi/mod.rs` | RENOHARNESS-10.1 |
 | `crates/reno-harness/src/drivers/pi/rpc.rs` | RENOHARNESS-10.2 |
 | `crates/reno-harness/src/wire/pi/launch.rs` | RENOHARNESS-10.1 |
-| `crates/reno-harness/src/wire/pi/normalize.rs` | RENOHARNESS-4.4 |
-| `crates/reno-harness/src/child_env.rs` | RENOHARNESS-10.1 |
-| `crates/reno-harness/src/drivers/pi/` new gate extension and its socket | no behavior to guard (new) |
-| `crates/reno-kernel/src/supervisor/approval.rs` | RENOHARNESS-10.3, RENOHARNESS-4.3, RENOHARNESS-6.3 |
-| `crates/reno-kernel/src/supervisor/protect.rs` (docs: Pi "asks nothing" is true only of `pi`) | RENOHARNESS-10.4 |
+| `crates/reno-harness/src/wire/pi/frames.rs` (new builder and parser only) | RENOHARNESS-10.1 |
+| `crates/reno-harness/src/wire/pi/normalize.rs` (read, not changed) | RENOHARNESS-4.4 |
+| `crates/reno-harness/src/child_env.rs` (a new list; `PI` unchanged) | RENOHARNESS-10.1 |
+| `crates/reno-harness/src/exec/mod.rs` (two default no-op trait methods) | RENOHARNESS-10.6 |
+| `crates/reno-harness/src/drivers/pi/` new gate extension, gate host and subject mapping | no behavior to guard (new) |
+| `crates/reno-kernel/src/supervisor/approval.rs` (read, not changed) | RENOHARNESS-10.3, RENOHARNESS-4.3, RENOHARNESS-6.3 |
+| `crates/reno-kernel/src/supervisor/protect.rs` (docs only: Pi "asks nothing" is true only of `pi`) | RENOHARNESS-10.4 |
 | `crates/reno-kernel/src/supervisor.rs` (read, not changed) | RENOHARNESS-4.4, RENOHARNESS-2.6 |
 | `crates/reno-kernel/src/budget.rs` (read, not changed) | RENOHARNESS-8.3 |
-| `crates/reno-proto/src/defs/mod.rs` (`BUILTIN_EXECUTORS`) | RENOHARNESS-10.8 |
-| `crates/reno-proto/src/defs/eval.rs`, `protect.rs` (read; changed only if design puts RENOHARNESS-7.1 there) | RENOHARNESS-7.4 |
-| `apps/renod/src/daemon.rs` (its `discover` call site gains the data directory) | RENOHARNESS-10.6, RENOHARNESS-6.5 |
-| `crates/reno-kernel/src/dispatcher.rs` and `router.rs` | RENOHARNESS-10.5 |
-| `apps/renod/src/executors.rs` (`discover` gains the data directory) | RENOHARNESS-10.6 |
-| `crates/reno-proto/src/defs/bot.rs` (docs only) | RENOHARNESS-10.7 |
+| `crates/reno-kernel/src/router.rs`, `kernel.rs` (`plan_route`), `dispatcher.rs` | RENOHARNESS-10.5 |
+| `crates/reno-kernel/src/workspaces.rs` (`run_ended`) | RENOHARNESS-10.9 |
+| `crates/reno-kernel/src/recovery.rs` (one awaited step) | RENOHARNESS-10.10, RENOHARNESS-6.5 |
 | `crates/reno-kernel/src/dispatcher.rs` secret resolution, `crates/reno-proto/src/secrets.rs` (read, not changed) | RENOHARNESS-2.5 |
-| `README.md` | no behavior to guard (text) |
+| `crates/reno-proto/src/defs/mod.rs` (`BUILTIN_EXECUTORS`) | RENOHARNESS-10.8 |
+| `crates/reno-proto/src/defs/eval.rs`, `protect.rs` (read, not changed) | RENOHARNESS-7.4 |
+| `crates/reno-proto/src/defs/bot.rs` (docs only) | RENOHARNESS-10.7 |
+| `apps/renod/src/executors.rs`, `apps/renod/src/daemon.rs` (`discover` gains the data directory) | RENOHARNESS-10.6, RENOHARNESS-6.5 |
+| `README.md`, `apps/renod/README.md`, `docs/KEEPING-UP.md` | no behavior to guard (text) |
 | `crates/reno-proto/src/protocol.rs`, `crates/reno-store/src/migrations.rs` | not touched: no wire method, no migration |
 
 - **RENOHARNESS-10.1** (guard) WHEN a bot or the owner runs on `pi` THE SYSTEM SHALL CONTINUE TO run the owner's Pi at full access and unrestricted only, with the flags, environment allowlist, login and owner config handling it uses today, and no gate.
@@ -149,6 +152,8 @@ Files the change touches, and what each guards:
 - **RENOHARNESS-10.6** (guard) WHEN the daemon starts THE SYSTEM SHALL CONTINUE TO register every executor it registers today, `pi` included (every harness executor unless harnesses are switched off), and the kernel SHALL CONTINUE TO probe each once in the background.
 - **RENOHARNESS-10.7** (guard) WHEN a bot definition that does not list `reno` is loaded THE SYSTEM SHALL CONTINUE TO parse and validate it exactly as today, with no new field accepted or required.
 - **RENOHARNESS-10.8** (guard) WHEN a bot definition lists a built-in executor id other than `reno` THE SYSTEM SHALL CONTINUE TO accept it in offline validation as today.
+- **RENOHARNESS-10.9** (guard) WHEN a run ends THE SYSTEM SHALL CONTINUE TO start its thread's idle clock, and to close the thread of a run a trigger started once that run has ended for good, as `workspaces::run_ended` does today.
+- **RENOHARNESS-10.10** (guard) WHEN the daemon starts THE SYSTEM SHALL CONTINUE TO run recovery's steps in their order (sweep, state, approvals, journals, resume) to the end before the dispatcher claims anything.
 
 ## 11. Quality attributes
 
