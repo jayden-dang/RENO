@@ -21,7 +21,7 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 
 ## Focus
 
-**Now:** ROAD-33, ROAD-56, ROAD-61, ROAD-65
+**Now:** ROAD-33, ROAD-56
 **Next:** ROAD-55, ROAD-53, MILE-1, MILE-11
 
 | ID | Milestone | Depends-on | Commitment |
@@ -213,8 +213,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** The owner gives a bot Reno's own harness: it runs on the owner's API key, every tool call it makes is checked by that bot's policy before it runs and a denied call never runs, the owner sees each call with its usage, and a run goes on until the harness says it is done.
 **Goals:** GOAL-1, GOAL-10, GOAL-11
 **Members:**
-- **ROAD-61** reno-harness-spike — After: none — Surfaces: None — a throwaway spike picks Pi or dsh — Notes: [ROAD-61](roads/ROAD-61.notes.md)
-- **ROAD-62** reno-harness-driver-and-gate — After: ROAD-61 — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/bot.rs`, `README.md`
+- ~~**ROAD-61**~~ reno-harness-spike — delivered 2026-11-22: ADR-0002 picks Pi — Notes: [ROAD-61](roads/ROAD-61.notes.md)
+- **ROAD-62** reno-harness-driver-and-gate — After: none — Surfaces: `crates/reno-harness/src/drivers/`, `crates/reno-kernel/src/supervisor/approval.rs`, `crates/reno-proto/src/defs/bot.rs`, `README.md`
 - **ROAD-63** per-bot-tool-and-domain-policy — After: ROAD-62 — Surfaces: `crates/reno-proto/src/defs/`, `crates/reno-kernel/`
 - **ROAD-64** runs-uncapped-by-default — After: none — Surfaces: `crates/reno-proto/src/defs/bot.rs`, `crates/reno-kernel/src/budget.rs`, `docs/ROADMAP.md`
 **Depends-on:** MILE-10
@@ -228,8 +228,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 **Outcome:** A bot on Reno's harness works in a computer of its own on the owner's Mac: a browser first, only its project mounted, only the domains its definition allows reachable, and the owner watches it live and can take over.
 **Goals:** GOAL-10
 **Members:**
-- **ROAD-65** bot-computer-spike — After: none — Surfaces: None — a throwaway spike on a Linux VM per bot — Notes: [ROAD-65](roads/ROAD-65.notes.md)
-- **ROAD-66** bot-computer-vm — After: ROAD-65 — Surfaces: `apps/renod/`, `crates/reno-kernel/`
+- ~~**ROAD-65**~~ bot-computer-spike — delivered 2026-11-22: feasible on Apple `container`; findings in its notes — Notes: [ROAD-65](roads/ROAD-65.notes.md)
+- **ROAD-66** bot-computer-vm — After: none — Surfaces: `apps/renod/`, `crates/reno-kernel/`
 - **ROAD-67** egress-allowlist-proxy — After: ROAD-66 — Surfaces: `apps/renod/`, `crates/reno-proto/src/defs/bot.rs`
 - **ROAD-68** browser-tools-and-live-view — After: ROAD-66, ROAD-62 — Surfaces: `crates/reno-harness/`, `apps/reno-app/`
 - **ROAD-69** computer-setup-scripts — After: ROAD-66 — Surfaces: `apps/renod/`
