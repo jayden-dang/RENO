@@ -2299,3 +2299,55 @@ async fn a_real_pi_plays_a_run_against_its_mock_provider() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The Reno harness's Pi is its own process group, reported at spawn and ended with the run
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reno_group_pi_leads_its_own_group_and_is_reported_at_spawn() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), gate_spec(&bench, "ok")).await;
+    let record = live.records.recv().await.expect("a process record");
+    assert!(record.pid > 1);
+    assert_eq!(record.pgid, record.pid, "its own process group");
+    let pid = record.pid as i32;
+    assert_eq!(unsafe { libc::getpgid(pid) }, pid, "the live group leader");
+    assert_ne!(
+        unsafe { libc::getpgid(0) },
+        pid,
+        "not the daemon's own group"
+    );
+    drive(&mut live).await;
+    assert!(until_gone(pid).await, "pi was left running");
+}
+
+#[tokio::test]
+async fn reno_group_dropping_the_run_ends_the_whole_group() {
+    let bench = Bench::new();
+    let mut spec = gate_spec(&bench, "ok");
+    spec.prompt = "scenario:interrupt".to_owned();
+    let mut live = start(&reno_executor(&bench), spec).await;
+    let record = live.records.recv().await.expect("a process record");
+    let pid = record.pid as i32;
+    while let Some(event) = live.stream.next().await {
+        if matches!(event, ExecEvent::Started { .. }) {
+            break;
+        }
+    }
+    assert!(alive(pid), "pi runs until the run is dropped");
+    let Live {
+        stream,
+        handle,
+        records,
+    } = live;
+    drop(stream);
+    drop(handle);
+    drop(records);
+    assert!(until_gone(pid).await, "pi outlived its dropped run");
+    assert_eq!(
+        unsafe { libc::killpg(pid, 0) },
+        -1,
+        "something in pi's group is still alive"
+    );
+}
