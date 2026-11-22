@@ -110,7 +110,6 @@ static RENO_ID: LazyLock<ExecutorId> = LazyLock::new(|| match RENO_EXECUTOR_ID.p
 
 /// Who governs the tool calls of a run: Pi's own behavior for the owner (`pi`), or Reno (`reno`).
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "read once a Reno run is armed")]
 enum Flavor {
     Owner,
     Reno { sessions_root: PathBuf },
@@ -594,7 +593,7 @@ impl Executor for PiExecutor {
             ..
         } = controls;
 
-        let launched = launch_pi(&self.tracker, &exe, &spec, &processes).await;
+        let launched = launch_pi(&self.tracker, &exe, &spec, &processes, &self.flavor).await;
         let pi = match launched {
             Ok(pi) => pi,
             // Any failure to launch is a failed run, not an ineligible executor.
@@ -654,6 +653,8 @@ struct Pi {
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// The run's scratch directory: the bridge, its config and the instructions. Removed with it.
     _scratch: Option<ScratchDir>,
+    /// What a Reno attempt keeps beside them: the gate, its socket path and key.
+    _gate: Option<GateFiles>,
     /// When the process was seen to have exited; frames it left behind are still read until then.
     exit_deadline: Option<Instant>,
 }
@@ -703,39 +704,156 @@ impl Pi {
     }
 }
 
+/// The gate extension: loaded after every other extension of a Reno attempt.
+const GATE: &str = include_str!("gate.mjs");
+
+/// The longest path a Unix socket address holds on macOS (`sun_path`), the NUL included.
+const SUN_PATH_MAX: usize = 104;
+
+fn fits_sun_path(path: &Path) -> bool {
+    path.as_os_str().len() < SUN_PATH_MAX
+}
+
+/// What one attempt of a Reno run owns on disk besides its scratch directory. Every attempt gets
+/// its own, so no file an earlier one could reach is reused.
+struct GateFiles {
+    /// `<scratch>/.reno`: every file the attempt writes is under it.
+    dir: PathBuf,
+    gate: PathBuf,
+    /// Pi's agent directory for this attempt; it holds no `mcp.json` and no credentials.
+    agent: PathBuf,
+    socket: PathBuf,
+    nonce: String,
+    /// Owns the short directory holding the socket when `<scratch>` is too long for one.
+    _socket_dir: Option<ScratchDir>,
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700);
+        builder.create(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    builder.create(path)
+}
+
+/// A fresh scratch directory under `temp` with the `.reno` layout of one attempt. The socket sits
+/// in it, unless that path would not fit a socket address: then it goes to a short owner-only
+/// directory under `/tmp`, and fails the attempt when even that does not fit.
+fn lay_out(temp: &Path) -> std::io::Result<(ScratchDir, GateFiles)> {
+    let scratch = ScratchDir::new_in(temp, "pi")?;
+    let dir = scratch.path().join(".reno");
+    let agent = dir.join("agent");
+    create_private_dir(&agent)?;
+    let mut socket = dir.join("gate.sock");
+    let mut socket_dir = None;
+    if !fits_sun_path(&socket) {
+        let short = ScratchDir::at(
+            PathBuf::from("/tmp").join(format!("reno-gate-{}", uuid::Uuid::new_v4())),
+        )?;
+        let reno = short.path().join(".reno");
+        create_private_dir(&reno)?;
+        socket = reno.join("gate.sock");
+        if !fits_sun_path(&socket) {
+            return Err(std::io::Error::other(format!(
+                "the gate socket path {} is too long for a socket address",
+                socket.display()
+            )));
+        }
+        socket_dir = Some(short);
+    }
+    let gate = mcp::write_private(&dir, "gate.mjs", GATE.as_bytes())?;
+    Ok((
+        scratch,
+        GateFiles {
+            dir,
+            gate,
+            agent,
+            socket,
+            nonce: uuid::Uuid::new_v4().to_string(),
+            _socket_dir: socket_dir,
+        },
+    ))
+}
+
+/// The run's session directory under `root`, owner-only, created when it is missing. The same
+/// for every attempt of the run.
+fn open_session_dir(root: &Path, run: &str) -> std::io::Result<PathBuf> {
+    let mut parts = Path::new(run).components();
+    let one_name = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !one_name {
+        return Err(std::io::Error::other(format!(
+            "{run:?} cannot name a session directory"
+        )));
+    }
+    let dir = root.join(run);
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
 async fn launch_pi(
     tracker: &TaskTracker,
     exe: &Path,
     spec: &ExecSpec,
     processes: &ProcessSink,
+    flavor: &Flavor,
 ) -> Result<Pi, std::io::Error> {
-    let scratch = ScratchDir::new("pi")?;
+    let reno = matches!(flavor, Flavor::Reno { .. });
+    let (scratch, gate, session) = match flavor {
+        Flavor::Owner => (ScratchDir::new("pi")?, None, None),
+        Flavor::Reno { sessions_root } => {
+            let session = open_session_dir(sessions_root, spec.run_id.as_ref())?;
+            let (scratch, gate) = lay_out(&std::env::temp_dir())?;
+            (scratch, Some(gate), Some(session))
+        }
+    };
+    let files = gate
+        .as_ref()
+        .map_or(scratch.path(), |gate| gate.dir.as_path());
     let instructions = match spec
         .instructions
         .as_deref()
         .filter(|i| !i.trim().is_empty())
     {
         Some(text) => Some(mcp::write_private(
-            scratch.path(),
+            files,
             "instructions.md",
             text.as_bytes(),
         )?),
         None => None,
     };
-    let bridge = mcp::install(scratch.path(), &spec.mcp)?;
+    let bridge = mcp::install(files, &spec.mcp)?;
     let mut cmd = Command::new(exe);
     crate::child_env::restrict(&mut cmd, crate::child_env::PI);
     cmd.args(launch::args(Launch {
         resume: spec.resume.as_ref().map(|s| s.0.as_str()),
-        isolate: !spec.inherit_user_config,
+        isolate: reno || !spec.inherit_user_config,
         instructions: instructions.as_deref(),
         bridge: bridge.as_ref().map(|b| b.extension.as_path()),
+        session_dir: session.as_deref(),
+        builtins: reno,
+        no_approve: reno,
+        gate: gate.as_ref().map(|gate| gate.gate.as_path()),
     }));
     crate::compose_child_path(&mut cmd, exe);
     // The allowlisted environment of the run (the bot's secrets, Reno's `RENO_*` run variables).
     crate::apply_run_env(&mut cmd, &spec.env);
     if let Some(bridge) = &bridge {
         cmd.env(mcp::CONFIG_ENV, &bridge.config);
+    }
+    // Last, so a secret of the same name cannot override them.
+    if let Some(gate) = &gate {
+        cmd.env("PI_CODING_AGENT_DIR", &gate.agent)
+            .env("RENO_GATE_SOCKET", &gate.socket)
+            .env("RENO_GATE_NONCE", &gate.nonce);
     }
     if !spec.cwd.as_os_str().is_empty() {
         cmd.current_dir(&spec.cwd);
@@ -779,6 +897,7 @@ async fn launch_pi(
         stderr_tail,
         stderr_task,
         _scratch: Some(scratch),
+        _gate: gate,
         exit_deadline: None,
     })
 }
@@ -1412,5 +1531,360 @@ mod tests {
         assert!(caps.resume && caps.mcp_injection && caps.deterministic_turn_end);
         assert!(!caps.structured_output && !caps.plan_mode && !caps.model_switch);
         assert!(caps.live_effort.is_none() && caps.live_model_options.is_none());
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod reno_attempt {
+        use std::os::unix::fs::PermissionsExt;
+
+        use reno_proto::{McpServerSpec, RunId};
+
+        use super::super::*;
+
+        fn fake() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("fake-pi.py")
+        }
+
+        struct Bench {
+            dir: tempfile::TempDir,
+        }
+
+        impl Bench {
+            fn new() -> Self {
+                Self {
+                    dir: tempfile::tempdir().unwrap(),
+                }
+            }
+
+            fn log(&self) -> PathBuf {
+                self.dir.path().join("fake-pi.log")
+            }
+
+            fn flavor(&self) -> Flavor {
+                Flavor::Reno {
+                    sessions_root: self.dir.path().join("data/.reno/pi-sessions"),
+                }
+            }
+
+            fn spec(&self, suffix: &str) -> ExecSpec {
+                ExecSpec {
+                    run_id: RunId::from_suffix(suffix).unwrap(),
+                    prompt: "hello".into(),
+                    cwd: self.dir.path().to_path_buf(),
+                    model: None,
+                    instructions: Some("Be brief.".into()),
+                    effort: None,
+                    model_options: Default::default(),
+                    access: AccessMode::Supervised,
+                    sandbox: SandboxLevel::Unrestricted,
+                    resume: None,
+                    mcp: vec![McpServerSpec {
+                        name: "reno".into(),
+                        command: "/opt/reno/mcp".into(),
+                        args: vec![],
+                        env: Default::default(),
+                    }],
+                    env: [("FAKE_PI_LOG".to_owned(), self.log().display().to_string())].into(),
+                    output_schema: None,
+                    inherit_user_config: false,
+                }
+            }
+
+            async fn launch(&self, spec: &ExecSpec, flavor: &Flavor) -> Pi {
+                let (controls, _handle) = ExecControls::new(4);
+                launch_pi(
+                    &TaskTracker::new(),
+                    &fake(),
+                    spec,
+                    &controls.processes,
+                    flavor,
+                )
+                .await
+                .unwrap()
+            }
+
+            /// Let the fake exit, so everything it logged as it started is written.
+            async fn finish(&self, mut pi: Pi) {
+                pi.transport.close_input();
+                pi.child.wait().await.unwrap();
+            }
+
+            /// What each fake logged as it started, oldest first.
+            fn starts(&self) -> Vec<serde_json::Value> {
+                std::fs::read_to_string(self.log())
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.contains("\"argv\""))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            }
+
+            /// What the only fake started in this bench logged, once it has exited.
+            async fn started(&self, pi: Pi) -> serde_json::Value {
+                self.finish(pi).await;
+                let mut starts = self.starts();
+                assert_eq!(starts.len(), 1);
+                starts.remove(0)
+            }
+        }
+
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        fn files_under(dir: &Path) -> Vec<PathBuf> {
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    found.extend(files_under(&path));
+                }
+                found.push(path);
+            }
+            found
+        }
+
+        fn argv_value(argv: &[String], flag: &str) -> String {
+            let at = argv.iter().position(|a| a == flag).unwrap();
+            argv[at + 1].clone()
+        }
+
+        #[tokio::test]
+        async fn a_reno_attempt_writes_every_file_under_a_reno_component() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            let reno = scratch.join(".reno");
+            for name in [
+                "gate.mjs",
+                "reno-mcp.mjs",
+                "mcp-servers.json",
+                "instructions.md",
+            ] {
+                assert!(reno.join(name).is_file(), "{name}");
+            }
+            assert!(reno.join("agent").is_dir());
+            for file in files_under(&scratch) {
+                assert!(
+                    file.strip_prefix(&scratch).unwrap().starts_with(".reno"),
+                    "{}",
+                    file.display()
+                );
+            }
+            assert_eq!(mode(&reno), 0o700);
+            assert_eq!(mode(&reno.join("agent")), 0o700);
+            assert_eq!(mode(&reno.join("gate.mjs")), 0o600);
+            bench.started(pi).await;
+        }
+
+        #[tokio::test]
+        async fn the_child_is_told_where_everything_is() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let reno = pi._scratch.as_ref().unwrap().path().join(".reno");
+            let gate = pi._gate.as_ref().unwrap();
+            assert_eq!(gate.socket.file_name().unwrap(), "gate.sock");
+            assert_eq!(gate.socket.parent().unwrap().file_name().unwrap(), ".reno");
+            let socket = gate.socket.display().to_string();
+            let nonce = gate.nonce.clone();
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            assert_eq!(
+                argv.last().unwrap(),
+                &reno.join("gate.mjs").display().to_string()
+            );
+            assert_eq!(
+                argv_value(&argv, "--session-dir"),
+                bench
+                    .dir
+                    .path()
+                    .join("data/.reno/pi-sessions/run_01HZX9")
+                    .display()
+                    .to_string()
+            );
+            assert!(argv.contains(&"--no-approve".to_owned()));
+            assert!(!argv.contains(&"--no-mcp".to_owned()));
+            assert_eq!(started["gate_socket"], socket);
+            assert_eq!(started["gate_nonce_len"], nonce.len());
+            assert_eq!(
+                started["agent_dir"],
+                reno.join("agent").display().to_string()
+            );
+            for extension in started["extensions"].as_object().unwrap().values() {
+                assert_eq!(extension, true);
+            }
+        }
+
+        #[tokio::test]
+        async fn the_session_dir_is_the_runs_own_and_private() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let session = bench.dir.path().join("data/.reno/pi-sessions/run_01HZX9");
+            assert!(session.is_dir());
+            assert_eq!(mode(&session), 0o700);
+            assert!(
+                !pi._scratch
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .join("sessions")
+                    .exists()
+            );
+            bench.started(pi).await;
+        }
+
+        #[tokio::test]
+        async fn a_session_dir_that_exists_is_made_private() {
+            let bench = Bench::new();
+            let session = bench.dir.path().join("data/.reno/pi-sessions/run_01HZX9");
+            std::fs::create_dir_all(&session).unwrap();
+            std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            assert_eq!(mode(&session), 0o700);
+            bench.started(pi).await;
+        }
+
+        #[test]
+        fn a_run_id_that_is_not_one_path_component_gets_no_session_dir() {
+            assert!(open_session_dir(Path::new("/data/s"), "../x").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), "a/b").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), "").is_err());
+            assert!(open_session_dir(Path::new("/data/s"), ".").is_err());
+        }
+
+        #[tokio::test]
+        async fn a_second_attempt_of_the_same_run_starts_afresh_but_keeps_the_session() {
+            let bench = Bench::new();
+            let spec = bench.spec("01HZX9");
+            let first = bench.launch(&spec, &bench.flavor()).await;
+            let second = bench.launch(&spec, &bench.flavor()).await;
+            let (a, b) = (
+                first._gate.as_ref().unwrap(),
+                second._gate.as_ref().unwrap(),
+            );
+            assert_ne!(
+                first._scratch.as_ref().unwrap().path(),
+                second._scratch.as_ref().unwrap().path()
+            );
+            assert_ne!(a.gate, b.gate);
+            assert_ne!(a.agent, b.agent);
+            assert_ne!(a.socket, b.socket);
+            assert_ne!(a.nonce, b.nonce);
+            bench.finish(first).await;
+            bench.finish(second).await;
+            let starts = bench.starts();
+            assert_eq!(starts.len(), 2);
+            let argvs: Vec<Vec<String>> = starts
+                .iter()
+                .map(|started| serde_json::from_value(started["argv"].clone()).unwrap())
+                .collect();
+            assert_eq!(
+                argv_value(&argvs[0], "--session-dir"),
+                argv_value(&argvs[1], "--session-dir")
+            );
+            assert_ne!(argvs[0].last(), argvs[1].last());
+            assert_ne!(starts[0]["gate_socket"], starts[1]["gate_socket"]);
+            assert_ne!(starts[0]["agent_dir"], starts[1]["agent_dir"]);
+        }
+
+        #[test]
+        fn a_long_temp_dir_moves_only_the_socket_to_a_short_private_path() {
+            let base = tempfile::tempdir().unwrap();
+            let mut long = base.path().to_path_buf();
+            while long.as_os_str().len() < 90 {
+                long.push("d".repeat(20));
+            }
+            std::fs::create_dir_all(&long).unwrap();
+            let (scratch, gate) = lay_out(&long).unwrap();
+            assert!(scratch.path().starts_with(&long));
+            assert!(gate.dir.starts_with(scratch.path()));
+            assert!(gate.gate.starts_with(&gate.dir));
+            let socket = gate.socket.to_str().unwrap();
+            assert!(socket.starts_with("/tmp/reno-gate-"), "{socket}");
+            assert!(socket.ends_with("/.reno/gate.sock"), "{socket}");
+            assert!(gate.socket.as_os_str().len() < SUN_PATH_MAX);
+            let socket_dir = gate.socket.parent().unwrap().to_path_buf();
+            assert_eq!(mode(&socket_dir), 0o700);
+            assert_eq!(mode(socket_dir.parent().unwrap()), 0o700);
+            drop(gate);
+            assert!(!socket_dir.exists());
+            drop(scratch);
+        }
+
+        #[test]
+        fn a_short_temp_dir_keeps_the_socket_beside_the_gate() {
+            let base = tempfile::Builder::new()
+                .prefix("r")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let (scratch, gate) = lay_out(base.path()).unwrap();
+            assert_eq!(gate.socket, scratch.path().join(".reno/gate.sock"));
+            assert!(gate._socket_dir.is_none());
+        }
+
+        #[test]
+        fn a_socket_path_of_104_bytes_does_not_fit() {
+            let path_of = |len: usize| PathBuf::from("/".to_owned() + &"s".repeat(len - 1));
+            assert!(fits_sun_path(&path_of(103)));
+            assert!(!fits_sun_path(&path_of(104)));
+        }
+
+        #[tokio::test]
+        async fn the_attempts_files_go_when_it_ends_normally() {
+            let bench = Bench::new();
+            let mut pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            assert!(scratch.exists());
+            pi.transport.close_input();
+            pi.child.wait().await.unwrap();
+            drop(pi);
+            assert!(!scratch.exists());
+        }
+
+        #[tokio::test]
+        async fn the_attempts_files_go_when_pi_is_killed() {
+            let bench = Bench::new();
+            let mut pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            crate::shutdown_child(&mut pi.child, Duration::from_millis(300)).await;
+            drop(pi);
+            assert!(!scratch.exists());
+        }
+
+        #[tokio::test]
+        async fn the_session_dir_outlives_the_attempt() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            bench.started(pi).await;
+            assert!(
+                bench
+                    .dir
+                    .path()
+                    .join("data/.reno/pi-sessions/run_01HZX9")
+                    .is_dir()
+            );
+        }
+
+        #[tokio::test]
+        async fn the_owners_attempt_gets_no_reno_layout_and_no_gate_environment() {
+            let bench = Bench::new();
+            let pi = bench.launch(&bench.spec("01HZX9"), &Flavor::Owner).await;
+            assert!(pi._gate.is_none());
+            let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
+            assert!(!scratch.join(".reno").exists());
+            assert!(scratch.join("instructions.md").is_file());
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            for absent in ["--session-dir", "--no-approve", "--tools", "builtin:mcp"] {
+                assert!(!argv.contains(&absent.to_owned()), "{absent}");
+            }
+            assert!(argv.contains(&"--no-mcp".to_owned()));
+            assert!(started["gate_socket"].is_null());
+            assert!(started["gate_nonce_len"].is_null());
+        }
     }
 }

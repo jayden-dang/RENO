@@ -42,7 +42,13 @@ def flag(name):
 
 log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
      "offline": os.environ.get("PI_OFFLINE"), "telemetry": os.environ.get("PI_TELEMETRY"),
-     "mcp_env": os.environ.get("RENO_PI_MCP"), "leak": os.environ.get("FAKE_PI_LEAK")})
+     "mcp_env": os.environ.get("RENO_PI_MCP"), "leak": os.environ.get("FAKE_PI_LEAK"),
+     "gate_socket": os.environ.get("RENO_GATE_SOCKET"),
+     "gate_nonce_len": len(os.environ["RENO_GATE_NONCE"]) if "RENO_GATE_NONCE" in os.environ else None,
+     "agent_dir": os.environ.get("PI_CODING_AGENT_DIR"),
+     "session_dir": flag("--session-dir"),
+     "extensions": {path: os.path.exists(path) for flag_name, path in zip(args, args[1:])
+                    if flag_name == "--extension"}})
 
 session = flag("--session-id") or str(uuid.uuid4())
 session_file = os.path.join(SESSIONS, session + ".jsonl")
