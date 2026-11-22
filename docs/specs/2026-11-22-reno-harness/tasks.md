@@ -540,8 +540,8 @@ _Requirements: RENOHARNESS-2.7, RENOHARNESS-6.6, RENOHARNESS-7.2, RENOHARNESS-10
 
 **Reuse:** rung 2:
 - the ladder (`approval.rs:276-383`) answers gated calls as it answers every executor: committed before the harness
-  is told, then journaled (`approval.rs:62-66`), with expiry as a deny (`:37-38`);
-- the built-in protection (`protect.rs:52,65-78,131-146`) denies edits and recognised writes to any path with a
+  is told, then journaled (`approval.rs:70-72`), with expiry as a deny (`:41-42`, `expire_due` at `:703`);
+- the built-in protection (`protect.rs:53,65-78,131-146`) denies edits and recognised writes to any path with a
   `.reno` component. The launch puts every run-owned file under one, which is 7.1;
 - redaction (`supervisor.rs:395-415`, `redact/values.rs:164-201`) scrubs `subject.raw` with the rest of the event;
 - Pi's `Tool`, `ToolResult` and `Usage` normalisation (`normalize.rs:144-145,244`) records the calls that run (4.4);

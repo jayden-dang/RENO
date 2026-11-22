@@ -47,7 +47,7 @@ ARCH-18.
    `Done{stop: Error}` (today's launch-failure path, `drivers/pi/mod.rs:517-529`), which the dispatcher never falls
    back from [Weigh S1].
 4. Run-owned files live under a `.reno` path component, so the existing built-in protection
-   (`crates/reno-proto/src/defs/protect.rs:52,131-146`) denies edits and recognised writes to them before any allow,
+   (`crates/reno-proto/src/defs/protect.rs:53,131-146`) denies edits and recognised writes to them before any allow,
    in every mode. No proto change is needed [Weigh S3].
 5. Pi's session lives in `<data_dir>/harness/.reno/pi-sessions/<run_id>/` (0700), passed with `--session-dir`. It
    is removed when the run is `succeeded` or `cancelled`, and swept at start [Weigh W6-W8].
@@ -387,8 +387,8 @@ Satisfies: RENOHARNESS-3.6, RENOHARNESS-3.7, RENOHARNESS-4.2, RENOHARNESS-4.3, R
 RENOHARNESS-7.1, RENOHARNESS-7.4, RENOHARNESS-8.1, RENOHARNESS-8.3, RENOHARNESS-10.3, RENOHARNESS-10.4
 Reuse: rung 2:
 - the ladder (`approval.rs:276-383`) answers gated calls as it answers every executor: committed before the harness
-  is told, then journaled (`approval.rs:62-66`), with expiry as a deny (`:37-38`);
-- the built-in protection (`protect.rs:52,65-78,131-146`) denies edits and recognised writes to any path with a
+  is told, then journaled (`approval.rs:70-72`), with expiry as a deny (`:41-42`, `expire_due` at `:703`);
+- the built-in protection (`protect.rs:53,65-78,131-146`) denies edits and recognised writes to any path with a
   `.reno` component. The launch puts every run-owned file under one, which is 7.1;
 - redaction (`supervisor.rs:395-415`, `redact/values.rs:164-201`) scrubs `subject.raw` with the rest of the event;
 - Pi's `Tool`, `ToolResult` and `Usage` normalisation (`normalize.rs:144-145,244`) records the calls that run (4.4);
