@@ -76,9 +76,12 @@ That rules out three alternatives:
 6. **Reading place.** Saved per thread in `panel-state.json` as an additive `#[serde(default)] place` field on the
    thread's `Descriptors`:
    - `VERSION` stays 1;
-   - it inherits the 100-key bound and the run-to-thread carry-over;
-   - it is written through the existing coalesced `Saver` on scroll settle, and flushed on quit;
-   - the offset is whole points, because `Descriptors` derives `Eq`.
+   - it inherits the 100-key bound and the run-to-thread carry-over (`resolve_panel_key`, `run.rs:906-920`);
+   - each scroll event marks it changed, and the existing `Saver` coalesces the writes to one, 750 ms after the last
+     change;
+   - quit and window close flush it (`panel/saved.rs:58`, `app.rs:401`);
+   - the offset is whole points, because `Descriptors` derives `Eq`;
+   - a view following the tail saves no place, so the thread reopens at the tail and follows (4.5).
    (Operator-confirmed frame default; conductor clarification 11:12.)
 7. **Renderers.** Both are agent-decided (Delegated: renderers):
    - math: `ratex-*` `=0.1.16`, with an OFL notice;
@@ -93,12 +96,17 @@ That rules out three alternatives:
    - Agent-posted visuals and tool-result images live behind a reno-client desk and an app-local `Capabilities` field:
      `REAL` false, `FAKE` true. This follows the ActivityDesk precedent (crates/reno-client/src/activity.rs:6) and needs no
      wire change.
-9. **Timers.** Every timer is a deadline armed by an event and stopped when its work is done (ARCH-10, runtime.md):
-   - the 150 ms find recount;
-   - the 16 ms streaming reveal, which drains in 200 ms and is off under reduced motion;
-   - the 16 ms drag autoscroll, armed while the pointer is held past the list edge and ended on release;
-   - the 300 ms diagram re-raster after a zoom.
-   None runs while idle, and tests drive them on GPUI's test clock (ARCH-16).
+9. **Timers.** Nothing polls (ARCH-10, runtime.md "Timers and clocks"). Two kinds exist, and neither runs while idle:
+   - **One-shot deadlines:**
+     - The find recount is a 150 ms **throttle**: the first change arms it, and later changes inside the window ride the
+       same deadline (`run/find.rs:229-241`). It is not a debounce, so a stream cannot starve the count.
+     - The diagram re-raster fires 300 ms after the last zoom step.
+   - **Bounded animation ticks** of 16 ms. Each exists only while its cause holds, the same discipline as the shared
+     pulse clock and its leases (`ui/motion.rs:40-64`):
+     - the streaming reveal, while received text is ahead of shown text; it stops when caught up and is off under
+       reduced motion;
+     - the drag autoscroll, while the pointer is held past the list edge; it stops on release (`run/select.rs:321-325`).
+   Tests drive all of them on GPUI's test clock (ARCH-16).
 10. **Bench.** `long_frame_p95_ms` becomes a failing budget, and BENCHMARKS.md's "a target, not a budget" line goes. A
     bench-only `renod --stream-mock=longreply` adds the one-very-long-reply scenario. That is bench executor code in
     `apps/renod`, not a change to how journals are kept (L5).
@@ -114,14 +122,14 @@ say otherwise.
 
 Satisfies: TRANSCRIPT-1.1, TRANSCRIPT-1.2, TRANSCRIPT-1.3, TRANSCRIPT-1.4, TRANSCRIPT-1.5, TRANSCRIPT-1.6, TRANSCRIPT-1.7,
 TRANSCRIPT-1.8, TRANSCRIPT-1.9, TRANSCRIPT-1.10, TRANSCRIPT-1.11
-Reuse: rung 2 — `transcript.rs` `build_rows`/`fold_turns`/`Key`, and GPUI `ListState::remeasure_items` (rung 4); the
-projection `vm/items.rs` is kept code from the draft.
+Reuse: none — new code (rung 7) for the projection `vm/items.rs`, which is new on this branch and kept from the draft;
+it builds on rung 2 (`transcript.rs` `build_rows`, `fold_turns`, `Key`) and rung 4 (GPUI `ListState::remeasure_items`).
 Respects: ARCH-12, ARCH-10
 Surface:
 - `RunScreen::rows()`, `top_row()`, `older_builds()`, `facts()`: cfg(test) accessors read by `tests.rs:327`,
   `convo_tests.rs:228`, `thread_tests.rs:151` and the other lock tests. **frozen**: built around, since `rows()` stays the
   nested model and `top_row()` stays a top-level index.
-- `run.rs` `rebuild_rows` (:678): **replace** with the incremental builder; its only caller is `refresh`.
+- `run.rs` `rebuild_rows` (:627): **replace** with the incremental builder; its only caller is `refresh`.
 - `list.splice` at `run.rs:513` (`apply_plan`): **replace**, splice only for a fold replacing its turn; growth uses
   `remeasure_items`.
 - `bench_scroll` (`run.rs:756`) and `open_all_folds` (`run.rs:735`), read by `app.rs:604,612` and the bench: **replace**,
@@ -129,7 +137,8 @@ Surface:
 Interface: `Projection { items, … }` with `item_of(Key)`, `item_of_top(row)`, `top_of(item)`, `reproject(rows, from,
 is_open)`, `diff(old, new, at) -> Plan { splice, remeasure }`; `RunScreen` keeps `rows()`; a `TurnBuilder` exposes
 `push(event)` and `finish() -> Option<FoldedTurn>`.
-Depth: n/a — extends `transcript.rs` (`build_rows`, `fold_turns`) and the kept `vm/items.rs`.
+Depth: if `vm/items.rs` vanished, callers would still need to know only that a list item maps to (row, inner index) and
+back by `Key`; the folding rules stay in `transcript.rs`.
 Locality: extend `run.rs` (refresh path) and `transcript.rs` (an incremental builder beside `build_rows`, sharing its row
 rules); leave `screens/run/transcript.rs` row drawing; activity chips read `prose_at` from the projection (done).
 
@@ -143,32 +152,36 @@ held until a pending render settles (`settled_generation`, 1.4).
 
 Satisfies: TRANSCRIPT-3.1, TRANSCRIPT-3.2, TRANSCRIPT-3.3, TRANSCRIPT-3.4, TRANSCRIPT-3.5, TRANSCRIPT-3.6, TRANSCRIPT-3.7,
 TRANSCRIPT-3.8, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-3.11, TRANSCRIPT-3.12, TRANSCRIPT-3.13
-Reuse: rung 2 — kept `vm/find.rs`, `screens/run/find.rs` and `ui/find.rs`; the kit field `ui/field.rs`; rung 5 — the
-`regex` crate, already in the workspace lock through `reno-syntax`, for 3.9 (confirm a direct dependency with
-`cargo machete`; else rung 7, a literal matcher with case and word options and no regex).
+Reuse: none — new code (rung 7) for `vm/find.rs`, `screens/run/find.rs` and `ui/find.rs`, new on this branch and kept
+from the draft. Rung 2: the kit field `ui/field.rs`. Rung 5: `regex` 1.13.1, already in `Cargo.lock` as a transitive
+dependency; the plan adds it as a direct workspace dependency pinned `=1.13.1`, for 3.9's regex mode.
 Respects: ARCH-10, ARCH-16
 Surface:
 - Esc in the approval dock (`run/dock.rs:38`, `DenyHeld`) and the composer's stop (`ui/composer.rs:1247`): **replace**,
   both pass Esc on while the strip is open (built), and keep it when closed (3.13).
-- `run.rs` `open` (a `HashSet<Key>` before the branch): **replace** with `Opens<Key>`, owner and search sets; its readers
-  are `run/transcript.rs:346,627`, `run/output.rs:65,94,203` and `open_all_folds`.
+- `vm::find::{find_all, matches, count_label}`, read by `run/find.rs` and by the prose marks in `ui/markdown_view.rs:630`
+  (`marks.needle`): **replace**, they take a `Query` instead of a bare `&str`, and every reader moves in the same change.
+  (`open` is already `Opens<Key>`; nothing to change there.)
 Interface: `vm::find::{find_all(rows, query: &Query) -> Vec<Hit>, Found { hits, current }, Opens<K>, count_label}` with
 `Query { text, case, word, regex }` and an invalid-regex error; `RunScreen::{open_find, close_find, find_step}`.
-Depth: n/a — extends the kept `vm/find.rs`.
+Depth: if `vm/find.rs` vanished, callers would still need only a hit list of (row key, part, byte range) and a current
+index; the matching rules and the owner/search open sets live inside it.
 Locality: extend `vm/find.rs` (`Query` and options for 3.9 and 3.10) and `run/find.rs` (strip toggles, ⌥⌘C/W/X); leave the
 rest.
 
 The strip's toggles (case, whole word, regex) feed one `Query`. A regex that does not parse yields `Err(reason)`, and the
-strip shows its error state with no count (3.10). The recount is a 150 ms one-shot owned task, armed by a store change or
-an open/close and replaced on re-arm (3.11). Reasoning that is open only because it streams is held in neither set;
+strip shows its error state with no count (3.10). The recount is a 150 ms throttle, armed by a store change or an
+open/close; changes inside the window ride the armed deadline (3.11). The toggles and the error state are 3.9 and 3.10,
+which the operator's go sheet listed as "not in the draft yet (built after your go)". They join the locked strip inside the
+field's right edge, in the kit's own toggle style. Reasoning that is open only because it streams is held in neither set;
 closing search never closes it, and a stream ending never closes a row search opened while the strip is open (3.12).
 
 ### Selection and copy
 
 Satisfies: TRANSCRIPT-2.1, TRANSCRIPT-2.2, TRANSCRIPT-2.3, TRANSCRIPT-2.4, TRANSCRIPT-2.5, TRANSCRIPT-2.6, TRANSCRIPT-2.7,
 TRANSCRIPT-2.8, TRANSCRIPT-2.9, TRANSCRIPT-2.10, TRANSCRIPT-2.11, TRANSCRIPT-2.12, TRANSCRIPT-2.13
-Reuse: rung 2 — kept `vm/selection.rs`, `vm/anchor.rs`, `ui/markdown_view/select.rs` and `screens/run/select.rs`; GPUI
-`TextLayout::index_for_position` (rung 4).
+Reuse: none — new code (rung 7) for `vm/selection.rs`, `vm/anchor.rs`, `ui/markdown_view/select.rs` and
+`screens/run/select.rs`, new on this branch and kept from the draft; rung 4: GPUI `TextLayout::index_for_position`.
 Respects: ARCH-12
 Surface:
 - `transcript.rs:323-337` whole-message quiet Copy and `user-copy-<key>`: unchanged readers; their tests keep passing
@@ -178,7 +191,8 @@ Surface:
 Interface: `Selection { anchor: Pos, head: Pos }`; `copy_text(sel, entries, shown) -> String`; `anchors(sel, entries,
 shown) -> Vec<Anchor { key, slot, range: Option<Range<usize>> }>`; `RunScreen::{copy_selection, copy_markdown,
 selection_anchors}`.
-Depth: n/a — extends the kept selection modules.
+Depth: if these modules vanished, callers would still need only `Selection { anchor, head }`, `copy_text` and `anchors`;
+the slot maps, atoms and the painted-text registry stay inside.
 Locality: extend `run/select.rs` (click counts: word, line, block; shift-click extend; "Copy as Markdown" via
 `anchor::source_of(sel)`); leave the renderer's `Track` registry, which registers only painted items, so its cost scales
 with the viewport.
@@ -186,58 +200,75 @@ with the viewport.
 ### Reading place
 
 Satisfies: TRANSCRIPT-4.1, TRANSCRIPT-4.2, TRANSCRIPT-4.3, TRANSCRIPT-4.4, TRANSCRIPT-4.5
-Reuse: rung 2 — `panel/persist.rs` (`PanelStore`, `Saver` with `SAVE_DELAY` 750 ms and `flush` on quit and window close
-:333), `panel_key_for` and `migrated` (`run.rs`, the run-to-thread carry-over), and the projection's `item_of`.
+Reuse: rung 2 — `panel/persist.rs` (`PanelStore`; `Saver` with `SAVE_DELAY` 750 ms and `flush` at :334, which quit and
+window close call through `Saved::flush`, `panel/saved.rs:58` and `app.rs:401`), `panel_key_for`, `migrated` and
+`resolve_panel_key` (`run.rs:906-920`, the run-to-thread carry-over), and the projection's `item_of`.
 Respects: ARCH-8 (the place is view state in an app-local file, not a second source of truth for daemon data)
 Surface:
 - `panel/mod.rs` `Descriptors { tabs, active, closed }` (derives `Eq`): **frozen** as a persisted shape, built around with
   an additive `#[serde(default)] place: Option<Place { key: u64, offset_pt: i32 }>`; `VERSION` stays 1; a file without it
   reads `None`.
-- `screens/run/panel.rs:128` `persist_panel`, `panel/mod.rs:201` `PanelState::snapshot`, and
+- `screens/run/panel.rs:128` `persist_panel`, `panel/mod.rs:200` `PanelState::snapshot`, and
   `screens/run/terminal.rs:131,153` `Terms::restore`/`to_saved`: each builds `Descriptors` field by field. **replace**, each
   carries `place`, or a write would drop it.
+- `run.rs:906-920` `resolve_panel_key`: on the run-to-thread move it restores the thread's saved `Descriptors`, or persists
+  the run's. **replace**, the place moves with the tabs (4.4).
+- The `Descriptors { .. }` struct literals in tests: `panel/mod.rs:361,550,556,576,590`, `persist.rs:360` and
+  `terminal_tests.rs:839`. **replace**, each gains `place: None`, or uses `..Default::default()`. A test edit for
+  compilation only; no assertion changes.
 - `persist.rs:174`, the drop-empty rule: **replace**, a key holding only a `place` is kept.
-- `app.rs:1604` `open_run`, which makes a fresh `RunScreen` on every open: **replace**, the outgoing screen writes its place
-  before it is dropped, and the incoming one reads it.
+- `app.rs:1594` `open_run`, which makes a fresh `RunScreen` on every open: **replace**, the outgoing screen's place is
+  already in the store (each scroll event marks it), and the incoming screen reads it.
 Interface: `RunScreen::{saved_place() -> Option<Place>, restore_place(Place)}`; `Place::resolve(&Projection, &rows) ->
 ListOffset`, which falls back to the fold head, then the next key (4.3).
 Depth: n/a — extends `panel/persist.rs` and `RunScreen`.
 Locality: extend `panel/mod.rs`, `panel/persist.rs`, `run/panel.rs`, `run/terminal.rs` and `run.rs`; leave the rest.
 
-The list's scroll handler records the top item's `Key` and offset whenever scrolling settles. That is an event, not a
-poll, and it goes into the thread's `Descriptors` through the existing `Saver`. Quit and window close flush it. Opening a
-thread with a saved place restores it after the first layout; with none, the view opens at the tail and follows it (4.5).
+Each scroll event records the top item's `Key` and offset into the thread's `Descriptors` in memory and marks the store
+changed. The `Saver` writes once, 750 ms after the last change, so a long scroll is one write; quit and window close
+flush it. While the view follows the tail it records "no place". Opening a thread with a saved place restores it after
+the first layout; with none, the view opens at the tail and follows it (4.5).
 
 ### Navigation and jump to latest
 
 Satisfies: TRANSCRIPT-5.1, TRANSCRIPT-5.2, TRANSCRIPT-5.3, TRANSCRIPT-5.4, TRANSCRIPT-5.5, TRANSCRIPT-6.1, TRANSCRIPT-6.2
 Reuse: rung 2 — the `Transcript` key context and focus node (`run/select.rs:27`), the tick rail (`run.rs` `tick_rail`,
-`convo::tick_marks`/`row_starts`), `kit::icon_button`, the kept `jump_control`; GPUI list `scroll_by`/`scroll_to` and its
-scrollbar support (rung 4).
+`convo::tick_marks`/`row_starts`), `kit::icon_button`, the kept `jump_control`; rung 4 — GPUI list `scroll_by`/`scroll_to`
+and its scrollbar hooks (`set_offset_from_scrollbar`, `max_offset_for_scrollbar`, `scrollbar_drag_started`); new (rung 7) —
+`ui/scrollbar.rs`, a scrollbar element over those hooks, because neither GPUI's `list()` nor the app has one.
 Interface: actions `PageUp`, `PageDown`, `LineUp`, `LineDown`, `Home`, `End`, `PrevPrompt`, `NextPrompt` in the
 `Transcript` context; `RunScreen::{scroll_page(dir), jump_to_latest}`.
-Depth: n/a — extends `run.rs` and `run/select.rs` key bindings.
-Locality: extend `run.rs` (scrollbar beside the rail; turn-end hover actions "Scroll to user message" and "Scroll to top");
-leave the composer's own key bindings.
+Depth: if `ui/scrollbar.rs` vanished, callers would still need only to hand it a `ListState`; the thumb geometry and drag
+stay inside it. The key bindings extend `run/select.rs`.
+Locality: extend `run.rs` (the scrollbar beside the rail; the turn-end hover action "Scroll to user message" on every
+finished turn, and "Scroll to top" on the last turn only, 5.4); leave the composer's own key bindings.
 
 ### Renderer host, code blocks, links and rich markdown
 
 Satisfies: TRANSCRIPT-7.1, TRANSCRIPT-7.2, TRANSCRIPT-8.1, TRANSCRIPT-8.2, TRANSCRIPT-8.3, TRANSCRIPT-8.4, TRANSCRIPT-8.5,
 TRANSCRIPT-8.6, TRANSCRIPT-14.1, TRANSCRIPT-14.2, TRANSCRIPT-14.3, TRANSCRIPT-14.4
-Reuse: rung 2 — kept `ui/markdown_view.rs` (`Host`, `blocks_with`), `md/chrome.rs`, `md/link.rs` and `run/links.rs`;
-`ui/menu.rs` for the context menu; `links::open` (`links.rs`) and `open_file_at` (`run/files.rs:496`); the parser's existing
-footnote, table and task parsing in `reno-markdown` (pulldown-cmark options).
+Reuse: rung 2 — `ui/markdown_view.rs` (`Host`, `blocks_with`), `md/chrome.rs`, `md/link.rs` and `run/links.rs` (new on
+this branch, kept); `ui/menu.rs` `popup(at: Point)` for the context menu, extended with ↑/↓/Enter/Esc keyboard navigation
+(16.8); `links::open` and `open_file_at` (`run/files.rs:496`). Rung 5 — pulldown-cmark 0.12.2 options the parser does not
+enable today (`crates/reno-markdown/src/parser.rs:143-147` sets only tables, strikethrough, tasklists and math):
+`ENABLE_FOOTNOTES`, `ENABLE_YAML_STYLE_METADATA_BLOCKS` (front matter) and `ENABLE_GFM` (`BlockQuoteKind` for
+`[!NOTE]`-style callouts).
 Respects: ARCH-16
 Surface:
-- `markdown_view::blocks(&BlockTree, &Theme, &Window)` (base `ui/markdown_view.rs:67`): **replace** by `blocks_with(tree,
-  theme, Host)`. Callers: `run/files.rs:1138` (`Host::preview()`, which keeps today's links, 8.5), `run/transcript.rs:177`
-  and `renderers_tests.rs:69`.
+- `crates/reno-markdown` `options()` and its block types: enabling footnotes, metadata blocks and GFM block-quote kinds
+  adds block kinds (`Footnote`, `FrontMatter`, a `BlockQuote` kind, and task markers drawn as boxes). The readers are
+  `ui/markdown_view.rs`, `vm/anchor.rs` (`atoms`), the Files tab preview (`run/files.rs:1138`) and the crate's 100 parser
+  tests. **replace**, all move in the same change, and the 100 existing tests stay green unchanged.
+- The renderer entry `blocks_with(tree, theme, Host)` is already in place (callers `run/files.rs:1138` with
+  `Host::preview()`, which keeps today's links, 8.5; `run/transcript.rs:177`; `renderers_tests.rs:69`). Nothing changes.
 - `cx.open_url` in the transcript path: **replace** by `links::open` (8.2). The Files tab preview keeps its own call
   (`md/link.rs:113`). A `mailto:` in the transcript becomes plain text (links.rs:27 policy).
 Interface: `Host::{transcript(run, client, files), preview(), while_streaming, marked, selectable}`; `blocks_with`;
 `LinkPolicy`, `FileLinks`; `chrome::card(kind, …)`.
-Depth: n/a — extends the kept renderer.
-Locality: extend `markdown_view.rs`:
+Depth: if the renderer vanished, callers would still need only `blocks_with(tree, theme, Host)`; the block drawing,
+chrome, link policy and caches stay inside.
+Locality: extend `crates/reno-markdown/src/parser.rs` (the three options and their block kinds, with parser tests) and
+`markdown_view.rs`:
 - callouts: `[!NOTE]`, `[!TIP]`, `[!WARNING]`, `[!CAUTION]` block quotes;
 - wide tables in a horizontal scroll with a scrollbar;
 - footnotes at the reply's end, with a click scrolling to the note;
@@ -245,7 +276,7 @@ Locality: extend `markdown_view.rs`:
 - HTML comments hidden;
 - task boxes drawn and not toggled.
 Add a context menu in `run.rs` on right-click (Open, Copy Link, Copy, Copy as Markdown, Copy Message, Scroll to top or
-bottom). Leave `reno-markdown` unless a block kind is missing, and add a parser test if so.
+bottom). The menu opens on right-click and on ⇧F10 in the `Transcript` context (a new binding).
 
 ### Math and its settings
 
@@ -258,7 +289,8 @@ Surface: `app-settings.json`, read by `prefs.rs` load and save and by older buil
 keys. Unknown keys are kept (prefs.rs:5-6), and a missing key reads as the default (16.11).
 Interface: `md::math::typeset(tex, display, size, color, scale, cx) -> Option<Rc<Typeset>>`; `Prefs::math(cx) -> (bool,
 u8)`.
-Depth: n/a — kept module.
+Depth: if `md/math.rs` (rung 7, new on this branch) vanished, callers would still need only `typeset(..)` returning a
+raster with its above-baseline and below-baseline heights.
 Locality: leave; typesetting stays synchronous on a cache miss (0.06 ms parse and layout, 0.2 ms raster in the spike;
 4 KiB source cap; LRU of 256 entries / 24 MiB). Reopen trigger: if the 16.2 bench misses its target, move it to an owned
 background task with a placeholder slot.
@@ -271,7 +303,8 @@ Reuse: rung 5 — `merman =0.11.0` (added, agent-decided; `cssparser` MPL-2.0 is
 Respects: ARCH-11, ARCH-12, ARCH-17
 Interface: `mermaid::drawing(source, theme, scale, cx) -> Drawing { Rendering, Ready, Failed }`; the diagram card with
 `Preview | Code` tabs and a zoom state.
-Depth: n/a — kept module.
+Depth: if `md/mermaid.rs` (rung 7, new on this branch) vanished, callers would still need only `drawing(..)` and its three
+states; the measurer, theme init and cache stay inside.
 Locality: extend `Cargo.toml` (merman features `diagram-class`, `diagram-state`, `diagram-er`, `diagram-gantt`,
 `diagram-pie`, with one test each; a type it cannot draw goes through reroute-plan) and `md/mermaid.rs` (keep the previous
 `Ready` while a changed source renders, 10.2) and the card (tabs; ⌘-scroll zoom from fit-to-width to 200 % with a reset;
@@ -286,7 +319,8 @@ SVG.
 Respects: ARCH-2, ARCH-12, ARCH-16
 Interface: `image::{classify(src) -> Classified { Source(ImageSource), Remote, Refused }, resolve(source, host, cx) ->
 Shown}`.
-Depth: n/a — kept module.
+Depth: if `md/image.rs` (rung 7, new on this branch) vanished, callers would still need only `classify` and `resolve`;
+the chunked read, the cache and the SVG rasteriser stay inside.
 Locality: extend `md/image.rs`: an SVG returned by `fs.read_image` is rasterised by `usvg` with `no_files()` instead of being
 refused. Lock test: an SVG whose `<image href>` names a file outside the worktree paints nothing. Leave the rest.
 
@@ -300,7 +334,8 @@ Surface: `Capabilities` (`vm/capabilities.rs`), whose only constructors are the 
 field is added to both; done). A new `tool_images` flag follows the same shape.
 Interface: `VisualDesk::visuals(&RunId) -> Vec<Visual>`, plus `VisualDesk::tool_images(&RunId, call: &str) ->
 Vec<VisualImage>` for 12.2; `Store::{run_visuals, tool_images}` returning empty when the capability is off.
-Depth: n/a — extends the kept desk.
+Depth: if the desk (rung 7, new on this branch) vanished, callers would still need only `visuals(run)` and
+`tool_images(run, call)` returning plain structs; the seeding stays in the fake.
 Locality: extend `visuals.rs` (tool images), `fake/visuals.rs` (one seeded tool image) and `run/output.rs` (the image
 under its call, scaled down to at most 384 × 384, with "Go to file" when the call names a file); leave `reno-proto`.
 
@@ -312,14 +347,16 @@ TRANSCRIPT-13.14, TRANSCRIPT-13.15, TRANSCRIPT-13.16, TRANSCRIPT-13.17, TRANSCRI
 Reuse: rung 2:
 - `screens/run/transcript.rs` (`reasoning`, `worked`, the Thinking line), `run/output.rs` (`step_row`, output block,
   Copy), the `ui/motion.rs` pulse discipline and `cx.reduce_motion()`;
-- `convo::step_lines` and `line_calls`, the Changes tab's diff line drawing (`changes.rs` `line_runs`), and `prefs.rs`
+- `convo::step_lines` and `line_calls`, the diff line runs (`ui/markdown_view.rs:569` `line_runs`, as the Changes tab uses),
+and `prefs.rs`
   plus `settings_pages.rs` for the two settings rows.
 Respects: ARCH-10, ARCH-16
 Surface:
 - `app-settings.json`: **frozen**, built around with additive keys `thinking` (`auto | preview | open | closed`),
   `expandNewEdits` and `expandNewCommands`.
 - Tool output data (`ToolOutput`, `crates/reno-proto/src/exec.rs:246-263`): read only, **frozen**, not changed.
-Interface: `Reveal { shown: usize }`, with `RunScreen::reveal_tick()` armed by a delta; `ThinkingMode`; `Prefs::{thinking,
+Interface: `StreamReveal { shown: usize }` (named apart from `vm::find::Reveal`), with `RunScreen::reveal_tick()` armed by
+a delta; `ThinkingMode`; `Prefs::{thinking,
 expand_new_edits, expand_new_commands}`.
 Depth: n/a — extends the existing row views and prefs.
 Locality: extend `run/transcript.rs`:
@@ -341,7 +378,8 @@ Satisfies: TRANSCRIPT-15.1, TRANSCRIPT-15.2, TRANSCRIPT-15.3, TRANSCRIPT-15.4
 Reuse: rung 2 — kept `crates/reno-client/src/fake/transcript.rs` and `fake/{script,data,files,world/threads}.rs`;
 `FakeConfig::transcript_threads`, which the app's `--fake` turns on (`store.rs:1002`).
 Interface: the seeded runs `acp1`–`acp8` and `render1`, and the prompt script `/longreply`; `FakeConfig::transcript_threads`.
-Depth: n/a — kept.
+Depth: if the seeded scenes (rung 7, new on this branch) vanished, callers would still need only the run ids and
+`FakeConfig::transcript_threads`; the event scripts stay inside the fake.
 Locality: extend `fake/transcript.rs` with the seeded content the unbuilt stories need, each behind the same flag:
 - a tool-result image;
 - an error turn;
@@ -357,10 +395,13 @@ Reuse: rung 2 — `xtask/src/app_bench.rs` (`long_transcript`), `xtask/src/app_s
 `apps/renod/src/executors.rs` `StreamMock`, `apps/reno-app/src/bench.rs` (`ScrollPlan`, `RENO_BENCH_SCROLL`).
 Respects: ARCH-16
 Surface:
-- `app_stats.rs:86-91`, the row `long_frame_p95_ms` (`target: Some("ROAD-33")`), its test at :731, and
-  `docs/BENCHMARKS.md:165-174`: **replace**, the row becomes a budget and the doc line is rewritten.
-- `StreamMock::{Steady, Burst}`, read by `app_bench.rs` and renod's executor tests: **replace**, adding `LongReply`, with
-  the existing kinds unchanged (1.11 guard).
+- `app_stats.rs:86-91`, the row `long_frame_p95_ms` (`target: Some("ROAD-33")`), and `docs/BENCHMARKS.md:165-174`:
+  **replace**, the row becomes a budget and the doc line is rewritten.
+- `StreamMock::{Steady, Burst}` in renod, read by `apps/renod/src/main.rs:30-33` (`parse_stream_mock`), `daemon.rs:75` and
+  `executors.rs:152-172` and their tests: **replace**, adding `LongReply` and the word `longreply`, with the existing kinds
+  unchanged (1.11 guard). xtask passes the word as a string to `--stream-mock`.
+- `app_stats.rs:399,724,731-754` (the target-row tests and the report) and `BENCHMARKS.md:172,198`: **replace**, the row
+  is now reported and tested as a budget.
 Interface: `renod --stream-mock=longreply`; `long_reply` scenario in `cargo xtask bench --app`.
 Depth: n/a — extends the bench.
 Locality: extend `apps/renod/src/executors.rs` (a bench-only stream of one very long reply with code blocks and math),
@@ -378,9 +419,13 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 Respects: ARCH-12, ARCH-13, ARCH-16, ARCH-17
 Surface: `RunScreen.markdown`, `.probed` and `file_index.dirs` are unbounded today (scan-design §6). **replace** each with
 an `Lru`:
-- parsed trees: 512 entries, reparsed on demand;
+- parsed trees: 512 entries, reparsed on demand. The live streaming row's entry is pinned and never evicted, since its
+  incremental parser holds state.
 - probed directories: 256 entries;
 - listed directories: 256 entries.
+Also bounded:
+- `Found.hits` stops at 10,000 hits, and the count reads "10,000+";
+- text layout is GPUI's own per-frame line-layout cache, bounded by the viewport.
 Interface: none new.
 Depth: n/a — applies `Lru` to three maps.
 Locality: extend `run.rs` and `run/links.rs`. Leave the rest, which is covered by the lock tests listed in `ui-brief.md`
@@ -408,8 +453,9 @@ Components:
 - rung 1 — `ui/field.rs`, `kit::icon_button`, `kit::tip`, `kit::focus_ring`;
 - new (rung 7) — the strip frame (no kit piece is a bar pinned over a list).
 
-States: closed · open and empty · "N of M" · "No results" · an invalid regex (the field in its `danger` state with the
-reason, and no count) · a toggle on (the icon pressed).
+States: closed · open and empty · "N of M" · "No results" · counting while the thread loads (the count restarts at the
+first hit until one is gone to) · "10,000+" · an invalid regex (the field in its `danger` state with the reason, and no
+count) · a toggle on (the icon pressed).
 
 Type & color:
 - the strip on `surface`; the count in Geist 13 `muted`;
@@ -469,17 +515,18 @@ States: none · selecting · selected · copied (toast) · menu open.
 
 Type & color: the selection background is `accent` at low alpha; the menu uses the kit's colours.
 
-A11y: ⌘C only when the transcript has focus; the composer's ⌘C is unaffected; the menu is reachable by keyboard
-(⇧F10 / the menu key), with focus rings.
+A11y: ⌘C only when the transcript has focus; the composer's ⌘C is unaffected; ⇧F10 opens the menu (a new binding in the
+`Transcript` context), and ↑/↓/Enter/Esc move through it (`ui/menu.rs` extended), with focus rings.
 
 ### Navigation: jump to latest, scrollbar and keys
 
 Layout:
 - a round 32 pt jump button over the bottom-right of the transcript, shown only while detached;
 - a vertical scrollbar beside the tick rail;
-- "Scroll to user message" and "Scroll to top" on hover at the end of a finished turn.
+- on hover at the end of a finished turn: "Scroll to user message"; on the last turn also "Scroll to top".
 
-Components: rung 1 — `kit::icon_button`, `kit::tip`; rung 4 — the list's scrollbar.
+Components: rung 1 — `kit::icon_button`, `kit::tip`; new (rung 7) — `ui/scrollbar.rs` over the list's scrollbar hooks
+(the thumb on `raised`, hover `faint`; no new token).
 
 States: following (no button) · detached (button) · pressed (follows again) · UI-grown content (detached).
 
@@ -536,7 +583,7 @@ A11y: switches and choices are keyboard reachable, with labels.
 
 ## Seams for testing
 
-All seams exist today; no new seam is added.
+One new seam: the incremental `TurnBuilder` (unit). Every other seam exists today.
 
 | Seam | Kind | Covers |
 |---|---|---|
