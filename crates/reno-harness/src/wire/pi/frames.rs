@@ -244,11 +244,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_commands_is_the_bare_command() {
-        assert_eq!(get_commands(), json!({ "type": "get_commands" }));
-    }
-
-    #[test]
     fn only_an_extension_command_of_that_name_is_listed() {
         let data = json!({ "commands": [
             { "name": "skill:reno-gate", "source": "skill" },

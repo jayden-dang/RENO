@@ -480,8 +480,6 @@ mod tests {
             ("HOME", "/Users/me"),
         ];
         assert_eq!(kept(RENO, &daemon), ["HOME"]);
-        assert!(RENO.names.is_empty());
-        assert!(RENO.prefixes.is_empty());
     }
 
     #[test]

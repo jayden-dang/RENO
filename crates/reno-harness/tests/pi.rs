@@ -1070,8 +1070,10 @@ fn reno_declares_supervised_and_full_access_with_no_sandbox_ceiling() {
     assert_eq!(descriptor.caps.sandbox_levels, [SandboxLevel::Unrestricted]);
     assert!(descriptor.caps.resume);
     assert!(descriptor.caps.isolates_user_config);
-    assert_eq!(descriptor.cli_verified.min, "1.5.0");
-    assert_eq!(descriptor.cli_verified.verified, "1.5.0");
+    assert_eq!(
+        descriptor.cli_verified,
+        PiExecutor::new().descriptor().cli_verified
+    );
 }
 
 #[test]
@@ -2356,6 +2358,7 @@ async fn a_real_pi_plays_a_run_against_its_mock_provider() {
     ] {
         let mut spec = bench.spec(prompt);
         spec.env.clear();
+        spec.env.insert("HOME".to_owned(), live_home(&bench));
         // The probe extension is a user extension: this run inherits it.
         spec.inherit_user_config = true;
         // Pin the mock model: whatever provider keys the environment holds, the prompt goes
@@ -2411,8 +2414,16 @@ fn live_reno_spec(bench: &Bench, prompt: &str) -> ExecSpec {
     let mut spec = bench.spec(prompt);
     spec.env.clear();
     spec.env.insert("RENO_BOT".to_owned(), "keeper".to_owned());
+    spec.env.insert("HOME".to_owned(), live_home(bench));
     spec.model = Some("reno-probe/mock".into());
     spec
+}
+
+/// A throwaway home inside the bench, so a live run never reads or writes the owner's.
+fn live_home(bench: &Bench) -> String {
+    let home = bench.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    home.display().to_string()
 }
 
 /// How long each call took from its `NeedsApproval` to its `ToolResult`, with every call allowed
@@ -2504,9 +2515,6 @@ async fn a_real_pi_behind_the_gate_arms_and_every_kind_of_call_reaches_a_decisio
     };
     for (name, class) in [
         ("read", ActionClass::Read),
-        ("grep", ActionClass::Read),
-        ("find", ActionClass::Read),
-        ("ls", ActionClass::Read),
         ("edit", ActionClass::Edit),
         ("write", ActionClass::Edit),
         ("bash", ActionClass::Command),

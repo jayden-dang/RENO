@@ -356,13 +356,19 @@ def run_tool(name, args):
     return "ran " + name
 
 
-def gated_tool(call_id, name, args, parent=None, inside=None):
-    """What Pi does for one tool: announce it, ask the gate, then run it or end it with the reason."""
+def gate_ask(call_id, name, args, parent=None):
+    """Announce one tool and ask the gate about it; the fake ends if the gate is gone."""
     tool_start(call_id, name, args, parent)
     gate_send(name, args, call_id, parent)
     decision = gate_decision()
     if decision is None:
         sys.exit(3)
+    return decision
+
+
+def gated_tool(call_id, name, args, parent=None, inside=None):
+    """What Pi does for one tool: announce it, ask the gate, then run it or end it with the reason."""
+    decision = gate_ask(call_id, name, args, parent)
     if decision["decision"] == "allow":
         log({"ran": {"tool": name, "call_id": call_id, "input": args}})
         if inside:
@@ -374,11 +380,7 @@ def gated_tool(call_id, name, args, parent=None, inside=None):
 
 def decided_as(call_id, name, args):
     """Ask the gate about one call and say how it was decided, ending the tool as Pi would."""
-    tool_start(call_id, name, args)
-    gate_send(name, args, call_id)
-    decision = gate_decision()
-    if decision is None:
-        sys.exit(3)
+    decision = gate_ask(call_id, name, args)
     if decision["decision"] == "allow":
         tool_end(call_id, name, "ran " + name)
         return "allow"

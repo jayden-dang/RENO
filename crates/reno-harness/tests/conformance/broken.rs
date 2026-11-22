@@ -344,6 +344,26 @@ async fn an_executor_that_never_inherits_the_owners_config_skips_the_comparison_
 }
 
 #[tokio::test]
+async fn a_target_that_refuses_inherited_config_and_plans_the_comparison_anyway_fails() {
+    let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
+    descriptor.caps.isolates_user_config = true;
+    let executor = Arc::new(ScriptedMock::with_descriptor(Some(descriptor)));
+    let mut target = crate::targets::mock_target_for(executor);
+    target.plan.user_config = Some(UserConfigPlan {
+        scenario: Scenario::new("mock:user-config"),
+        isolated: vec![Expect::TextContains("user-config:isolated".into())],
+        inherited: vec![Expect::TextContains("user-config:inherited".into())],
+    });
+    target.profile.refuses_inherited_config = true;
+    let report = run_suite(&target).await;
+    let Status::Fail(why) = status(&report, CaseId::UserConfig) else {
+        panic!("{:?}", report.labels());
+    };
+    assert!(why.contains("refuses"), "{why}");
+    assert!(!report.is_green());
+}
+
+#[tokio::test]
 async fn a_claimed_plan_mode_is_a_failure_because_nothing_can_exercise_it() {
     let mut descriptor = MockExecutor::default_descriptor("mock".parse().unwrap());
     descriptor.caps.plan_mode = true;

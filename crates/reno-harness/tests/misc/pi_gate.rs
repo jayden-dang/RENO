@@ -1,7 +1,7 @@
 //! Reno's Pi gate extension (`src/drivers/pi/gate.mjs`) against a scripted Unix socket, under
 //! Node. Pi itself is not involved: the gate is an extension function, driven here with the calls
 //! Pi makes of it (`on`, `registerCommand`). Node must be installed (Pi is a Node program, so
-//! anywhere Pi runs it is); without it the test says so and passes, since there is nothing to run.
+//! anywhere Pi runs it is); without it the test fails, since a gate nothing ran is not checked.
 
 #[tokio::test]
 async fn the_gate_sends_every_call_and_blocks_whatever_it_cannot_judge() {
@@ -14,8 +14,7 @@ async fn the_gate_sends_every_call_and_blocks_whatever_it_cannot_judge() {
     {
         Ok(Ok(output)) => output,
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("node is not installed: the Pi gate test did not run");
-            return;
+            panic!("node is not installed: the Pi gate test cannot run")
         }
         Ok(Err(error)) => panic!("node did not run: {error}"),
         Err(_) => panic!("the Pi gate test must finish without waiting on a clock"),

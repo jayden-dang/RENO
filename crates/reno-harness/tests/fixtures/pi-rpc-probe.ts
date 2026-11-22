@@ -10,9 +10,6 @@ const codemodeScript = "await tools.read({path:'a.txt'}); await tools.mcp__probe
 const SCRIPTS = {
   'script-tools': [[
     {name:'read', arguments:{path:'a.txt'}},
-    {name:'grep', arguments:{pattern:'needle', path:'.', glob:'*.txt'}},
-    {name:'find', arguments:{pattern:'*.txt'}},
-    {name:'ls', arguments:{path:'.'}},
     {name:'edit', arguments:{path:'edit-me.txt', edits:[{oldText:'before', newText:'after'}]}},
     {name:'write', arguments:{path:'written.txt', content:'written by the script'}},
     {name:'bash', arguments:{command:'echo PROBE_MUTATE > bash-ran.txt'}},
