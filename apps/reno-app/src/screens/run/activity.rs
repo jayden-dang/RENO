@@ -13,7 +13,6 @@ use reno_proto::RunId;
 
 use super::RunScreen;
 use crate::panel::surface::Surface;
-use crate::transcript::Row;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
 use crate::ui::theme::Theme;
@@ -599,16 +598,12 @@ impl RunScreen {
     pub(super) fn activity_chips(
         &self,
         theme: &Theme,
-        ix: usize,
+        prose_at: Option<usize>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let a = self.activity(cx)?;
-        let prose_at = self.rows[..=ix.min(self.rows.len().saturating_sub(1))]
-            .iter()
-            .filter(|r| matches!(r, Row::Prose { .. }))
-            .count()
-            .checked_sub(1)
-            .filter(|_| matches!(self.rows.get(ix), Some(Row::Prose { .. })))?;
+        // Which top-level prose row this item is (the projection counted them once).
+        let prose_at = prose_at?;
         let chips: Vec<AnyElement> = a
             .agents
             .iter()

@@ -6,29 +6,51 @@
 //! "Worked for Ns".
 
 use super::*;
+use crate::ui::find as find_look;
 use crate::ui::motion;
+use crate::vm::draft33::Variant;
+use crate::vm::find;
 
 impl RunScreen {
+    /// One list item: its row, with the space below it, the subagent chips that hang on it and,
+    /// under the last item of a live run, "Thinking".
     pub(super) fn render_row(
-        &self,
+        &mut self,
         ix: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = theme::current(cx);
-        let Some(row) = self.rows.get(ix) else {
+        let variant = Self::variant(cx);
+        let Some(item) = self.items.items.get(ix).copied() else {
             return div().into_any_element();
         };
-        let last = ix + 1 == self.rows.len();
-        let body = self.row_body(row, Some(ix), &theme, window, cx);
+        // A reply's markdown is parsed when its item is first drawn, not when the row arrives.
+        if let Some(Row::Prose { key, text }) = items::row_of(&self.rows, 0, &item) {
+            self.markdown.entry(*key).or_default().set_text(text);
+        }
+        let Some(row) = items::row_of(&self.rows, 0, &item) else {
+            return div().into_any_element();
+        };
+        let top = item.inner.is_none().then_some(ix);
+        let body = self.row_body(row, top, &theme, variant, window, cx);
         // "Thinking" under the last row while the agent works between steps.
-        let thinking = last && self.is_thinking(cx);
+        let thinking = item.decor.last && self.is_thinking(cx);
+        // A row inside an open fold sits a step closer to its neighbours than a top-level row.
+        let open_head = matches!(row, Row::Worked { key, .. } if self.open.contains(key));
+        let gap = if item.inner.is_some() || open_head {
+            12.0
+        } else if item.decor.last {
+            26.0
+        } else {
+            16.0
+        };
         div()
             .w_full()
             .when(ix == 0, |d| d.pt(px(22.0)))
-            .pb(px(if last { 26.0 } else { 16.0 }))
+            .pb(px(if item.decor.last { 26.0 } else { gap }))
             .child(body)
-            .children(self.activity_chips(&theme, ix, cx))
+            .children(self.activity_chips(&theme, item.decor.prose_at, cx))
             .when(thinking, |d| d.child(self.thinking_line(&theme, cx)))
             .into_any_element()
     }
@@ -60,12 +82,13 @@ impl RunScreen {
             .into_any_element()
     }
 
-    /// One row. `top` is its index in the list; a row inside a fold has none.
+    /// One row. `top` is its item's index in the list; a row inside a fold has none.
     fn row_body(
         &self,
         row: &Row,
         top: Option<usize>,
         theme: &Theme,
+        variant: Variant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -81,12 +104,31 @@ impl RunScreen {
                     return div().into_any_element();
                 };
                 let actions = top
-                    .filter(|ix| convo::final_messages(&self.rows).contains(ix))
+                    .and_then(|ix| self.items.items.get(ix))
+                    .filter(|item| item.decor.final_message)
                     .map(|_| self.message_actions(theme, *key, text));
+                // The prose is drawn by the markdown view, which cannot paint a match over its
+                // text: a row that holds one is tinted, and the one the bar is on has a rule.
+                let mark = self.find_row_mark(*key);
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
+                    .when_some(mark, |d, current| {
+                        let tint = find_look::hit_style(theme, variant, false)
+                            .background_color
+                            .unwrap_or(theme.raised);
+                        d.bg(tint)
+                            .rounded(px(6.0))
+                            .px(px(8.0))
+                            .mx(px(-8.0))
+                            .border_l_2()
+                            .border_color(if current {
+                                theme.accent
+                            } else {
+                                gpui::transparent_black()
+                            })
+                    })
                     .child(
                         div()
                             .text_size(px(15.0))
@@ -96,8 +138,8 @@ impl RunScreen {
                     .children(actions)
                     .into_any_element()
             }
-            Row::Reasoning { key, text } => self.reasoning(theme, *key, text, cx),
-            Row::Tools { key, calls } => self.steps(theme, *key, calls, cx),
+            Row::Reasoning { key, text } => self.reasoning(theme, variant, *key, text, cx),
+            Row::Tools { key, calls } => self.steps(theme, variant, *key, calls, cx),
             Row::Question {
                 questions,
                 resolution,
@@ -138,7 +180,7 @@ impl RunScreen {
                 )
             }
             Row::Routing { key, view } => self.routing_card(theme, *key, view, cx),
-            Row::Worked { key, secs, rows } => self.worked(theme, *key, *secs, rows, window, cx),
+            Row::Worked { key, secs, rows } => self.worked(theme, variant, *key, *secs, rows, cx),
             Row::Done {
                 stop,
                 result,
@@ -155,14 +197,8 @@ impl RunScreen {
                 ))
                 // Only the thread's latest run says what the branch holds.
                 .children(
-                    (top.is_some()
-                        && self
-                            .rows
-                            .iter()
-                            .rposition(|r| matches!(r, Row::Done { .. }))
-                            == top)
-                        .then(|| self.result_line(theme, cx))
-                        .flatten(),
+                    top.filter(|&ix| self.items.is_last_done(ix))
+                        .and_then(|_| self.result_line(theme, cx)),
                 )
                 .into_any_element(),
             Row::Divider {
@@ -175,17 +211,21 @@ impl RunScreen {
     }
 
     /// "Worked for 3m 12s ›": a disclosure that opens the turn's interim text and steps in place.
+    /// This is the fold's head only; while it is open its rows are list items of their own, right
+    /// after it. Its look is the variant's: A today's muted line, B a ledger line with the step
+    /// count behind a raised rule, C a quiet card with the tools used as small chips.
     fn worked(
         &self,
         theme: &Theme,
+        variant: Variant,
         key: Key,
         secs: Option<u64>,
         rows: &[Row],
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.open.contains(&key);
         let text = theme.text;
+        let label = SharedString::from(convo::worked_label(secs));
         let head = div()
             .id(SharedString::from(format!("worked-{}", key.0)))
             .debug_selector({
@@ -195,33 +235,57 @@ impl RunScreen {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .text_size(px(13.0))
+            .text_size(px(if variant == Variant::B { 12.0 } else { 13.0 }))
             .text_color(theme.muted)
             .cursor_pointer()
             .hover(move |s| s.text_color(text))
-            .child(SharedString::from(convo::worked_label(secs)))
+            .child(label)
+            .when(variant == Variant::B, |d| {
+                d.child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(11.0))
+                        .text_color(theme.faint)
+                        .child(SharedString::from(format!(
+                            "\u{b7} {} steps",
+                            convo::steps_in(rows)
+                        ))),
+                )
+            })
             .child(icon(
                 if open { Icon::ChevDown } else { Icon::Fwd },
                 13.0,
                 theme.muted,
             ))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)));
-        let inner: Vec<AnyElement> = if open {
-            rows.iter()
-                .map(|row| self.row_body(row, None, theme, window, cx))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(head)
-            .when(open, |d| {
-                d.child(div().flex().flex_col().gap(px(12.0)).children(inner))
-            })
-            .into_any_element()
+        match variant {
+            Variant::A => head.into_any_element(),
+            Variant::B => div()
+                .border_l_2()
+                .border_color(theme.raised)
+                .pl(px(10.0))
+                .py(px(2.0))
+                .child(head)
+                .into_any_element(),
+            Variant::C => div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(10.0))
+                .bg(theme.surface)
+                .border_1()
+                .border_color(theme.hairline)
+                .child(head)
+                .child(div().flex_1())
+                .children(
+                    convo::tools_used(rows, 4)
+                        .into_iter()
+                        .map(|name| kit::chip(theme, SharedString::from(name))),
+                )
+                .into_any_element(),
+        }
     }
 
     /// A user message: a neutral raised bubble on the right; the time and Copy show on hover, and
@@ -267,6 +331,9 @@ impl RunScreen {
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(key, cx)))
         });
         let time = at_ms.map(|at| convo::clock_label(at, &chrono::Local));
+        // The matches in the words shown (the cut part of a long message has none painted).
+        let variant = Self::variant(cx);
+        let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .group(group.clone())
             .w_full()
@@ -291,7 +358,11 @@ impl RunScreen {
                     .bg(theme.raised)
                     .text_size(px(15.0))
                     .line_height(px(23.0))
-                    .child(SharedString::from(shown.shown))
+                    .child(if hits.is_empty() {
+                        SharedString::from(shown.shown).into_any_element()
+                    } else {
+                        Self::find_paint(theme, variant, shown.shown, &hits).into_any_element()
+                    })
                     .children(toggle),
             )
             .child(
@@ -339,6 +410,7 @@ impl RunScreen {
     pub(super) fn steps(
         &self,
         theme: &Theme,
+        variant: Variant,
         key: Key,
         calls: &[ToolEntry],
         cx: &mut Context<Self>,
@@ -351,7 +423,7 @@ impl RunScreen {
             .children(
                 lines
                     .iter()
-                    .map(|line| self.step_row(theme, key, line, calls, cx)),
+                    .map(|line| self.step_row(theme, variant, key, line, calls, cx)),
             )
             .into_any_element()
     }
@@ -530,11 +602,13 @@ impl RunScreen {
     pub(super) fn reasoning(
         &self,
         theme: &Theme,
+        variant: Variant,
         key: Key,
         text: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.open.contains(&key);
+        let hits = self.find_highlights(key, find::Part::Whole);
         div()
             .flex()
             .flex_col()
@@ -555,7 +629,12 @@ impl RunScreen {
                         .text_size(px(13.5))
                         .line_height(px(21.0))
                         .text_color(theme.muted)
-                        .child(SharedString::from(text.to_owned())),
+                        .child(if hits.is_empty() {
+                            SharedString::from(text.to_owned()).into_any_element()
+                        } else {
+                            Self::find_paint(theme, variant, text.to_owned(), &hits)
+                                .into_any_element()
+                        }),
                 )
             })
             .into_any_element()

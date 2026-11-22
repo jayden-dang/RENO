@@ -1244,6 +1244,9 @@ impl Composer {
             self.model.set_text("");
             cx.emit(ReasonEvent::Cancelled);
             cx.notify();
+        } else if crate::ui::find::is_open(cx) {
+            // The find bar is open: Escape is its, and does not stop the run.
+            cx.propagate();
         } else if let Mode::Steer(run) = &self.mode
             && crate::prefs::current(cx).escape_stops
             && dock_action(self.stoppable(cx), self.model.can_submit()) == DockAction::Stop

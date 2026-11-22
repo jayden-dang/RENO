@@ -1,10 +1,14 @@
 //! The Run screen: one run's transcript, its details and a steer input.
 //!
 //! The transcript is a virtualised GPUI `list()`, bottom-aligned, that follows the tail while the
-//! run streams. Its rows come from the pure `transcript::build_rows`; this file only draws them
-//! and keeps a few per-row caches: the streaming markdown parse of each prose row and which tool
-//! groups are open. A store notification rebuilds the rows, finds the first one that differs and
-//! tells the list to re-measure from there, so a streamed delta costs one row, not the list.
+//! run streams. Its rows come from the pure `transcript::build_rows`, nested (a finished turn's
+//! interim rows sit in its "Worked for" row); the list draws a flat projection of them
+//! (`vm::items`): one item per top-level row and, while a fold is open, one per row inside it.
+//! A store notification rebuilds the rows, compares the items by key and tells the list only what
+//! changed: the items whose row grew are measured again in place, and the stretch that was
+//! replaced (a finished turn folding) is replaced in one range, so a streamed delta costs one
+//! item, not the list, and never moves the item under the scroll anchor. A reply's markdown is
+//! parsed when its item is first drawn.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -24,7 +28,7 @@ use crate::panel::saved::Saved;
 use crate::panel::{PanelKey, PanelState};
 use crate::store::{RunRouting, Store};
 use crate::summary;
-use crate::transcript::{self as model, Built, Facts, Key, Row, ToolEntry};
+use crate::transcript::{self as model, Facts, Key, Row, ToolEntry};
 use crate::ui::composer::Composer;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO, Tone};
@@ -33,12 +37,15 @@ use crate::ui::theme::{self, Theme};
 use crate::vm::changes::{self as change_facts, Loaded, Patch, PatchPane, ReviewScope};
 use crate::vm::convo;
 use crate::vm::executors as executor_facts;
+use crate::vm::find::Opens;
+use crate::vm::items::{self, Projection, Side};
 use crate::vm::routing::{self, RoutingView};
 
 mod activity;
 mod changes;
 mod dock;
 mod files;
+mod find;
 mod history;
 mod output;
 mod panel;
@@ -51,6 +58,7 @@ mod transcript;
 pub(crate) use dock::bind_keys;
 #[cfg(test)]
 pub(crate) use dock::keep_composer_under_panels;
+pub(crate) use find::Demo as FindDemo;
 pub(crate) use panel::PanelAction;
 
 /// How long a burst of finished tool calls waits before the changes are read again.
@@ -77,7 +85,14 @@ pub(crate) struct RunScreen {
     /// Review read. The transcript shows every run of its thread up to this one.
     run: RunId,
     list: ListState,
+    /// The nested rows: what the transcript says, and what its tests read.
     rows: Vec<Row>,
+    /// The flat items the list draws, over `rows` and the open folds.
+    items: Projection,
+    /// The prompt tick rail, and where each top-level row starts (0.0 to 1.0): made when the rows
+    /// change, not on every frame.
+    ticks: Vec<convo::TickMark>,
+    row_starts: Vec<f32>,
     /// How many leading rows are the older runs' (with their dividers), and what they were built
     /// from. While that holds, only the latest run's rows are built again.
     prefix_len: usize,
@@ -92,13 +107,17 @@ pub(crate) struct RunScreen {
     /// The Session tab's "Close thread" is asking for a confirmation.
     close_confirm: bool,
     facts: Facts,
-    /// One streaming parse per prose row, keyed by the row's first event.
+    /// One streaming parse per prose row, keyed by the row's first event, made when the row is
+    /// first drawn.
     markdown: HashMap<Key, Streaming>,
-    /// Tool groups and reasoning rows the user opened.
-    open: HashSet<Key>,
-    /// Tool calls whose output shows (in a group of more than one), and those showing all of it.
-    outputs_open: HashSet<String>,
-    outputs_full: HashSet<String>,
+    /// Folds, tool groups, reasoning rows and long messages that are open: the owner's, and those
+    /// find opened (which it closes again).
+    open: Opens<Key>,
+    /// Tool calls whose output shows, and those showing all of it.
+    outputs_open: Opens<String>,
+    outputs_full: Opens<String>,
+    /// Find in the conversation.
+    find: find::Find,
     /// The side panel's tabs, keyed by what the panel belongs to (the run, until threads land).
     panel_key: PanelKey,
     panel: PanelState,
@@ -191,6 +210,12 @@ impl RunScreen {
         };
         let list = ListState::new(0, ListAlignment::Bottom, px(OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
+        // A scroll may have brought the view back to the tail (or taken it off): the "jump to
+        // latest" control reads that on the next frame, once the list has settled.
+        let this = cx.entity_id();
+        list.set_scroll_handler(move |_, window, _| {
+            window.on_next_frame(move |_, cx| cx.notify(this));
+        });
         let mut screen = Self {
             _store: cx.observe(&store, |this, _, cx| {
                 this.refresh(cx);
@@ -200,6 +225,9 @@ impl RunScreen {
             run: run.clone(),
             list,
             rows: Vec::new(),
+            items: Projection::default(),
+            ticks: Vec::new(),
+            row_starts: Vec::new(),
             prefix_len: 0,
             prefix_runs: Vec::new(),
             segments: HashMap::new(),
@@ -209,9 +237,10 @@ impl RunScreen {
             close_confirm: false,
             facts: Facts::default(),
             markdown: HashMap::new(),
-            open: HashSet::new(),
-            outputs_open: HashSet::new(),
-            outputs_full: HashSet::new(),
+            open: Opens::default(),
+            outputs_open: Opens::default(),
+            outputs_full: Opens::default(),
+            find: find::Find::default(),
             panel_key: key,
             panel,
             panel_seeded,
@@ -321,10 +350,22 @@ impl RunScreen {
         &self.facts
     }
 
-    /// The first row the list shows.
+    /// The first top-level row the list shows (an item inside a fold is its fold's row).
     #[cfg(test)]
     pub(crate) fn top_row(&self) -> usize {
-        self.list.logical_scroll_top().item_ix
+        self.items
+            .top_of(self.list.logical_scroll_top().item_ix, self.rows.len())
+    }
+
+    /// The flat items the list draws, for tests.
+    #[cfg(test)]
+    pub(crate) fn items(&self) -> &Projection {
+        &self.items
+    }
+
+    #[cfg(test)]
+    pub(crate) fn item_count(&self) -> usize {
+        self.list.item_count()
     }
 
     #[cfg(test)]
@@ -332,23 +373,131 @@ impl RunScreen {
         self.list.is_following_tail()
     }
 
+    /// The owner opens or closes a fold, a reasoning row, a tool group or a long message.
+    /// Opening one while the view follows the tail stops following and puts what opened at the
+    /// top of the view, so what grew stays in view.
     fn toggle(&mut self, key: Key, cx: &mut Context<Self>) {
-        if !self.open.remove(&key) {
-            self.open.insert(key);
+        let opening = !self.open.contains(&key);
+        let following = self.list.is_following_tail();
+        self.open.toggle(key);
+        self.reflow(key, cx);
+        if opening && following {
+            self.keep_in_view(key);
         }
-        self.remeasure(key);
+    }
+
+    /// Stops following the tail, with the item of `key` at the top of the view.
+    pub(super) fn keep_in_view(&mut self, key: Key) {
+        if let Some(ix) = self.items.item_of(key) {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+    }
+
+    /// What `key` shows changed: a fold's rows come into the list or leave it; anything else is
+    /// one item that is measured again.
+    pub(super) fn reflow(&mut self, key: Key, cx: &mut Context<Self>) {
+        let is_fold = self
+            .items
+            .item_of(key)
+            .and_then(|ix| self.items.row(&self.rows, ix))
+            .is_some_and(|row| matches!(row, Row::Worked { .. }));
+        if is_fold {
+            self.reproject(cx);
+        } else {
+            self.remeasure(key);
+        }
+        self.find_note_change(cx);
         cx.notify();
     }
 
-    /// The row holding `key` (itself, or inside a fold) changed height: measure it again.
+    /// The row holding `key` changed height: measure its item again.
     pub(super) fn remeasure(&mut self, key: Key) {
-        let holds = |row: &Row| {
-            row.key() == key
-                || matches!(row, Row::Worked { rows, .. } if rows.iter().any(|r| r.key() == key))
-        };
-        if let Some(ix) = self.rows.iter().position(holds) {
-            self.list.splice(ix..ix + 1, 1);
+        if let Some(ix) = self.items.item_of(key) {
+            self.list.remeasure_items(ix..ix + 1);
         }
+    }
+
+    /// The open folds changed: the items are made again over the same rows, and the list is told
+    /// which came or went. The fold's head keeps its place.
+    fn reproject(&mut self, cx: &mut Context<Self>) {
+        self.replace_rows(0, None, cx);
+    }
+
+    /// Makes the items of the rows from top-level row `from` on (the rows before it did not
+    /// change) and tells the list what differs. `rows` are the new rows from `from`: `None`
+    /// when the rows stay and only the open folds changed.
+    fn replace_rows(&mut self, from: usize, rows: Option<Vec<Row>>, cx: &mut Context<Self>) {
+        let from = from.min(self.rows.len());
+        let rows_replaced = rows.is_some();
+        let old_rows = match rows {
+            Some(new) => {
+                let old = self.rows.split_off(from);
+                self.rows.extend(new);
+                old
+            }
+            // The rows stay where they are: compare them with themselves.
+            None => Vec::new(),
+        };
+        let same_rows = old_rows.is_empty() && from == 0;
+        let was_last_done = self
+            .items
+            .last_done_item()
+            .map(|ix| self.items.items[ix].key);
+        let before = self.items.len();
+        let open = &self.open;
+        let old_items = self
+            .items
+            .reproject(&self.rows, from, |k| open.contains(&k));
+        let at = before - old_items.len();
+        let replaced = rows_replaced;
+        let plan = items::diff(
+            Side {
+                rows: if same_rows { &self.rows } else { &old_rows },
+                base: if same_rows { 0 } else { from },
+                items: &old_items,
+            },
+            Side {
+                rows: &self.rows,
+                base: 0,
+                items: &self.items.items[at..],
+            },
+            at,
+        );
+        self.apply_plan(&plan);
+        // The Done that says what the branch holds moved to another row: both are measured again.
+        let now_last_done = self
+            .items
+            .last_done_item()
+            .map(|ix| self.items.items[ix].key);
+        if was_last_done != now_last_done {
+            for key in was_last_done.into_iter().chain(now_last_done) {
+                self.remeasure(key);
+            }
+        }
+        if replaced && !plan.is_empty() {
+            self.rail_changed();
+            // New events: the find count follows, soon, from a timer this arms.
+            self.find_note_change(cx);
+        }
+    }
+
+    /// Tells the list what [`items::diff`] found.
+    fn apply_plan(&self, plan: &items::Plan) {
+        if let Some((range, count)) = &plan.splice {
+            self.list.splice(range.clone(), *count);
+        }
+        for &ix in &plan.remeasure {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+    }
+
+    /// The rows changed: the tick rail is worked out again, once, not on every frame.
+    fn rail_changed(&mut self) {
+        self.ticks = convo::tick_marks(&self.rows);
+        self.row_starts = convo::row_starts(&self.rows);
     }
 
     /// Rebuilds the rows from the store and tells the list what changed.
@@ -377,18 +526,23 @@ impl RunScreen {
         self.follow_thread(cx);
     }
 
-    /// Chips under the transcript's agent text change those rows' height: measure them again when
-    /// the run's agents appear or go.
+    /// Chips under the transcript's agent text change those rows' height: measure the prose rows
+    /// they hang under again when the run's agents appear or go.
     fn measure_activity_chips(&mut self, cx: &gpui::App) {
-        let chips = self
+        let spawned: Vec<usize> = self
             .store
             .read(cx)
             .run_activity(&self.run)
-            .map_or(0, |a| a.agents.len());
-        if chips != self.activity_chips {
-            self.activity_chips = chips;
-            let rows = self.rows.len();
-            self.list.splice(0..rows, rows);
+            .map(|a| a.agents.iter().map(|l| l.spawned_after).collect())
+            .unwrap_or_default();
+        if spawned.len() == self.activity_chips {
+            return;
+        }
+        self.activity_chips = spawned.len();
+        for n in spawned {
+            if let Some(ix) = self.items.prose_item(n) {
+                self.list.remeasure_items(ix..ix + 1);
+            }
         }
     }
 
@@ -460,14 +614,23 @@ impl RunScreen {
             .into_iter()
             .collect();
         tail.extend(built.rows.into_iter().map(|row| row.in_segment(segment_at)));
-        let facts = built.facts;
+        self.facts = built.facts;
 
         if prefix_same {
-            self.apply_tail(facts, tail);
+            // The older runs' rows and items stay: only the latest run's are made again.
+            let from = self.prefix_len.min(self.rows.len());
+            self.replace_rows(from, Some(tail), cx);
             return;
         }
-        // Some older run moved: build it again, the others come from the cache.
+        // Some older run moved: build it again, the others come from the cache. The runs before
+        // the first that moved, and their rows and items, stay as they are.
+        let same_upto = prefix_runs
+            .iter()
+            .zip(&self.prefix_runs)
+            .take_while(|(now, was)| now == was)
+            .count();
         let mut cache = std::mem::take(&mut self.segments);
+        let mut from = 0;
         let mut rows: Vec<Row> = Vec::new();
         for (at, (id, sig)) in prefix_runs.iter().enumerate() {
             let segment = match cache.remove(id).filter(|c| &c.signature == sig) {
@@ -488,14 +651,17 @@ impl RunScreen {
                     }
                 }
             };
-            rows.extend(segment.rows.iter().cloned());
+            if at < same_upto {
+                from += segment.rows.len();
+            } else {
+                rows.extend(segment.rows.iter().cloned());
+            }
             self.segments.insert(id.clone(), segment);
         }
-        self.prefix_len = rows.len();
+        self.prefix_len = from + rows.len();
         self.prefix_runs = prefix_runs;
-        self.feed_markdown(&rows);
         rows.extend(tail);
-        self.apply(Built { rows, facts });
+        self.replace_rows(from, Some(rows), cx);
     }
 
     /// Opens every fold of a finished turn (a screenshot hook: `RENO_OPEN_FOLDS=1`).
@@ -506,11 +672,16 @@ impl RunScreen {
             .filter(|row| matches!(row, Row::Worked { .. }))
             .map(Row::key)
             .collect();
-        for key in folds {
-            if !self.open.contains(&key) {
-                self.toggle(key, cx);
-            }
+        if folds.is_empty() {
+            return;
         }
+        for key in folds {
+            self.open.owner_open(key);
+        }
+        self.list.pause_following_tail();
+        self.reproject(cx);
+        self.find_note_change(cx);
+        cx.notify();
     }
 
     /// `RENO_BENCH=1`: once the transcript has stopped growing, scroll it from its end to its
@@ -581,7 +752,7 @@ impl RunScreen {
     /// Brings the row at `ix` to the top of the list (a tick on the rail was clicked).
     fn scroll_to_row(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.list.scroll_to(ListOffset {
-            item_ix: ix,
+            item_ix: self.items.item_of_top(ix),
             offset_in_item: px(0.0),
         });
         cx.notify();
@@ -592,14 +763,18 @@ impl RunScreen {
     fn tick_rail(
         &self,
         theme: &Theme,
-        marks: &[convo::TickMark],
+        variant: crate::vm::draft33::Variant,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let marks = self.ticks.as_slice();
         let scrolls = f32::from(self.list.max_offset_for_scrollbar().y);
         if marks.is_empty() || !convo::rail_visible(scrolls) {
             return None;
         }
-        let current = convo::current_tick(marks, self.list.logical_scroll_top().item_ix);
+        let top = self
+            .items
+            .top_of(self.list.logical_scroll_top().item_ix, self.rows.len());
+        let current = convo::current_tick(marks, top);
         let (faint, text) = (theme.faint.opacity(0.6), theme.text);
         Some(
             div()
@@ -637,40 +812,14 @@ impl RunScreen {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_row(ix, cx)))
                 }))
+                // Ledger: where the matches are, beside the prompt ticks.
+                .children(if variant == crate::vm::draft33::Variant::B {
+                    self.find_rail_ticks(theme)
+                } else {
+                    Vec::new()
+                })
                 .into_any_element(),
         )
-    }
-
-    /// Parses each prose row's text, those inside a fold too.
-    fn feed_markdown(&mut self, rows: &[Row]) {
-        for row in rows {
-            match row {
-                Row::Prose { key, text } => {
-                    self.markdown.entry(*key).or_default().set_text(text);
-                }
-                Row::Worked { rows, .. } => self.feed_markdown(rows),
-                _ => {}
-            }
-        }
-    }
-
-    /// The latest run's rows replace what followed the older runs'.
-    fn apply_tail(&mut self, facts: Facts, tail: Vec<Row>) {
-        self.facts = facts;
-        self.feed_markdown(&tail);
-        let at = self.prefix_len.min(self.rows.len());
-        let same = self.rows[at..]
-            .iter()
-            .zip(&tail)
-            .take_while(|(old, new)| old == new)
-            .count();
-        let old_len = self.rows.len() - at;
-        if same < old_len || same < tail.len() {
-            self.list
-                .splice(at + same..self.rows.len(), tail.len() - same);
-        }
-        self.rows.truncate(at);
-        self.rows.extend(tail);
     }
 
     /// Follows the thread: the panel key once the daemon names the thread, and a newer run of
@@ -768,12 +917,8 @@ impl RunScreen {
         };
         if line != self.result {
             self.result = line;
-            if let Some(ix) = self
-                .rows
-                .iter()
-                .rposition(|r| matches!(r, Row::Done { .. }))
-            {
-                self.list.splice(ix..ix + 1, 1);
+            if let Some(ix) = self.items.last_done_item() {
+                self.list.remeasure_items(ix..ix + 1);
             }
         }
     }
@@ -827,22 +972,6 @@ impl RunScreen {
         });
     }
 
-    fn apply(&mut self, built: Built) {
-        let Built { rows, facts } = built;
-        self.facts = facts;
-        self.feed_markdown(&rows);
-        let same = self
-            .rows
-            .iter()
-            .zip(&rows)
-            .take_while(|(old, new)| old == new)
-            .count();
-        if same < self.rows.len() || same < rows.len() {
-            self.list.splice(same..self.rows.len(), rows.len() - same);
-        }
-        self.rows = rows;
-    }
-
     pub(super) fn summary<'a>(&self, cx: &'a gpui::App) -> Option<&'a RunSummary> {
         self.store.read(cx).state().run(&self.run)
     }
@@ -856,9 +985,12 @@ impl Render for RunScreen {
         if let Some(files) = self.files.as_mut() {
             files.model.set_show_hidden(show_hidden);
         }
-        let ticks = convo::tick_marks(&self.rows);
+        let variant = Self::variant(cx);
+        self.sync_find_tab(variant);
+        let rail = self.tick_rail(&theme, variant, cx);
         let transcript = div()
             .id("transcript")
+            .debug_selector(|| "transcript".to_owned())
             .relative()
             .flex_1()
             .min_h_0()
@@ -874,7 +1006,9 @@ impl Render for RunScreen {
                 ),
             )
             // After the list, so it is on top of it and takes the clicks.
-            .children(self.tick_rail(&theme, &ticks, cx));
+            .children(rail)
+            .children(self.jump_control(&theme, variant, cx))
+            .children(self.find_bar_over(&theme, variant, window, cx));
         let chat = div()
             .id("chat-canvas")
             .debug_selector(|| "chat-canvas".to_owned())
@@ -888,6 +1022,7 @@ impl Render for RunScreen {
             .border_1()
             .border_color(theme.hairline)
             .overflow_hidden()
+            .children(self.find_bar_above(&theme, variant, window, cx))
             .child(
                 div()
                     .flex_1()
@@ -948,6 +1083,8 @@ mod convo_tests;
 
 #[cfg(test)]
 mod files_tests;
+#[cfg(test)]
+mod find_tests;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]

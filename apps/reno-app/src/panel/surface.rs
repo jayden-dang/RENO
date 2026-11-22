@@ -28,6 +28,9 @@ pub(crate) enum Surface {
     Commit(String),
     /// A side conversation, by its run.
     SideChat(RunId),
+    /// The results of find in the conversation (draft variant C). It lives while the find bar is
+    /// open, is not saved and is not brought back by "reopen closed tab".
+    Find,
     /// A tab whose feature arrives in a later phase: the page says so. It goes away when the
     /// feature gets its own kind, and is not saved.
     Planned(HomeKind),
@@ -53,6 +56,7 @@ impl Surface {
                 .unwrap_or(path)
                 .to_owned(),
             Self::Files => "Files".into(),
+            Self::Find => "Find".into(),
             Self::Terminal(_) => "Terminal".into(),
             Self::History => "History".into(),
             Self::Commit(sha) => sha.chars().take(7).collect(),
@@ -81,6 +85,7 @@ impl Surface {
             Self::Review => "review".into(),
             Self::File(path) => format!("file-{path}"),
             Self::Files => "files".into(),
+            Self::Find => "find".into(),
             Self::Terminal(id) => format!("terminal-{id}"),
             Self::History => "history".into(),
             Self::Commit(sha) => format!("commit-{sha}"),
@@ -99,6 +104,7 @@ impl Surface {
             Self::Review => Icon::Branch,
             Self::File(_) => Icon::File,
             Self::Files => Icon::Folder,
+            Self::Find => Icon::Search,
             Self::Terminal(_) => Icon::Terminal,
             Self::History => Icon::History,
             Self::Commit(_) => Icon::Merge,
@@ -132,8 +138,9 @@ impl Surface {
             Self::History => (Kind::History, String::new()),
             Self::Commit(sha) => (Kind::Commit, sha.clone()),
             Self::SideChat(run) => (Kind::SideChat, run.as_str().to_owned()),
-            // A placeholder is not saved: a build that knows no such kind reads it as nothing.
-            Self::Planned(_) => (Kind::Unknown, String::new()),
+            // A placeholder, and the find results, are not saved: a build that knows no such kind
+            // reads it as nothing.
+            Self::Planned(_) | Self::Find => (Kind::Unknown, String::new()),
         };
         Descriptor { kind, key }
     }
@@ -334,6 +341,17 @@ mod tests {
         assert_eq!(Surface::Review.count(&c), Some(3));
         assert_eq!(Surface::Review.count(&Counts::default()), None);
         assert_eq!(Surface::Session.count(&c), None);
+    }
+
+    #[test]
+    fn the_find_tab_is_a_tab_that_is_never_saved() {
+        let d = Surface::Find.descriptor();
+        assert_eq!(d.kind, Kind::Unknown);
+        assert_eq!(d.surface(), None);
+        assert!(!d.is_savable());
+        assert_eq!(Surface::Find.title(), "Find");
+        assert_eq!(Surface::Find.slug(), "find");
+        assert!(Surface::Find.closable());
     }
 
     #[test]

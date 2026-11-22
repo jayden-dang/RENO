@@ -134,7 +134,8 @@ impl PanelState {
         };
         self.tabs.remove(at);
         self.mru.retain(|s| s != surface);
-        if *surface != Surface::Home {
+        // Neither the home page nor the find results come back with "reopen closed tab".
+        if !matches!(surface, Surface::Home | Surface::Find) {
             self.closed.retain(|s| s != surface);
             self.closed.push(surface.clone());
             if self.closed.len() > CLOSED_CAP {
