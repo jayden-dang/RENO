@@ -357,14 +357,14 @@ _Requirements: TRANSCRIPT-3.1, TRANSCRIPT-3.2, TRANSCRIPT-3.3, TRANSCRIPT-3.4, T
 
 **Depends-on:** none
 
-- [ ] **Step 1:** Add failing tests:
+- [x] **Step 1:** Add failing tests:
   - `double_triple_and_quadruple_click_select_a_word_a_line_and_a_block`;
   - `shift_click_extends_the_selection`;
   - `copy_as_markdown_gives_the_source_with_its_math_delimiters`.
   Run: `cargo test -p reno-app select` — expect: fails.
-- [ ] **Step 2:** Implement click units, shift-extend and `source_of`. Run: `cargo test -p reno-app` — expect: pass,
+- [x] **Step 2:** Implement click units, shift-extend and `source_of`. Run: `cargo test -p reno-app` — expect: pass,
   including the kept selection tests.
-- [ ] **Step 3:** Commit `selection: word, line and block clicks, shift-click, and Copy as Markdown`.
+- [x] **Step 3:** Commit `selection: word, line and block clicks, shift-click, and Copy as Markdown`.
 
 _Requirements: TRANSCRIPT-2.1, TRANSCRIPT-2.2, TRANSCRIPT-2.3, TRANSCRIPT-2.4, TRANSCRIPT-2.5, TRANSCRIPT-2.6, TRANSCRIPT-2.7, TRANSCRIPT-2.8, TRANSCRIPT-2.9, TRANSCRIPT-2.10, TRANSCRIPT-2.11, TRANSCRIPT-2.12, TRANSCRIPT-2.13_
 
