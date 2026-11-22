@@ -288,10 +288,14 @@ impl Options {
     }
 }
 
+/// The Geist regular face. Registered with GPUI below and also read by the diagram renderer, which
+/// measures and rasterises labels in the font the app draws everything else in.
+pub(crate) const GEIST_REGULAR: &[u8] = include_bytes!("../assets/fonts/Geist.ttf");
+
 /// Registers Geist and Geist Mono (SIL OFL, see `assets/fonts/Geist-OFL.txt`).
 pub(crate) fn register_fonts(cx: &mut App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
-        Cow::Borrowed(include_bytes!("../assets/fonts/Geist.ttf").as_slice()),
+        Cow::Borrowed(GEIST_REGULAR),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Medium.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-SemiBold.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono.ttf").as_slice()),

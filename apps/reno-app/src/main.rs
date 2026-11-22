@@ -48,6 +48,8 @@ mod panel_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]
+mod renderers_tests;
+#[cfg(test)]
 mod screen_tests;
 #[cfg(test)]
 mod settings_pages_tests;

@@ -531,6 +531,7 @@ impl Store {
     /// The mocked agent-posted visuals (ROAD-33): only where [`Capabilities::agent_visuals`] is
     /// on. The real daemon has no such contract, so this is `None` there and the transcript
     /// shows no visuals and no placeholder.
+    #[allow(dead_code)] // The transcript reads visuals through `run_visuals` (ROAD-33 wiring).
     fn visual_desk(&self) -> Option<&dyn VisualDesk> {
         if !self.capabilities.agent_visuals {
             return None;
@@ -539,6 +540,7 @@ impl Store {
     }
 
     /// The visuals `run` posted, in order; empty when this connection offers none.
+    #[allow(dead_code)] // The transcript inserts them after their entry (ROAD-33 wiring).
     pub(crate) fn run_visuals(&self, run: &RunId) -> Vec<Visual> {
         self.visual_desk()
             .map(|desk| desk.visuals(run))

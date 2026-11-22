@@ -159,7 +159,6 @@ mod tests {
                 && !real.place_chooser
                 && !real.thread_edit
                 && !real.daemon_restart
-                && !real.agent_visuals
         );
     }
 
@@ -191,6 +190,13 @@ mod tests {
         let fake = Capabilities::FAKE;
         assert!(fake.permission_modes && fake.allow_similar && fake.answer_questions);
         assert!(fake.harness_commands && fake.message_queue && fake.place_chooser);
-        assert!(fake.thread_edit && fake.daemon_restart && fake.agent_visuals);
+        assert!(fake.thread_edit && fake.daemon_restart);
+    }
+
+    #[test]
+    fn agent_visuals_are_a_fake_only_capability() {
+        let (real, fake) = (Capabilities::REAL, Capabilities::FAKE);
+        assert!(!real.agent_visuals, "the real daemon posts none");
+        assert!(fake.agent_visuals);
     }
 }

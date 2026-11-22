@@ -94,6 +94,7 @@ icons! {
     Terminal => "terminal",
     Up => "up",
     Wand => "wand",
+    Wrap => "wrap",
     X => "x",
     PhCaretRight => "ph-caret-right",
     PhCaretDown => "ph-caret-down",

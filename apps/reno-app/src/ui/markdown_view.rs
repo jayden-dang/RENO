@@ -16,16 +16,35 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, SharedString,
-    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*, px,
+    AnyElement, App, FontStyle, FontWeight, Hsla, InteractiveText, IntoElement, Pixels, RenderOnce,
+    SharedString, StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window, div, prelude::*,
+    px,
 };
+use reno_client::Client;
 use reno_markdown::mend::PENDING_LINK_URL;
 use reno_markdown::parser::TableAlign;
 use reno_markdown::{Block, BlockTree, IncrementalParser, InlineRun};
+use reno_proto::RunId;
 use reno_syntax::{HighlightKind, HighlightRequest, HighlightSpan, HighlightedDocument};
 
+use self::chrome::Card;
+use self::image::ImageHost;
+use self::link::{Action, LinkPolicy};
+use self::picture::{Overlay, Overlays, Picture};
 use super::kit::MONO;
 use super::theme::Theme;
+use crate::vm::draft33::Variant;
+
+pub(crate) mod chrome;
+pub(crate) mod image;
+pub(crate) mod link;
+pub(crate) mod lru;
+pub(crate) mod math;
+pub(crate) mod mermaid;
+pub(crate) mod picture;
+pub(crate) mod visual;
+
+pub(crate) use self::link::FileLinks;
 
 /// One streaming message: its parser and the tree to draw.
 #[derive(Debug, Default)]
@@ -63,23 +82,126 @@ pub(crate) fn plain(runs: &[InlineRun]) -> String {
     runs.iter().map(|r| r.text.as_str()).collect()
 }
 
-/// The elements of a whole tree, stacked.
-pub(crate) fn blocks(tree: &BlockTree, theme: &Theme, window: &Window) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .children(
-            tree.blocks
-                .iter()
-                .map(|top| block(&top.block, theme, window)),
-        )
-        .into_any_element()
+/// What the renderer needs from whoever shows the markdown: how links behave and where a
+/// worktree image is read from (TRANSCRIPT-8.2, 11.1).
+#[derive(Clone, Debug)]
+pub(crate) struct Host {
+    pub(crate) links: LinkPolicy,
+    /// `None`: images are not drawn; an image is its alt text, as the Files tab's preview always
+    /// showed it.
+    pub(crate) images: Option<ImageHost>,
 }
 
-fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
+impl Host {
+    /// The Files tab's preview: the links it always had, images as text (8.5).
+    pub(crate) fn preview() -> Self {
+        Self {
+            links: LinkPolicy::Preview,
+            images: None,
+        }
+    }
+
+    /// The transcript: web links through the link opener, worktree files through `files`,
+    /// worktree images read for `run` through `client`. With no run or client a worktree image
+    /// shows "Image not loaded".
+    pub(crate) fn transcript(
+        run: Option<RunId>,
+        client: Option<Client>,
+        files: Option<Rc<dyn FileLinks>>,
+    ) -> Self {
+        Self {
+            links: LinkPolicy::Transcript { files },
+            images: Some(ImageHost { run, client }),
+        }
+    }
+}
+
+/// Bumped each time something the renderers load in the background lands (an image, a diagram)
+/// or a block changes height (wrap): a list that caches row heights compares it between frames
+/// and measures the rows again when it moved.
+#[derive(Default)]
+struct Settled(u64);
+
+impl gpui::Global for Settled {}
+
+/// Records that a renderer's output changed size or arrived, and redraws.
+pub(crate) fn settled(cx: &mut App) {
+    cx.default_global::<Settled>().0 += 1;
+    cx.refresh_windows();
+}
+
+/// See [`Settled`].
+#[allow(dead_code)] // The transcript list reads it to measure rows again (ROAD-33 wiring).
+pub(crate) fn settled_generation(cx: &App) -> u64 {
+    cx.try_global::<Settled>().map_or(0, |s| s.0)
+}
+
+/// Everything one draw of a tree reads, taken once at its start.
+struct Env<'a> {
+    theme: &'a Theme,
+    host: &'a Host,
+    window: &'a Window,
+    base: gpui::TextStyle,
+    scale: f32,
+    variant: Variant,
+    /// Whether math is typeset, and its size in logical pixels per em.
+    math: Option<f32>,
+}
+
+/// A tree drawn for a host. A component, so that it reads the app (settings, the draft switch,
+/// the renderers' caches) when it is drawn and the caller needs no `App` to make one.
+#[derive(IntoElement)]
+struct Markdown {
+    tree: BlockTree,
+    theme: Theme,
+    host: Host,
+}
+
+impl RenderOnce for Markdown {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let base = window.text_style();
+        let (typeset, percent) = crate::prefs::math(cx);
+        let size = base.font_size.to_pixels(window.rem_size());
+        let env = Env {
+            theme: &self.theme,
+            host: &self.host,
+            window,
+            scale: window.scale_factor(),
+            variant: super::draft33::current(cx).unwrap_or(Variant::A),
+            math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
+            base,
+        };
+        div().flex().flex_col().gap(px(10.0)).children(
+            self.tree
+                .blocks
+                .iter()
+                .map(|top| block(&top.block, &env, cx))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+/// The elements of a whole tree, stacked, for the transcript's host with no run behind it: web
+/// links through the link opener, no file links, worktree images "not loaded". A transcript that
+/// knows its run draws with [`blocks_with`] and [`Host::transcript`].
+pub(crate) fn blocks(tree: &BlockTree, theme: &Theme, _window: &Window) -> AnyElement {
+    blocks_with(tree, theme, Host::transcript(None, None, None))
+}
+
+/// The elements of a whole tree, stacked, for `host`.
+pub(crate) fn blocks_with(tree: &BlockTree, theme: &Theme, host: Host) -> AnyElement {
+    Markdown {
+        tree: tree.clone(),
+        theme: *theme,
+        host,
+    }
+    .into_any_element()
+}
+
+fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
+    let theme = env.theme;
     match node {
-        Block::Paragraph { runs } => inline(runs, theme, window),
+        Block::Paragraph { runs } => paragraph(runs, env, cx),
         Block::Heading { level, runs } => {
             let size = match level {
                 1 => 20.0,
@@ -91,16 +213,18 @@ fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
                 .text_size(px(size))
                 .font_weight(FontWeight::SEMIBOLD)
                 .pt(px(4.0))
-                .child(inline(runs, theme, window))
+                .child(inline(runs, env, cx))
                 .into_any_element()
         }
-        Block::CodeBlock { code, language } => code_block(
-            code.trim_end_matches('\n'),
-            language.as_deref(),
-            theme,
-            window,
-        ),
-        Block::Math { tex } => code_block(tex, None, theme, window),
+        Block::CodeBlock { code, language } => {
+            let code = code.trim_end_matches('\n');
+            if language.as_deref().map(str::trim) == Some("mermaid") {
+                diagram(code, env, cx)
+            } else {
+                code_block(code, language.as_deref(), env, cx)
+            }
+        }
+        Block::Math { tex } => display_math(tex, env, cx),
         Block::BlockQuote { children } => div()
             .pl(px(12.0))
             .border_l_2()
@@ -109,7 +233,12 @@ fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .children(children.iter().map(|b| block(b, theme, window)))
+            .children(
+                children
+                    .iter()
+                    .map(|b| block(b, env, cx))
+                    .collect::<Vec<_>>(),
+            )
             .into_any_element(),
         Block::List {
             ordered_start,
@@ -118,43 +247,92 @@ fn block(node: &Block, theme: &Theme, window: &Window) -> AnyElement {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .children(items.iter().enumerate().map(|(i, item)| {
-                let marker = match ordered_start {
-                    Some(start) => format!("{}.", start + i as u64),
-                    None => "\u{2022}".to_owned(),
-                };
-                div()
-                    .flex()
-                    .gap(px(8.0))
-                    .child(
+            .children(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let marker = match ordered_start {
+                            Some(start) => format!("{}.", start + i as u64),
+                            None => "\u{2022}".to_owned(),
+                        };
                         div()
-                            .flex_none()
-                            .w(px(20.0))
-                            .text_color(theme.muted)
-                            .child(marker),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .children(item.iter().map(|b| block(b, theme, window))),
-                    )
-            }))
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(20.0))
+                                    .text_color(theme.muted)
+                                    .child(marker),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .children(
+                                        item.iter().map(|b| block(b, env, cx)).collect::<Vec<_>>(),
+                                    ),
+                            )
+                    })
+                    .collect::<Vec<_>>(),
+            )
             .into_any_element(),
         Block::Table {
             header,
             rows,
             align,
-        } => table(header, rows, align, theme, window),
+        } => table(header, rows, align, env, cx),
         Block::Rule => div()
             .h(px(1.0))
             .w_full()
             .bg(theme.hairline)
             .into_any_element(),
     }
+}
+
+/// A paragraph. Where the host draws images, an image splits it: the text before, the picture,
+/// the text after.
+fn paragraph(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
+    let Some(images) = &env.host.images else {
+        return inline(runs, env, cx);
+    };
+    if !runs.iter().any(|r| r.style.image.is_some()) {
+        return inline(runs, env, cx);
+    }
+    let mut parts: Vec<AnyElement> = Vec::new();
+    let mut text: Vec<InlineRun> = Vec::new();
+    for run in runs {
+        let Some(shown) = &run.style.image else {
+            text.push(run.clone());
+            continue;
+        };
+        if !text.is_empty() {
+            parts.push(inline(&std::mem::take(&mut text), env, cx));
+        }
+        parts.push(image::view(
+            &shown.alt,
+            &shown.source,
+            shown.link.as_deref(),
+            images,
+            &env.host.links,
+            env.theme,
+            cx,
+        ));
+    }
+    if !text.is_empty() {
+        parts.push(inline(&text, env, cx));
+    }
+    div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(6.0))
+        .children(parts)
+        .into_any_element()
 }
 
 /// What a code token looks like. Accent is not spent here (UI brief); tokens differ by weight and
@@ -287,64 +465,196 @@ pub(crate) fn line_runs(
         .collect()
 }
 
-fn code_block(code: &str, language: Option<&str>, theme: &Theme, window: &Window) -> AnyElement {
-    let frame = div()
-        .w_full()
-        .px(px(14.0))
-        .py(px(10.0))
-        .rounded(px(10.0))
-        .bg(theme.surface)
-        .border_1()
-        .border_color(theme.hairline)
-        .font_family(MONO)
-        .text_size(px(12.5))
-        .line_height(px(19.0));
-    let doc = highlighted(code, language);
+/// The lines of `code`, highlighted when the fence names a language this build knows.
+fn code_lines(code: &str, language: Option<&str>, env: &Env) -> Vec<AnyElement> {
+    let theme = env.theme;
     let lines: Vec<&str> = code.split('\n').collect();
-    let Some(doc) = doc.filter(|d| d.lines.len() == lines.len()) else {
-        return frame
-            .child(SharedString::from(code.to_owned()))
-            .into_any_element();
-    };
-    let base = window.text_style();
-    frame
-        .flex()
-        .flex_col()
-        .children(lines.iter().zip(doc.lines.iter()).map(|(line, spans)| {
+    let doc = highlighted(code, language).filter(|d| d.lines.len() == lines.len());
+    lines
+        .iter()
+        .enumerate()
+        .map(|(ix, line)| {
             if line.is_empty() {
                 // An empty line still takes its height.
                 return div().h(px(19.0)).into_any_element();
             }
-            StyledText::new(SharedString::from((*line).to_owned()))
-                .with_runs(line_runs(line, spans, theme, &base))
-                .into_any_element()
-        }))
+            match &doc {
+                Some(doc) => StyledText::new(SharedString::from((*line).to_owned()))
+                    .with_runs(line_runs(line, &doc.lines[ix], theme, &env.base))
+                    .into_any_element(),
+                None => SharedString::from((*line).to_owned()).into_any_element(),
+            }
+        })
+        .collect()
+}
+
+/// The code area of a frame: mono, with its lines wrapped or scrolling sideways.
+fn code_body(code: &str, language: Option<&str>, wrapped: bool, key: u64, env: &Env) -> AnyElement {
+    let area = div()
+        .px(px(14.0))
+        .py(px(10.0))
+        .font_family(MONO)
+        .text_size(px(12.5))
+        .line_height(px(19.0))
+        .flex()
+        .flex_col()
+        .children(code_lines(code, language, env));
+    if wrapped {
+        area.w_full().min_w_0().into_any_element()
+    } else {
+        div()
+            .id(("md-code-scroll", key as usize))
+            .w_full()
+            .overflow_x_scroll()
+            .child(area.flex_none().min_w_full().whitespace_nowrap())
+            .into_any_element()
+    }
+}
+
+/// A code block in its frame, with Copy and wrap (TRANSCRIPT-7.1, 7.2).
+fn code_block(code: &str, language: Option<&str>, env: &Env, cx: &mut App) -> AnyElement {
+    let key = chrome::key_of(language, code);
+    let wrapped = chrome::wraps(key, cx);
+    chrome::card(
+        &Card {
+            kind: chrome::Kind::Code {
+                language,
+                lines: code.split('\n').count(),
+            },
+            copy: code,
+            key,
+            wrappable: true,
+            wrapped,
+        },
+        env.variant,
+        env.theme,
+        code_body(code, language, wrapped, key, env),
+    )
+}
+
+/// TeX source in code style, with no controls: what math is when it is not typeset.
+fn source_block(tex: &str, env: &Env) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(14.0))
+        .py(px(10.0))
+        .rounded(px(10.0))
+        .bg(env.theme.surface)
+        .border_1()
+        .border_color(env.theme.hairline)
+        .font_family(MONO)
+        .text_size(px(12.5))
+        .line_height(px(19.0))
+        .child(SharedString::from(tex.to_owned()))
         .into_any_element()
+}
+
+/// Display math on its own line, centred; its source when typesetting is off or fails
+/// (TRANSCRIPT-9.1, 9.3, 9.5).
+fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
+    let Some(size) = env.math else {
+        return source_block(tex, env);
+    };
+    match math::typeset(tex, true, size, env.base.color, env.scale, cx) {
+        Some(set) => div()
+            .debug_selector(|| "md-math-display".to_owned())
+            .w_full()
+            .flex()
+            .justify_center()
+            .py(px(4.0))
+            .child(Picture {
+                image: set.image.clone(),
+                width: set.width,
+                height: set.height(),
+            })
+            .into_any_element(),
+        None => source_block(tex, env),
+    }
+}
+
+/// A Mermaid block: the drawing in the diagram frame, its source with "Rendering\u{2026}" while it is
+/// drawn, a plain code block when it cannot be (TRANSCRIPT-10.1, 10.3).
+fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
+    let key = chrome::key_of(Some("mermaid"), source);
+    let frame = |body: AnyElement| {
+        chrome::card(
+            &Card {
+                kind: chrome::Kind::Diagram,
+                copy: source,
+                key,
+                wrappable: false,
+                wrapped: false,
+            },
+            env.variant,
+            env.theme,
+            body,
+        )
+    };
+    match mermaid::drawing(source, env.theme, env.scale, cx) {
+        mermaid::Drawing::Ready(diagram) => frame(
+            div()
+                .debug_selector(|| "md-diagram".to_owned())
+                .w_full()
+                .flex()
+                .justify_center()
+                .p(px(12.0))
+                .child(Picture {
+                    image: diagram.image.clone(),
+                    width: diagram.width,
+                    height: diagram.height,
+                })
+                .into_any_element(),
+        ),
+        mermaid::Drawing::Rendering => frame(
+            div()
+                .child(code_body(source, None, false, key, env))
+                .child(
+                    div()
+                        .px(px(14.0))
+                        .pb(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(env.theme.faint)
+                        .debug_selector(|| "md-diagram-rendering".to_owned())
+                        .child("Rendering\u{2026}"),
+                )
+                .into_any_element(),
+        ),
+        mermaid::Drawing::Failed => code_block(source, Some("mermaid"), env, cx),
+    }
 }
 
 fn table(
     header: &[Vec<InlineRun>],
     rows: &[Vec<Vec<InlineRun>>],
     align: &[TableAlign],
-    theme: &Theme,
-    window: &Window,
+    env: &Env,
+    cx: &mut App,
 ) -> AnyElement {
-    let row = |cells: &[Vec<InlineRun>], head: bool| {
+    let theme = env.theme;
+    let mut row = |cells: &[Vec<InlineRun>], head: bool| {
         div()
             .flex()
             .border_b_1()
             .border_color(theme.hairline)
             .when(head, |r| r.font_weight(FontWeight::MEDIUM))
-            .children(cells.iter().enumerate().map(|(i, cell)| {
-                let cell_box = div().flex_1().min_w_0().px(px(10.0)).py(px(6.0));
-                let cell_box = match align.get(i) {
-                    Some(TableAlign::Center) => cell_box.text_center(),
-                    Some(TableAlign::Right) => cell_box.text_right(),
-                    _ => cell_box,
-                };
-                cell_box.child(inline(cell, theme, window))
-            }))
+            .children(
+                cells
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cell)| {
+                        let cell_box = div().flex_1().min_w_0().px(px(10.0)).py(px(6.0));
+                        let cell_box = match align.get(i) {
+                            Some(TableAlign::Center) => cell_box.text_center(),
+                            Some(TableAlign::Right) => cell_box.text_right(),
+                            _ => cell_box,
+                        };
+                        cell_box.child(inline(cell, env, cx))
+                    })
+                    .collect::<Vec<_>>(),
+            )
     };
+    let head = row(header, true);
+    let body: Vec<_> = rows.iter().map(|r| row(r, false)).collect();
     div()
         .w_full()
         .rounded(px(10.0))
@@ -352,30 +662,35 @@ fn table(
         .border_color(theme.hairline)
         .bg(theme.surface)
         .overflow_hidden()
-        .child(row(header, true))
-        .children(rows.iter().map(|r| row(r, false)))
+        .child(head)
+        .children(body)
         .into_any_element()
 }
 
-/// Whether a link may be opened from the transcript: web and mail links only. Anything else
-/// (`file:`, custom schemes) could launch another program, and a link still streaming has no
-/// destination yet.
-pub(crate) fn openable(url: &str) -> bool {
-    if url == PENDING_LINK_URL {
-        return false;
-    }
-    let lower = url.trim().to_ascii_lowercase();
-    ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|scheme| lower.starts_with(scheme))
+/// The advance of a no-break space in `font`: the unit inline math reserves its width in.
+fn gap_unit(font: &gpui::Font, size: Pixels, window: &Window) -> f32 {
+    let system = window.text_system();
+    let id = system.resolve_font(font);
+    system
+        .advance(id, size, '\u{a0}')
+        .map(|advance| f32::from(advance.width))
+        .ok()
+        .filter(|w| *w > 0.5)
+        .unwrap_or_else(|| f32::from(size) * 0.25)
 }
 
-/// One paragraph of styled runs; links that may be opened are clickable.
-fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> AnyElement {
-    let base = window.text_style();
+/// One paragraph of styled runs. A link that the host's policy opens is clickable; one it does
+/// not is plain text. Inline math reserves a gap of no-break spaces in the text and is painted
+/// over it, its baseline on the text's.
+fn inline(runs: &[InlineRun], env: &Env, cx: &mut App) -> AnyElement {
+    let theme = env.theme;
+    let base = &env.base;
+    let policy = &env.host.links;
+    let font_size = base.font_size.to_pixels(env.window.rem_size());
     let mut text = String::new();
     let mut spans = Vec::with_capacity(runs.len());
-    let mut links: Vec<(Range<usize>, String)> = Vec::new();
+    let mut links: Vec<(Range<usize>, Action)> = Vec::new();
+    let mut overlays: Vec<Overlay> = Vec::new();
     for run in runs {
         if run.text.is_empty() {
             continue;
@@ -388,12 +703,55 @@ fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> AnyElement {
         if style.italic {
             font.style = FontStyle::Italic;
         }
+        if style.math
+            && let Some(size) = env.math
+            && let Some(set) = math::typeset(&run.text, false, size, base.color, env.scale, cx)
+        {
+            let unit = gap_unit(&font, font_size, env.window);
+            let count = ((set.width / unit).ceil() as usize).max(1);
+            let gap = "\u{a0}".repeat(count);
+            overlays.push(Overlay {
+                range: text.len()..text.len() + gap.len(),
+                math: set,
+            });
+            spans.push(TextRun {
+                len: gap.len(),
+                font,
+                color: base.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            text.push_str(&gap);
+            continue;
+        }
+        let mut action = style
+            .link
+            .as_deref()
+            .map(|url| policy.action(url))
+            .filter(|a| *a != Action::Plain);
+        // An inline-code path that names a file the run has is a link to it (8.1).
+        if action.is_none()
+            && style.code
+            && style.link.is_none()
+            && link::looks_like_path(&run.text)
+            && let Some(files) = policy.files()
+            && let Some(target) = link::file_target(&run.text)
+            && files.resolves(&target.path, cx)
+        {
+            action = Some(Action::File(target));
+        }
         if style.code || style.math {
             font.family = MONO.into();
         }
-        let link = style.link.is_some();
-        if let Some(url) = style.link.as_deref().filter(|u| openable(u)) {
-            links.push((text.len()..text.len() + run.text.len(), url.to_owned()));
+        // A streaming link and every link in the preview look like links; in the transcript one
+        // the policy will not open is plain text.
+        let link = action.is_some()
+            || (style.link.is_some()
+                && (matches!(policy, LinkPolicy::Preview)
+                    || style.link.as_deref() == Some(PENDING_LINK_URL)));
+        if let Some(action) = action {
+            links.push((text.len()..text.len() + run.text.len(), action));
         }
         spans.push(TextRun {
             len: run.text.len(),
@@ -413,19 +771,40 @@ fn inline(runs: &[InlineRun], theme: &Theme, window: &Window) -> AnyElement {
         text.push_str(&run.text);
     }
     let styled = StyledText::new(SharedString::from(text.clone())).with_runs(spans);
-    if links.is_empty() {
-        return styled.into_any_element();
+    let layout = styled.layout().clone();
+    let element = if links.is_empty() {
+        styled.into_any_element()
+    } else {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let (ranges, actions): (Vec<_>, Vec<_>) = links.into_iter().unzip();
+        let policy = policy.clone();
+        InteractiveText::new(("md-text", hasher.finish() as usize), styled)
+            .on_click(ranges, move |ix, window, cx| {
+                if let Some(action) = actions.get(ix) {
+                    policy.run(action, window, cx);
+                }
+            })
+            .into_any_element()
+    };
+    if overlays.is_empty() {
+        element
+    } else {
+        Overlays::new(element, layout, overlays).into_any_element()
     }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    let (ranges, urls): (Vec<_>, Vec<_>) = links.into_iter().unzip();
-    InteractiveText::new(("md-text", hasher.finish() as usize), styled)
-        .on_click(ranges, move |ix, _, cx| {
-            if let Some(url) = urls.get(ix) {
-                cx.open_url(url);
-            }
-        })
-        .into_any_element()
+}
+
+/// Whether a link may be opened from the Files tab's preview: web and mail links only. Anything
+/// else (`file:`, custom schemes) could launch another program, and a link still streaming has no
+/// destination yet.
+pub(crate) fn openable(url: &str) -> bool {
+    if url == PENDING_LINK_URL {
+        return false;
+    }
+    let lower = url.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
 }
 
 #[cfg(test)]

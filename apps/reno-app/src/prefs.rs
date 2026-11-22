@@ -401,6 +401,15 @@ pub(crate) fn current(cx: &gpui::App) -> Prefs {
         .map_or_else(Prefs::default, |store| store.prefs.clone())
 }
 
+/// Whether math is typeset and its size as a percentage of the text, without copying the rest of
+/// the preferences: the markdown renderer reads it for every message it draws.
+pub(crate) fn math(cx: &gpui::App) -> (bool, u8) {
+    cx.try_global::<PrefStore>()
+        .map_or((true, MATH_SIZE_DEFAULT), |store| {
+            (store.prefs.typeset_math, store.prefs.math_size)
+        })
+}
+
 /// Changes the preferences in force and redraws; installs an in-memory store when none is.
 pub(crate) fn update(cx: &mut gpui::App, change: impl FnOnce(&mut Prefs)) {
     cx.default_global::<PrefStore>().update(change);
