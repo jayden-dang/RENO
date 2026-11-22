@@ -62,7 +62,7 @@ that I paste exactly that text in order.
   equivalent: math as its TeX between `$…$` (inline) or `$$…$$` (display) whatever delimiter the source used, a diagram as
   its fenced source, and an image as its alt text in square brackets. (Weigh; the image alt text is agent-decided)
 - **TRANSCRIPT-2.7** WHEN the selected range covers a file link drawn with a short label (new with 8.1; the parser's
-  unused `file_label` field anticipates it) THE SYSTEM SHALL copy the link's path, not its label.
+  unused `file_label` field anticipates it) THE SYSTEM SHALL copy the link's path, not its label (Weigh: W8; new work).
 - **TRANSCRIPT-2.8** THE SYSTEM SHALL never select or copy control text: buttons and their labels, "Show N more lines",
   subagent chips, the "Thinking" line, hover times and the prompt tick rail. (Weigh)
 - **TRANSCRIPT-2.9** WHEN the owner chooses "Copy as Markdown" on a selection THE SYSTEM SHALL copy the markdown source
@@ -75,8 +75,11 @@ that I paste exactly that text in order.
   on the prompt, its time), a long one SHALL CONTINUE TO collapse with Show more / Show less, and the bubble SHALL
   CONTINUE TO show plain text.
   (agent-decided: the frame default of markdown in the bubble is set aside)
-- **TRANSCRIPT-2.13** THE SYSTEM SHALL resolve every selection to source anchors (the entry, and the character range of
-  that entry's source text, for each entry the selection covers), never to painted positions alone. (Lock: operator
+- **TRANSCRIPT-2.13** THE SYSTEM SHALL resolve every selection to source anchors, never to painted positions alone: for
+  each entry the selection covers, the entry's key and the character range of that entry's source text, stored as UTF-8
+  byte offsets on character boundaries (the unit is agent-decided); a span over text that has no source (a fold head
+  such as "Worked for 3m 12s", a tool group's "Ran N commands", an "Output was cut" note) resolves to that row's key with
+  no range (agent-decided). (Lock: operator
   amendment 2026-11-22, so that a later comments item anchors to a selection without rework)
 
 ## 3. Find anything in the conversation
@@ -108,7 +111,7 @@ that I paste exactly that text in order.
 - **TRANSCRIPT-3.11** WHEN new events arrive, or the owner opens or closes a row, while the find bar holds a query THE SYSTEM SHALL update the count without
   moving the current match, at most once per 150 ms. (Weigh)
 - **TRANSCRIPT-3.12** WHILE a reasoning row is open only because it is streaming THE SYSTEM SHALL leave it open when search
-  closes, and SHALL not close a row search opened when its stream ends while the find bar is open.
+  closes, and SHALL not close a row search opened when its stream ends while the find bar is open (agent-decided: close package decision 8).
 - **TRANSCRIPT-3.13** (guard) WHILE the find bar is closed THE SYSTEM SHALL CONTINUE TO deny the held approval on Esc when
   the approval panel has focus, and, where "Escape stops the agent" is on, to stop the run on Esc from the composer while
   Stop shows.
@@ -121,11 +124,11 @@ it, so that I keep my place in a long conversation.
 - **TRANSCRIPT-4.1** WHEN the owner leaves a thread's run screen THE SYSTEM SHALL remember, for that thread, the entry at
   the top of the view and the offset into it, in memory only. (Weigh; agent-decided: not on disk)
 - **TRANSCRIPT-4.2** WHEN the owner returns to that thread while the app is still running THE SYSTEM SHALL show the
-  remembered entry at the remembered offset.
+  remembered entry at the remembered offset (Weigh: W3, fork 1).
 - **TRANSCRIPT-4.3** IF the remembered entry is gone, or now sits inside a closed fold, THEN THE SYSTEM SHALL restore to
-  that fold's head, else to the next entry after it in the thread.
+  that fold's head, else to the next entry after it in the thread (Weigh: W4, fork 1).
 - **TRANSCRIPT-4.4** WHEN a run's view moves from the run's key to its thread's key because the daemon named the thread
-  THE SYSTEM SHALL carry the remembered place over.
+  THE SYSTEM SHALL carry the remembered place over (Weigh: W5, fork 1).
 - **TRANSCRIPT-4.5** WHEN the owner opens a thread with no remembered place THE SYSTEM SHALL open it at the tail,
   following new events (agent-decided: today's behaviour).
 
@@ -249,7 +252,7 @@ follow a live run without it jumping.
 
 - **TRANSCRIPT-13.1** WHEN reply text streams in THE SYSTEM SHALL reveal it in steps of 16 ms, catching up with the
   received text within 200 ms of the last delta, and SHALL stop the reveal timer once caught up. (agent-decided: streaming pace)
-- **TRANSCRIPT-13.2** WHILE reduce motion is on THE SYSTEM SHALL show received text at once.
+- **TRANSCRIPT-13.2** WHILE reduce motion is on THE SYSTEM SHALL show received text at once (agent-decided: close package decision 20).
 - **TRANSCRIPT-13.3** WHILE a reasoning block streams THE SYSTEM SHALL show it open, scrolled to its newest line, and WHEN
   it ends THE SYSTEM SHALL close it unless the owner opened or closed it meanwhile. (Weigh: the reference's default)
 - **TRANSCRIPT-13.4** WHEN a new edit call with a diff or a new command call arrives while its turn is live THE SYSTEM
@@ -319,24 +322,24 @@ through and grade the reading tools on mocked data.
   - **TRANSCRIPT-16.1** WHEN `cargo xtask bench --app` runs the long-transcript scenario (2,000 messages, every fold open)
     THE SYSTEM SHALL keep frame time at or under 16.7 ms at p95, and the `long_frame_p95_ms` row SHALL fail the run when
     over (today it is a target that does not fail, xtask/src/app_stats.rs:86-91; docs/BENCHMARKS.md's "a target, not a
-    budget" line is rewritten with it) — verified by the bench.
+    budget" line is rewritten with it) — verified by the bench (Lock L10).
   - **TRANSCRIPT-16.2** WHEN the bench runs a new one-very-long-reply scenario THE SYSTEM SHALL keep frame time at or under
-    16.7 ms at p95 — verified by the bench.
+    16.7 ms at p95 — verified by the bench (Weigh: close package success).
   - **TRANSCRIPT-16.3** THE SYSTEM SHALL stay inside the signed-off long-transcript peak footprint (≤ 370 MiB), streaming CPU
     (≤ 15 %) and peak footprint (≤ 260 MiB), idle CPU (< 1 %), idle wakeups (< 1 per second) and cold start (< 400 ms)
-    budgets — verified by the bench.
+    budgets — verified by the bench (default: the signed-off budgets, docs/BENCHMARKS.md).
   - **TRANSCRIPT-16.4** THE SYSTEM SHALL bound every cache this feature adds (math, diagrams, images, search, text layout)
-    by entry count or bytes — verified by unit tests at the bound.
+    by entry count or bytes — verified by unit tests at the bound (ARCH-12).
 - **Security:** No threat model (docs/security/threat-model.md absent). The trust boundary crossed is untrusted agent output
   reaching the app.
   - **TRANSCRIPT-16.5** THE SYSTEM SHALL make no outbound network request because of anything in a transcript — verified by
-    a lock test whose counting HTTP client sees zero sends for a reply with an https image and links.
+    a lock test whose counting HTTP client sees zero sends for a reply with an https image and links (Weigh: W12).
   - **TRANSCRIPT-16.6** THE SYSTEM SHALL open links from transcript content only through the app's link opener, which
-    tests forbid from reaching a real browser — verified by lock tests.
+    tests forbid from reaching a real browser — verified by lock tests (Weigh: W14).
   - **TRANSCRIPT-16.7** THE SYSTEM SHALL read local images only through the daemon's worktree-rooted file read — verified by
-    a lock test with a path outside the worktree that shows "Image not loaded".
+    a lock test with a path outside the worktree that shows "Image not loaded" (Weigh: W11).
   - **TRANSCRIPT-16.12** THE SYSTEM SHALL pin each new crate (the math renderer, `merman`) to an exact version, and the
-    workspace SHALL pass `cargo deny check` and `cargo machete` — verified in the verify run.
+    workspace SHALL pass `cargo deny check` and `cargo machete` — verified in the verify run (ARCH-17).
 - **Reliability:** No standing reliability doc (docs/ops/reliability.md absent). The feature adds no durable state; what it
   must keep durable is the existing contracts (Compat obligation Internal, docs/agents/project.md:24).
   - **TRANSCRIPT-16.10** (guard) THE SYSTEM SHALL CONTINUE TO match the protocol schema snapshot unchanged: no new event,
@@ -346,9 +349,9 @@ through and grade the reading tools on mocked data.
 - **Accessibility:** No standing accessibility doc (docs/standards/accessibility.md absent).
   - **TRANSCRIPT-16.8** THE SYSTEM SHALL make every new control (find bar and its toggles, jump to latest, Copy and wrap
     buttons, diagram tabs and zoom reset, the context menu) reachable and operable by keyboard alone — verified by GPUI
-    keystroke tests.
+    keystroke tests (agent-decided).
   - **TRANSCRIPT-16.9** THE SYSTEM SHALL draw highlights, the current match, callouts and diagram colours from theme tokens
-    in both light and dark themes — verified by lock tests on both themes.
+    in both light and dark themes — verified by lock tests on both themes (agent-decided).
 
 ## Guard map
 
@@ -391,7 +394,8 @@ Every file the change touches, and the guards that protect its existing behaviou
   - "Stop tool call": see S5.
 - Images at an absolute path or outside the run's worktree (reference #30 loads them): the daemon's file sandbox refuses
   absolute paths (apps/renod/src/files/sandbox.rs:125), so TRANSCRIPT-16.7 shows "Image not loaded".
-- Comments anchored to passages: their own MILE-10 item, after ROAD-33 (operator amendment 2026-11-22). ROAD-33 gives them
+- Comments anchored to passages: their own MILE-10 item, ROAD-60, after ROAD-33 and ROAD-31 (operator amendment
+  2026-11-22). ROAD-33 gives them
   source-anchored selections (2.13) and builds no comment code.
 - Toggling task-list checkboxes from the transcript.
 - Markdown in the user's own message bubble.
