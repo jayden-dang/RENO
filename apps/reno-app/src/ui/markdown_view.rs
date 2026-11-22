@@ -90,6 +90,10 @@ pub(crate) struct Host {
     /// `None`: images are not drawn; an image is its alt text, as the Files tab's preview always
     /// showed it.
     pub(crate) images: Option<ImageHost>,
+    /// The text is still arriving: its last block may be half written, so a diagram there is
+    /// shown as code until the next block starts (it would otherwise be drawn again for every
+    /// chunk of its source).
+    pub(crate) streaming: bool,
 }
 
 impl Host {
@@ -98,6 +102,7 @@ impl Host {
         Self {
             links: LinkPolicy::Preview,
             images: None,
+            streaming: false,
         }
     }
 
@@ -112,7 +117,15 @@ impl Host {
         Self {
             links: LinkPolicy::Transcript { files },
             images: Some(ImageHost { run, client }),
+            streaming: false,
         }
+    }
+
+    /// Says whether the text is still arriving (see [`Host::streaming`]).
+    #[allow(dead_code)] // The transcript sets it for a running reply (ROAD-33 wiring).
+    pub(crate) fn while_streaming(mut self, streaming: bool) -> Self {
+        self.streaming = streaming;
+        self
     }
 }
 
@@ -146,6 +159,14 @@ struct Env<'a> {
     variant: Variant,
     /// Whether math is typeset, and its size in logical pixels per em.
     math: Option<f32>,
+    /// How many framed blocks this draw has made so far (their element ids differ by it).
+    cards: std::cell::Cell<usize>,
+}
+
+impl Env<'_> {
+    fn next_card(&self) -> usize {
+        self.cards.replace(self.cards.get() + 1)
+    }
 }
 
 /// A tree drawn for a host. A component, so that it reads the app (settings, the draft switch,
@@ -169,16 +190,30 @@ impl RenderOnce for Markdown {
             scale: window.scale_factor(),
             variant: super::draft33::current(cx).unwrap_or(Variant::A),
             math: typeset.then(|| f32::from(size) * f32::from(percent) / 100.0),
+            cards: std::cell::Cell::new(0),
             base,
         };
+        let last = self.tree.blocks.len().saturating_sub(1);
         div().flex().flex_col().gap(px(10.0)).children(
             self.tree
                 .blocks
                 .iter()
-                .map(|top| block(&top.block, &env, cx))
+                .enumerate()
+                .map(|(at, top)| match &top.block {
+                    Block::CodeBlock { code, language }
+                        if self.host.streaming && at == last && is_mermaid(language) =>
+                    {
+                        code_block(code.trim_end_matches('\n'), language.as_deref(), &env, cx)
+                    }
+                    other => block(other, &env, cx),
+                })
                 .collect::<Vec<_>>(),
         )
     }
+}
+
+fn is_mermaid(language: &Option<String>) -> bool {
+    language.as_deref().map(str::trim) == Some("mermaid")
 }
 
 /// The elements of a whole tree, stacked, for the transcript's host with no run behind it: web
@@ -218,7 +253,7 @@ fn block(node: &Block, env: &Env, cx: &mut App) -> AnyElement {
         }
         Block::CodeBlock { code, language } => {
             let code = code.trim_end_matches('\n');
-            if language.as_deref().map(str::trim) == Some("mermaid") {
+            if is_mermaid(language) {
                 diagram(code, env, cx)
             } else {
                 code_block(code, language.as_deref(), env, cx)
@@ -514,6 +549,7 @@ fn code_body(code: &str, language: Option<&str>, wrapped: bool, key: u64, env: &
 /// A code block in its frame, with Copy and wrap (TRANSCRIPT-7.1, 7.2).
 fn code_block(code: &str, language: Option<&str>, env: &Env, cx: &mut App) -> AnyElement {
     let key = chrome::key_of(language, code);
+    let ordinal = env.next_card();
     let wrapped = chrome::wraps(key, cx);
     chrome::card(
         &Card {
@@ -525,10 +561,11 @@ fn code_block(code: &str, language: Option<&str>, env: &Env, cx: &mut App) -> An
             key,
             wrappable: true,
             wrapped,
+            ordinal,
         },
         env.variant,
         env.theme,
-        code_body(code, language, wrapped, key, env),
+        code_body(code, language, wrapped, key ^ ordinal as u64, env),
     )
 }
 
@@ -555,8 +592,7 @@ fn display_math(tex: &str, env: &Env, cx: &mut App) -> AnyElement {
     let Some(size) = env.math else {
         return source_block(tex, env);
     };
-    // Display style reads a little larger than the line it stands between.
-    match math::typeset(tex, true, size * 1.15, env.base.color, env.scale, cx) {
+    match math::typeset(tex, true, size, env.base.color, env.scale, cx) {
         Some(set) => div()
             .debug_selector(|| "md-math-display".to_owned())
             .w_full()
@@ -594,6 +630,7 @@ pub(crate) fn diagram_picture(diagram: &mermaid::Diagram, key: u64) -> AnyElemen
 /// drawn, a plain code block when it cannot be (TRANSCRIPT-10.1, 10.3).
 fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
     let key = chrome::key_of(Some("mermaid"), source);
+    let ordinal = env.next_card();
     let frame = |body: AnyElement| {
         chrome::card(
             &Card {
@@ -602,6 +639,7 @@ fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
                 key,
                 wrappable: false,
                 wrapped: false,
+                ordinal,
             },
             env.variant,
             env.theme,
@@ -609,10 +647,10 @@ fn diagram(source: &str, env: &Env, cx: &mut App) -> AnyElement {
         )
     };
     match mermaid::drawing(source, env.theme, env.scale, cx) {
-        mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key)),
+        mermaid::Drawing::Ready(diagram) => frame(diagram_picture(&diagram, key ^ ordinal as u64)),
         mermaid::Drawing::Rendering => frame(
             div()
-                .child(code_body(source, None, false, key, env))
+                .child(code_body(source, None, false, key ^ ordinal as u64, env))
                 .child(
                     div()
                         .px(px(14.0))

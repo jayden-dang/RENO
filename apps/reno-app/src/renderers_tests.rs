@@ -131,7 +131,10 @@ fn a_reply_with_an_https_image_and_links_makes_no_request(cx: &mut TestAppContex
     let hits = Rc::new(links::fake::Recording::default());
     cx.update(|cx| links::install(cx, hits.clone()));
     let host = Host::transcript(None, None, Some(Rc::new(watch_files())));
-    let (_view, vcx) = probe(cx, RENDER_REPLY, host, Appearance::Dark);
+    let text = format!(
+        "{RENDER_REPLY}\nSee [the docs](https://example.com/docs) and <https://example.org>."
+    );
+    let (_view, vcx) = probe(cx, &text, host, Appearance::Dark);
     // Draw again and again, as scrolling does.
     for _ in 0..5 {
         draw(vcx);
@@ -450,4 +453,36 @@ impl Render for ProbeVisual {
             .w(px(640.0))
             .child(visual_view(&self.visual, self.host.clone(), &self.theme))
     }
+}
+
+#[gpui::test]
+fn a_diagram_still_arriving_is_shown_as_code_and_not_drawn(cx: &mut TestAppContext) {
+    let partial = "Here:\n\n```mermaid\nflowchart LR\n  A --> B";
+    let (_view, vcx) = probe(
+        cx,
+        partial,
+        Host::transcript(None, None, None).while_streaming(true),
+        Appearance::Dark,
+    );
+    assert!(!painted(vcx, "md-diagram"));
+    assert!(!painted(vcx, "md-diagram-rendering"));
+    assert!(painted(vcx, "Wrap lines"), "a code block meanwhile");
+    // Once the message is whole the same text is drawn.
+    let (_view, vcx) = probe(
+        cx,
+        partial,
+        Host::transcript(None, None, None),
+        Appearance::Dark,
+    );
+    settle(vcx, |vcx| painted(vcx, "md-diagram"));
+}
+
+#[gpui::test]
+fn two_identical_code_blocks_each_have_their_own_controls(cx: &mut TestAppContext) {
+    let text = "```rust\nfn a() {}\n```\n\nAgain:\n\n```rust\nfn a() {}\n```";
+    let (_view, vcx) = probe(cx, text, Host::preview(), Appearance::Dark);
+    assert!(painted(vcx, "Copy code"));
+    click(vcx, "Copy code");
+    let copied = vcx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some("fn a() {}"));
 }

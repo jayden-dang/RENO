@@ -88,6 +88,13 @@ pub(crate) fn host_of(url: &str) -> String {
     host.to_owned()
 }
 
+/// The format of a raster image type. An SVG is refused: GPUI draws it with a renderer that
+/// reads any file path an `<image>` inside it names, and a picture in a reply must not show a
+/// file from outside the worktree (TRANSCRIPT-16.7).
+pub(crate) fn raster_format(mime: &str) -> Option<ImageFormat> {
+    ImageFormat::from_mime_type(&mime.to_ascii_lowercase()).filter(|f| *f != ImageFormat::Svg)
+}
+
 fn decode_data(src: &str) -> Option<gpui::Image> {
     let rest = src.get("data:".len()..)?;
     let (meta, payload) = rest.split_once(',')?;
@@ -96,10 +103,7 @@ fn decode_data(src: &str) -> Option<gpui::Image> {
     if !parts.any(|p| p.eq_ignore_ascii_case("base64")) {
         return None;
     }
-    let format = match mime.as_str() {
-        "image/svg+xml" => ImageFormat::Svg,
-        other => ImageFormat::from_mime_type(other)?,
-    };
+    let format = raster_format(&mime)?;
     if payload.len() / 4 * 3 > DATA_MAX_BYTES {
         return None;
     }
@@ -188,7 +192,7 @@ fn state_of(host: &ImageHost, path: &str, cx: &mut App) -> Shown {
         let key = key.clone();
         async move |cx| {
             let slot = match read.await {
-                Ok(Ok((mime, bytes))) => ImageFormat::from_mime_type(&mime)
+                Ok(Ok((mime, bytes))) => raster_format(&mime)
                     .map(|format| {
                         let cost = bytes.len();
                         (
@@ -415,6 +419,7 @@ mod tests {
             "data:text/html;base64,PGI+",
             "data:image/png,rawbytes",
             "data:image/png;base64,",
+            "data:image/svg+xml;base64,PHN2Zy8+",
             "data:",
         ] {
             assert_eq!(classify(bad), Classified::Refused, "{bad}");

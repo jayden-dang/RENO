@@ -48,6 +48,9 @@ pub(crate) struct Card<'a> {
     /// Show a wrap toggle (a diagram has none).
     pub(crate) wrappable: bool,
     pub(crate) wrapped: bool,
+    /// Which block of its draw this is: two identical blocks share a `key` (and a wrap choice)
+    /// but not an element id.
+    pub(crate) ordinal: usize,
 }
 
 struct Wraps(Lru<u64, bool>);
@@ -183,7 +186,7 @@ pub(crate) fn card(
     theme: &Theme,
     body: AnyElement,
 ) -> AnyElement {
-    let id = ElementId::Name(format!("md-card-{}", card.key).into());
+    let id = ElementId::Name(format!("md-card-{}-{}", card.key, card.ordinal).into());
     let surface = theme.surface.opacity(0.92);
     match variant {
         Variant::A => frame(theme)

@@ -1,6 +1,6 @@
 //! Typeset math (TRANSCRIPT-9.1 to 9.6, 16.4): TeX source into a picture, with its metrics.
 //!
-//! `ratex` parses and lays the formula out in em units and writes it as SVG paths with the KaTeX
+//! `ratex` parses and lays the formula out in em units and writes it as SVG paths with the math
 //! fonts embedded; `resvg` rasterises that at the window's scale, in the theme's text colour. The
 //! layout's height and depth (em, times the font size) say where the baseline sits, so inline
 //! math can be aligned on the text's. A formula that does not typeset is remembered as such
@@ -108,7 +108,11 @@ fn draw(tex: &str, display: bool, size: f32, color: [u8; 4], scale: f32) -> Resu
         Some(end) => format!("{}{}", svg[..end].replace("pt\"", "\""), &svg[end..]),
         None => svg,
     };
-    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    let options = usvg::Options {
+        image_href_resolver: super::mermaid::no_files(),
+        ..usvg::Options::default()
+    };
+    let tree = usvg::Tree::from_str(&svg, &options).map_err(|e| e.to_string())?;
     let (w, h) = (
         (tree.size().width().ceil() as u32).max(1),
         (tree.size().height().ceil() as u32).max(1),

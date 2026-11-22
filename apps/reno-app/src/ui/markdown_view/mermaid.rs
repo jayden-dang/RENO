@@ -208,13 +208,32 @@ pub(crate) fn init_directive(theme: &Theme) -> String {
     )
 }
 
+/// `source` with the theme directive in front of the diagram: after a leading `---` front matter
+/// block when there is one (the directive must not come before it).
+fn with_directive(source: &str, directive: &str) -> String {
+    let body = source.trim_start();
+    if let Some(rest) = body.strip_prefix("---")
+        && rest.starts_with(['\n', '\r'])
+    {
+        let mut at = 0;
+        for line in rest.split_inclusive('\n') {
+            at += line.len();
+            if line.trim_end() == "---" && at > 4 {
+                let (front, diagram) = rest.split_at(at);
+                return format!("---{front}{directive}{diagram}");
+            }
+        }
+    }
+    format!("{directive}{source}")
+}
+
 /// The diagram's SVG, with the theme's colours and labels measured in the UI font.
 pub(crate) fn render_svg(source: &str, theme: &Theme) -> Result<String, String> {
     if source.trim().is_empty() || source.len() > MAX_SOURCE_BYTES {
         return Err("empty or too long".to_owned());
     }
     let measurer = measurer()?;
-    let themed = format!("{}{source}", init_directive(theme));
+    let themed = with_directive(source, &init_directive(theme));
     // The layout engine is third-party code fed model output: a panic is a failed diagram.
     std::panic::catch_unwind(|| {
         let identity = TextMeasurementProfileIdentity::new(
@@ -257,11 +276,22 @@ pub(crate) struct Raster {
     pub(crate) height: f32,
 }
 
+/// An image resolver that reads no file: the default one reads whatever path an `<image href>`
+/// names, so a diagram source could show a file from outside the worktree (TRANSCRIPT-16.7).
+/// `data:` images still resolve.
+pub(crate) fn no_files() -> usvg::ImageHrefResolver<'static> {
+    usvg::ImageHrefResolver {
+        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(|_, _| None),
+    }
+}
+
 /// The SVG drawn into pixels at `scale` (smaller when the picture would pass the size cap).
 pub(crate) fn rasterize(svg: &str, scale: f32) -> Result<Raster, String> {
     let options = usvg::Options {
         fontdb: fonts(),
         font_family: FAMILY.to_owned(),
+        image_href_resolver: no_files(),
         ..usvg::Options::default()
     };
     let tree = usvg::Tree::from_str(svg, &options).map_err(|e| e.to_string())?;
@@ -480,6 +510,39 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_svg_cannot_make_the_rasteriser_read_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.svg");
+        std::fs::write(
+            &secret,
+            "<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'><rect width='50' height='50' fill='#ff0000'/></svg>",
+        )
+        .unwrap();
+        let svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='50' height='50'><image width='50' height='50' xlink:href='{}'/></svg>",
+            secret.display()
+        );
+        let raster = rasterize(&svg, 1.0).unwrap();
+        let pixmap = tiny_skia::Pixmap::decode_png(&raster.png).unwrap();
+        assert!(
+            pixmap.pixels().iter().all(|p| p.alpha() == 0),
+            "the file's red was painted"
+        );
+        // The same svg does paint through the default resolver, so the test can fail.
+        let options = usvg::Options::default();
+        let tree = usvg::Tree::from_str(&svg, &options).unwrap();
+        let mut open = tiny_skia::Pixmap::new(50, 50).unwrap();
+        resvg::render(&tree, tiny_skia::Transform::identity(), &mut open.as_mut());
+        assert!(open.pixels().iter().any(|p| p.alpha() > 0));
+    }
+
+    #[test]
+    fn a_source_with_front_matter_still_draws() {
+        let source = "---\ntitle: Demo\n---\nflowchart LR\n  A[One] --> B[Two]\n";
+        assert!(render_svg(source, &dark()).is_ok());
     }
 
     #[test]

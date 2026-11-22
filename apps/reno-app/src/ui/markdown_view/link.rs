@@ -327,7 +327,7 @@ mod tests {
             Action::Web("http://example.com".to_owned())
         );
         assert_eq!(policy.action("mailto:a@example.org"), Action::Plain);
-        assert_eq!(policy.action("zed://x"), Action::Plain);
+        assert_eq!(policy.action("custom://x"), Action::Plain);
         assert_eq!(policy.action("file:///etc/passwd"), Action::Plain);
         assert_eq!(policy.action("/etc/passwd"), Action::Plain);
         assert_eq!(policy.action(PENDING_LINK_URL), Action::Plain);

@@ -130,7 +130,7 @@ tree-sitter-make = "=1.1.1"
 tree-sitter-containerfile = "=0.9.2"
 
 # Transcript renderers (ROAD-33). Pinned exactly: both are pre-1.0 and break their API often.
-# Math: TeX parse, layout and SVG with the KaTeX fonts embedded (SIL OFL 1.1, see
+# Math: TeX parse, layout and SVG with the math fonts embedded (SIL OFL 1.1, see
 # THIRD_PARTY_NOTICES.md). Diagrams: `merman` without its `merman-export` (which would pull a
 # second resvg); labels are measured by the app (`ui/markdown_view/mermaid.rs`).
 ratex-parser = "=0.1.16"

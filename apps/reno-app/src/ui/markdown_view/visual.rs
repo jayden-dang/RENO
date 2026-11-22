@@ -3,9 +3,7 @@
 //! the Mermaid path and the diagram frame of the ROAD-33 draft's chosen variant. A visual that
 //! does not load or draw is its caption and "Visual not loaded".
 
-use gpui::{
-    AnyElement, App, FontWeight, ImageFormat, IntoElement, RenderOnce, Window, div, prelude::*, px,
-};
+use gpui::{AnyElement, App, FontWeight, IntoElement, RenderOnce, Window, div, prelude::*, px};
 use reno_client::visuals::{Visual, VisualImage, VisualKind};
 use std::sync::Arc;
 
@@ -42,11 +40,7 @@ fn source_of(image: &VisualImage) -> Option<ImageSource> {
     match image {
         VisualImage::Worktree(path) => clean_path(path).map(ImageSource::Worktree),
         VisualImage::Data { mime, bytes } => {
-            let format = if mime.eq_ignore_ascii_case("image/svg+xml") {
-                ImageFormat::Svg
-            } else {
-                ImageFormat::from_mime_type(&mime.to_ascii_lowercase())?
-            };
+            let format = image::raster_format(mime)?;
             (!bytes.is_empty()).then(|| {
                 ImageSource::Data(Arc::new(gpui::Image::from_bytes(format, bytes.clone())))
             })
@@ -88,6 +82,7 @@ fn body(
                         key: chrome::key_of(Some("mermaid"), source),
                         wrappable: false,
                         wrapped: false,
+                        ordinal: 0,
                     },
                     variant,
                     theme,
