@@ -1,7 +1,7 @@
 # Roadmap: Reno
 
 Status: Approved
-Date: 2026-11-21
+Date: 2026-11-22
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -21,8 +21,8 @@ slot, bound to a feature code only by `specify-behavior` in docs/specs/INDEX.md.
 
 ## Focus
 
-**Now:** ROAD-33
-**Next:** ROAD-53, MILE-1
+**Now:** ROAD-33, ROAD-56
+**Next:** ROAD-55, ROAD-53, MILE-1
 
 | ID | Milestone | Depends-on | Commitment |
 |---|---|---|---|
