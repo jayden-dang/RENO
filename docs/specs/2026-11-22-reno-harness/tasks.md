@@ -686,12 +686,12 @@ The existing live test's mock provider (`tests/fixtures/pi-rpc-probe.ts`) is loa
 
 **Depends-on:** Task 8, Task 10
 
-- [ ] Write `reno_target()`:
+- [x] Write `reno_target()`:
   - every scenario sets `RENO_BOT` in its env (`Scenario::env`, targets.rs:321) and `FAKE_PI_GATE=ok`;
   - `user_config: None`;
   - `approval: Some(ApprovalPlan{ scenario: "scenario:approval-subjects" at AccessMode::Supervised, on_allow, on_deny, on_deny_message })`;
   - the exhaustive mode runs cover `Supervised` and `FullAccess` at `Unrestricted`.
-- [ ] Write the live test (`RENO_PI_LIVE=1`, `-- --ignored`). Its wrapper exports only `PI_OFFLINE` and
+- [x] Write the live test (`RENO_PI_LIVE=1`, `-- --ignored`). Its wrapper exports only `PI_OFFLINE` and
   `PI_TELEMETRY` and passes `-e <pi-rpc-probe.ts>` before `"$@"`, so the gate stays the last `--extension`, and it
   never exports `PI_CODING_AGENT_DIR`. The spec sets `RENO_BOT`. It asserts:
   - a real Pi arms with its own `{}` `auth.json` present;
@@ -702,9 +702,9 @@ The existing live test's mock provider (`tests/fixtures/pi-rpc-probe.ts`) is loa
     session.
   - It reports, as a measurement with no bound, the time from each `NeedsApproval` it receives to that call's
     `ToolResult`, over 200 calls it allows at once.
-- [ ] Run `cargo test -p reno-harness --test conformance the_mock_and_every_driver_pass_the_suite`, and expect a pass,
+- [x] Run `cargo test -p reno-harness --test conformance the_mock_and_every_driver_pass_the_suite`, and expect a pass,
   with `reno` in the pinned labels. The owner runs the live test per `docs/KEEPING-UP.md`.
-- [ ] `git commit -m "test(harness): conformance and live checks for the Reno harness"`
+- [x] `git commit -m "test(harness): conformance and live checks for the Reno harness"`
 
 _Requirements: RENOHARNESS-3.2, RENOHARNESS-5.1, RENOHARNESS-5.4, RENOHARNESS-8.5, RENOHARNESS-2.7_
 
