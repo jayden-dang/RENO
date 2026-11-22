@@ -832,7 +832,25 @@ async fn launch_pi(
     };
     let bridge = mcp::install(files, &spec.mcp)?;
     let mut cmd = Command::new(exe);
-    crate::child_env::restrict(&mut cmd, crate::child_env::PI);
+    crate::child_env::restrict(
+        &mut cmd,
+        if reno {
+            crate::child_env::RENO
+        } else {
+            crate::child_env::PI
+        },
+    );
+    if let Some(gate) = &gate {
+        // Missing paths, so no ambient cloud credential file is read; a bot secret of the same
+        // name is applied next and wins.
+        for name in [
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+        ] {
+            cmd.env(name, gate.agent.join(name.to_ascii_lowercase()));
+        }
+    }
     cmd.args(launch::args(Launch {
         resume: spec.resume.as_ref().map(|s| s.0.as_str()),
         isolate: reno || !spec.inherit_user_config,
@@ -1885,6 +1903,117 @@ mod tests {
             assert!(argv.contains(&"--no-mcp".to_owned()));
             assert!(started["gate_socket"].is_null());
             assert!(started["gate_nonce_len"].is_null());
+        }
+
+        const BOT_KEY: &str = "sk-test-123456";
+
+        fn with_env(mut spec: ExecSpec, pairs: &[(&str, &str)]) -> ExecSpec {
+            for (name, value) in pairs {
+                spec.env.insert((*name).to_owned(), (*value).to_owned());
+            }
+            spec
+        }
+
+        const BLANKS: [&str; 3] = [
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+        ];
+
+        #[tokio::test]
+        async fn a_reno_child_sees_only_the_bots_key_its_own_agent_dir_and_three_blanks() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let agent = pi._gate.as_ref().unwrap().agent.display().to_string();
+            let started = bench.started(pi).await;
+            let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
+            let blanks: Vec<String> = BLANKS.iter().map(|n| (*n).to_owned()).collect();
+            let mut expected = vec!["OPENAI_API_KEY".to_owned()];
+            expected.extend(blanks);
+            expected.sort();
+            assert_eq!(names, expected);
+            for blank in BLANKS {
+                let fact = &started["credential_env"][blank];
+                assert_eq!(fact["set"], true, "{blank}");
+                assert_eq!(fact["in_agent_dir"], true, "{blank}");
+                assert_eq!(fact["exists"], false, "{blank}");
+            }
+            assert_eq!(started["agent_dir"], agent);
+        }
+
+        #[tokio::test]
+        async fn a_secret_named_like_a_blank_wins_but_one_named_like_the_agent_dir_does_not() {
+            let bench = Bench::new();
+            let spec = with_env(
+                bench.spec("01HZX9"),
+                &[
+                    ("GOOGLE_APPLICATION_CREDENTIALS", "/bots/own/sa.json"),
+                    ("PI_CODING_AGENT_DIR", "/bots/own/agent"),
+                ],
+            );
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let agent = pi._gate.as_ref().unwrap().agent.display().to_string();
+            let started = bench.started(pi).await;
+            let google = &started["credential_env"]["GOOGLE_APPLICATION_CREDENTIALS"];
+            assert_eq!(google["in_agent_dir"], false);
+            assert_eq!(google["set"], true);
+            for other in ["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"] {
+                assert_eq!(started["credential_env"][other]["in_agent_dir"], true);
+            }
+            assert_eq!(started["agent_dir"], agent);
+        }
+
+        #[tokio::test]
+        async fn the_bots_key_is_not_on_the_command_line() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &bench.flavor()).await;
+            let started = bench.started(pi).await;
+            let argv: Vec<String> = serde_json::from_value(started["argv"].clone()).unwrap();
+            assert!(argv.iter().all(|arg| !arg.contains(BOT_KEY)), "{argv:?}");
+        }
+
+        #[tokio::test]
+        async fn a_key_the_child_prints_is_scrubbed_from_the_stderr_tail() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let mut pi = bench.launch(&spec, &bench.flavor()).await;
+            pi.transport
+                .client
+                .request(serde_json::json!({"type": "prompt", "message": "scenario:leak-stderr"}))
+                .unwrap();
+            while let Ok(frame) = pi.next_frame().await {
+                if frame["type"] == "agent_settled" {
+                    break;
+                }
+            }
+            pi.transport.close_input();
+            pi.child.wait().await.unwrap();
+            if let Some(task) = pi.stderr_task.take() {
+                task.await.unwrap();
+            }
+            let tail = pi.stderr_tail.snapshot().unwrap();
+            assert!(tail.contains("rejected key"), "{tail}");
+            assert!(!tail.contains(BOT_KEY), "{tail}");
+            assert!(tail.contains("[secret:OPENAI_API_KEY]"), "{tail}");
+        }
+
+        #[tokio::test]
+        async fn the_owners_child_gets_no_blanks_and_keeps_its_own_agent_dir_variable() {
+            let bench = Bench::new();
+            let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
+            let pi = bench.launch(&spec, &Flavor::Owner).await;
+            let started = bench.started(pi).await;
+            for blank in BLANKS {
+                assert_eq!(started["credential_env"][blank]["set"], false, "{blank}");
+            }
+            assert_eq!(
+                started["credential_env"]["PI_CODING_AGENT_DIR"]["in_agent_dir"],
+                false
+            );
+            let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
+            assert!(names.contains(&"OPENAI_API_KEY".to_owned()));
         }
     }
 }

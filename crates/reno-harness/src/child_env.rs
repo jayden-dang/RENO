@@ -192,6 +192,14 @@ pub const PI: DriverEnv = DriverEnv {
     prefixes: &[],
 };
 
+/// A Reno attempt: the base set and nothing else. Its model key is the bot's own secret, applied
+/// after this; a variable of the daemon's that names a provider, a cloud account or Pi's agent
+/// directory never reaches it.
+pub const RENO: DriverEnv = DriverEnv {
+    names: &[],
+    prefixes: &[],
+};
+
 /// Muse Code: nothing beyond the base set, on purpose. Its sign-in is the owner's own login (a
 /// file under `XDG_CONFIG_HOME`, which the base set carries, or the Keychain, which Muse reads
 /// itself). `META_API_KEY` is NOT here: it takes priority over the login, so one exported to the
@@ -458,6 +466,22 @@ mod tests {
             ("GITHUB_TOKEN", "g"),
         ];
         assert_eq!(kept(PI, &daemon), ["PI_CODING_AGENT_DIR"]);
+    }
+
+    #[test]
+    fn a_reno_child_keeps_the_base_set_and_no_key_or_agent_dir_of_the_daemons() {
+        let daemon = [
+            ("ANTHROPIC_API_KEY", "k"),
+            ("ANTHROPIC_OAUTH_TOKEN", "t"),
+            ("PI_CODING_AGENT_DIR", "/d"),
+            ("OPENAI_API_KEY", "k"),
+            ("AWS_ACCESS_KEY_ID", "a"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "/g"),
+            ("HOME", "/Users/me"),
+        ];
+        assert_eq!(kept(RENO, &daemon), ["HOME"]);
+        assert!(RENO.names.is_empty());
+        assert!(RENO.prefixes.is_empty());
     }
 
     #[test]

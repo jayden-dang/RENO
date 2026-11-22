@@ -40,12 +40,29 @@ def flag(name):
     return args[args.index(name) + 1] if name in args else None
 
 
+def credential_env():
+    """Whether each credential variable is set and points into the agent dir, never its value."""
+    agent = os.environ.get("PI_CODING_AGENT_DIR")
+    facts = {}
+    for name in ("GOOGLE_APPLICATION_CREDENTIALS", "AWS_SHARED_CREDENTIALS_FILE",
+                 "AWS_CONFIG_FILE", "PI_CODING_AGENT_DIR"):
+        value = os.environ.get(name)
+        facts[name] = {"set": value is not None,
+                       "in_agent_dir": bool(value and agent and value.startswith(agent + os.sep)),
+                       "exists": bool(value and os.path.exists(value))}
+    return facts
+
+
 log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
      "offline": os.environ.get("PI_OFFLINE"), "telemetry": os.environ.get("PI_TELEMETRY"),
      "mcp_env": os.environ.get("RENO_PI_MCP"), "leak": os.environ.get("FAKE_PI_LEAK"),
      "gate_socket": os.environ.get("RENO_GATE_SOCKET"),
      "gate_nonce_len": len(os.environ["RENO_GATE_NONCE"]) if "RENO_GATE_NONCE" in os.environ else None,
      "agent_dir": os.environ.get("PI_CODING_AGENT_DIR"),
+     "credential_env": credential_env(),
+     "key_names": sorted(name for name in os.environ
+                         if name.endswith(("_API_KEY", "_TOKEN", "_KEY", "_SECRET", "_ACCESS_KEY_ID"))
+                         or name.startswith(("ANTHROPIC_", "OPENAI_", "AWS_", "GOOGLE_"))),
      "session_dir": flag("--session-dir"),
      "extensions": {path: os.path.exists(path) for flag_name, path in zip(args, args[1:])
                     if flag_name == "--extension"}})
@@ -327,6 +344,14 @@ def play(cmd):
         log({"child": child.pid})
         start(cmd)
         assistant("spawned")
+        settle()
+    elif prompt == "scenario:leak-stderr":
+        for name, value in sorted(os.environ.items()):
+            if name.endswith("_API_KEY"):
+                sys.stderr.write("fake pi: rejected key %s\n" % value)
+        sys.stderr.flush()
+        start(cmd)
+        assistant("leaked")
         settle()
     elif prompt == "scenario:env":
         start(cmd)
