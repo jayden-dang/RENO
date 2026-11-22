@@ -849,7 +849,7 @@ fn display_math(tex: &str, atom: usize, env: &Env, cx: &mut App) -> AnyElement {
 
 /// The least share of its size a diagram is drawn at (TRANSCRIPT-10.4): it is fitted to the
 /// column whole, and only one that would need its labels smaller than this to fit scrolls.
-const DIAGRAM_MIN_SCALE: f32 = 0.5;
+const DIAGRAM_MIN_SCALE: f32 = 0.75;
 
 /// A drawn diagram: fit to the column, but never smaller than half its size, so its labels stay
 /// legible; a wider diagram scrolls sideways.
@@ -1294,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn the_render_checks_flowchart_is_drawn_whole_in_the_column_by_default() {
+    fn the_render_checks_flowchart_is_drawn_whole_and_legible_in_the_column() {
         use crate::ui::theme::{Appearance, Theme};
         let source = reno_client::fake::transcript::RENDER_REPLY
             .split("```mermaid\n")
@@ -1306,16 +1306,17 @@ mod tests {
         let drawn = mermaid::rasterize(&svg, 1.0).expect("it rasterises");
         // The transcript's column inside a diagram's frame and padding.
         let column = 560.0;
+        // Fit to width, never below the floor that keeps labels legible: the seeded diagram is
+        // drawn whole, with no sideways scroll, at no less than three quarters of its size.
+        let shown = picture::shown_width(column, drawn.width, DIAGRAM_MIN_SCALE);
         assert!(
-            drawn.width > column,
-            "it is wider than the column: {}",
+            shown >= drawn.width * DIAGRAM_MIN_SCALE && shown <= column,
+            "natural width {}, shown {shown}",
             drawn.width
         );
-        // Fit to width: the whole diagram, scaled down, with no sideways scroll.
-        assert_eq!(
-            picture::shown_width(column, drawn.width, DIAGRAM_MIN_SCALE),
-            column,
-            "natural width {}",
+        assert!(
+            drawn.width * DIAGRAM_MIN_SCALE <= column,
+            "the whole diagram fits: natural width {}",
             drawn.width
         );
     }

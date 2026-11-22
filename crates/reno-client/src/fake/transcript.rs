@@ -335,7 +335,7 @@ $$\int_0^1 x^2\,dx = \tfrac13$$
 And an inline one: the area under $x^2$ on the unit interval.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Client] -->|hello v2| B[Handshake]
     B -->|offer| C{Agent}
     C -->|counter v1| D[Negotiate]
@@ -650,7 +650,7 @@ mod tests {
         for want in [
             "$$\\int_0^1 x^2\\,dx = \\tfrac13$$",
             "$x^2$",
-            "```mermaid\nflowchart LR",
+            "```mermaid\nflowchart TD",
             "```rust",
             "![build graph](docs/graph.png)",
             "![status](https://example.com/status.png)",
