@@ -316,22 +316,22 @@ dependency; the plan adds it as a direct workspace dependency pinned `=1.13.1`, 
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1:** Add failing unit tests in `vm/find.rs`:
+- [x] **Step 1:** Add failing unit tests in `vm/find.rs`:
   - `match_case_whole_word_and_regex_each_change_the_count`;
   - `a_regex_that_does_not_parse_or_is_too_large_says_why`;
   - `a_recount_keeps_the_current_hit_once_one_is_gone_to`.
   Run: `cargo test -p reno-app vm::find` — expect: fails to compile, with `Query` undefined.
-- [ ] **Step 2:** Implement `Query` and `Matcher`, and move `find_all`, `matches` and the prose marks to them. Run:
+- [x] **Step 2:** Implement `Query` and `Matcher`, and move `find_all`, `matches` and the prose marks to them. Run:
   `cargo test -p reno-app vm::find` — expect: pass.
-- [ ] **Step 3:** Add failing GPUI tests:
+- [x] **Step 3:** Add failing GPUI tests:
   - `toggles_and_their_keys_recount_and_an_invalid_regex_shows_no_count`;
   - `a_recount_while_streaming_rescans_only_the_live_run`;
   - `the_hit_cache_stops_at_its_bound`;
   - `closing_search_leaves_streaming_reasoning_open_and_a_stream_ending_keeps_search_opened_rows`.
   Run: `cargo test -p reno-app find_tests` — expect: fails.
-- [ ] **Step 4:** Implement the toggles in the kit's toggle style, the error state, the bounded hit cache, and the
+- [x] **Step 4:** Implement the toggles in the kit's toggle style, the error state, the bounded hit cache, and the
   streaming-open rule. Run: `cargo test -p reno-app` — expect: pass, including the kept find tests.
-- [ ] **Step 5:** Run `cargo deny check` and `cargo machete` — expect: pass. Commit
+- [x] **Step 5:** Run `cargo deny check` and `cargo machete` — expect: pass. Commit
   `find: match case, whole word and regex; the recount rescans only the live run`.
 
 _Requirements: TRANSCRIPT-3.1, TRANSCRIPT-3.2, TRANSCRIPT-3.3, TRANSCRIPT-3.4, TRANSCRIPT-3.5, TRANSCRIPT-3.6, TRANSCRIPT-3.7, TRANSCRIPT-3.8, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-3.11, TRANSCRIPT-3.12, TRANSCRIPT-3.13_
