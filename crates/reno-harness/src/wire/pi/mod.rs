@@ -16,3 +16,4 @@ pub(crate) mod framing;
 pub(crate) mod known;
 pub(crate) mod launch;
 pub(crate) mod normalize;
+pub(crate) mod subject;
