@@ -42,6 +42,7 @@ rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 proptest = "1"
 unicode-segmentation = "1"
+regex = "=1.13.1"
 
 # Definitions (T1.4): TOML files, globs, time zones, and the file watcher (renod, and the CLI for `daemon logs -f`).
 toml = "1"

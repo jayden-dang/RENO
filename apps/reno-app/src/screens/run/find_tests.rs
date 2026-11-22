@@ -1280,3 +1280,197 @@ fn the_directory_probes_stop_at_their_bound(cx: &mut TestAppContext) {
     }
     screen.read_with(vcx, |s, _| assert!(s.probed_dirs() <= 256));
 }
+
+// --- match case, whole word, regex -------------------------------------------------------------
+
+fn hits(vcx: &VisualTestContext, screen: &Entity<RunScreen>) -> usize {
+    screen.read_with(vcx, |s, _| s.find_found().hits.len())
+}
+
+/// Replaces the query in the open bar (⌘F puts the keyboard back in the field after a click).
+fn requery(vcx: &mut VisualTestContext, query: &str) {
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    vcx.simulate_keystrokes("cmd-a");
+    vcx.simulate_input(query);
+    draw(vcx);
+}
+
+#[gpui::test]
+fn toggles_and_their_keys_recount_and_an_invalid_regex_shows_no_count(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    requery(vcx, "SUPERVISOR.RS");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    assert!(painted(vcx, "find-case") && painted(vcx, "find-word") && painted(vcx, "find-regex"));
+
+    // Match case, by its key: the capitals match nothing, and the key undoes it.
+    vcx.simulate_keystrokes("cmd-alt-c");
+    draw(vcx);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("No results"));
+    assert!(screen.read_with(vcx, |s, _| s.find_query().case));
+    vcx.simulate_keystrokes("cmd-alt-c");
+    draw(vcx);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    // And by its button.
+    click(vcx, "find-case");
+    draw(vcx);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("No results"));
+    click(vcx, "find-case");
+    draw(vcx);
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+
+    // Whole word: `visor` is inside `supervisor`, so fewer places count.
+    requery(vcx, "visor");
+    let inside = hits(vcx, &screen);
+    assert!(inside > 0, "`visor` is in the thread");
+    vcx.simulate_keystrokes("cmd-alt-w");
+    draw(vcx);
+    let whole = hits(vcx, &screen);
+    assert!(whole < inside, "{whole} whole words of {inside}");
+    assert!(screen.read_with(vcx, |s, _| s.find_query().word));
+    click(vcx, "find-word");
+    draw(vcx);
+    assert_eq!(hits(vcx, &screen), inside);
+
+    // Regex: `.` is any character, and a pattern that does not parse says why, with no count.
+    requery(vcx, "supervisor.rs");
+    let plain = hits(vcx, &screen);
+    vcx.simulate_keystrokes("cmd-alt-x");
+    draw(vcx);
+    assert!(screen.read_with(vcx, |s, _| s.find_query().regex));
+    assert!(hits(vcx, &screen) >= plain);
+    requery(vcx, "(");
+    screen.read_with(vcx, |s, _| {
+        assert!(s.find_error().is_some_and(|why| why.contains("unclosed")));
+        assert_eq!(s.find_count_label(), None, "no count");
+        assert!(s.find_found().hits.is_empty());
+    });
+    assert!(painted(vcx, "find-error"));
+    click(vcx, "find-regex");
+    draw(vcx);
+    screen.read_with(vcx, |s, _| {
+        assert_eq!(s.find_error(), None, "a plain `(` is not a pattern");
+        assert!(s.find_count_label().is_some(), "counted again");
+        assert!(
+            !s.find_found().hits.is_empty(),
+            "the thread has parentheses"
+        );
+    });
+    assert!(!painted(vcx, "find-error"));
+}
+
+#[gpui::test]
+fn a_recount_while_streaming_rescans_only_the_live_run(cx: &mut TestAppContext) {
+    let (store, _root, vcx, screen) = open(cx);
+    let run = run_id("acp8");
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    requery(vcx, "supervisor.rs");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    let scanned = |vcx: &VisualTestContext| screen.read_with(vcx, |s, _| s.find_runs_scanned());
+    let before = scanned(vcx);
+
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![
+            ExecEvent::Resumed {
+                from_attempt: 0,
+                session: SessionRef("s".into()),
+            },
+            text("now supervisor.rs"),
+        ],
+    );
+    draw(vcx);
+    vcx.executor().advance_clock(Duration::from_millis(151));
+    vcx.run_until_parked();
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 8"));
+    assert_eq!(
+        scanned(vcx) - before,
+        1,
+        "the seven older runs were not read"
+    );
+
+    stream(vcx, &store, &run, vec![text(" and supervisor.rs again")]);
+    draw(vcx);
+    vcx.executor().advance_clock(Duration::from_millis(151));
+    vcx.run_until_parked();
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 9"));
+    assert_eq!(scanned(vcx) - before, 2, "one more read of the live run");
+}
+
+#[gpui::test]
+fn the_hit_cache_stops_at_its_bound(cx: &mut TestAppContext) {
+    let (_store, _root, vcx, screen) = open(cx);
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    // Every key typed is another query, and each is kept for each older run.
+    requery(vcx, "supervisor.rs handshake negotiation");
+    assert_eq!(
+        screen.read_with(vcx, |s, _| s.find_hit_lists()),
+        64,
+        "the least recently used lists went"
+    );
+    // What was dropped is found again, correctly.
+    requery(vcx, "supervisor.rs");
+    assert_eq!(count(vcx, &screen).as_deref(), Some("1 of 7"));
+    assert_eq!(screen.read_with(vcx, |s, _| s.find_hit_lists()), 64);
+}
+
+#[gpui::test]
+fn closing_search_leaves_streaming_reasoning_open_and_a_stream_ending_keeps_search_opened_rows(
+    cx: &mut TestAppContext,
+) {
+    bind(cx);
+    let store = fake_store(cx);
+    wait_until(cx, |cx| approvals(cx, &store) == 2);
+    let (root, vcx) = window(cx, &store, Appearance::Dark);
+    draw(vcx);
+    let run = run_id("builder1");
+    root.update_in(vcx, |r, window, cx| r.open_run(run.clone(), window, cx));
+    let screen = root.read_with(vcx, |r, _| r.run_screen().cloned()).unwrap();
+    wait_for(vcx, "painted(vcx, \"thinking\")", |vcx| {
+        painted(vcx, "thinking")
+    });
+    let reply = |s: &str| ExecEvent::Text { text: s.into() };
+    stream(
+        vcx,
+        &store,
+        &run,
+        vec![ExecEvent::Reasoning {
+            text: "weighing the mirror".into(),
+        }],
+    );
+    draw(vcx);
+    let key = screen.read_with(vcx, |s, _| s.rows().last().unwrap().key());
+    let open = |vcx: &VisualTestContext| screen.read_with(vcx, |s, cx| s.reasoning_open(key, cx));
+    assert!(open(vcx), "open while it streams");
+
+    // Search goes to a match inside it, and closing search leaves it open: the stream holds it.
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    requery(vcx, "mirror");
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    assert!(open(vcx));
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(!screen.read_with(vcx, |s, _| s.find_is_open()));
+    assert!(open(vcx), "closing search does not close what streams");
+    assert!(!screen.read_with(vcx, |s, _| s.search_holds()));
+
+    // With the bar open, a row search opened stays open when the stream ends.
+    vcx.simulate_keystrokes("cmd-f");
+    draw(vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+    stream(vcx, &store, &run, vec![reply("Going with the mirror.")]);
+    draw(vcx);
+    assert!(open(vcx), "search's row did not close when the stream did");
+    vcx.simulate_keystrokes("escape");
+    draw(vcx);
+    assert!(!open(vcx), "and closes with search once the stream is over");
+}

@@ -350,7 +350,7 @@ fn the_find_bar_hands_a_reply_its_needle_and_which_of_its_hits_is_current(cx: &m
     let marks = screen
         .read_with(vcx, |s, _| s.find_marks(key))
         .expect("the reply holds the word");
-    assert_eq!(marks.needle, "negotiation");
+    assert_eq!(marks.matcher.matches("a negotiation"), vec![2..13]);
     assert!(marks.current.is_some(), "the bar is on a hit in this reply");
     // And a row with no hit gets none.
     let user = screen.read_with(vcx, |s, _| s.rows()[0].key());

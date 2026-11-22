@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::ops::Range;
 
+use regex::{Regex, RegexBuilder};
+
 use crate::transcript::{Key, Row, ToolEntry};
 use crate::vm::changes::{self as facts, OUTPUT_LINES};
 use crate::vm::convo;
@@ -66,46 +68,110 @@ impl Hit {
     }
 }
 
-/// Whether two characters are the same letter, ignoring case.
-fn same_char(a: char, b: char) -> bool {
-    a == b || a.to_lowercase().eq(b.to_lowercase())
+/// What the strip asks for: the text, and the three options that change what it means.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Query {
+    pub(crate) text: String,
+    /// Match case: `Cat` is not `cat`.
+    pub(crate) case: bool,
+    /// Whole word: `cat` is not in `concat`.
+    pub(crate) word: bool,
+    /// The text is a pattern, not the words to look for.
+    pub(crate) regex: bool,
 }
 
-/// Where `needle` is in `hay`, ignoring case, left to right and not overlapping. Ranges are bytes
-/// of `hay` and fall on character boundaries. An empty needle matches nothing.
-pub(crate) fn matches(hay: &str, needle: &str) -> Vec<Range<usize>> {
-    matches_up_to(hay, needle, usize::MAX)
+/// The most a compiled pattern may weigh, so a pasted pattern cannot cost the app its memory.
+const PATTERN_LIMIT: usize = 1 << 20;
+
+/// A [`Query`] ready to search with. Matching takes time linear in the text, whatever the
+/// pattern. An empty query matches nothing.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Matcher {
+    re: Option<Regex>,
 }
 
-/// [`matches`], stopping at `limit` of them.
-fn matches_up_to(hay: &str, needle: &str, limit: usize) -> Vec<Range<usize>> {
-    let Some(first) = needle.chars().next() else {
-        return Vec::new();
-    };
-    let mut found = Vec::new();
-    let mut from = 0;
-    for (at, c) in hay.char_indices() {
-        if found.len() >= limit {
-            break;
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+impl Query {
+    /// Compiles the query, or says in one line why it cannot be: a pattern that does not parse,
+    /// or one over [`PATTERN_LIMIT`].
+    pub(crate) fn compile(&self) -> Result<Matcher, String> {
+        if self.text.is_empty() {
+            return Ok(Matcher { re: None });
         }
-        if at < from || !same_char(c, first) {
-            continue;
-        }
-        let mut rest = hay[at..].char_indices();
-        let mut end = at;
-        let all = needle.chars().all(|n| match rest.next() {
-            Some((i, h)) if same_char(h, n) => {
-                end = at + i + h.len_utf8();
-                true
+        let pattern = if self.regex {
+            let body = format!("(?:{})", self.text);
+            if self.word {
+                format!("\\b{body}\\b")
+            } else {
+                body
             }
-            _ => false,
-        });
-        if all {
-            found.push(at..end);
-            from = end;
-        }
+        } else {
+            // A boundary only where the text ends in a word character: `.rs` has none to find
+            // at its dot.
+            let (first, last) = (self.text.chars().next(), self.text.chars().next_back());
+            let edge = |c: Option<char>| {
+                if self.word && c.is_some_and(is_word) {
+                    "\\b"
+                } else {
+                    ""
+                }
+            };
+            format!("{}{}{}", edge(first), regex::escape(&self.text), edge(last))
+        };
+        RegexBuilder::new(&pattern)
+            .unicode(true)
+            .case_insensitive(!self.case)
+            .size_limit(PATTERN_LIMIT)
+            .build()
+            .map(|re| Matcher { re: Some(re) })
+            .map_err(|err| reason(&err))
     }
-    found
+}
+
+/// The part of a build error worth showing in a strip: one line.
+fn reason(err: &regex::Error) -> String {
+    match err {
+        regex::Error::CompiledTooBig(_) => "the pattern is too large".to_owned(),
+        regex::Error::Syntax(text) => text
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("error: "))
+            .unwrap_or("the pattern does not parse")
+            .to_owned(),
+        other => other
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+
+impl Matcher {
+    /// Where the query is in `hay`, left to right and not overlapping. Ranges are bytes of
+    /// `hay` and fall on character boundaries; a match with nothing in it is not one.
+    pub(crate) fn matches(&self, hay: &str) -> Vec<Range<usize>> {
+        self.matches_up_to(hay, usize::MAX)
+    }
+
+    /// [`Self::matches`], stopping at `limit` of them.
+    fn matches_up_to(&self, hay: &str, limit: usize) -> Vec<Range<usize>> {
+        let Some(re) = &self.re else {
+            return Vec::new();
+        };
+        re.find_iter(hay)
+            .filter(|m| !m.is_empty())
+            .map(|m| m.range())
+            .take(limit)
+            .collect()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.re.is_none()
+    }
 }
 
 /// The searchable texts of a row, with what each is.
@@ -144,22 +210,71 @@ pub(crate) fn text_of(row: &Row, part: Part) -> Option<&str> {
 /// occurrence.
 pub(crate) const HIT_CAP: usize = 10_000;
 
-/// The first [`HIT_CAP`] matches of `needle` in `rows` (folds opened out), in reading order.
-pub(crate) fn find_all(rows: &[Row], needle: &str) -> Vec<Hit> {
+/// Where a run of rows sits in the thread: how many rows come before it in reading order, and
+/// how many prompts. A run's hits are found once, as if it were the thread, and placed after.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Place {
+    pub(crate) rows: usize,
+    pub(crate) turns: usize,
+}
+
+impl Place {
+    /// What `rows` take up (folds opened out).
+    pub(crate) fn taken_by(rows: &[Row]) -> Self {
+        rows.iter().fold(Self::default(), |at, row| match row {
+            Row::Worked { rows, .. } => {
+                let inner = Self::taken_by(rows);
+                Self {
+                    rows: at.rows + inner.rows,
+                    turns: at.turns + inner.turns,
+                }
+            }
+            Row::User { steer: false, .. } => Self {
+                rows: at.rows + 1,
+                turns: at.turns + 1,
+            },
+            _ => Self {
+                rows: at.rows + 1,
+                ..at
+            },
+        })
+    }
+}
+
+/// The first [`HIT_CAP`] matches of `matcher` in `rows` (folds opened out), in reading order.
+pub(crate) fn find_all(rows: &[Row], matcher: &Matcher) -> Vec<Hit> {
+    let mut hits: Vec<Hit> = placed(&find_in_run(rows, matcher), Place::default()).collect();
+    hits.truncate(HIT_CAP);
+    hits
+}
+
+/// The matches in one run's `rows`, numbered from the run's own start: its first row is row 0,
+/// and `turn` counts the prompts in the run so far (0 before its first). [`placed`] moves them
+/// into the thread.
+pub(crate) fn find_in_run(rows: &[Row], matcher: &Matcher) -> Vec<Hit> {
     let mut hits = Vec::new();
-    if needle.is_empty() {
+    if matcher.is_empty() {
         return hits;
     }
     let (mut ordinal, mut turn) = (0, 0);
-    scan(rows, None, needle, &mut ordinal, &mut turn, &mut hits);
+    scan(rows, None, matcher, &mut ordinal, &mut turn, &mut hits);
     hits.truncate(HIT_CAP);
     hits
+}
+
+/// `hits` of [`find_in_run`] as they are once the run sits at `at` in the thread.
+pub(crate) fn placed(hits: &[Hit], at: Place) -> impl Iterator<Item = Hit> + '_ {
+    hits.iter().map(move |hit| Hit {
+        ordinal: hit.ordinal + at.rows,
+        turn: (hit.turn + at.turns).max(1),
+        ..hit.clone()
+    })
 }
 
 fn scan(
     rows: &[Row],
     fold: Option<Key>,
-    needle: &str,
+    matcher: &Matcher,
     ordinal: &mut usize,
     turn: &mut usize,
     hits: &mut Vec<Hit>,
@@ -169,7 +284,7 @@ fn scan(
             return;
         }
         if let Row::Worked { key, rows, .. } = row {
-            scan(rows, Some(*key), needle, ordinal, turn, hits);
+            scan(rows, Some(*key), matcher, ordinal, turn, hits);
             continue;
         }
         if matches!(row, Row::User { steer: false, .. }) {
@@ -177,7 +292,8 @@ fn scan(
         }
         for (part, source, text) in texts(row) {
             hits.extend(
-                matches_up_to(text, needle, HIT_CAP - hits.len())
+                matcher
+                    .matches_up_to(text, HIT_CAP - hits.len())
                     .into_iter()
                     .map(|range| Hit {
                         key: row.key(),
@@ -185,7 +301,7 @@ fn scan(
                         range,
                         fold,
                         ordinal: *ordinal,
-                        turn: (*turn).max(1),
+                        turn: *turn,
                         source,
                     }),
             );
@@ -378,6 +494,25 @@ mod tests {
     use crate::transcript::{Outcome, ToolKind};
     use reno_proto::ToolOutput;
 
+    fn query(text: &str) -> Query {
+        Query {
+            text: text.to_owned(),
+            ..Query::default()
+        }
+    }
+
+    fn search(rows: &[Row], needle: &str) -> Vec<Hit> {
+        find_all(rows, &query(needle).compile().unwrap())
+    }
+
+    fn matches_of(hay: &str, needle: &str) -> Vec<Range<usize>> {
+        query(needle).compile().unwrap().matches(hay)
+    }
+
+    fn count_in(rows: &[Row], query: &Query) -> usize {
+        find_all(rows, &query.compile().unwrap()).len()
+    }
+
     fn prose(n: u64, text: &str) -> Row {
         Row::Prose {
             key: Key(n),
@@ -419,19 +554,128 @@ mod tests {
     #[test]
     fn matches_ignore_case_do_not_overlap_and_stay_on_character_boundaries() {
         assert_eq!(
-            matches("Supervisor.rs, supervisor.RS", "supervisor.rs"),
+            matches_of("Supervisor.rs, supervisor.RS", "supervisor.rs"),
             vec![0..13, 15..28]
         );
-        assert_eq!(matches("aaaa", "aa"), vec![0..2, 2..4]);
-        assert_eq!(matches("abc", ""), Vec::<Range<usize>>::new());
+        assert_eq!(matches_of("aaaa", "aa"), vec![0..2, 2..4]);
+        assert_eq!(matches_of("abc", ""), Vec::<Range<usize>>::new());
         // Multi-byte text: the ranges are bytes of the haystack.
         let hay = "d\u{fc}sseldorf \u{c9}COLE \u{e9}cole";
-        let found = matches(hay, "\u{e9}cole");
+        let found = matches_of(hay, "\u{e9}cole");
         assert_eq!(found.len(), 2);
         for r in &found {
             assert!(hay.is_char_boundary(r.start) && hay.is_char_boundary(r.end));
         }
         assert_eq!(&hay[found[0].clone()], "\u{c9}COLE");
+    }
+
+    #[test]
+    fn match_case_whole_word_and_regex_each_change_the_count() {
+        let rows = vec![prose(0, "cat Cat concat cat.")];
+        let plain = query("cat");
+        assert_eq!(count_in(&rows, &plain), 4, "case is ignored by default");
+        let case = Query {
+            case: true,
+            ..plain.clone()
+        };
+        assert_eq!(count_in(&rows, &case), 3, "match case drops `Cat`");
+        let word = Query {
+            word: true,
+            ..plain.clone()
+        };
+        assert_eq!(count_in(&rows, &word), 3, "whole word drops `concat`");
+        let both = Query {
+            case: true,
+            word: true,
+            ..plain
+        };
+        assert_eq!(count_in(&rows, &both), 2);
+
+        let literal = query("c.t");
+        assert_eq!(count_in(&rows, &literal), 0, "a dot is a dot without regex");
+        let regex = Query {
+            regex: true,
+            ..literal.clone()
+        };
+        assert_eq!(count_in(&rows, &regex), 4);
+        let regex_case = Query {
+            case: true,
+            ..regex.clone()
+        };
+        assert_eq!(count_in(&rows, &regex_case), 3);
+        let regex_word = Query {
+            word: true,
+            ..regex
+        };
+        assert_eq!(count_in(&rows, &regex_word), 3);
+    }
+
+    #[test]
+    fn whole_word_needs_a_boundary_only_where_the_query_ends_in_a_word_character() {
+        let rows = vec![prose(0, "a.rs b.rsx .rs")];
+        let word = |text: &str| Query {
+            word: true,
+            ..query(text)
+        };
+        assert_eq!(count_in(&rows, &word("a.rs")), 1);
+        assert_eq!(count_in(&rows, &word("b.rs")), 0, "`b.rsx` is another word");
+        assert_eq!(
+            count_in(&rows, &word(".rs")),
+            2,
+            "the dot needs no boundary before it, the s still needs one after"
+        );
+    }
+
+    #[test]
+    fn a_regex_match_is_never_empty_and_stays_on_character_boundaries() {
+        let regex = Query {
+            regex: true,
+            ..query("\u{e9}*")
+        };
+        let hay = "x \u{e9}\u{e9} y";
+        let found = regex.compile().unwrap().matches(hay);
+        assert_eq!(found.len(), 1, "empty matches are skipped: {found:?}");
+        assert_eq!(&hay[found[0].clone()], "\u{e9}\u{e9}");
+        assert!(query("").compile().unwrap().matches(hay).is_empty());
+    }
+
+    #[test]
+    fn a_regex_that_does_not_parse_or_is_too_large_says_why() {
+        let bad = Query {
+            regex: true,
+            ..query("(open")
+        };
+        let why = bad.compile().unwrap_err();
+        assert!(why.contains("unclosed group"), "{why}");
+        assert!(!why.contains('\n'), "one line, fit for the strip: {why}");
+
+        let huge = Query {
+            regex: true,
+            ..query("\\pL{1000}\\pL{1000}")
+        };
+        let why = huge.compile().unwrap_err();
+        assert!(why.contains("too large"), "{why}");
+
+        assert!(
+            query("(open").compile().is_ok(),
+            "plain text is never a pattern"
+        );
+    }
+
+    #[test]
+    fn a_recount_keeps_the_current_hit_once_one_is_gone_to() {
+        let regex = Query {
+            regex: true,
+            ..query("x+")
+        };
+        let rows = vec![prose(2, "x xx"), prose(4, "xxx")];
+        let mut f = Found::new(find_all(&rows, &regex.compile().unwrap()));
+        f.go_to(2);
+        let more = vec![prose(2, "x xx x"), prose(4, "xxx"), prose(6, "x")];
+        let again = f.recounted(find_all(&more, &regex.compile().unwrap()));
+        let current = again.current_hit().unwrap();
+        assert_eq!((current.key, current.range.start), (Key(4), 0));
+        assert_eq!(again.current, Some(3));
     }
 
     #[test]
@@ -459,7 +703,7 @@ mod tests {
             user(1 << 40, "again?"),
             prose(10 | 1 << 40, "no supervisor.rs this time"),
         ];
-        let hits = find_all(&rows, "SUPERVISOR.RS");
+        let hits = search(&rows, "SUPERVISOR.RS");
         let at: Vec<_> = hits
             .iter()
             .map(|h| (h.key.0 & 0xff, h.part, h.source, h.turn))
@@ -484,7 +728,7 @@ mod tests {
         };
         let text = text_of(&inner[1], first_output.part).unwrap();
         assert_eq!(&text[first_output.range.clone()], "supervisor.rs");
-        assert!(find_all(&rows, "").is_empty());
+        assert!(search(&rows, "").is_empty());
     }
 
     #[test]
@@ -502,7 +746,7 @@ mod tests {
             prose(2, &"x ".repeat(HIT_CAP)),
             prose(4, "x"),
         ];
-        let hits = find_all(&rows, "x");
+        let hits = search(&rows, "x");
         assert_eq!(hits.len(), HIT_CAP);
         assert!(
             hits.windows(2).all(|w| w[0].order() < w[1].order()),
@@ -522,7 +766,7 @@ mod tests {
 
     fn found(n: usize) -> Found {
         let rows: Vec<Row> = (0..n).map(|i| prose(2 * i as u64, "x")).collect();
-        Found::new(find_all(&rows, "x"))
+        Found::new(search(&rows, "x"))
     }
 
     #[test]
@@ -546,11 +790,11 @@ mod tests {
     #[test]
     fn a_recount_keeps_the_current_match_where_it_is() {
         let rows = vec![prose(2, "x x"), prose(4, "x")];
-        let mut f = Found::new(find_all(&rows, "x"));
+        let mut f = Found::new(search(&rows, "x"));
         f.go_to(2);
         // A reply grew above the current match, and one was added after it.
         let more = vec![prose(2, "x x x"), prose(4, "x"), prose(6, "x")];
-        let again = f.recounted(find_all(&more, "x"));
+        let again = f.recounted(search(&more, "x"));
         assert_eq!(again.hits.len(), 5);
         let current = again.current_hit().unwrap();
         assert_eq!((current.key, current.range.start), (Key(4), 0));
@@ -560,21 +804,21 @@ mod tests {
     #[test]
     fn a_recount_whose_current_match_is_gone_takes_the_next_one() {
         let rows = vec![prose(2, "x"), prose(4, "x"), prose(6, "x")];
-        let mut f = Found::new(find_all(&rows, "x"));
+        let mut f = Found::new(search(&rows, "x"));
         f.go_to(1);
         let after = vec![prose(2, "x"), prose(4, "-"), prose(6, "x")];
-        let again = f.recounted(find_all(&after, "x"));
+        let again = f.recounted(search(&after, "x"));
         assert_eq!(again.current_hit().map(|h| h.key), Some(Key(6)));
         // Nothing left, then something: the first hit.
         let none = f.recounted(Vec::new());
         assert_eq!(none.current, None);
-        assert_eq!(none.recounted(find_all(&rows, "x")).current, Some(0));
+        assert_eq!(none.recounted(search(&rows, "x")).current, Some(0));
     }
 
     #[test]
     fn a_hit_in_a_closed_fold_asks_for_the_fold() {
         let row = prose(2, "x");
-        let hit = &find_all(std::slice::from_ref(&row), "x")[0];
+        let hit = &search(std::slice::from_ref(&row), "x")[0];
         let fold_key = Key::fold(Key(2));
         let need = reveal(hit, &row, Some(fold_key));
         assert_eq!(need.fold, Some(fold_key));
@@ -588,7 +832,7 @@ mod tests {
             key: Key(2),
             text: "think about x".to_owned(),
         };
-        let hit = &find_all(std::slice::from_ref(&row), "x")[0];
+        let hit = &search(std::slice::from_ref(&row), "x")[0];
         assert!(reveal(hit, &row, None).row);
     }
 
@@ -596,13 +840,13 @@ mod tests {
     fn a_hit_past_the_cut_of_a_long_message_asks_to_show_more() {
         let long = format!("{} needle", "word ".repeat(100));
         let row = user(0, &long);
-        let hit = &find_all(std::slice::from_ref(&row), "needle")[0];
+        let hit = &search(std::slice::from_ref(&row), "needle")[0];
         assert!(reveal(hit, &row, None).row);
         let early = user(0, &format!("needle {}", "word ".repeat(100)));
-        let hit = &find_all(std::slice::from_ref(&early), "needle")[0];
+        let hit = &search(std::slice::from_ref(&early), "needle")[0];
         assert!(!reveal(hit, &early, None).row, "the first lines show");
         let short = user(0, "needle");
-        let hit = &find_all(std::slice::from_ref(&short), "needle")[0];
+        let hit = &search(std::slice::from_ref(&short), "needle")[0];
         assert!(!reveal(hit, &short, None).row);
     }
 
@@ -617,14 +861,14 @@ mod tests {
             key: Key(2),
             calls: vec![call("c1", "cargo test", Some(&out))],
         };
-        let hits = find_all(std::slice::from_ref(&row), "needle");
+        let hits = search(std::slice::from_ref(&row), "needle");
         let need = reveal(&hits[0], &row, None);
         assert_eq!(need.output, Some(("c1".to_owned(), true)));
         let early = Row::Tools {
             key: Key(2),
             calls: vec![call("c1", "cargo test", Some("the needle\nline 2\n"))],
         };
-        let hits = find_all(std::slice::from_ref(&early), "needle");
+        let hits = search(std::slice::from_ref(&early), "needle");
         assert_eq!(
             reveal(&hits[0], &early, None).output,
             Some(("c1".to_owned(), false))

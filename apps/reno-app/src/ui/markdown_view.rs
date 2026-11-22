@@ -117,11 +117,11 @@ pub(crate) struct Host {
     pub(crate) select: Option<Rc<SelectHost>>,
 }
 
-/// What to paint over a reply: the needle, and which of the reply's drawn matches is the one the
+/// What to paint over a reply: what to look for, and which of the reply's drawn matches is the one the
 /// find bar is on (counted from zero in drawing order; `None` when it is in another row).
 #[derive(Debug)]
 pub(crate) struct Marks {
-    pub(crate) needle: String,
+    pub(crate) matcher: Rc<crate::vm::find::Matcher>,
     pub(crate) current: Option<usize>,
 }
 
@@ -627,7 +627,9 @@ fn find_hits(env: &Env, text: &str, base: usize) -> Vec<(Range<usize>, bool)> {
     let Some(marks) = &env.host.marks else {
         return Vec::new();
     };
-    crate::vm::find::matches(text, &marks.needle)
+    marks
+        .matcher
+        .matches(text)
         .into_iter()
         .map(|range| {
             let n = env.hit_at.replace(env.hit_at.get() + 1);
@@ -1245,8 +1247,15 @@ mod tests {
         use crate::ui::theme::{Appearance, Theme};
         let (_view, vcx) = cx.add_window_view(|_, _| gpui::Empty);
         let theme = Theme::for_appearance(Appearance::Dark);
+        let matcher = crate::vm::find::Query {
+            text: "draw".to_owned(),
+            ..Default::default()
+        }
+        .compile()
+        .map(Rc::new)
+        .expect("a plain query compiles");
         let host = Host::preview().marked(Some(Rc::new(Marks {
-            needle: "draw".to_owned(),
+            matcher,
             current: Some(1),
         })));
         vcx.update(|window, _| {

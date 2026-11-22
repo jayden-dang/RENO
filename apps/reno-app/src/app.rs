@@ -2090,6 +2090,21 @@ impl Render for RootView {
                     run.update(cx, |run, cx| run.find_step(false, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &actions::ToggleMatchCase, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_match_case(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleWholeWord, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_whole_word(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::ToggleRegex, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.toggle_regex(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &actions::PinThread, w, cx| {
                 this.sidebar_key(false, w, cx);
             }))

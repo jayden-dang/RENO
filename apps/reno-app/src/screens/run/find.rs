@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -14,14 +15,16 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::RunScreen;
+use super::{RunScreen, Segment};
 use crate::transcript::{Key, Row};
 use crate::ui::field::{Field, FieldEvent, Look};
 use crate::ui::find as look;
 use crate::ui::icon::{Icon, icon};
 use crate::ui::kit::{self, MONO};
+use crate::ui::markdown_view::lru::Lru;
 use crate::ui::theme::Theme;
-use crate::vm::find::{self, Found, Part};
+use crate::vm::find::{self, Found, Hit, Matcher, Part, Place, Query};
+use reno_proto::{RunId, RunStatus};
 
 /// The recount follows new events and opening or closing rows at most this often.
 pub(super) const RECOUNT_EVERY: Duration = Duration::from_millis(150);
@@ -31,11 +34,36 @@ const OUTPUT_TOP: f32 = 40.0;
 const OUTPUT_LINE: f32 = 18.0;
 const OUTPUT_CONTEXT: f32 = 90.0;
 
+/// The most older-run hit lists kept (a list is capped itself, and so is the cost of all).
+const HIT_LISTS: usize = 64;
+
+/// What an older run was built from: how many events it has, and how it stands.
+type Signature = (usize, Option<RunStatus>);
+
+/// One older run's hits for one query: the run's place in the thread, what it was built from,
+/// and the query.
+type RunKey = (usize, Signature, Query);
+
+struct HitCache(Lru<RunKey, Vec<Hit>>);
+
+impl Default for HitCache {
+    fn default() -> Self {
+        Self(Lru::new(HIT_LISTS, 4 * find::HIT_CAP))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Find {
     pub(super) open: bool,
-    /// The query, as the field last said it.
-    pub(super) query: String,
+    /// The query: the text as the field last said it, and the three options.
+    pub(super) query: Query,
+    matcher: Rc<Matcher>,
+    /// Why the query cannot be searched with (a pattern that does not parse), when it cannot.
+    error: Option<String>,
+    /// What older runs held for a query, so a recount reads only the live run's text.
+    hit_cache: HitCache,
+    #[cfg(test)]
+    pub(super) runs_scanned: usize,
     field: Option<(Entity<Field>, Subscription)>,
     found: Found,
     /// The hits of each row, as indexes into `found.hits`, so a row finds its own.
@@ -51,6 +79,31 @@ pub(super) struct Find {
     pub(super) recounts: usize,
 }
 
+/// The rows of each older run, with what it was built from, when `rows` hold exactly those runs'
+/// rows ahead of the live run's. `None` when they do not (the rows were set by hand).
+fn older_runs_in<'a>(
+    rows: &'a [Row],
+    prefix_len: usize,
+    prefix_runs: &[(RunId, Signature)],
+    segments: &HashMap<RunId, Segment>,
+) -> Option<Vec<(Signature, &'a [Row])>> {
+    let mut start = 0;
+    let mut older = Vec::with_capacity(prefix_runs.len());
+    for (id, signature) in prefix_runs {
+        let segment = segments.get(id).filter(|s| &s.signature == signature)?;
+        let run = rows.get(start..start + segment.rows.len())?;
+        let same_end = |a: Option<&Row>, b: Option<&Row>| a.map(Row::key) == b.map(Row::key);
+        if !same_end(run.first(), segment.rows.first())
+            || !same_end(run.last(), segment.rows.last())
+        {
+            return None;
+        }
+        older.push((*signature, run));
+        start += run.len();
+    }
+    (start == prefix_len).then_some(older)
+}
+
 impl RunScreen {
     pub(crate) fn find_is_open(&self) -> bool {
         self.find.open
@@ -61,11 +114,35 @@ impl RunScreen {
         if !self.find.open {
             return None;
         }
+        if self.find.error.is_some() {
+            return None;
+        }
         find::count_label(
-            &self.find.query,
+            &self.find.query.text,
             self.find.found.hits.len(),
             self.find.found.current,
         )
+    }
+
+    /// Why the query cannot be searched with, while the bar is open.
+    #[cfg(test)]
+    pub(crate) fn find_error(&self) -> Option<&str> {
+        self.find.error.as_deref().filter(|_| self.find.open)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_query(&self) -> &Query {
+        &self.find.query
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_runs_scanned(&self) -> usize {
+        self.find.runs_scanned
+    }
+
+    #[cfg(test)]
+    pub(crate) fn find_hit_lists(&self) -> usize {
+        self.find.hit_cache.0.len()
     }
 
     #[cfg(test)]
@@ -183,11 +260,54 @@ impl RunScreen {
     // --- the query and the count ---------------------------------------------------------------
 
     fn find_query_changed(&mut self, text: String, cx: &mut Context<Self>) {
-        self.find.query = text;
+        self.find.query.text = text;
+        self.find_asked_again(cx);
+    }
+
+    /// The query changed: the first hit is current again, and nothing is gone to.
+    fn find_asked_again(&mut self, cx: &mut Context<Self>) {
+        self.find_compile();
         self.find.navigated = false;
-        self.find.found = Found::new(find::find_all(&self.rows, &self.find.query));
+        self.find.found = Found::new(self.find_hits());
         self.find_reindex();
         cx.notify();
+    }
+
+    /// ⌥⌘C, or the button: match case on or off.
+    pub(crate) fn toggle_match_case(&mut self, cx: &mut Context<Self>) {
+        if self.find.open {
+            self.find.query.case ^= true;
+            self.find_asked_again(cx);
+        }
+    }
+
+    /// ⌥⌘W, or the button: whole word on or off.
+    pub(crate) fn toggle_whole_word(&mut self, cx: &mut Context<Self>) {
+        if self.find.open {
+            self.find.query.word ^= true;
+            self.find_asked_again(cx);
+        }
+    }
+
+    /// ⌥⌘X, or the button: the text is a pattern, or not.
+    pub(crate) fn toggle_regex(&mut self, cx: &mut Context<Self>) {
+        if self.find.open {
+            self.find.query.regex ^= true;
+            self.find_asked_again(cx);
+        }
+    }
+
+    fn find_compile(&mut self) {
+        match self.find.query.compile() {
+            Ok(matcher) => {
+                self.find.matcher = Rc::new(matcher);
+                self.find.error = None;
+            }
+            Err(why) => {
+                self.find.matcher = Rc::default();
+                self.find.error = Some(why);
+            }
+        }
     }
 
     /// Counts again over the rows now, keeping the current match where it is.
@@ -200,8 +320,11 @@ impl RunScreen {
             .field
             .as_ref()
             .map_or_else(String::new, |(f, _)| f.read(cx).text().to_owned());
-        self.find.query = text;
-        let hits = find::find_all(&self.rows, &self.find.query);
+        if text != self.find.query.text {
+            self.find.query.text = text;
+            self.find_compile();
+        }
+        let hits = self.find_hits();
         // Until a hit was gone to, the current match is the first in reading order, also when
         // earlier runs arrive after the query was typed; after that it stays put.
         self.find.found = if self.find.navigated {
@@ -217,6 +340,63 @@ impl RunScreen {
         cx.notify();
     }
 
+    /// The hits of the thread. The older runs' come from the cache when the run and the query are
+    /// as they were; only the runs that are not (the live one, always) are read through.
+    fn find_hits(&mut self) -> Vec<Hit> {
+        if self.find.matcher.is_empty() {
+            return Vec::new();
+        }
+        let Some(older) = older_runs_in(
+            &self.rows,
+            self.prefix_len,
+            &self.prefix_runs,
+            &self.segments,
+        ) else {
+            #[cfg(test)]
+            {
+                self.find.runs_scanned += 1;
+            }
+            return find::find_all(&self.rows, &self.find.matcher);
+        };
+        let mut hits: Vec<Hit> = Vec::new();
+        let mut at = Place::default();
+        for (index, (signature, rows)) in older.into_iter().enumerate() {
+            if hits.len() >= find::HIT_CAP {
+                break;
+            }
+            let key = (index, signature, self.find.query.clone());
+            let local = match self.find.hit_cache.0.get(&key) {
+                Some(local) => local.clone(),
+                None => {
+                    #[cfg(test)]
+                    {
+                        self.find.runs_scanned += 1;
+                    }
+                    let local = find::find_in_run(rows, &self.find.matcher);
+                    self.find
+                        .hit_cache
+                        .0
+                        .insert(key, local.clone(), local.len() + 1);
+                    local
+                }
+            };
+            hits.extend(find::placed(&local, at));
+            let taken = Place::taken_by(rows);
+            at = Place {
+                rows: at.rows + taken.rows,
+                turns: at.turns + taken.turns,
+            };
+        }
+        #[cfg(test)]
+        {
+            self.find.runs_scanned += 1;
+        }
+        let live = find::find_in_run(&self.rows[self.prefix_len..], &self.find.matcher);
+        hits.extend(find::placed(&live, at));
+        hits.truncate(find::HIT_CAP);
+        hits
+    }
+
     fn find_reindex(&mut self) {
         self.find.by_row.clear();
         for (at, hit) in self.find.found.hits.iter().enumerate() {
@@ -227,7 +407,7 @@ impl RunScreen {
     /// Events arrived, or a row opened or closed: the count follows, at most once per
     /// [`RECOUNT_EVERY`], from a timer this arms (nothing polls). The current match stays put.
     pub(super) fn find_note_change(&mut self, cx: &mut Context<Self>) {
-        if !self.find.open || self.find.query.is_empty() || self.find.timer.is_some() {
+        if !self.find.open || self.find.query.text.is_empty() || self.find.timer.is_some() {
             return;
         }
         self.find.timer = Some(cx.spawn(async move |this, cx| {
@@ -364,16 +544,13 @@ impl RunScreen {
     /// What the markdown view paints over a reply (TRANSCRIPT-3.5): the needle, and which of the
     /// reply's matches is the one the bar is on. `None` unless the bar is open and the reply
     /// holds a match.
-    pub(super) fn find_marks(
-        &self,
-        key: Key,
-    ) -> Option<std::rc::Rc<crate::ui::markdown_view::Marks>> {
-        if !self.find.open || self.find.query.is_empty() {
+    pub(super) fn find_marks(&self, key: Key) -> Option<Rc<crate::ui::markdown_view::Marks>> {
+        if !self.find.open || self.find.query.text.is_empty() {
             return None;
         }
         let hits = self.find.by_row.get(&key)?;
-        Some(std::rc::Rc::new(crate::ui::markdown_view::Marks {
-            needle: self.find.query.clone(),
+        Some(Rc::new(crate::ui::markdown_view::Marks {
+            matcher: self.find.matcher.clone(),
             current: hits
                 .iter()
                 .position(|&at| self.find.found.current == Some(at)),
@@ -413,7 +590,8 @@ impl RunScreen {
 
     // --- the bar -------------------------------------------------------------------------------
 
-    /// The query field in a rounded box that shows when it has the keyboard.
+    /// The query field in a rounded box that shows when it has the keyboard, with the three
+    /// options at its right edge. The box turns `danger` while the query cannot be searched.
     fn find_field_box(
         &mut self,
         theme: &Theme,
@@ -422,27 +600,100 @@ impl RunScreen {
     ) -> AnyElement {
         let field = self.find_field(cx);
         let focused = field.read(cx).focus_handle(cx).is_focused(window);
+        let [case, word, regex] = self.find_toggles(theme, cx);
         div()
             .flex_1()
             .min_w_0()
             .h(px(28.0))
-            .px(px(10.0))
+            .pl(px(10.0))
+            .pr(px(4.0))
             .flex()
             .items_center()
+            .gap(px(4.0))
             .rounded(px(999.0))
             .bg(theme.raised)
             .border_1()
-            .border_color(if focused {
+            .border_color(if self.find.error.is_some() {
+                theme.danger
+            } else if focused {
                 theme.accent
             } else {
                 theme.hairline
             })
-            .child(field)
+            .child(div().flex_1().min_w_0().child(field))
+            .child(case)
+            .child(word)
+            .child(regex)
             .into_any_element()
+    }
+
+    /// Match case, whole word and regex, each pressed while it is on.
+    fn find_toggles(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
+        let query = &self.find.query;
+        let toggle = |id: &'static str,
+                      label: &'static str,
+                      spoken: &'static str,
+                      tip: &'static str,
+                      on: bool| {
+            // The field is `raised` already, which a pressed segment would be too: an accent tint
+            // says it is on.
+            kit::segment(theme, id, label, on)
+                .when(on, |d| {
+                    d.bg(theme.accent.opacity(0.2)).text_color(theme.accent)
+                })
+                .h(px(20.0))
+                .px(px(7.0))
+                .text_size(px(11.5))
+                .aria_label(spoken)
+                .tooltip(kit::tip(tip))
+        };
+        [
+            toggle(
+                "find-case",
+                "Aa",
+                "Match case",
+                "Match case (\u{2325}\u{2318}C)",
+                query.case,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_match_case(cx)))
+            .into_any_element(),
+            toggle(
+                "find-word",
+                "ab",
+                "Whole word",
+                "Whole word (\u{2325}\u{2318}W)",
+                query.word,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_whole_word(cx)))
+            .into_any_element(),
+            toggle(
+                "find-regex",
+                ".*",
+                "Regular expression",
+                "Regular expression (\u{2325}\u{2318}X)",
+                query.regex,
+            )
+            .font_family(MONO)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_regex(cx)))
+            .into_any_element(),
+        ]
     }
 
     /// "1 of 7", or "No results".
     fn find_count_text(&self, theme: &Theme, size: f32, mono: bool) -> AnyElement {
+        if let Some(why) = &self.find.error {
+            return div()
+                .id("find-error")
+                .debug_selector(|| "find-error".to_owned())
+                .flex_none()
+                .max_w(px(220.0))
+                .truncate()
+                .text_size(px(size))
+                .text_color(theme.danger)
+                .tooltip(kit::tip(why.clone()))
+                .child(gpui::SharedString::from(why.clone()))
+                .into_any_element();
+        }
         let label = self.find_count_label().unwrap_or_default();
         div()
             .id("find-count")

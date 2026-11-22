@@ -5834,6 +5834,7 @@ dependencies = [
  "ratex-parser",
  "ratex-svg",
  "ratex-types",
+ "regex",
  "reno-client",
  "reno-markdown",
  "reno-notify",

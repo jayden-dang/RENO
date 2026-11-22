@@ -28,6 +28,10 @@ actions!(
         FindNext,
         FindPrevious,
         CloseFind,
+        // The find bar's options: match case, whole word and regular expression.
+        ToggleMatchCase,
+        ToggleWholeWord,
+        ToggleRegex,
         // The sidebar's thread menu: Escape closes what is open; the others act on the thread.
         DismissSidebar,
         PinThread,
@@ -61,6 +65,21 @@ pub(crate) fn bind_keys(cx: &mut App) {
         // While the bar is open Escape closes it, wherever the keyboard is in the run screen; the
         // composer and the approval panel pass theirs on to it.
         KeyBinding::new("escape", CloseFind, Some(crate::ui::find::OPEN_CONTEXT)),
+        KeyBinding::new(
+            "cmd-alt-c",
+            ToggleMatchCase,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-w",
+            ToggleWholeWord,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
+        KeyBinding::new(
+            "cmd-alt-x",
+            ToggleRegex,
+            Some(crate::ui::find::OPEN_CONTEXT),
+        ),
         KeyBinding::new(
             "shift-enter",
             FindPrevious,
