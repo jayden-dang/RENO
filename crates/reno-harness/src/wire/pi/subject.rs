@@ -14,8 +14,10 @@ use super::normalize::action_class;
 ///
 /// A command is `input.command`. Edits and reads name `input.path`; `grep`, `find` and `ls` may
 /// omit it (meaning the working directory), which leaves no path. A path is spelled as Pi will
-/// open it (see [`opened_paths`]), with `~` expanded against `home`, the daemon user's home
-/// directory (left as written when it is unknown). A `find` pattern and a `grep` glob are not
+/// open it (see [`opened_paths`]). Pi expands `~` with its child's `os.homedir()`, which is the
+/// `HOME` the daemon's base environment passes on, so the caller passes the daemon user's home as
+/// `home`; without it `~/Library/Application Support/Reno` would read as a path inside the
+/// working directory. A `find` pattern and a `grep` glob are not
 /// paths and stay only in `raw`, which is the call as the gate sent it.
 #[cfg_attr(not(test), expect(dead_code, reason = "nothing reads gate calls yet"))]
 pub(crate) fn subject(
@@ -23,7 +25,7 @@ pub(crate) fn subject(
     call_id: &str,
     parent: Option<&str>,
     input: &Value,
-    home: Option<&Path>,
+    home: &Path,
 ) -> ApprovalSubject {
     let action = action_class(tool);
     let text = |key: &str| input.get(key).and_then(Value::as_str);
@@ -51,21 +53,31 @@ pub(crate) fn subject(
 }
 
 /// The paths the protection should judge for a tool's `path` argument, spelled as Pi will open
-/// it, in Pi's order: one leading `@` is dropped; with a known `home`, a leading `~` or `~/` is
-/// expanded; then a `file://` URL is read as node's `fileURLToPath` reads it. A URL that call
-/// would refuse (another host, an encoded `/`) still yields its decoded path and, besides, the
+/// it, in Pi's order: Unicode spaces become plain spaces; one leading `@` is dropped; a leading `~`
+/// or `~/` is expanded against `home`; then a `file://` URL is read as node's `fileURLToPath`
+/// reads it. A URL that call would refuse (another host, an encoded `/`) still yields its decoded path and, besides, the
 /// text as written, so a protected component in either form is seen.
-fn opened_paths(path: &str, home: Option<&Path>) -> Vec<PathBuf> {
-    let path = path.strip_prefix('@').unwrap_or(path);
-    if let Some(home) = home {
-        if path == "~" {
-            return vec![home.to_path_buf()];
-        }
-        if let Some(rest) = path.strip_prefix("~/") {
-            return vec![home.join(rest)];
-        }
+fn opened_paths(path: &str, home: &Path) -> Vec<PathBuf> {
+    let spaced: String = path
+        .chars()
+        .map(|c| if is_unicode_space(c) { ' ' } else { c })
+        .collect();
+    let path = spaced.strip_prefix('@').unwrap_or(&spaced);
+    if path == "~" {
+        return vec![home.to_path_buf()];
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return vec![home.join(rest)];
     }
     file_url_paths(path).unwrap_or_else(|| vec![PathBuf::from(path)])
+}
+
+/// The characters Pi turns into a plain space first (`/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/`).
+fn is_unicode_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{a0}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
 }
 
 /// The WHATWG reading of a `file://` URL that Pi hands to `fileURLToPath`: trailing control
@@ -101,6 +113,7 @@ fn percent_decode(text: &str) -> String {
         let byte = (bytes[at] == b'%')
             .then(|| bytes.get(at + 1..at + 3))
             .flatten()
+            .filter(|pair| pair.iter().all(u8::is_ascii_hexdigit))
             .and_then(|pair| std::str::from_utf8(pair).ok())
             .and_then(|pair| u8::from_str_radix(pair, 16).ok());
         decoded.push(byte.unwrap_or(bytes[at]));
@@ -118,7 +131,7 @@ mod tests {
 
     /// A call as the driver makes it, with a constructed home.
     fn subject(tool: &str, call_id: &str, parent: Option<&str>, input: &Value) -> ApprovalSubject {
-        super::subject(tool, call_id, parent, input, Some(Path::new("/home/u")))
+        super::subject(tool, call_id, parent, input, Path::new("/home/u"))
     }
 
     fn paths(subject: &ApprovalSubject) -> Vec<&str> {
@@ -155,7 +168,7 @@ mod tests {
 
     #[test]
     fn a_path_is_what_pi_will_open_not_what_the_model_typed() {
-        let rows: [(&str, &[&str]); 31] = [
+        let rows: &[(&str, &[&str])] = &[
             ("@.reno/policy.toml", &[".reno/policy.toml"]),
             ("@.git/hooks/pre-commit", &[".git/hooks/pre-commit"]),
             ("@@x", &["@x"]),
@@ -197,11 +210,21 @@ mod tests {
                 "file://other/work/.reno/x",
                 &["/work/.reno/x", "file://other/work/.reno/x"],
             ),
+            ("file:///work/.git\u{a0}", &["/work/.git"]),
+            ("file:///work/.git\u{3000}", &["/work/.git"]),
+            ("file:///work/.git\u{2003}\u{202f}", &["/work/.git"]),
+            ("file:///work/.git \t", &["/work/.git"]),
+            ("file:///work/.git\u{a0}\t ", &["/work/.git"]),
+            ("@file:///work/.reno\u{3000} ", &["/work/.reno"]),
+            ("\u{a0}file:///work/.reno/x", &[" file:///work/.reno/x"]),
+            ("docs/a\u{a0}b/c", &["docs/a b/c"]),
+            ("file:///work/%+f/.reno", &["/work/%+f/.reno"]),
+            ("file:///work/%2/.reno", &["/work/%2/.reno"]),
             ("FILE:///work/.reno/x", &["FILE:///work/.reno/x"]),
             ("file:/work/.reno/x", &["file:/work/.reno/x"]),
         ];
         for tool in ["read", "ls", "grep", "find", "edit", "write"] {
-            for (typed, opened) in rows {
+            for &(typed, opened) in rows {
                 let subject = subject(tool, "c1", None, &json!({ "path": typed }));
                 assert_eq!(paths(&subject), opened, "{tool} {typed:?}");
                 assert_eq!(
@@ -210,12 +233,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_home_path_is_left_as_written_when_the_home_is_unknown() {
-        let subject = super::subject("write", "c1", None, &json!({ "path": "~/.reno/x" }), None);
-        assert_eq!(paths(&subject), ["~/.reno/x"]);
     }
 
     #[test]
