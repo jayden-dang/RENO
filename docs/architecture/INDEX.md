@@ -1,7 +1,7 @@
 # Architecture: Reno
 
 Status: Approved
-Date: 2026-11-19
+Date: 2026-11-22
 
 The rules that keep Reno modular as it grows. Each one is checked by the compiler, a test, or
 `cargo xtask check`. This file is the only place an `ARCH-N` is defined; the domain files below
@@ -46,10 +46,15 @@ and adding a fresh ID.
 - **ARCH-16** Tests need no network, no real harness and no wall clock.
 - **ARCH-17** Dependencies stay permissive and current.
 
+### Reno's own harness
+
+- **ARCH-18** On Reno's own harness, every tool call passes Reno's policy before it runs, and a call the policy cannot judge does not run.
+- **ARCH-19** A bot's computer reaches the network only through `renod`'s egress allowlist for that bot.
+
 ## Domains
 
 - System — [system.md](./system.md): crate graph, components, who knows what, contracts (ARCH-1 to ARCH-6, ARCH-13, ARCH-14)
-- Runtime — [runtime.md](./runtime.md): processes, kernel ports, clocks, queues, executor trust (ARCH-7, ARCH-10 to ARCH-12, ARCH-15)
+- Runtime — [runtime.md](./runtime.md): processes, kernel ports, clocks, queues, executor trust, Reno's own harness and the bot's computer (ARCH-7, ARCH-10 to ARCH-12, ARCH-15, ARCH-18, ARCH-19)
 - Data — [data.md](./data.md): the store, journals and fences (ARCH-8, ARCH-9)
 - Tests and dependencies — [../standards/testing.md](../standards/testing.md) and [../standards/INDEX.md](../standards/INDEX.md) (ARCH-16, ARCH-17)
 

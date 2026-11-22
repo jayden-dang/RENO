@@ -1,6 +1,6 @@
 # Reno
 
-Reno is a local-first, Rust-native daemon for macOS that coordinates existing coding harnesses (Claude Code, Codex, Pi, opencode, Cursor, any ACP agent). It does not run a model loop of its own: it decides who does what, when, in which workspace, and whether the result was good enough. The pieces are the daemon `renod`, the CLI `reno` and the GPUI app `reno-app`.
+Reno is a local-first, Rust-native daemon for macOS that coordinates existing coding harnesses (Claude Code, Codex, Pi, opencode, Cursor, any ACP agent). It decides who does what, when, in which workspace, and whether the result was good enough. The only model loop it runs is the **Reno harness**, an existing harness it drives and gates for bots. The pieces are the daemon `renod`, the CLI `reno` and the GPUI app `reno-app`.
 
 ## Language
 
@@ -30,6 +30,14 @@ A pending action a run is waiting on. Only the owner approves or denies; a stand
 **Policy**:
 The definition that decides what a run may do without asking.
 
+**Reno harness**:
+The executor Reno runs for bots: an existing agent harness that Reno drives with the owner's API keys and gates, so every tool call passes the **Policy** before it runs.
+_Avoid_: own loop, native agent, built-in agent
+
+**Bot computer**:
+The Linux VM a bot on the **Reno harness** works in: a browser first, only its project mounted, network only through `renod`'s allowlist for that bot.
+_Avoid_: sandbox, desktop, VM (alone)
+
 ## Relationships
 
 - A **Bot** has many **Triggers** and lists the **Executors** it may run on
@@ -39,3 +47,4 @@ The definition that decides what a run may do without asking.
 ## Flagged ambiguities
 
 - "driver" vs "harness": harness is the layer, a driver is one executor's module inside it
+- "harness" also names an agent CLI in the vision and roadmap ("the harness's own settings"); the glossary's **Harness** is the layer. Unresolved; the **Reno harness** follows the vision's sense

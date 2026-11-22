@@ -1,13 +1,13 @@
 # Architecture domain: Runtime
 
 Status: Approved
-Date: 2026-11-19
+Date: 2026-11-22
 
 ## Purpose and boundary
 
 How Reno runs: its processes, how the kernel reaches the world, which clock each deadline is on,
-and how queues, tasks and executors are bounded. It explains ARCH-7, ARCH-10 to ARCH-12 and
-ARCH-15 from `docs/architecture/INDEX.md`. The crate graph is in `system.md`.
+and how queues, tasks and executors are bounded. It explains ARCH-7, ARCH-10 to ARCH-12,
+ARCH-15, ARCH-18 and ARCH-19 from `docs/architecture/INDEX.md`. The crate graph is in `system.md`.
 
 ## Topology
 
@@ -92,6 +92,20 @@ No executor is trusted beyond what it declares (ARCH-15). An executor that canno
 requested access mode is ineligible; it is never run with more access than asked. A driver never
 claims more than a green run verified (`ExecutorDescriptor::cli_verified`, see
 `docs/KEEPING-UP.md`).
+
+## Reno's own harness and the bot's computer
+
+Reno's own harness is an existing agent harness that a driver starts and gates like any other
+executor; which one is settled by a spike. What makes it Reno's is the gate (ARCH-18): the driver
+loads Reno's gate into the harness, checks that it loaded before the first prompt, and the gate
+sends every tool call to the kernel's policy before the call runs. A call the policy denies, or
+cannot judge because the gate or the daemon is unreachable, does not run. The policy, the approval
+inbox and the journal are the ones every other run uses.
+
+A bot's computer is a Linux VM on the Mac, started and stopped by `renod` behind a port, so the
+kernel keeps no macOS-only code. The VM has no route out except `renod`'s egress proxy, which
+applies that bot's domain allowlist (ARCH-19); the allowlist is part of the bot's pinned version.
+Only the bot's project or worktree is mounted into it.
 
 ## Not the invariant spine
 
