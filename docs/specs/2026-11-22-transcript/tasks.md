@@ -89,7 +89,7 @@ Paths are under `apps/reno-app/src/` unless they say otherwise.
 | `screens/run/transcript.rs` | Reasoning modes, turn-end actions, reveal, error callout, hidden rows | 5, 11, 22, 25 |
 | `screens/run/output.rs` | Tool images, auto-expand, edit, patch, command, read-file, raw input, resource link | 14, 21, 23, 24, 25 |
 | `vm/convo.rs` | Edit and command shapes from `ToolCall.input` | 24 |
-| `vm/capabilities.rs`, `store.rs` | `tool_images` capability and seam | 21 |
+| `vm/capabilities.rs`, `store.rs` | `tool_images` capability and seam; the watched-call timing map | 21, 24 |
 | `prefs.rs`, `screens/settings_pages.rs` | Thinking mode; expand settings | 5, 23 |
 | `ui/markdown_view.rs`, `ui/markdown_view/chrome.rs`, `ui/markdown_view/mermaid.rs` | Marks, diagram tabs, zoom, footnotes, callouts, tables, front matter, task boxes | 6, 12, 13, 16, 18 |
 | `ui/markdown_view/image.rs` | Worktree SVG through `no_files()` | 20 |
@@ -132,7 +132,8 @@ Retrieval (load-subgraph, 2026-11-22):
   - a Bash call with `input.command` and a `ToolResult { ok: false, summary }`;
   - a file read whose output lines are numbered, and whose `input` is shown as raw input;
   - a `ToolResult` whose output names the worktree path `src/supervisor.rs`;
-  - a `Tool` with no `ToolResult` before the turn's `Done`, which is a call canceled before output;
+  - a `Tool` with no `ToolResult` in a turn whose `Done` is `StopReason::Interrupted`: a call canceled before output;
+  - a `Tool` with no `ToolResult` in a turn that ended `Completed`, which stays Pending;
   - a reply with a `[!NOTE]` callout, a table wider than the column, two footnotes, YAML front matter, task boxes and an
     HTML comment;
   - a markdown image `docs/flow.svg`, served by the fake tree.
@@ -164,12 +165,14 @@ _Requirements: TRANSCRIPT-15.1, TRANSCRIPT-15.2, TRANSCRIPT-15.3, TRANSCRIPT-15.
 - Consumes: `cargo xtask bench --app`.
 - Produces: the branch head's long-transcript p95, p50 and peak footprint, recorded beside the 31.4 ms baseline.
 
-**Depends-on:** none. It gates no task, but run it first: its number is the U1 evidence.
+**Depends-on:** none. It gates no task; Task 3 (per-event building) does not rest on the U1 cause. Run it first anyway:
+its number is the U1 evidence.
 
 - [ ] **Step 1:** Manual acceptance on a quiet Mac, with the window in front. Run `cargo xtask bench --app` and record the
   long-transcript rows.
-- [ ] **Step 2:** If p95 ≤ 16.7 ms, record U1 as confirmed in `BENCHMARKS.md`. Otherwise take the new cause through
-  `reroute-plan` before Task 3 lands.
+- [ ] **Step 2:** If p95 ≤ 16.7 ms, record U1 as resolved in `BENCHMARKS.md`: the bench meets the target with one item per
+  entry. That resolves U1; it does not prove the cause, which stays unprofiled. Otherwise take the new cause through
+  `reroute-plan`. Task 28's final bench is the gate either way.
 - [ ] **Step 3:** Commit `bench: long transcript measured on the item-per-entry list (ROAD-33 U1)`.
 
 _Requirements: TRANSCRIPT-1.1_
@@ -870,7 +873,7 @@ _Requirements: TRANSCRIPT-13.4, TRANSCRIPT-13.18_
 ### Task 24: Edit, patch, command and read-file cards, from the call's own input
 
 **Files:**
-- Modify: `screens/run/output.rs`, `vm/convo.rs`
+- Modify: `screens/run/output.rs`, `vm/convo.rs`, `store.rs` (the live-event apply path; the watched map)
 - Test: `screens/run/changes_tests.rs`, `vm/convo.rs` (tests module)
 
 **Reuse:** rung 2:
@@ -891,8 +894,9 @@ and `prefs.rs`
   - `convo::edit_of(&ToolCall) -> Option<Edit { path, old, new }>`;
   - `convo::patch_of(&ToolCall) -> Option<Vec<FilePatch>>`;
   - `convo::command_of(&ToolCall) -> Option<String>`;
-  - `RunScreen.watched: Lru<String, (Instant, Option<Instant>)>` (256, agent-decided), recorded from GPUI's executor
-    clock when a call is seen live;
+  - `Store::watched(&RunId, call: &str) -> Option<(Instant, Option<Instant>)>`, backed by
+    `Lru<(RunId, String), (Instant, Option<Instant>)>` (1,024, agent-decided) in the store, recorded from GPUI's
+    executor clock when the store applies a live `Tool` or `ToolResult`. It survives reopening the screen;
   - selectors `edit-badge-<call>`, `edit-diff-<call>`, `patch-file-<call>-<n>`, `command-copy-<call>`,
     `command-status-<call>`, `read-numbered-<call>`, `raw-input-<call>`.
 
@@ -905,6 +909,7 @@ and `prefs.rs`
   - `a_one_file_edit_shows_its_badge_go_to_file_and_inline_diff`;
   - `a_patch_shows_one_hunk_block_per_file`;
   - `a_command_shows_copy_and_status_and_a_watched_call_its_elapsed_time`, on the test clock;
+  - `the_elapsed_time_survives_leaving_and_reopening_the_thread`;
   - `a_restored_call_shows_no_elapsed_time`;
   - `a_numbered_read_shows_as_a_code_block_and_raw_input_opens`.
   Run: `cargo test -p reno-app changes_tests` — expect: fails.
@@ -938,7 +943,9 @@ and `prefs.rs`
 
 - [ ] **Step 1:** Add failing tests:
   - `an_error_turn_shows_a_callout_with_copy_error`;
-  - `an_empty_reply_and_a_call_canceled_before_output_are_hidden`;
+  - `an_empty_reply_and_a_call_canceled_before_output_are_hidden`, where canceled means no result in an `Interrupted`
+    turn;
+  - `a_call_with_no_result_in_a_completed_turn_stays_pending_in_its_group`, which holds guard 13.15;
   - `a_worktree_path_in_a_tool_result_is_a_button_that_opens_the_file`.
   Run: `cargo test -p reno-app convo_tests` — expect: fails.
 - [ ] **Step 2:** Implement them. Run: `cargo test -p reno-app` — expect: pass, including the guard tests for 13.10–13.15
@@ -1073,7 +1080,10 @@ dependency; the plan adds it as a direct workspace dependency pinned `=1.13.1`, 
   window id on the seeded threads (`render2` and the handshake thread), and open each capture.
 - [ ] **Step 2:** Hand the captures and the launch command to the operator the way the charter's UI stop does, leave the app
   running, and wait for the operator's explicit go. Apply any change and show it again.
+- [ ] **Step 2b:** U3 check at the same stop. The operator copies `$$\int_0^1 x^2\,dx = \tfrac13$$` with ⌘C and pastes it
+  into a tool of their choice. Record whether the TeX with its `$$` delimiters (TRANSCRIPT-2.6) works there, and close or
+  reopen U3 in requirements' Open Questions.
 - [ ] **Step 3:** On the go, update `./ui-brief.md` (the Find strip, Navigation, Rich blocks and Settings surfaces, and the
   Amendments) and commit `docs(specs): the ui brief takes the additions the operator accepted`.
 
-_Requirements: TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-5.3, TRANSCRIPT-5.4, TRANSCRIPT-8.3, TRANSCRIPT-10.1, TRANSCRIPT-10.4, TRANSCRIPT-13.5, TRANSCRIPT-13.6, TRANSCRIPT-13.8, TRANSCRIPT-13.17, TRANSCRIPT-13.18, TRANSCRIPT-14.1, TRANSCRIPT-14.2, TRANSCRIPT-14.3, TRANSCRIPT-14.4_
+_Requirements: TRANSCRIPT-2.6, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-5.3, TRANSCRIPT-5.4, TRANSCRIPT-8.3, TRANSCRIPT-10.1, TRANSCRIPT-10.4, TRANSCRIPT-13.5, TRANSCRIPT-13.6, TRANSCRIPT-13.8, TRANSCRIPT-13.17, TRANSCRIPT-13.18, TRANSCRIPT-14.1, TRANSCRIPT-14.2, TRANSCRIPT-14.3, TRANSCRIPT-14.4_

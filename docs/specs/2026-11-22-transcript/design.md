@@ -387,9 +387,13 @@ Where each tool card's data comes from. The wire is `ExecEvent::Tool { id, call:
   text, read per `ActionClass`. An input shape the app does not know shows the raw input instead.
 - A command, its Copy and the raw input come from `call.input`.
 - The exit status is `ok`, with `summary`.
-- Elapsed time: the app records when it saw the `Tool` and the `ToolResult` arrive, on GPUI's executor clock (the test
-  clock in tests), for calls it watched live. Calls restored from history show none (TRANSCRIPT-13.6 as corrected).
-- A call canceled before output is a `Tool` with no `ToolResult` when its turn's `Done` or the run's end arrives.
+- Elapsed time: the store records when the app saw the `Tool` and the `ToolResult` arrive, on GPUI's executor clock (the
+  test clock in tests). Records are keyed by (run, call id) in a bounded `Lru` of 1,024 (agent-decided), so they outlive
+  the `RunScreen` that `open_run` rebuilds on every open (`app.rs:1594`). Calls restored from history show none
+  (TRANSCRIPT-13.6 as corrected).
+- A call canceled before output is a `Tool` with no `ToolResult` in a turn whose `Done` carries
+  `StopReason::Interrupted` (`crates/reno-proto/src/run.rs:102-112`). In a turn that stopped `Completed` (or any other
+  reason) such a call stays `Outcome::Pending` in its group, as today (`transcript.rs:84-95`; guard 13.15).
 - A resource link is a worktree path in the result's output text, resolved like file links (`run/links.rs`).
 - The `TurnBuilder` call index (Row projection) gives each card its `ToolCall`. `ToolEntry` and `Row` stay unchanged.
 Locality: extend `run/transcript.rs`:
