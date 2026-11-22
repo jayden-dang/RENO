@@ -44,7 +44,7 @@
 //! - Process records: the Pi a run spawns is reported through `ExecControls::processes` at
 //!   once. The short-lived probe Pi is bounded by its own timeout and reaped before it returns.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
@@ -76,6 +76,7 @@ use crate::wire::pi::frames::{self, Disposition, Reply, State, string};
 use crate::wire::pi::known;
 use crate::wire::pi::launch::{self, Launch};
 use crate::wire::pi::normalize::Normalizer;
+use crate::wire::pi::subject::subject;
 use crate::{HarnessError, HarnessId};
 
 #[cfg(unix)]
@@ -83,13 +84,44 @@ mod gate;
 mod mcp;
 mod rpc;
 
-#[cfg(unix)]
-use gate::GateHost;
-
-/// Where a Reno attempt's gate would listen. Never built off unix: `start` refuses first.
+/// Off unix no gate is ever armed (`start` refuses a Reno run first); this only lets the one
+/// code path of the driver compile.
 #[cfg(not(unix))]
-#[derive(Debug)]
-struct GateHost;
+mod gate {
+    use std::time::Duration;
+
+    use serde_json::Value;
+
+    use crate::exec::Decision;
+
+    #[derive(Debug)]
+    pub(super) struct GateHost;
+
+    pub(super) struct GateCall {
+        pub(super) id: u64,
+        pub(super) tool: String,
+        pub(super) call_id: String,
+        pub(super) parent: Option<String>,
+        pub(super) input: Value,
+        pub(super) over_bound: bool,
+    }
+
+    impl GateHost {
+        pub(super) async fn next(&mut self) -> Option<GateCall> {
+            None
+        }
+
+        pub(super) fn decide(&mut self, _id: u64, _decision: Decision, _reason: Option<String>) {}
+
+        pub(super) fn is_live(&self) -> bool {
+            false
+        }
+
+        pub(super) async fn close(&mut self, _grace: Duration) {}
+    }
+}
+
+use gate::{GateCall, GateHost};
 
 /// The oldest Pi this driver runs. Checked: 1.5.0 only (see the module docs). A Pi older than
 /// this is refused before a run instead of failing in the middle of one.
@@ -161,6 +193,12 @@ const MAX_OPEN_DIALOGS: usize = 16;
 
 /// Frames kept while the startup queries run, to be handled once the run has started.
 const MAX_BACKLOG: usize = 512;
+
+/// The request id of a gate call is this and the gate's own id for it.
+const GATE_REQUEST_PREFIX: &str = "gate-";
+
+/// What the gate tells Pi's tool when a call is denied because the run stopped.
+const RUN_STOPPED: &str = "Reno stopped the run before it decided this call.";
 
 /// The Pi CLI to launch: `PI_EXECUTABLE`, then our own PATH, the login-shell PATH and the known
 /// install locations. Resolved per call: cheap after the snapshot is cached.
@@ -670,8 +708,11 @@ struct Pi {
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// The run's scratch directory: the bridge, its config and the instructions. Removed with it.
     _scratch: Option<ScratchDir>,
-    /// What a Reno attempt keeps beside them: the gate, its socket path and key.
-    _gate: Option<GateFiles>,
+    /// What a Reno attempt keeps beside them: the gate, its socket path and key. Held so they
+    /// go with the process.
+    _gate_files: Option<GateFiles>,
+    /// The `HOME` the child was given, which Pi expands `~` against.
+    home: Option<PathBuf>,
     /// When the process was seen to have exited; frames it left behind are still read until then.
     exit_deadline: Option<Instant>,
 }
@@ -882,7 +923,10 @@ async fn launch_pi(
     };
     let bridge = mcp::install(files, &spec.mcp)?;
     // Listening before Pi exists, so its gate's connection at start-up finds the socket.
-    let host = gate.as_ref().map(bind_gate).transpose()?;
+    let host = gate
+        .as_ref()
+        .map(|gate| bind_gate(gate, tracker))
+        .transpose()?;
     let mut cmd = Command::new(exe);
     crate::child_env::restrict(&mut cmd, child_driver_env(flavor));
     if let Some(gate) = &gate {
@@ -913,6 +957,13 @@ async fn launch_pi(
         cmd.env("PI_CODING_AGENT_DIR", &gate.agent)
             .env("RENO_GATE_SOCKET", &gate.socket)
             .env("RENO_GATE_NONCE", &gate.nonce);
+    }
+    // What Pi expands `~` against: the child's own `HOME`, a bot secret named so included.
+    let home = child_home(&cmd);
+    if reno && home.is_none() {
+        return Err(std::io::Error::other(
+            "the Reno harness needs a HOME for Pi, to read the paths its calls open",
+        ));
     }
     if !spec.cwd.as_os_str().is_empty() {
         cmd.current_dir(&spec.cwd);
@@ -956,20 +1007,31 @@ async fn launch_pi(
         stderr_tail,
         stderr_task,
         _scratch: Some(scratch),
-        _gate: gate,
+        _gate_files: gate,
+        home,
         exit_deadline: None,
     };
     Ok((pi, host))
 }
 
-fn bind_gate(files: &GateFiles) -> std::io::Result<GateHost> {
+/// The `HOME` `cmd` will run with, when it has a usable one.
+fn child_home(cmd: &Command) -> Option<PathBuf> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "HOME")
+        .and_then(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn bind_gate(files: &GateFiles, tracker: &TaskTracker) -> std::io::Result<GateHost> {
     #[cfg(unix)]
     {
-        GateHost::bind(&files.socket, &files.nonce)
+        GateHost::bind(&files.socket, &files.nonce, tracker)
     }
     #[cfg(not(unix))]
     {
-        let _ = files;
+        let _ = (files, tracker);
         Err(std::io::Error::other(
             "the Reno gate needs Unix sockets and cannot run on this platform",
         ))
@@ -1221,6 +1283,12 @@ impl Run {
     /// close its stdin (its own orderly shutdown), give it a moment, then SIGTERM and SIGKILL to
     /// the process group and the descendants traced.
     async fn teardown(&mut self) {
+        // Denials still queued reach the gate first; then the connection closes, and the gate
+        // blocks any call Pi makes while it winds down.
+        if let Some(mut gate) = self.gate.take() {
+            gate.close(self.kill_grace.min(Duration::from_secs(1)))
+                .await;
+        }
         #[cfg(unix)]
         let tree = match self.pi.child.id() {
             Some(pid) => crate::process::descendants(pid).await,
@@ -1248,6 +1316,15 @@ struct Player<'a> {
     pending: HashMap<String, Pending>,
     /// Dialogs open on a person.
     dialogs: OpenRequests<(), Dialog>,
+    /// Gate calls open on the ladder.
+    calls: OpenRequests<GatePayload, ()>,
+    /// The tool calls Pi has started and not finished: a gate call is raised only once its
+    /// `Tool` event has gone out, because the gate's socket and Pi's stdout race.
+    running: HashSet<String>,
+    /// A gate call whose `Tool` event has not come yet.
+    parked: Option<GateCall>,
+    /// The gate's connection is being read.
+    watching: bool,
     /// When Pi gives up on each open dialog by itself.
     deadlines: Vec<(Instant, String)>,
     /// Pi is running something for this run: it said it started or queued a prompt, or an
@@ -1268,15 +1345,33 @@ struct Player<'a> {
 
 type Ended = (StopReason, Option<String>, Option<String>);
 
+/// What a gate request keeps to be answered with: the gate's id for the call.
+struct GatePayload {
+    id: u64,
+}
+
+/// The gate's next call. Never ready when the attempt has no gate.
+async fn gate_next(gate: Option<&mut GateHost>) -> Option<GateCall> {
+    match gate {
+        Some(gate) => gate.next().await,
+        None => std::future::pending().await,
+    }
+}
+
 impl<'a> Player<'a> {
     fn new(run: &'a mut Run, state: State) -> Self {
         let mut norm = Normalizer::new();
         norm.set_window(state.context_window);
+        let watching = run.gate.as_ref().is_some_and(GateHost::is_live);
         Self {
             run,
             norm,
             pending: HashMap::new(),
             dialogs: OpenRequests::new(),
+            calls: OpenRequests::new(),
+            running: HashSet::new(),
+            parked: None,
+            watching,
             deadlines: Vec::new(),
             open: false,
             answered: false,
@@ -1346,6 +1441,17 @@ impl<'a> Player<'a> {
                     Some(answer) => self.answer(answer),
                     None => self.answers_open = false,
                 },
+                call = gate_next(self.run.gate.as_mut()), if self.watching && self.parked.is_none() => {
+                    match call {
+                        None => return self.lost_watch().await,
+                        Some(call) if call.over_bound => return self.flooded(),
+                        Some(call) => {
+                            if self.hold(call).await.is_err() {
+                                return self.gone().await;
+                            }
+                        }
+                    }
+                }
                 () = expiry => self.expire().await,
                 () = barrier => {
                     return (
@@ -1439,9 +1545,20 @@ impl<'a> Player<'a> {
         }
     }
 
-    /// A dialog's answer from a person.
+    /// An answer: the ladder's decision on a gate call, or a dialog's answer from a person.
     fn answer(&mut self, answer: ExecAnswer) {
         let request_id = answer.request_id.clone();
+        if request_id.starts_with(GATE_REQUEST_PREFIX) {
+            match self.calls.resolve(answer) {
+                Resolved::Decision(GatePayload { id }, decision, message) => {
+                    self.decide_call(id, decision, message);
+                }
+                _ => {
+                    tracing::debug!(target: "reno_harness::pi", "answer for {request_id} matches no open call");
+                }
+            }
+            return;
+        }
         match self.dialogs.resolve(answer) {
             Resolved::Input(dialog, answers) => {
                 self.deadlines.retain(|(_, id)| *id != request_id);
@@ -1465,6 +1582,109 @@ impl<'a> Player<'a> {
                 let _ = self.client().send(dialog::dismissed(&dialog));
             }
         }
+        // Nothing is left open on the ladder: each gate call still waiting is denied, once.
+        for (_, open) in self.calls.drain() {
+            if let crate::exec::Open::Approval(GatePayload { id }) = open {
+                self.decide_call(id, crate::exec::Decision::Deny, Some(RUN_STOPPED.into()));
+            }
+        }
+        if let Some(call) = self.parked.take() {
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(RUN_STOPPED.into()),
+            );
+        }
+    }
+
+    fn decide_call(&mut self, id: u64, decision: crate::exec::Decision, reason: Option<String>) {
+        if let Some(gate) = self.run.gate.as_mut() {
+            gate.decide(id, decision, reason);
+        }
+    }
+
+    /// A call from the gate: raised to the ladder once Pi's `Tool` event for it has gone out,
+    /// which Pi emits before it asks the gate.
+    async fn hold(&mut self, call: GateCall) -> Result<(), ()> {
+        if self.running.contains(&call.call_id) {
+            self.raise(call).await
+        } else {
+            self.parked = Some(call);
+            Ok(())
+        }
+    }
+
+    async fn raise(&mut self, call: GateCall) -> Result<(), ()> {
+        let Some(home) = self.run.pi.home.as_deref() else {
+            // A call whose paths cannot be judged is not run.
+            self.decide_call(call.id, crate::exec::Decision::Deny, None);
+            return Ok(());
+        };
+        let subject = subject(
+            &call.tool,
+            &call.call_id,
+            call.parent.as_deref(),
+            &call.input,
+            home,
+        );
+        let request_id = format!("{GATE_REQUEST_PREFIX}{}", call.id);
+        self.calls
+            .open_approval(request_id.clone(), GatePayload { id: call.id });
+        let ask = ExecEvent::NeedsApproval {
+            request_id,
+            subject,
+        };
+        if self.emit(ask).await {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Raise the call that was waiting for its `Tool` event, if that has come.
+    async fn release_parked(&mut self) -> Result<(), ()> {
+        match self.parked.take() {
+            Some(call) if self.running.contains(&call.call_id) => self.raise(call).await,
+            other => {
+                self.parked = other;
+                Ok(())
+            }
+        }
+    }
+
+    /// The gate's connection is gone while the run goes on.
+    async fn lost_watch(&mut self) -> Ended {
+        self.watching = false;
+        if self.run.pi.exit_deadline.is_some()
+            || self.run.pi.child.try_wait().ok().flatten().is_some()
+        {
+            return self.gone().await;
+        }
+        self.dismiss_all();
+        if self.interrupted {
+            return (StopReason::Interrupted, None, None);
+        }
+        (
+            StopReason::Error,
+            None,
+            Some("Reno lost its watch over the run: the gate's connection closed".into()),
+        )
+    }
+
+    /// The gate left more calls unanswered than it may: the extra one is denied and the
+    /// connection is closed with the run's end.
+    fn flooded(&mut self) -> Ended {
+        self.watching = false;
+        self.dismiss_all();
+        (
+            StopReason::Error,
+            None,
+            Some(
+                "Reno's gate left too many calls unanswered; Reno denied the extra call and \
+                 closed the gate"
+                    .into(),
+            ),
+        )
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -1505,13 +1725,25 @@ impl<'a> Player<'a> {
         let grace = self.run.interrupt_grace;
         let _ = tokio::time::timeout(grace, async {
             while self.pending.values().any(|p| *p == Pending::Abort) || self.open {
-                match self.run.pi.next_frame().await {
-                    Ok(frame) => {
-                        if self.frame(frame).await.is_err() {
-                            break;
+                tokio::select! {
+                    frame = self.run.pi.next_frame() => match frame {
+                        Ok(frame) => {
+                            if self.frame(frame).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                    Err(_) => break,
+                        Err(_) => break,
+                    },
+                    // A call made while the run is being stopped is denied, never raised.
+                    call = gate_next(self.run.gate.as_mut()), if self.watching => match call {
+                        Some(call) if !call.over_bound => self.decide_call(
+                            call.id,
+                            crate::exec::Decision::Deny,
+                            Some(RUN_STOPPED.into()),
+                        ),
+                        Some(_) => {}
+                        None => self.watching = false,
+                    },
                 }
             }
         })
@@ -1533,10 +1765,20 @@ impl<'a> Player<'a> {
             self.run.unknown.note(&kind);
         }
         for event in events {
+            match &event {
+                ExecEvent::Tool { id, .. } => {
+                    self.running.insert(id.clone());
+                }
+                ExecEvent::ToolResult { id, .. } => {
+                    self.running.remove(id);
+                }
+                _ => {}
+            }
             if !self.emit(event).await {
                 return Err(());
             }
         }
+        self.release_parked().await?;
         match kind {
             "agent_start" => self.open = true,
             "agent_settled" => {
@@ -1620,7 +1862,10 @@ impl<'a> Player<'a> {
                 return Ok(());
             }
         };
-        if self.dialogs.len() >= MAX_OPEN_DIALOGS || self.interrupted {
+        if self.dialogs.len() >= MAX_OPEN_DIALOGS
+            || self.interrupted
+            || dialog.request_id.starts_with(GATE_REQUEST_PREFIX)
+        {
             let _ = self.client().send(dialog::dismissed(&dialog));
             return Ok(());
         }
@@ -1659,6 +1904,21 @@ mod tests {
         assert!(too_old_message(Some(&semver::Version::new(1, 5, 0))).is_none());
         assert!(too_old_message(Some(&semver::Version::new(2, 0, 0))).is_none());
         assert!(too_old_message(None).is_none());
+    }
+
+    #[test]
+    fn the_childs_home_is_the_last_one_set_and_none_when_blank_or_missing() {
+        let mut cmd = Command::new("pi");
+        cmd.env_clear();
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "");
+        assert_eq!(child_home(&cmd), None);
+        cmd.env("HOME", "/Users/daemon");
+        assert_eq!(child_home(&cmd), Some(PathBuf::from("/Users/daemon")));
+        cmd.env("HOME", "/bots/own");
+        assert_eq!(child_home(&cmd), Some(PathBuf::from("/bots/own")));
+        cmd.env_remove("HOME");
+        assert_eq!(child_home(&cmd), None);
     }
 
     #[test]
@@ -1834,7 +2094,7 @@ mod tests {
             let bench = Bench::new();
             let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
             let reno = pi._scratch.as_ref().unwrap().path().join(".reno");
-            let gate = pi._gate.as_ref().unwrap();
+            let gate = pi._gate_files.as_ref().unwrap();
             assert_eq!(gate.socket.file_name().unwrap(), "gate.sock");
             assert_eq!(gate.socket.parent().unwrap().file_name().unwrap(), ".reno");
             let socket = gate.socket.display().to_string();
@@ -1911,8 +2171,8 @@ mod tests {
             let first = bench.launch(&spec, &bench.flavor()).await;
             let second = bench.launch(&spec, &bench.flavor()).await;
             let (a, b) = (
-                first._gate.as_ref().unwrap(),
-                second._gate.as_ref().unwrap(),
+                first._gate_files.as_ref().unwrap(),
+                second._gate_files.as_ref().unwrap(),
             );
             assert_ne!(
                 first._scratch.as_ref().unwrap().path(),
@@ -2044,7 +2304,7 @@ mod tests {
         async fn the_owners_attempt_gets_no_reno_layout_and_no_gate_environment() {
             let bench = Bench::new();
             let pi = bench.launch(&bench.spec("01HZX9"), &Flavor::Owner).await;
-            assert!(pi._gate.is_none());
+            assert!(pi._gate_files.is_none());
             let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
             assert!(!scratch.join(".reno").exists());
             assert!(scratch.join("instructions.md").is_file());
@@ -2084,7 +2344,7 @@ mod tests {
             let bench = Bench::new();
             let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
             let pi = bench.launch(&spec, &bench.flavor()).await;
-            let agent = pi._gate.as_ref().unwrap().agent.display().to_string();
+            let agent = pi._gate_files.as_ref().unwrap().agent.display().to_string();
             let started = bench.started(pi).await;
             let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
             let blanks: Vec<String> = BLANKS.iter().map(|n| (*n).to_owned()).collect();
@@ -2112,7 +2372,7 @@ mod tests {
                 ],
             );
             let pi = bench.launch(&spec, &bench.flavor()).await;
-            let agent = pi._gate.as_ref().unwrap().agent.display().to_string();
+            let agent = pi._gate_files.as_ref().unwrap().agent.display().to_string();
             let started = bench.started(pi).await;
             let google = &started["credential_env"]["GOOGLE_APPLICATION_CREDENTIALS"];
             assert_eq!(google["in_agent_dir"], false);

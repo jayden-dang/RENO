@@ -12,6 +12,16 @@ how: `ok` (the default), `no-hello`, `never-connect`, `wrong-nonce`, `no-command
 `get_commands` does not list the gate) or `second-client` (a hello, then a second connection that
 the daemon must not serve). The outcome of the second connection and of one made when the first
 prompt arrives is logged.
+
+Armed, a run plays Pi's tool loop through the gate: for each scripted tool it emits
+`tool_execution_start`, sends the gate's call line and waits for the decision; on `allow` it runs
+the tool (only `bash` has an effect: it runs the command) and logs it, on a deny it ends the tool
+with an error carrying the reason. Scenarios: `gate-coverage` (one call of every kind, siblings one
+at a time and a codemode call with nested ones), `gate-200` (200 reads), `gate-hold` (three calls
+sent together, left open until the run is stopped; every decision is logged to the end of the
+connection), `gate-late` (a second call made while the run is being stopped) and `gate-drop` (the gate's connection closes mid-run) and `gate-flood` (a broken gate that sends 17
+calls without waiting). Every decision
+the gate receives is logged as `gate_decision`.
 """
 import json
 import os
@@ -78,6 +88,8 @@ log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
 GATE_SOCKET = os.environ.get("RENO_GATE_SOCKET")
 GATE_MODE = os.environ.get("FAKE_PI_GATE", "ok") if GATE_SOCKET else None
 GATE_CONNECTIONS = []
+GATE_READER = None
+GATE_IDS = iter(range(1, 1000000))
 
 
 def gate_connect():
@@ -117,6 +129,8 @@ def arm_gate():
         gate_hello(client, "not-" + nonce)
     else:
         gate_hello(client, nonce)
+        global GATE_READER
+        GATE_READER = client.makefile("r")
     if GATE_MODE == "second-client":
         try:
             second = gate_connect()
@@ -278,8 +292,139 @@ def abort_when_asked():
     sys.exit(0)
 
 
+def gate_send(name, args, call_id, parent=None):
+    """Send one call line to the gate and return its id."""
+    n = next(GATE_IDS)
+    line = json.dumps({"t": "call", "id": n, "toolName": name, "toolCallId": call_id,
+                       "parentToolCallId": parent, "input": args})
+    GATE_CONNECTIONS[0].sendall((line + "\n").encode())
+    return n
+
+
+def gate_decision():
+    """The next decision line from the gate's connection; None once it is closed."""
+    line = GATE_READER.readline()
+    if not line:
+        return None
+    decision = json.loads(line)
+    log({"gate_decision": decision})
+    return decision
+
+
+def tool_start(call_id, name, args, parent=None):
+    frame = {"type": "tool_execution_start", "toolCallId": call_id, "toolName": name, "args": args}
+    if parent:
+        frame["parentToolCallId"] = parent
+    emit(frame)
+
+
+def tool_end(call_id, name, text, error=False, parent=None):
+    frame = {"type": "tool_execution_end", "toolCallId": call_id, "toolName": name,
+             "result": {"content": [{"type": "text", "text": text}]}, "isError": error}
+    if parent:
+        frame["parentToolCallId"] = parent
+    emit(frame)
+
+
+def run_tool(name, args):
+    if name == "bash":
+        done = subprocess.run(["sh", "-c", args["command"]], capture_output=True, text=True)
+        return done.stdout
+    return "ran " + name
+
+
+def gated_tool(call_id, name, args, parent=None, inside=None):
+    """What Pi does for one tool: announce it, ask the gate, then run it or end it with the reason."""
+    tool_start(call_id, name, args, parent)
+    gate_send(name, args, call_id, parent)
+    decision = gate_decision()
+    if decision is None:
+        sys.exit(3)
+    if decision["decision"] == "allow":
+        log({"ran": {"tool": name, "call_id": call_id, "input": args}})
+        if inside:
+            inside()
+        tool_end(call_id, name, run_tool(name, args), parent=parent)
+    else:
+        tool_end(call_id, name, decision.get("reason") or "blocked", error=True, parent=parent)
+
+
+def drain_gate():
+    """Log every decision that still arrives, until the daemon closes the connection."""
+    while gate_decision() is not None:
+        pass
+
+
+def stop_when_asked():
+    """Settle as aborted when the daemon asks, then log what the gate still sends until it closes."""
+    abort = wait_until(lambda c: c["type"] == "abort")
+    assistant("partial", stop="aborted", usage=False)
+    settle(aborted=True)
+    reply(abort)
+    drain_gate()
+    sys.exit(0)
+
+
+def play_gate(prompt, cmd):
+    start(cmd)
+    if prompt == "scenario:gate-coverage":
+        gated_tool("g-read", "read", {"path": "a.txt"})
+        gated_tool("g-grep", "grep", {"pattern": "needle", "path": "src", "glob": "*.rs"})
+        gated_tool("g-find", "find", {"pattern": "*.md"})
+        gated_tool("g-ls", "ls", {})
+        gated_tool("g-bash", "bash", {"command": "echo hi > canary.txt"})
+        gated_tool("g-edit", "edit", {"path": "a.txt", "edits": [{"oldText": "x", "newText": "y"}]})
+        gated_tool("g-write", "write", {"path": "b.txt", "content": "hello"})
+        gated_tool("g-mcp", "mcp__reno__ping", {"message": "hi"})
+        for n in (1, 2, 3):
+            gated_tool("g-sib%d" % n, "read", {"path": "sib%d.txt" % n})
+
+        def nested():
+            gated_tool("g-code/1", "mcp__reno__ping", {"message": "nested"}, parent="g-code")
+            gated_tool("g-code/2", "read", {"path": "deep.txt"}, parent="g-code")
+
+        gated_tool("g-code", "codemode", {"code": "await ping(); await read()"}, inside=nested)
+        assistant("gate-covered")
+    elif prompt == "scenario:gate-200":
+        for n in range(200):
+            gated_tool("g200-%d" % n, "read", {"path": "f%d.txt" % n})
+        assistant("gate-200-done")
+    elif prompt == "scenario:gate-home":
+        gated_tool("g-home", "read", {"path": "~/.reno/secret"})
+        assistant("gate-home-done")
+    elif prompt == "scenario:gate-hold":
+        for n in (1, 2, 3):
+            call_id = "h-%d" % n
+            tool_start(call_id, "bash", {"command": "sleep %d" % n})
+            gate_send("bash", {"command": "sleep %d" % n}, call_id)
+        for n in (1, 2, 3):
+            decision = gate_decision()
+            if decision is None:
+                sys.exit(3)
+            tool_end("h-%d" % n, "bash", decision.get("reason") or "ran", error=decision["decision"] != "allow")
+        stop_when_asked()
+    elif prompt == "scenario:gate-late":
+        # The second call is made while the daemon is stopping the run: its abort is still unread.
+        gated_tool("late-1", "bash", {"command": "echo one"})
+        gated_tool("late-2", "bash", {"command": "echo two"})
+        stop_when_asked()
+    elif prompt == "scenario:gate-drop":
+        GATE_READER.close()
+        GATE_CONNECTIONS[0].close()
+        time.sleep(30)
+    elif prompt == "scenario:gate-flood":
+        for n in range(17):
+            tool_start("f-%d" % n, "read", {"path": "f%d.txt" % n})
+            gate_send("read", {"path": "f%d.txt" % n}, "f-%d" % n)
+        drain_gate()
+        sys.exit(0)
+    settle()
+
+
 def play(cmd):
     prompt = cmd["message"]
+    if GATE_READER is not None and prompt.startswith("scenario:gate-"):
+        return play_gate(prompt, cmd)
     if prompt == "scenario:conf-happy":
         start(cmd)
         emit({"type": "message_start", "message": {"role": "assistant", "content": []}})

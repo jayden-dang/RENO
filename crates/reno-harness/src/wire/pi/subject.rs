@@ -19,7 +19,6 @@ use super::normalize::action_class;
 /// `home`; without it `~/Library/Application Support/Reno` would read as a path inside the
 /// working directory. A `find` pattern and a `grep` glob are not
 /// paths and stay only in `raw`, which is the call as the gate sent it.
-#[cfg_attr(not(test), expect(dead_code, reason = "nothing reads gate calls yet"))]
 pub(crate) fn subject(
     tool: &str,
     call_id: &str,

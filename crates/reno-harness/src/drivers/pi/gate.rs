@@ -5,18 +5,45 @@
 //! afterwards, and the nonce (which Pi's own environment holds, and so a command Pi runs can
 //! read) reaches no listener. A connection from another user is closed unread; one that says
 //! hello with another nonce, no hello or no complete line fails the arming.
+//!
+//! After that the connection carries the gate's calls one way and the driver's decisions the
+//! other. Each call is held open until it is decided exactly once; a gate that breaks the rules
+//! (too many calls unanswered, a repeated id, a line that is not a call) is cut off, and Pi's
+//! gate then blocks everything it is asked about.
 
+use std::collections::HashSet;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
+
+use crate::exec::Decision;
 
 /// The longest hello line read. A real one is under a hundred bytes.
-const MAX_HELLO: u64 = 4096;
+const MAX_HELLO: usize = 4096;
+
+/// The longest call line read: a tool's whole input rides on it, a file's content included.
+const MAX_CALL_LINE: usize = 8 << 20;
+
+/// How many calls the gate may leave unanswered. A working gate holds its own count below this
+/// (its `MAX_OUTSTANDING`), so only a broken one reaches it.
+pub(super) const MAX_OPEN_GATE_CALLS: usize = 16;
+
+/// How many decisions wait for the writer: one for each call that may be open, and the denial of
+/// the one past the bound.
+const QUEUED_DECISIONS: usize = MAX_OPEN_GATE_CALLS + 1;
+
+/// What a call that is decided without being raised is told.
+const TOO_MANY_OPEN: &str = "Reno could not judge this call: too many calls were open at once.";
 
 /// Why the gate was not armed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -29,6 +56,88 @@ pub(super) enum ArmError {
     Timeout,
 }
 
+/// One tool call Pi is about to run, as the gate sent it, held until it is decided.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct GateCall {
+    pub(super) id: u64,
+    pub(super) tool: String,
+    pub(super) call_id: String,
+    pub(super) parent: Option<String>,
+    pub(super) input: Value,
+    /// The gate had too many calls open: this one was already denied, and the connection is
+    /// broken. It is not to be raised or decided.
+    pub(super) over_bound: bool,
+}
+
+#[derive(Deserialize)]
+struct CallLine {
+    t: String,
+    id: u64,
+    #[serde(rename = "toolName")]
+    tool: String,
+    #[serde(rename = "toolCallId")]
+    call_id: String,
+    #[serde(rename = "parentToolCallId", default)]
+    parent: Option<String>,
+    input: Value,
+}
+
+/// The read half of the gate's connection, which hands out whole lines.
+#[derive(Debug)]
+struct LineReader {
+    half: OwnedReadHalf,
+    buf: Vec<u8>,
+    scanned: usize,
+}
+
+enum LineEnd {
+    Closed,
+    TooLong,
+}
+
+impl LineReader {
+    fn new(half: OwnedReadHalf) -> Self {
+        Self {
+            half,
+            buf: Vec::new(),
+            scanned: 0,
+        }
+    }
+
+    /// The next line without its newline. Cancel-safe: the only await is a read whose bytes go
+    /// into the buffer this value keeps.
+    async fn line(&mut self, max: usize) -> Result<Vec<u8>, LineEnd> {
+        loop {
+            if let Some(at) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') {
+                let at = self.scanned + at;
+                self.scanned = 0;
+                let mut line: Vec<u8> = self.buf.drain(..=at).collect();
+                line.pop();
+                return if line.len() > max {
+                    Err(LineEnd::TooLong)
+                } else {
+                    Ok(line)
+                };
+            }
+            self.scanned = self.buf.len();
+            if self.buf.len() > max {
+                return Err(LineEnd::TooLong);
+            }
+            let mut chunk = [0_u8; 8192];
+            match self.half.read(&mut chunk).await {
+                Ok(0) | Err(_) => return Err(LineEnd::Closed),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+}
+
+/// The accepted connection, before it is split between reading calls and writing decisions.
+struct Connection {
+    reader: LineReader,
+    writer: OwnedWriteHalf,
+}
+
 /// The socket of one attempt, and, once armed, the gate's connection.
 #[derive(Debug)]
 pub(super) struct GateHost {
@@ -36,15 +145,22 @@ pub(super) struct GateHost {
     path: PathBuf,
     nonce: String,
     owner: u32,
+    tracker: TaskTracker,
     outcome: Option<Result<(), ArmError>>,
-    /// Held so the gate's connection stays open for the attempt.
-    _connection: Option<BufReader<UnixStream>>,
+    reader: Option<LineReader>,
+    /// Decisions on their way to the writer task: bounded, and never waited on.
+    lines: Option<mpsc::Sender<Vec<u8>>>,
+    writer: Option<JoinHandle<()>>,
+    /// The calls read and not yet decided.
+    open: HashSet<u64>,
+    /// The connection broke the rules or was lost: nothing more is read.
+    broken: bool,
 }
 
 impl GateHost {
     /// Listen on `path`, readable and writable by this user only. The directory holding it is
-    /// the caller's private one.
-    pub(super) fn bind(path: &Path, nonce: &str) -> io::Result<Self> {
+    /// the caller's private one. The writer task of the armed connection runs on `tracker`.
+    pub(super) fn bind(path: &Path, nonce: &str, tracker: &TaskTracker) -> io::Result<Self> {
         let listener = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         let owner = std::fs::symlink_metadata(path)?.uid();
@@ -53,8 +169,13 @@ impl GateHost {
             path: path.to_path_buf(),
             nonce: nonce.to_owned(),
             owner,
+            tracker: tracker.clone(),
             outcome: None,
-            _connection: None,
+            reader: None,
+            lines: None,
+            writer: None,
+            open: HashSet::new(),
+            broken: false,
         })
     }
 
@@ -74,14 +195,105 @@ impl GateHost {
         drop(listener);
         let _ = std::fs::remove_file(&self.path);
         let outcome = match admitted {
-            Ok(connection) => {
-                self._connection = Some(connection);
+            Ok(Connection { reader, writer }) => {
+                let (lines, queue) = mpsc::channel(QUEUED_DECISIONS);
+                self.writer = Some(self.tracker.spawn(write_decisions(writer, queue)));
+                self.lines = Some(lines);
+                self.reader = Some(reader);
                 Ok(())
             }
             Err(error) => Err(error),
         };
         self.outcome = Some(outcome);
         outcome
+    }
+
+    /// The gate's next call, or `None` once the connection is gone, broken, or was never armed.
+    /// Cancel-safe: it sits in a `select!`.
+    pub(super) async fn next(&mut self) -> Option<GateCall> {
+        if self.broken {
+            return None;
+        }
+        let line = match self.reader.as_mut()?.line(MAX_CALL_LINE).await {
+            Ok(line) => line,
+            Err(_) => return self.cut_off(),
+        };
+        let Some(call) = parse_call(&line) else {
+            return self.cut_off();
+        };
+        if self.open.contains(&call.id) {
+            return self.cut_off();
+        }
+        if self.open.len() >= MAX_OPEN_GATE_CALLS {
+            self.send(call.id, Decision::Deny, Some(TOO_MANY_OPEN));
+            self.broken = true;
+            return Some(GateCall {
+                over_bound: true,
+                ..call
+            });
+        }
+        self.open.insert(call.id);
+        Some(call)
+    }
+
+    /// Tell the gate what became of call `id`. Never blocks, and says nothing for a call that
+    /// is not open: each call is decided once.
+    pub(super) fn decide(&mut self, id: u64, decision: Decision, reason: Option<String>) {
+        if self.open.remove(&id) {
+            self.send(id, decision, reason.as_deref());
+        }
+    }
+
+    /// Whether the connection is usable: armed, and neither lost nor broken.
+    pub(super) fn is_live(&self) -> bool {
+        !self.broken && self.reader.is_some()
+    }
+
+    /// Let the decisions already queued reach the gate (up to `grace`), then close the
+    /// connection and end the writer task.
+    pub(super) async fn close(&mut self, grace: Duration) {
+        self.lines = None;
+        self.reader = None;
+        self.broken = true;
+        if let Some(mut writer) = self.writer.take()
+            && tokio::time::timeout(grace, &mut writer).await.is_err()
+        {
+            writer.abort();
+        }
+    }
+
+    fn send(&mut self, id: u64, decision: Decision, reason: Option<&str>) {
+        let line = json!({
+            "t": "decision",
+            "id": id,
+            "decision": match decision {
+                Decision::Allow => "allow",
+                Decision::Deny => "deny",
+            },
+            "reason": reason,
+        });
+        let mut bytes = line.to_string().into_bytes();
+        bytes.push(b'\n');
+        // A decision that cannot be queued is never dropped silently: the gate would wait on it
+        // for ever, so the connection goes instead and the gate blocks everything.
+        if self
+            .lines
+            .as_ref()
+            .is_none_or(|lines| lines.try_send(bytes).is_err())
+        {
+            self.cut_off();
+        }
+    }
+
+    /// Close the connection at once, without flushing. Always `None`, for `next`.
+    fn cut_off(&mut self) -> Option<GateCall> {
+        self.broken = true;
+        self.reader = None;
+        self.lines = None;
+        if let Some(writer) = self.writer.take() {
+            writer.abort();
+        }
+        None
     }
 
     #[cfg(test)]
@@ -93,9 +305,35 @@ impl GateHost {
 
 impl Drop for GateHost {
     fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            writer.abort();
+        }
         // The listener closes with this value; the file is ours to remove.
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+fn parse_call(line: &[u8]) -> Option<GateCall> {
+    let call: CallLine = serde_json::from_slice(line).ok()?;
+    (call.t == "call").then_some(GateCall {
+        id: call.id,
+        tool: call.tool,
+        call_id: call.call_id,
+        parent: call.parent,
+        input: call.input,
+        over_bound: false,
+    })
+}
+
+/// Write each queued decision, in order, until the queue closes or the gate stops reading, then
+/// close the connection's write side.
+async fn write_decisions(mut half: OwnedWriteHalf, mut queue: mpsc::Receiver<Vec<u8>>) {
+    while let Some(line) = queue.recv().await {
+        if half.write_all(&line).await.is_err() {
+            return;
+        }
+    }
+    let _ = half.shutdown().await;
 }
 
 fn is_owner(peer: u32, owner: u32) -> bool {
@@ -108,7 +346,7 @@ async fn admit(
     owner: u32,
     nonce: &str,
     same_user: fn(u32, u32) -> bool,
-) -> Result<BufReader<UnixStream>, ArmError> {
+) -> Result<Connection, ArmError> {
     loop {
         let (stream, _) = listener.accept().await.map_err(|_| ArmError::NoHello)?;
         // A peer that cannot be identified (it already closed) is no hello, not a reason to wait.
@@ -119,19 +357,19 @@ async fn admit(
     }
 }
 
-async fn hello(stream: UnixStream, nonce: &str) -> Result<BufReader<UnixStream>, ArmError> {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let read = (&mut reader).take(MAX_HELLO).read_line(&mut line).await;
-    if !matches!(read, Ok(n) if n > 0) || !line.ends_with('\n') {
-        return Err(ArmError::NoHello);
-    }
-    let hello: Value = serde_json::from_str(&line).map_err(|_| ArmError::NoHello)?;
+async fn hello(stream: UnixStream, nonce: &str) -> Result<Connection, ArmError> {
+    let (read, writer) = stream.into_split();
+    let mut reader = LineReader::new(read);
+    let line = reader
+        .line(MAX_HELLO)
+        .await
+        .map_err(|_| ArmError::NoHello)?;
+    let hello: Value = serde_json::from_slice(&line).map_err(|_| ArmError::NoHello)?;
     if hello.get("t").and_then(Value::as_str) != Some("hello") {
         return Err(ArmError::NoHello);
     }
     match hello.get("nonce").and_then(Value::as_str) {
-        Some(said) if said == nonce => Ok(reader),
+        Some(said) if said == nonce => Ok(Connection { reader, writer }),
         _ => Err(ArmError::WrongNonce),
     }
 }
@@ -139,7 +377,7 @@ async fn hello(stream: UnixStream, nonce: &str) -> Result<BufReader<UnixStream>,
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     use super::*;
 
@@ -165,7 +403,7 @@ mod tests {
         }
 
         fn host(&self) -> GateHost {
-            GateHost::bind(&self.path(), NONCE).unwrap()
+            GateHost::bind(&self.path(), NONCE, &TaskTracker::new()).unwrap()
         }
 
         async fn client(&self) -> UnixStream {
@@ -267,9 +505,7 @@ mod tests {
         let socket = Socket::new();
         let mut host = socket.host();
         let mut gate = socket.client().await;
-        gate.write_all(&vec![b'a'; MAX_HELLO as usize + 100])
-            .await
-            .unwrap();
+        gate.write_all(&vec![b'a'; MAX_HELLO + 100]).await.unwrap();
         assert_eq!(host.arm(PLENTY).await, Err(ArmError::NoHello));
     }
 
@@ -341,5 +577,204 @@ mod tests {
         assert!(socket.path().exists());
         drop(host);
         assert!(!socket.path().exists());
+    }
+
+    fn call_line(id: u64) -> Vec<u8> {
+        format!(
+            "{{\"t\":\"call\",\"id\":{id},\"toolName\":\"bash\",\"toolCallId\":\"c{id}\",\
+             \"parentToolCallId\":null,\"input\":{{\"command\":\"ls\"}}}}\n"
+        )
+        .into_bytes()
+    }
+
+    /// An armed host and the gate's end of its connection.
+    async fn armed(socket: &Socket) -> (GateHost, BufReader<UnixStream>) {
+        let mut host = socket.host();
+        let mut gate = socket.client().await;
+        gate.write_all(&hello_line(NONCE)).await.unwrap();
+        host.arm(PLENTY).await.unwrap();
+        (host, BufReader::new(gate))
+    }
+
+    async fn reply(gate: &mut BufReader<UnixStream>) -> Option<Value> {
+        let mut line = String::new();
+        let read = tokio::time::timeout(PLENTY, gate.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        (read > 0).then(|| serde_json::from_str(&line).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_call_is_read_whole_and_decided_once() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        gate.get_mut().write_all(&call_line(1)).await.unwrap();
+        let call = host.next().await.unwrap();
+        assert_eq!(
+            call,
+            GateCall {
+                id: 1,
+                tool: "bash".into(),
+                call_id: "c1".into(),
+                parent: None,
+                input: json!({"command": "ls"}),
+                over_bound: false,
+            }
+        );
+        host.decide(1, Decision::Deny, Some("no".into()));
+        host.decide(1, Decision::Allow, None);
+        host.decide(99, Decision::Allow, None);
+        host.close(PLENTY).await;
+        assert_eq!(
+            reply(&mut gate).await.unwrap(),
+            json!({"t": "decision", "id": 1, "decision": "deny", "reason": "no"})
+        );
+        assert_eq!(reply(&mut gate).await, None, "no second decision for id 1");
+    }
+
+    #[tokio::test]
+    async fn a_call_with_a_parent_keeps_it_and_an_allow_carries_no_reason() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        let line = "{\"t\":\"call\",\"id\":7,\"toolName\":\"read\",\"toolCallId\":\"a/1\",\
+                    \"parentToolCallId\":\"a\",\"input\":{}}\n";
+        gate.get_mut().write_all(line.as_bytes()).await.unwrap();
+        let call = host.next().await.unwrap();
+        assert_eq!(call.parent.as_deref(), Some("a"));
+        host.decide(7, Decision::Allow, None);
+        assert_eq!(
+            reply(&mut gate).await.unwrap(),
+            json!({"t": "decision", "id": 7, "decision": "allow", "reason": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_a_call_survives_being_cancelled_part_way() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        let line = call_line(3);
+        let (first, rest) = line.split_at(20);
+        gate.get_mut().write_all(first).await.unwrap();
+        let waited = tokio::time::timeout(SHORT, host.next()).await;
+        assert!(waited.is_err(), "the line is not whole yet");
+        gate.get_mut().write_all(rest).await.unwrap();
+        assert_eq!(host.next().await.unwrap().id, 3);
+    }
+
+    #[tokio::test]
+    async fn the_call_past_the_bound_is_denied_and_the_connection_is_cut() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        for id in 1..=MAX_OPEN_GATE_CALLS as u64 + 1 {
+            gate.get_mut().write_all(&call_line(id)).await.unwrap();
+        }
+        for id in 1..=MAX_OPEN_GATE_CALLS as u64 {
+            let call = host.next().await.unwrap();
+            assert_eq!((call.id, call.over_bound), (id, false));
+        }
+        let excess = host.next().await.unwrap();
+        assert_eq!((excess.id, excess.over_bound), (17, true));
+        assert!(host.next().await.is_none());
+        host.decide(17, Decision::Allow, None);
+        for id in 1..=MAX_OPEN_GATE_CALLS as u64 {
+            host.decide(id, Decision::Deny, None);
+        }
+        host.close(PLENTY).await;
+        let denied = reply(&mut gate).await.unwrap();
+        assert_eq!(
+            (denied["id"].clone(), denied["decision"].clone()),
+            (json!(17), json!("deny"))
+        );
+        assert!(denied["reason"].as_str().unwrap().contains("too many"));
+        for id in 1..=MAX_OPEN_GATE_CALLS {
+            assert_eq!(reply(&mut gate).await.unwrap()["id"], id, "none is lost");
+        }
+        assert_eq!(reply(&mut gate).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_decided_call_makes_room_for_another() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        for id in 1..=MAX_OPEN_GATE_CALLS as u64 {
+            gate.get_mut().write_all(&call_line(id)).await.unwrap();
+            host.next().await.unwrap();
+        }
+        host.decide(1, Decision::Allow, None);
+        gate.get_mut().write_all(&call_line(17)).await.unwrap();
+        let call = host.next().await.unwrap();
+        assert_eq!((call.id, call.over_bound), (17, false));
+    }
+
+    #[tokio::test]
+    async fn a_repeated_id_or_a_stray_line_cuts_the_gate_off() {
+        let lines: [Vec<u8>; 4] = [
+            [call_line(1), call_line(1)].concat(),
+            b"not json\n".to_vec(),
+            hello_line(NONCE),
+            b"{\"t\":\"call\",\"id\":-1,\"toolName\":\"x\"}\n".to_vec(),
+        ];
+        for (n, bytes) in lines.iter().enumerate() {
+            let socket = Socket::new();
+            let (mut host, mut gate) = armed(&socket).await;
+            gate.get_mut().write_all(bytes).await.unwrap();
+            let mut ended = false;
+            for _ in 0..2 {
+                ended = host.next().await.is_none();
+            }
+            assert!(ended, "case {n}");
+            assert!(!host.is_live(), "case {n}");
+            assert!(closed_unserved(gate.get_mut()).await, "case {n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_over_long_call_line_cuts_the_gate_off() {
+        let socket = Socket::new();
+        let (mut host, gate) = armed(&socket).await;
+        let mut stream = gate.into_inner();
+        let flood = tokio::spawn(async move {
+            let _ = stream.write_all(&vec![b'a'; MAX_CALL_LINE + 100]).await;
+        });
+        assert!(host.next().await.is_none());
+        assert!(!host.is_live());
+        flood.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_closes_ends_the_calls() {
+        let socket = Socket::new();
+        let (mut host, gate) = armed(&socket).await;
+        drop(gate);
+        assert!(host.next().await.is_none());
+        assert!(!host.is_live());
+    }
+
+    #[tokio::test]
+    async fn closing_sends_what_was_queued_first() {
+        let socket = Socket::new();
+        let (mut host, mut gate) = armed(&socket).await;
+        for id in 1..=3 {
+            gate.get_mut().write_all(&call_line(id)).await.unwrap();
+            host.next().await.unwrap();
+        }
+        for id in 1..=3 {
+            host.decide(id, Decision::Deny, None);
+        }
+        host.close(PLENTY).await;
+        for id in 1..=3 {
+            assert_eq!(reply(&mut gate).await.unwrap()["id"], id);
+        }
+        assert_eq!(reply(&mut gate).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_was_never_armed_has_no_calls() {
+        let socket = Socket::new();
+        let mut host = socket.host();
+        assert!(host.next().await.is_none());
+        host.decide(1, Decision::Allow, None);
+        assert!(!host.is_live());
     }
 }

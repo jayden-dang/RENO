@@ -15,14 +15,14 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use reno_harness::exec::{ExecControls, ExecError, ExecHandle, Executor};
+use reno_harness::exec::{Decision, ExecControls, ExecError, ExecHandle, Executor};
 use reno_harness::{PiExecutor, ProcessRecord};
 use reno_proto::{
-    AccessMode, ActionClass, Effort, ExecEvent, ExecSpec, InstallStatus, McpServerSpec,
-    ModelSource, NotInstalledReason, RunId, SandboxLevel, SessionRef, SignedIn, Steering,
-    StopReason, VersionGate,
+    AccessMode, ActionClass, ApprovalSubject, Effort, ExecEvent, ExecSpec, InstallStatus,
+    McpServerSpec, ModelSource, NotInstalledReason, RunId, SandboxLevel, SessionRef, SignedIn,
+    Steering, StopReason, VersionGate,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 fn fixture_dir() -> PathBuf {
@@ -1389,6 +1389,492 @@ async fn reno_still_refuses_an_access_mode_it_does_not_declare() {
             ..
         }
     ));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The calls: each one is held for the ladder before it runs
+// ---------------------------------------------------------------------------------------------
+
+/// A bot's run whose fake plays the gate and the tool loop of `scenario`.
+fn call_spec(bench: &Bench, scenario: &str) -> ExecSpec {
+    let mut spec = gate_spec(bench, "ok");
+    spec.prompt = format!("scenario:{scenario}");
+    spec
+}
+
+type Verdict = (Decision, Option<String>);
+
+/// Drive `live` to its end, answering each `NeedsApproval` as `verdict` says.
+async fn drive_deciding(
+    live: &mut Live,
+    mut verdict: impl FnMut(&ApprovalSubject) -> Verdict,
+) -> Vec<ExecEvent> {
+    let mut events = Vec::new();
+    let run = async {
+        while let Some(event) = live.stream.next().await {
+            if let ExecEvent::NeedsApproval {
+                request_id,
+                subject,
+            } = &event
+            {
+                let (decision, reason) = verdict(subject);
+                live.handle
+                    .decide_with_message(request_id.clone(), decision, reason)
+                    .await
+                    .unwrap();
+            }
+            events.push(event);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), run)
+        .await
+        .expect("the run ends");
+    events
+}
+
+fn allow_all(_: &ApprovalSubject) -> Verdict {
+    (Decision::Allow, None)
+}
+
+fn raised(events: &[ExecEvent]) -> Vec<(&str, &ApprovalSubject)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ExecEvent::NeedsApproval {
+                request_id,
+                subject,
+            } => Some((request_id.as_str(), subject)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn call_id(subject: &ApprovalSubject) -> &str {
+    subject.raw["toolCallId"].as_str().unwrap()
+}
+
+fn position(events: &[ExecEvent], wanted: impl Fn(&ExecEvent) -> bool) -> usize {
+    events.iter().position(wanted).unwrap()
+}
+
+/// Every call was raised after its `Tool` event and before its `ToolResult`.
+fn assert_each_call_is_raised_between_its_tool_and_its_result(events: &[ExecEvent]) {
+    for (_, subject) in raised(events) {
+        let id = call_id(subject);
+        let started = position(
+            events,
+            |e| matches!(e, ExecEvent::Tool { id: t, .. } if t == id),
+        );
+        let asked = position(
+            events,
+            |e| matches!(e, ExecEvent::NeedsApproval { subject, .. } if call_id(subject) == id),
+        );
+        let ended = position(
+            events,
+            |e| matches!(e, ExecEvent::ToolResult { id: t, .. } if t == id),
+        );
+        assert!(
+            started < asked && asked < ended,
+            "{id}: {started} {asked} {ended}"
+        );
+    }
+}
+
+fn ran(bench: &Bench) -> Vec<Value> {
+    logged_values(bench, "ran")
+}
+
+fn gate_decisions(bench: &Bench) -> Vec<Value> {
+    logged_values(bench, "gate_decision")
+}
+
+#[tokio::test]
+async fn reno_calls_every_kind_of_call_is_raised_with_what_the_gate_sent() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-coverage")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    let expected: [(&str, &str, ActionClass, Option<&str>, Value); 14] = [
+        (
+            "g-read",
+            "read",
+            ActionClass::Read,
+            None,
+            json!({"path": "a.txt"}),
+        ),
+        (
+            "g-grep",
+            "grep",
+            ActionClass::Read,
+            None,
+            json!({"pattern": "needle", "path": "src", "glob": "*.rs"}),
+        ),
+        (
+            "g-find",
+            "find",
+            ActionClass::Read,
+            None,
+            json!({"pattern": "*.md"}),
+        ),
+        ("g-ls", "ls", ActionClass::Read, None, json!({})),
+        (
+            "g-bash",
+            "bash",
+            ActionClass::Command,
+            None,
+            json!({"command": "echo hi > canary.txt"}),
+        ),
+        (
+            "g-edit",
+            "edit",
+            ActionClass::Edit,
+            None,
+            json!({"path": "a.txt", "edits": [{"oldText": "x", "newText": "y"}]}),
+        ),
+        (
+            "g-write",
+            "write",
+            ActionClass::Edit,
+            None,
+            json!({"path": "b.txt", "content": "hello"}),
+        ),
+        (
+            "g-mcp",
+            "mcp__reno__ping",
+            ActionClass::McpTool,
+            None,
+            json!({"message": "hi"}),
+        ),
+        (
+            "g-sib1",
+            "read",
+            ActionClass::Read,
+            None,
+            json!({"path": "sib1.txt"}),
+        ),
+        (
+            "g-sib2",
+            "read",
+            ActionClass::Read,
+            None,
+            json!({"path": "sib2.txt"}),
+        ),
+        (
+            "g-sib3",
+            "read",
+            ActionClass::Read,
+            None,
+            json!({"path": "sib3.txt"}),
+        ),
+        (
+            "g-code",
+            "codemode",
+            ActionClass::Other,
+            None,
+            json!({"code": "await ping(); await read()"}),
+        ),
+        (
+            "g-code/1",
+            "mcp__reno__ping",
+            ActionClass::McpTool,
+            Some("g-code"),
+            json!({"message": "nested"}),
+        ),
+        (
+            "g-code/2",
+            "read",
+            ActionClass::Read,
+            Some("g-code"),
+            json!({"path": "deep.txt"}),
+        ),
+    ];
+    let asked = raised(&events);
+    assert_eq!(asked.len(), expected.len(), "one request per call");
+    for (id, tool, class, parent, input) in expected {
+        let (request_id, subject) = asked
+            .iter()
+            .find(|(_, subject)| call_id(subject) == id)
+            .unwrap_or_else(|| panic!("{id} was never raised"));
+        assert!(request_id.starts_with("gate-"), "{request_id}");
+        assert_eq!(subject.tool, tool, "{id}");
+        assert_eq!(subject.action, class, "{id}");
+        assert_eq!(subject.raw["parentToolCallId"], json!(parent), "{id}");
+        assert_eq!(subject.raw["toolName"], tool, "{id}");
+        assert_eq!(subject.raw["input"], input, "{id}");
+    }
+    let bash = asked
+        .iter()
+        .find(|(_, s)| call_id(s) == "g-bash")
+        .unwrap()
+        .1;
+    assert_eq!(bash.command.as_deref(), Some("echo hi > canary.txt"));
+    let order: Vec<&str> = asked.iter().map(|(_, s)| call_id(s)).collect();
+    assert_eq!(
+        &order[8..11],
+        ["g-sib1", "g-sib2", "g-sib3"],
+        "siblings go one after another: {order:?}"
+    );
+    for window in order[8..11].windows(2) {
+        let first_result = position(
+            &events,
+            |e| matches!(e, ExecEvent::ToolResult { id, .. } if id == window[0]),
+        );
+        let second_asked = position(
+            &events,
+            |e| matches!(e, ExecEvent::NeedsApproval { subject, .. } if call_id(subject) == window[1]),
+        );
+        assert!(first_result < second_asked, "{window:?}");
+    }
+    assert_each_call_is_raised_between_its_tool_and_its_result(&events);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ExecEvent::Usage {
+                output_tokens: 3,
+                ..
+            }
+        )),
+        "per-turn usage is still reported: {events:?}"
+    );
+    assert_eq!(text(&events), "gate-covered");
+}
+
+#[tokio::test]
+async fn reno_calls_an_allowed_call_runs_with_the_arguments_it_was_judged_on() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-coverage")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    done(&events);
+    let ran = ran(&bench);
+    let asked = raised(&events);
+    assert_eq!(ran.len(), asked.len());
+    for (_, subject) in asked {
+        let did = ran
+            .iter()
+            .find(|r| r["call_id"] == call_id(subject))
+            .unwrap();
+        assert_eq!(did["tool"], subject.raw["toolName"]);
+        assert_eq!(did["input"], subject.raw["input"]);
+    }
+    assert!(bench.dir.path().join("canary.txt").exists());
+}
+
+#[tokio::test]
+async fn reno_calls_a_denied_bash_runs_nothing_and_the_bot_reads_the_reason() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-coverage")).await;
+    let events = drive_deciding(&mut live, |subject| {
+        if subject.tool == "bash" {
+            (Decision::Deny, Some("bash is not allowed here".to_owned()))
+        } else {
+            allow_all(subject)
+        }
+    })
+    .await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert!(
+        !bench.dir.path().join("canary.txt").exists(),
+        "the command ran"
+    );
+    assert!(ran(&bench).iter().all(|r| r["tool"] != "bash"));
+    let result = events
+        .iter()
+        .find_map(|e| match e {
+            ExecEvent::ToolResult {
+                id,
+                ok,
+                summary,
+                output,
+            } if id == "g-bash" => Some((*ok, summary.clone(), output.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!result.0, "a denied call is an error result");
+    assert!(
+        result
+            .1
+            .as_deref()
+            .is_some_and(|s| s.contains("bash is not allowed here"))
+            && result
+                .2
+                .as_ref()
+                .is_some_and(|o| o.text.contains("bash is not allowed here")),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn reno_calls_two_hundred_calls_run_to_the_end_with_no_cap() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-200")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert_eq!(text(&events), "gate-200-done");
+    assert_eq!(raised(&events).len(), 200);
+    assert_eq!(ran(&bench).len(), 200);
+    assert_each_call_is_raised_between_its_tool_and_its_result(&events);
+}
+
+/// Start `scenario` and read events until `count` calls are open; the rest is for the caller.
+async fn until_open(live: &mut Live, count: usize) -> (Vec<ExecEvent>, Vec<String>) {
+    let mut events = Vec::new();
+    let mut open = Vec::new();
+    let wait = async {
+        while open.len() < count {
+            let event = live.stream.next().await.expect("the run is still going");
+            if let ExecEvent::NeedsApproval { request_id, .. } = &event {
+                open.push(request_id.clone());
+            }
+            events.push(event);
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), wait)
+        .await
+        .expect("the calls are raised");
+    (events, open)
+}
+
+async fn finish(live: &mut Live, mut events: Vec<ExecEvent>) -> Vec<ExecEvent> {
+    events.extend(drive(live).await);
+    events
+}
+
+fn scratch_of(bench: &Bench) -> PathBuf {
+    let socket = logged_values(bench, "gate_socket")[0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Path::new(&socket)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+#[tokio::test]
+async fn reno_calls_a_cancel_denies_every_open_request_and_leaves_no_scratch() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-hold")).await;
+    let (before, open) = until_open(&mut live, 3).await;
+    assert_eq!(open.len(), 3);
+    live.handle.cancel();
+    let events = finish(&mut live, before).await;
+    let (stop, _, _) = done(&events);
+    assert_eq!(stop, StopReason::Interrupted);
+    let decisions = gate_decisions(&bench);
+    assert_eq!(decisions.len(), 3, "{decisions:?}");
+    assert!(
+        decisions.iter().all(|d| d["decision"] == "deny"),
+        "{decisions:?}"
+    );
+    let mut ids: Vec<u64> = decisions
+        .iter()
+        .map(|d| d["id"].as_u64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+    assert!(!scratch_of(&bench).exists());
+}
+
+#[tokio::test]
+async fn reno_calls_a_call_answered_just_before_a_cancel_is_decided_only_once() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-hold")).await;
+    let (before, open) = until_open(&mut live, 3).await;
+    live.handle
+        .decide(open[0].clone(), Decision::Allow)
+        .await
+        .unwrap();
+    live.handle.cancel();
+    let events = finish(&mut live, before).await;
+    done(&events);
+    let mut ids: Vec<u64> = gate_decisions(&bench)
+        .iter()
+        .map(|d| d["id"].as_u64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3], "one decision for each call, none twice");
+}
+
+#[tokio::test]
+async fn reno_calls_a_call_made_while_the_run_is_being_stopped_is_denied_not_raised() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-late")).await;
+    let (before, _) = until_open(&mut live, 1).await;
+    live.handle.cancel();
+    let events = finish(&mut live, before).await;
+    let (stop, _, _) = done(&events);
+    assert_eq!(stop, StopReason::Interrupted);
+    assert_eq!(raised(&events).len(), 1, "the late call was never raised");
+    let decisions = gate_decisions(&bench);
+    assert_eq!(decisions.len(), 2, "{decisions:?}");
+    assert!(decisions.iter().all(|d| d["decision"] == "deny"));
+}
+
+#[tokio::test]
+async fn reno_calls_a_gate_that_sends_a_seventeenth_open_call_has_it_denied_and_the_run_ends() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-flood")).await;
+    let events = drive(&mut live).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(
+        diagnostic.unwrap().contains("too many calls"),
+        "the end names the cause"
+    );
+    assert_eq!(
+        raised(&events).len(),
+        16,
+        "only the first sixteen are raised"
+    );
+    let decisions = gate_decisions(&bench);
+    assert_eq!(decisions.len(), 17, "{decisions:?}");
+    assert!(decisions.iter().all(|d| d["decision"] == "deny"));
+    let excess = decisions.iter().find(|d| d["id"] == 17).unwrap();
+    assert!(excess["reason"].as_str().unwrap().contains("too many"));
+    assert!(!scratch_of(&bench).exists());
+}
+
+#[tokio::test]
+async fn reno_calls_a_gate_that_goes_away_mid_run_ends_the_run_as_lost() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-drop")).await;
+    let events = drive(&mut live).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(
+        diagnostic
+            .unwrap()
+            .contains("Reno lost its watch over the run"),
+    );
+    assert!(raised(&events).is_empty());
+}
+
+#[tokio::test]
+async fn reno_calls_a_path_under_the_home_is_judged_against_the_childs_own_home() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-home")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    done(&events);
+    let home = std::env::var("HOME").unwrap();
+    assert_eq!(
+        raised(&events)[0].1.paths,
+        [Path::new(&home).join(".reno/secret")]
+    );
+
+    let mut spec = call_spec(&bench, "gate-home");
+    spec.env.insert("HOME".to_owned(), "/bots/home".to_owned());
+    let mut live = start(&reno_executor(&bench), spec).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    done(&events);
+    assert_eq!(
+        raised(&events)[0].1.paths,
+        [PathBuf::from("/bots/home/.reno/secret")]
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
