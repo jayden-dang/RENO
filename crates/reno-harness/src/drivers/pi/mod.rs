@@ -30,7 +30,8 @@
 //!   `set_auto_compaction`, `set_auto_retry`, `cycle_model` and `cycle_thinking_level` write
 //!   `~/.pi/agent/settings.json`. The writer refuses them ([`rpc::Client::send`]) and a test
 //!   drives a run to prove none is sent. `set_model` and `set_thinking_level` stay in the session
-//!   transcript. The MCP bridge, the instructions and every file a flag names live in a scratch
+//!   transcript. A Reno run's writer also refuses the host `bash` command, which Pi runs without
+//!   its tool hook. The MCP bridge, the instructions and every file a flag names live in a scratch
 //!   directory of the run.
 //! - Extension dialogs (`select`, `confirm`, `input`, `editor`) become `NeedsInput`, answered
 //!   through `ExecHandle::answer_input`. One that is declined, that Pi gives up on, or that is
@@ -712,9 +713,9 @@ struct Pi {
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// The run's scratch directory: the bridge, its config and the instructions. Removed with it.
     _scratch: Option<ScratchDir>,
-    /// What a Reno attempt keeps beside them: the gate, its socket path and key. Held so they
-    /// go with the process.
-    _gate_files: Option<GateFiles>,
+    /// What a Reno attempt keeps beside them: the gate, its socket path and key, and Pi's agent
+    /// directory. They go with the process.
+    gate_files: Option<GateFiles>,
     /// The `HOME` the child was given, which Pi expands `~` against.
     home: Option<PathBuf>,
     /// When the process was seen to have exited; frames it left behind are still read until then.
@@ -754,6 +755,14 @@ impl Pi {
         }
     }
 
+    /// Whether a credential file is in this attempt's agent directory. An attempt with no agent
+    /// directory of its own cannot be vouched for, so it counts.
+    fn holds_credential(&self) -> bool {
+        self.gate_files
+            .as_ref()
+            .is_none_or(|files| stored_credential(&files.agent))
+    }
+
     /// What to say when Pi went away under a run: its exit status and last stderr lines.
     async fn crash_report(&mut self) -> String {
         self.stderr_tail.wait_closed().await;
@@ -779,6 +788,52 @@ const PROVIDER_KEY_HINT: [&str; 4] = [
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
 ];
+
+/// What Pi keeps a stored login in, inside its agent directory.
+const AUTH_FILE: &str = "auth.json";
+
+/// The largest `auth.json` that can be empty: Pi writes `{}`, and anything longer is a login.
+const MAX_AUTH_BYTES: u64 = 4096;
+
+const CREDENTIAL_APPEARED: &str =
+    "a credential file appeared in the run's Pi agent directory (auth.json)";
+
+/// Whether the agent directory's `auth.json` holds a credential: anything but a missing file or an
+/// empty JSON object. Fail closed: a file that cannot be read, is not plain or small, or is not
+/// JSON counts. It opens without following a link and without blocking, so a link or a pipe the
+/// run planted there is judged, not read.
+fn stored_credential(agent: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(agent.join(AUTH_FILE))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        let plain_and_small = file
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_AUTH_BYTES);
+        let mut bytes = Vec::new();
+        if !plain_and_small || file.take(MAX_AUTH_BYTES).read_to_end(&mut bytes).is_err() {
+            return true;
+        }
+        !matches!(
+            serde_json::from_slice::<Value>(&bytes),
+            Ok(Value::Object(fields)) if fields.is_empty()
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = agent;
+        true
+    }
+}
 
 /// The longest path a Unix socket address holds on macOS (`sun_path`), the NUL included.
 const SUN_PATH_MAX: usize = 104;
@@ -1006,13 +1061,17 @@ async fn launch_pi(
             tail.close();
         })
     });
+    let mut transport = rpc::Transport::new(stdin, stdout);
+    if reno {
+        transport.client = transport.client.clone().refusing_host_bash();
+    }
     let pi = Pi {
         child,
-        transport: rpc::Transport::new(stdin, stdout),
+        transport,
         stderr_tail,
         stderr_task,
         _scratch: Some(scratch),
-        _gate_files: gate,
+        gate_files: gate,
         home,
         exit_deadline: None,
     };
@@ -1125,6 +1184,9 @@ impl Run {
         let mut backlog = Vec::new();
         if let Err(why) = self.arm(&mut backlog).await {
             return Startup::Failed(format!("Reno's gate did not arm: {why}"));
+        }
+        if self.gated && self.pi.holds_credential() {
+            return Startup::Failed(CREDENTIAL_APPEARED.into());
         }
         match self.set_up(&mut backlog).await {
             Ok(state) => {
@@ -1341,6 +1403,8 @@ struct Player<'a> {
     /// The task prompt was refused.
     refused: Option<String>,
     interrupted: bool,
+    /// A credential file showed up in Pi's agent directory: the run is over.
+    credential: bool,
     /// The last barrier found Pi busy with no settle guaranteed to follow: look again when a
     /// compaction or retry ends.
     recheck: bool,
@@ -1383,6 +1447,7 @@ impl<'a> Player<'a> {
             answered: false,
             refused: None,
             interrupted: false,
+            credential: false,
             recheck: false,
             barrier_deadline: None,
             steering_open: true,
@@ -1485,6 +1550,10 @@ impl<'a> Player<'a> {
     /// Whether the run is over, and how. Over means Pi answered the prompt, has nothing running
     /// for it, owes no other reply and has no steering message waiting to be handed over.
     fn ended(&mut self) -> Option<Ended> {
+        if self.credential {
+            self.dismiss_all();
+            return Some((StopReason::Error, None, Some(CREDENTIAL_APPEARED.into())));
+        }
         if let Some(why) = self.refused.clone() {
             self.dismiss_all();
             return Some((StopReason::Error, None, Some(why)));
@@ -1629,6 +1698,15 @@ impl<'a> Player<'a> {
     }
 
     async fn raise(&mut self, call: GateCall) -> Result<(), ()> {
+        if self.run.pi.holds_credential() {
+            self.credential = true;
+            self.decide_call(
+                call.id,
+                crate::exec::Decision::Deny,
+                Some(CREDENTIAL_APPEARED.into()),
+            );
+            return Ok(());
+        }
         let Some(home) = self.run.pi.home.as_deref() else {
             // A call whose paths cannot be judged is not run.
             self.decide_call(call.id, crate::exec::Decision::Deny, None);
@@ -2115,7 +2193,7 @@ mod tests {
             let bench = Bench::new();
             let pi = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
             let reno = pi._scratch.as_ref().unwrap().path().join(".reno");
-            let gate = pi._gate_files.as_ref().unwrap();
+            let gate = pi.gate_files.as_ref().unwrap();
             assert_eq!(gate.socket.file_name().unwrap(), "gate.sock");
             assert_eq!(gate.socket.parent().unwrap().file_name().unwrap(), ".reno");
             let socket = gate.socket.display().to_string();
@@ -2192,8 +2270,8 @@ mod tests {
             let first = bench.launch(&spec, &bench.flavor()).await;
             let second = bench.launch(&spec, &bench.flavor()).await;
             let (a, b) = (
-                first._gate_files.as_ref().unwrap(),
-                second._gate_files.as_ref().unwrap(),
+                first.gate_files.as_ref().unwrap(),
+                second.gate_files.as_ref().unwrap(),
             );
             assert_ne!(
                 first._scratch.as_ref().unwrap().path(),
@@ -2325,7 +2403,7 @@ mod tests {
         async fn the_owners_attempt_gets_no_reno_layout_and_no_gate_environment() {
             let bench = Bench::new();
             let pi = bench.launch(&bench.spec("01HZX9"), &Flavor::Owner).await;
-            assert!(pi._gate_files.is_none());
+            assert!(pi.gate_files.is_none());
             let scratch = pi._scratch.as_ref().unwrap().path().to_path_buf();
             assert!(!scratch.join(".reno").exists());
             assert!(scratch.join("instructions.md").is_file());
@@ -2337,6 +2415,98 @@ mod tests {
             assert!(argv.contains(&"--no-mcp".to_owned()));
             assert!(started["gate_socket"].is_null());
             assert!(started["gate_nonce_len"].is_null());
+        }
+
+        #[tokio::test]
+        async fn only_the_reno_attempts_client_refuses_the_host_bash_command() {
+            let bench = Bench::new();
+            let reno = bench.launch(&bench.spec("01HZX9"), &bench.flavor()).await;
+            let error = reno
+                .transport
+                .client
+                .send(serde_json::json!({"type":"bash","command":"id"}))
+                .unwrap_err();
+            assert!(error.to_string().contains("`bash`"), "{error}");
+            let owner = bench.launch(&bench.spec("01HZX8"), &Flavor::Owner).await;
+            for (pi, flavor) in [(&reno, "reno"), (&owner, "pi")] {
+                let refused = pi
+                    .transport
+                    .client
+                    .send(serde_json::json!({"type":"set_auto_compaction","enabled":false}))
+                    .unwrap_err();
+                assert!(
+                    refused.to_string().contains("write Pi's own settings"),
+                    "{flavor}"
+                );
+            }
+            assert!(
+                owner
+                    .transport
+                    .client
+                    .send(serde_json::json!({"type":"bash","command":"id"}))
+                    .is_ok()
+            );
+            bench.finish(reno).await;
+            bench.finish(owner).await;
+        }
+
+        fn agent_with(auth: Option<&str>) -> tempfile::TempDir {
+            let agent = tempfile::tempdir().unwrap();
+            if let Some(content) = auth {
+                std::fs::write(agent.path().join("auth.json"), content).unwrap();
+            }
+            agent
+        }
+
+        #[test]
+        fn a_missing_auth_file_and_an_empty_object_hold_no_credential() {
+            for content in [None, Some("{}"), Some("{}\n"), Some(" {\n}\n")] {
+                let agent = agent_with(content);
+                assert!(!stored_credential(agent.path()), "{content:?}");
+            }
+            assert!(!stored_credential(Path::new("/nonexistent-agent-dir")));
+        }
+
+        #[test]
+        fn any_other_auth_file_is_taken_for_a_credential() {
+            let planted = r#"{"anthropic":{"type":"api_key","key":"sk-planted"}}"#;
+            let big = format!("{{{}}}", " ".repeat(2 * MAX_AUTH_BYTES as usize));
+            for content in [
+                planted,
+                "[]",
+                "null",
+                "0",
+                "",
+                "{not json",
+                r#"{"":null}"#,
+                big.as_str(),
+            ] {
+                let agent = agent_with(Some(content));
+                assert!(stored_credential(agent.path()), "{content:?}");
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn an_auth_file_that_is_not_a_plain_file_is_taken_for_a_credential() {
+            let agent = tempfile::tempdir().unwrap();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let target = elsewhere.path().join("auth.json");
+            std::fs::write(&target, "{}").unwrap();
+            std::os::unix::fs::symlink(&target, agent.path().join("auth.json")).unwrap();
+            assert!(stored_credential(agent.path()), "a link, even to `{{}}`");
+
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("auth.json")).unwrap();
+            assert!(stored_credential(dir.path()), "a directory");
+
+            let fifo = tempfile::tempdir().unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(fifo.path().join("auth.json"))
+                .status()
+                .unwrap();
+            assert!(made.success());
+            assert!(stored_credential(fifo.path()), "a pipe, without blocking");
         }
 
         const BOT_KEY: &str = "sk-test-123456";
@@ -2365,7 +2535,7 @@ mod tests {
             let bench = Bench::new();
             let spec = with_env(bench.spec("01HZX9"), &[("OPENAI_API_KEY", BOT_KEY)]);
             let pi = bench.launch(&spec, &bench.flavor()).await;
-            let agent = pi._gate_files.as_ref().unwrap().agent.display().to_string();
+            let agent = pi.gate_files.as_ref().unwrap().agent.display().to_string();
             let started = bench.started(pi).await;
             let names: Vec<String> = serde_json::from_value(started["key_names"].clone()).unwrap();
             let blanks: Vec<String> = BLANKS.iter().map(|n| (*n).to_owned()).collect();
@@ -2393,7 +2563,7 @@ mod tests {
                 ],
             );
             let pi = bench.launch(&spec, &bench.flavor()).await;
-            let agent = pi._gate_files.as_ref().unwrap().agent.display().to_string();
+            let agent = pi.gate_files.as_ref().unwrap().agent.display().to_string();
             let started = bench.started(pi).await;
             let google = &started["credential_env"]["GOOGLE_APPLICATION_CREDENTIALS"];
             assert_eq!(google["in_agent_dir"], false);

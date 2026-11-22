@@ -25,14 +25,25 @@ const OUT_CAPACITY: usize = 64;
 /// Frames read from Pi and not yet consumed.
 const IN_CAPACITY: usize = 256;
 
+/// Pi's RPC command that runs a shell command for the host, outside the agent's tool loop.
+const HOST_BASH: &str = "bash";
+
 /// The sending half. Cloneable: the run and every open dialog's answer share it.
 #[derive(Clone, Debug)]
 pub(super) struct Client {
     writer: mpsc::Sender<Value>,
     next_id: Arc<AtomicU64>,
+    /// Pi's host `bash` command runs a command without the `tool_call` hook the gate sits on.
+    refuse_host_bash: bool,
 }
 
 impl Client {
+    /// This client, and every clone of it made afterwards, refuses Pi's host RPC `bash`.
+    pub(super) fn refusing_host_bash(mut self) -> Client {
+        self.refuse_host_bash = true;
+        self
+    }
+
     /// Queue `frame` for Pi.
     ///
     /// A command that would make Pi write its own settings (`wire::pi::frames::writes_pi_settings`)
@@ -43,6 +54,11 @@ impl Client {
         if writes_pi_settings(kind) {
             return Err(HarnessError::Protocol(format!(
                 "refused to send Pi `{kind}`: it would write Pi's own settings"
+            )));
+        }
+        if self.refuse_host_bash && kind == HOST_BASH {
+            return Err(HarnessError::Protocol(format!(
+                "refused to send Pi `{kind}`: it runs a command past Reno's gate"
             )));
         }
         self.writer.try_send(frame).map_err(|e| match e {
@@ -189,6 +205,7 @@ impl Transport {
             client: Client {
                 writer: writer_tx,
                 next_id: Arc::new(AtomicU64::new(1)),
+                refuse_host_bash: false,
             },
             incoming,
             reader,
@@ -285,5 +302,35 @@ mod tests {
                 .request(json!({"type":"get_state"}))
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn a_client_that_refuses_host_bash_refuses_it_and_still_the_settings_writers() {
+        let (host, mut peer) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(host);
+        let transport = Transport::new(write, read);
+        let owner = transport.client.clone();
+        let reno = transport.client.clone().refusing_host_bash();
+        let bash = json!({"type":"bash","command":"echo hi"});
+        let error = reno.send(bash.clone()).unwrap_err();
+        assert!(error.to_string().contains("`bash`"), "{error}");
+        assert!(owner.send(bash).is_ok(), "an unflagged client is unchanged");
+        for client in [&owner, &reno] {
+            assert!(
+                client
+                    .request(json!({"type":"set_auto_compaction","enabled":false}))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("write Pi's own settings")
+            );
+        }
+        assert!(reno.request(json!({"type":"get_state"})).is_ok());
+        let mut lines = BufReader::new(&mut peer).lines();
+        let first: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(first["type"], "bash");
+        let second: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(second["type"], "get_state");
     }
 }

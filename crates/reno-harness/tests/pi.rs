@@ -1868,19 +1868,119 @@ async fn reno_calls_a_child_with_a_blank_or_relative_home_is_not_started() {
     }
 }
 
+const CREDENTIAL_ENDING: &str =
+    "a credential file appeared in the run's Pi agent directory (auth.json)";
+
+fn denied_decisions(bench: &Bench) -> Vec<Value> {
+    logged_values(bench, "gate_decision")
+        .into_iter()
+        .filter(|decision| decision["decision"] == "deny")
+        .collect()
+}
+
 #[tokio::test]
-async fn reno_calls_a_gate_that_goes_away_mid_run_ends_the_run_as_lost() {
+async fn reno_watch_a_gate_that_closes_mid_run_ends_the_run_as_lost() {
     let bench = Bench::new();
     let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-drop")).await;
     let events = drive(&mut live).await;
-    let (stop, _, diagnostic) = done(&events);
+    let (stop, result, diagnostic) = done(&events);
     assert_eq!(stop, StopReason::Error);
-    assert!(
-        diagnostic
-            .unwrap()
-            .contains("Reno lost its watch over the run"),
+    assert!(result.is_none());
+    assert_eq!(
+        diagnostic.unwrap(),
+        "Reno lost its watch over the run: the gate's connection closed"
     );
     assert!(raised(&events).is_empty());
+}
+
+#[tokio::test]
+async fn reno_watch_a_credential_written_to_the_agent_dir_ends_the_run_at_its_next_call() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-auth-json")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, result, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(result.is_none());
+    assert_eq!(diagnostic.unwrap(), CREDENTIAL_ENDING);
+    assert!(
+        raised(&events).is_empty(),
+        "the call never reached the ladder"
+    );
+    let denied = denied_decisions(&bench);
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    assert!(
+        denied[0]["reason"].as_str().unwrap().contains("auth.json"),
+        "{denied:?}"
+    );
+    assert!(
+        logged_values(&bench, "ran").is_empty(),
+        "the call did not run"
+    );
+    assert!(!bench.dir.path().join("canary.txt").exists());
+}
+
+#[tokio::test]
+async fn reno_watch_a_reno_run_sends_neither_a_settings_writer_nor_the_host_bash() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-coverage")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    assert_eq!(done(&events).0, StopReason::Completed);
+    let sent: Vec<String> = bench
+        .commands()
+        .iter()
+        .map(|c| c["type"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(sent.contains(&"prompt".to_owned()), "{sent:?}");
+    for refused in SETTINGS_WRITERS.iter().chain(&["bash"]) {
+        assert!(
+            !sent.iter().any(|kind| kind == refused),
+            "{refused}: {sent:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reno_watch_a_garbled_auth_file_ends_the_run_too() {
+    let bench = Bench::new();
+    let mut live = start(
+        &reno_executor(&bench),
+        call_spec(&bench, "gate-auth-garbled"),
+    )
+    .await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert_eq!(diagnostic.unwrap(), CREDENTIAL_ENDING);
+    assert!(raised(&events).is_empty());
+    assert_eq!(denied_decisions(&bench).len(), 1);
+}
+
+#[tokio::test]
+async fn reno_watch_a_missing_auth_file_and_pis_own_empty_object_do_not_end_the_run() {
+    let bench = Bench::new();
+    let mut live = start(&reno_executor(&bench), call_spec(&bench, "gate-auth-empty")).await;
+    let events = drive_deciding(&mut live, allow_all).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert_eq!(raised(&events).len(), 3);
+    assert!(denied_decisions(&bench).is_empty());
+}
+
+#[tokio::test]
+async fn reno_watch_a_credential_present_at_arming_fails_the_attempt_before_any_prompt() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "auth-preseed", PLENTY).await;
+    let (stop, result, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(result.is_none());
+    assert_eq!(diagnostic.unwrap(), CREDENTIAL_ENDING);
+    assert_eq!(prompts_sent(&bench), 0);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ExecEvent::Started { .. })),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

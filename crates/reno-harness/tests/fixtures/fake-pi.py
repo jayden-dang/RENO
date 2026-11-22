@@ -10,7 +10,8 @@ Never talks to a model, a network or a Pi settings directory.
 With RENO_GATE_SOCKET set the fake plays the gate before it reads any command. FAKE_PI_GATE picks
 how: `ok` (the default), `no-hello`, `never-connect`, `wrong-nonce`, `no-command` (a hello, but
 `get_commands` does not list the gate) or `second-client` (a hello, then a second connection that
-the daemon must not serve). The outcome of the second connection and of one made when the first
+the daemon must not serve) or `auth-preseed` (a credential `auth.json` is in the agent dir before the
+hello). The outcome of the second connection and of one made when the first
 prompt arrives is logged.
 
 Armed, a run plays Pi's tool loop through the gate: for each scripted tool it emits
@@ -25,6 +26,9 @@ Scenarios:
 - `gate-hold`: three calls sent together and left open until the run is stopped.
 - `gate-late`: a second call made while the run is being stopped.
 - `gate-drop`: the gate's connection closes mid-run.
+- `gate-auth-json`: a credential `auth.json` appears in the agent dir, then a call is made.
+- `gate-auth-empty`: calls made with no `auth.json`, then with Pi's own `{}` in two spellings.
+- `gate-auth-garbled`: an `auth.json` that is not JSON appears, then a call is made.
 - `gate-flood`: a broken gate that sends 17 calls without waiting.
 """
 import json
@@ -91,6 +95,7 @@ log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
 
 GATE_SOCKET = os.environ.get("RENO_GATE_SOCKET")
 GATE_MODE = os.environ.get("FAKE_PI_GATE", "ok") if GATE_SOCKET else None
+CREDENTIAL = '{"anthropic": {"type": "api_key", "key": "sk-planted-credential"}}'
 GATE_CONNECTIONS = []
 GATE_READER = None
 GATE_IDS = iter(range(1, 1000000))
@@ -118,9 +123,16 @@ def gate_outcome(client):
         return "closed"
 
 
+def write_auth(content):
+    with open(os.path.join(os.environ["PI_CODING_AGENT_DIR"], "auth.json"), "w") as handle:
+        handle.write(content)
+
+
 def arm_gate():
     if GATE_MODE == "never-connect":
         return
+    if GATE_MODE == "auth-preseed":
+        write_auth(CREDENTIAL)
     nonce = os.environ.get("RENO_GATE_NONCE", "")
     try:
         client = gate_connect()
@@ -427,6 +439,18 @@ def play_gate(prompt, cmd):
         GATE_READER.close()
         GATE_CONNECTIONS[0].close()
         time.sleep(30)
+    elif prompt in ("scenario:gate-auth-json", "scenario:gate-auth-garbled"):
+        write_auth(CREDENTIAL if prompt.endswith("json") else "{this is not json")
+        gated_tool("auth-1", "bash", {"command": "echo ran > canary.txt"})
+        drain_gate()
+        sys.exit(0)
+    elif prompt == "scenario:gate-auth-empty":
+        gated_tool("empty-1", "read", {"path": "none.txt"})
+        write_auth("{}")
+        gated_tool("empty-2", "read", {"path": "braces.txt"})
+        write_auth("{\n  \n}\n")
+        gated_tool("empty-3", "read", {"path": "spaced.txt"})
+        assistant("auth-empty-done")
     elif prompt == "scenario:gate-flood":
         for n in range(17):
             tool_start("f-%d" % n, "read", {"path": "f%d.txt" % n})
