@@ -5,6 +5,7 @@
 //! only draw what these return.
 
 pub(crate) mod accounts;
+pub(crate) mod anchor;
 pub(crate) mod activity;
 pub(crate) mod approval_panel;
 pub(crate) mod capabilities;
@@ -41,6 +42,7 @@ pub(crate) mod queue;
 pub(crate) mod registry;
 pub(crate) mod review;
 pub(crate) mod routing;
+pub(crate) mod selection;
 pub(crate) mod rules;
 pub(crate) mod runs;
 pub(crate) mod settings;
