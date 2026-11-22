@@ -609,6 +609,13 @@ def play(cmd):
         start(cmd)
         assistant("spawned")
         settle()
+    elif prompt == "scenario:child-hold":
+        # A tool's subprocess while the run is still going: nothing ends it but the run's teardown.
+        child = subprocess.Popen(["sleep", "300"])
+        log({"child": child.pid})
+        start(cmd)
+        assistant("working", stop="toolUse", usage=False)
+        abort_when_asked()
     elif prompt == "scenario:leak-stderr":
         for name, value in sorted(os.environ.items()):
             if name.endswith("_API_KEY"):

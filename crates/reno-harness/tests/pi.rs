@@ -2308,7 +2308,10 @@ async fn a_real_pi_plays_a_run_against_its_mock_provider() {
 async fn reno_group_pi_leads_its_own_group_and_is_reported_at_spawn() {
     let bench = Bench::new();
     let mut live = start(&reno_executor(&bench), gate_spec(&bench, "ok")).await;
-    let record = live.records.recv().await.expect("a process record");
+    let record = tokio::time::timeout(Duration::from_secs(10), live.records.recv())
+        .await
+        .expect("pi is reported")
+        .expect("a process record");
     assert!(record.pid > 1);
     assert_eq!(record.pgid, record.pid, "its own process group");
     let pid = record.pid as i32;
@@ -2318,24 +2321,46 @@ async fn reno_group_pi_leads_its_own_group_and_is_reported_at_spawn() {
         pid,
         "not the daemon's own group"
     );
+    // Only the normal end: which drop ends a dropped run is the next test's concern.
     drive(&mut live).await;
     assert!(until_gone(pid).await, "pi was left running");
 }
 
+/// Kills a pid on drop, so a failing test never leaves a tool's process running.
+struct KillOnDrop(i32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        unsafe { libc::kill(self.0, libc::SIGKILL) };
+    }
+}
+
 #[tokio::test]
-async fn reno_group_dropping_the_run_ends_the_whole_group() {
+async fn reno_group_dropping_the_run_ends_pi_and_what_a_tool_started() {
     let bench = Bench::new();
     let mut spec = gate_spec(&bench, "ok");
-    spec.prompt = "scenario:interrupt".to_owned();
+    spec.prompt = "scenario:child-hold".to_owned();
     let mut live = start(&reno_executor(&bench), spec).await;
-    let record = live.records.recv().await.expect("a process record");
+    let record = tokio::time::timeout(Duration::from_secs(10), live.records.recv())
+        .await
+        .expect("pi is reported")
+        .expect("a process record");
     let pid = record.pid as i32;
-    while let Some(event) = live.stream.next().await {
-        if matches!(event, ExecEvent::Started { .. }) {
+    let mut found = None;
+    for _ in 0..100 {
+        found = bench
+            .logged()
+            .iter()
+            .find_map(|entry| entry["child"].as_i64());
+        if found.is_some() {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let grandchild = found.expect("the fake started a tool process") as i32;
+    let _cleanup = KillOnDrop(grandchild);
     assert!(alive(pid), "pi runs until the run is dropped");
+    assert!(alive(grandchild), "the tool process runs");
     let Live {
         stream,
         handle,
@@ -2345,9 +2370,62 @@ async fn reno_group_dropping_the_run_ends_the_whole_group() {
     drop(handle);
     drop(records);
     assert!(until_gone(pid).await, "pi outlived its dropped run");
-    assert_eq!(
-        unsafe { libc::killpg(pid, 0) },
-        -1,
-        "something in pi's group is still alive"
+    assert!(
+        until_gone(grandchild).await,
+        "a tool's process outlived its dropped run"
+    );
+}
+
+/// A daemon that stops without winding its runs down aborts their tasks: only the child's own
+/// drop is left to end the group.
+#[test]
+fn reno_group_a_runtime_that_stops_mid_run_still_ends_pi_and_its_tool_process() {
+    let bench = Bench::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (live, pid, grandchild) = runtime.block_on(async {
+        let mut spec = gate_spec(&bench, "ok");
+        spec.prompt = "scenario:child-hold".to_owned();
+        let mut live = start(&reno_executor(&bench), spec).await;
+        let record = tokio::time::timeout(Duration::from_secs(10), live.records.recv())
+            .await
+            .expect("pi is reported")
+            .expect("a process record");
+        let mut found = None;
+        for _ in 0..100 {
+            found = bench
+                .logged()
+                .iter()
+                .find_map(|entry| entry["child"].as_i64());
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let grandchild = found.expect("the fake started a tool process") as i32;
+        (live, record.pid as i32, grandchild)
+    });
+    let _cleanup = KillOnDrop(grandchild);
+    assert!(alive(pid) && alive(grandchild));
+    // Held across the runtime's end so the run's handle is not what ends it.
+    std::mem::forget(live);
+    drop(runtime);
+    let gone = |pid: i32| {
+        (0..100).any(|_| {
+            if alive(pid) {
+                std::thread::sleep(Duration::from_millis(50));
+                false
+            } else {
+                true
+            }
+        })
+    };
+    assert!(gone(pid), "pi outlived the stopped runtime");
+    assert!(
+        gone(grandchild),
+        "a tool's process outlived the stopped runtime"
     );
 }
