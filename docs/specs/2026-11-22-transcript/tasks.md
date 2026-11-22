@@ -200,20 +200,20 @@ it builds on rung 2 (`transcript.rs` `build_rows`, `fold_turns`, `Key`) and rung
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1:** Add the failing unit tests `a_turn_builder_matches_build_rows_event_by_event` (on
+- [x] **Step 1:** Add the failing unit tests `a_turn_builder_matches_build_rows_event_by_event` (on
   `seeded_run_events("acp3")`), `a_done_folds_the_turn_as_one_change` and `the_call_index_finds_each_tools_input`.
   Run: `cargo test -p reno-app turn_builder` — expect: fails to compile, with `TurnBuilder` undefined.
-- [ ] **Step 2:** Implement `TurnBuilder` with `build_rows`' and `fold_turns`' row rules. Run the tests above — expect:
+- [x] **Step 2:** Implement `TurnBuilder` with `build_rows`' and `fold_turns`' row rules. Run the tests above — expect:
   pass.
-- [ ] **Step 3:** Add failing GPUI tests:
+- [x] **Step 3:** Add failing GPUI tests:
   - `a_streamed_delta_rebuilds_nothing_and_diffs_only_the_changed_tail`, which counts `rebuild_rows` calls and the items
     `diff` compares;
   - `a_rows_height_is_held_until_its_render_settles`.
   Run: `cargo test -p reno-app a_streamed_delta` — expect: fails.
-- [ ] **Step 4:** Route `refresh` through `TurnBuilder` for the latest run, keeping `older_builds` for older runs. Diff only
+- [x] **Step 4:** Route `refresh` through `TurnBuilder` for the latest run, keeping `older_builds` for older runs. Diff only
   from the first changed item. Fold a turn in one splice that keeps the anchor, and hold a measured height until its render
   settles. Run: `cargo test -p reno-app` — expect: pass, including the kept tests for 1.1 and 1.5–1.11.
-- [ ] **Step 5:** Commit `transcript: the latest run is built event by event, and a finished turn folds in one splice`.
+- [x] **Step 5:** Commit `transcript: the latest run is built event by event, and a finished turn folds in one splice`.
 
 _Requirements: TRANSCRIPT-1.1, TRANSCRIPT-1.2, TRANSCRIPT-1.3, TRANSCRIPT-1.4, TRANSCRIPT-1.5, TRANSCRIPT-1.6, TRANSCRIPT-1.7, TRANSCRIPT-1.8, TRANSCRIPT-1.9, TRANSCRIPT-1.10, TRANSCRIPT-1.11_
 
