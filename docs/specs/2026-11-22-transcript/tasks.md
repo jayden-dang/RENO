@@ -209,8 +209,7 @@ it builds on rung 2 (`transcript.rs` `build_rows`, `fold_turns`, `Key`) and rung
   `the_older_runs_are_not_built_again_on_every_change`, `convo_tests.rs`).
 - [ ] **Step 5:** Commit `transcript: the latest run is built event by event, and a finished turn folds in one splice`.
 
-_Requirements: TRANSCRIPT-1.1, TRANSCRIPT-1.2, TRANSCRIPT-1.3, TRANSCRIPT-1.4, TRANSCRIPT-1.5, TRANSCRIPT-1.6,
-TRANSCRIPT-1.7, TRANSCRIPT-1.8, TRANSCRIPT-1.9, TRANSCRIPT-1.10, TRANSCRIPT-1.11_
+_Requirements: TRANSCRIPT-1.1, TRANSCRIPT-1.2, TRANSCRIPT-1.3, TRANSCRIPT-1.4, TRANSCRIPT-1.5, TRANSCRIPT-1.6, TRANSCRIPT-1.7, TRANSCRIPT-1.8, TRANSCRIPT-1.9, TRANSCRIPT-1.10, TRANSCRIPT-1.11_
 
 ---
 
@@ -318,8 +317,7 @@ transitive dependency; the plan adds it as a direct workspace dependency pinned 
 - [ ] **Step 5:** Run `cargo deny check` and `cargo machete` — expect: pass. Commit
   `find: match case, whole word and regex; recount rescans only the live run`.
 
-_Requirements: TRANSCRIPT-3.1, TRANSCRIPT-3.2, TRANSCRIPT-3.3, TRANSCRIPT-3.4, TRANSCRIPT-3.5, TRANSCRIPT-3.6,
-TRANSCRIPT-3.7, TRANSCRIPT-3.8, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-3.11, TRANSCRIPT-3.12, TRANSCRIPT-3.13_
+_Requirements: TRANSCRIPT-3.1, TRANSCRIPT-3.2, TRANSCRIPT-3.3, TRANSCRIPT-3.4, TRANSCRIPT-3.5, TRANSCRIPT-3.6, TRANSCRIPT-3.7, TRANSCRIPT-3.8, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-3.11, TRANSCRIPT-3.12, TRANSCRIPT-3.13_
 
 ---
 
@@ -352,8 +350,7 @@ TRANSCRIPT-3.7, TRANSCRIPT-3.8, TRANSCRIPT-3.9, TRANSCRIPT-3.10, TRANSCRIPT-3.11
   including the kept selection tests for 2.1, 2.2, 2.4–2.8 and 2.10–2.13.
 - [ ] **Step 3:** Commit `selection: word, line and block clicks, shift-click, and Copy as Markdown`.
 
-_Requirements: TRANSCRIPT-2.1, TRANSCRIPT-2.2, TRANSCRIPT-2.3, TRANSCRIPT-2.4, TRANSCRIPT-2.5, TRANSCRIPT-2.6,
-TRANSCRIPT-2.7, TRANSCRIPT-2.8, TRANSCRIPT-2.9, TRANSCRIPT-2.10, TRANSCRIPT-2.11, TRANSCRIPT-2.12, TRANSCRIPT-2.13_
+_Requirements: TRANSCRIPT-2.1, TRANSCRIPT-2.2, TRANSCRIPT-2.3, TRANSCRIPT-2.4, TRANSCRIPT-2.5, TRANSCRIPT-2.6, TRANSCRIPT-2.7, TRANSCRIPT-2.8, TRANSCRIPT-2.9, TRANSCRIPT-2.10, TRANSCRIPT-2.11, TRANSCRIPT-2.12, TRANSCRIPT-2.13_
 
 ---
 
@@ -916,8 +913,7 @@ _Requirements: TRANSCRIPT-13.5, TRANSCRIPT-13.6, TRANSCRIPT-13.7_
   and the tool grouping (13.10–13.15).
 - [ ] **Step 3:** Commit `transcript: error callouts, hidden empty rows and resource links`.
 
-_Requirements: TRANSCRIPT-13.8, TRANSCRIPT-13.9, TRANSCRIPT-13.10, TRANSCRIPT-13.11, TRANSCRIPT-13.12, TRANSCRIPT-13.13,
-TRANSCRIPT-13.14, TRANSCRIPT-13.15, TRANSCRIPT-13.16_
+_Requirements: TRANSCRIPT-13.8, TRANSCRIPT-13.9, TRANSCRIPT-13.10, TRANSCRIPT-13.11, TRANSCRIPT-13.12, TRANSCRIPT-13.13, TRANSCRIPT-13.14, TRANSCRIPT-13.15, TRANSCRIPT-13.16_
 
 ---
 
@@ -975,8 +971,7 @@ the zero-send test; `protocol_schema_matches_snapshot`; the persist and prefs te
 - [ ] **Step 3:** Commit `checks: the contracts, the zero-network rule and the pinned dependencies hold`, if any test file
   changed; else record the results in the build ledger.
 
-_Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.10, TRANSCRIPT-16.11, TRANSCRIPT-16.12,
-TRANSCRIPT-16.13_
+_Requirements: TRANSCRIPT-16.5, TRANSCRIPT-16.6, TRANSCRIPT-16.7, TRANSCRIPT-16.10, TRANSCRIPT-16.11, TRANSCRIPT-16.12, TRANSCRIPT-16.13_
 
 ---
 
