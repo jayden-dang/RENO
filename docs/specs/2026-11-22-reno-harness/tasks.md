@@ -607,7 +607,7 @@ already reads whether the run ended for good. The sweep follows recovery's per-r
 
 **Depends-on:** Task 3, Task 7
 
-- [ ] Write failing tests:
+- [x] Write failing tests:
   - The kernel, with the recording executor, calls `run_closed` once for each run that ends `Succeeded` or
     `Cancelled`, through finish, a queued cancel and an interrupted cancel, and never for `Failed` or `Interrupted`.
   - Recovery awaits `retain_runs` with `keep = {Failed, Interrupted, Queued with session_ref}` before it re-queues
@@ -619,12 +619,12 @@ already reads whether the run ended for good. The sweep follows recovery's per-r
     ended for good. Recovery's existing steps still run in order, to the end, before any claim.
   - A second attempt with `spec.resume` passes the same `--session-dir <sessions_root>/<run_id>` (asserted on the
     fake's logged argv), and finds its session there with no "did not find session" notice.
-- [ ] Run `cargo test -p reno-kernel workspaces && cargo test -p reno-kernel recovery && cargo test -p reno-harness --test pi reno_session`,
+- [x] Run `cargo test -p reno-kernel workspaces && cargo test -p reno-kernel recovery && cargo test -p reno-harness --test pi reno_session`,
   and expect unresolved trait methods.
-- [ ] Implement the two defaults and the `Reno` overrides. `run_ended` calls `run_closed` on a `shared.spawn` task;
+- [x] Implement the two defaults and the `Reno` overrides. `run_ended` calls `run_closed` on a `shared.spawn` task;
   recovery calls `retain_runs` and awaits it.
-- [ ] Run, then `cargo check --workspace --all-targets`, and expect a pass, with every other `Executor` impl unedited.
-- [ ] `git commit -m "feat(kernel): remove a Reno-harness run's Pi session once it can never resume"`
+- [x] Run, then `cargo check --workspace --all-targets`, and expect a pass, with every other `Executor` impl unedited.
+- [x] `git commit -m "feat(kernel): remove a Reno-harness run's Pi session once it can never resume"`
 
 _Requirements: RENOHARNESS-8.5, RENOHARNESS-10.9, RENOHARNESS-10.10, RENOHARNESS-11.4, RENOHARNESS-11.6_
 
