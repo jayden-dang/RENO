@@ -174,7 +174,7 @@ Interface:
 // layout, per attempt:  <scratch>/.reno/{gate.mjs, gate.sock, agent/, reno-mcp.mjs, mcp-servers.json, instructions.md}
 // argv (Reno):  --mode rpc --no-themes --no-extensions --no-skills --no-prompt-templates --no-approve
 //               --session-dir <sessions_root>/<run_id> [--session-id <id>] [--append-system-prompt <file>]
-//               -e builtin:mcp -e builtin:codemode [--extension <bridge>] --extension <gate>      (gate last)
+//               -e builtin:mcp -e builtin:codemode --tools +codemode [--extension <bridge>] --extension <gate>   (gate last)
 // env (Reno):   restrict(RENO)  — BASE only: no PI_* and no provider variable from the daemon
 //               then the ambient-credential blanks: GOOGLE_APPLICATION_CREDENTIALS, AWS_SHARED_CREDENTIALS_FILE and
 //               AWS_CONFIG_FILE, each pointed at a missing file in <scratch>/.reno/agent/ (a bot secret of the
@@ -199,8 +199,9 @@ Details:
   trust (`docs/security.md:31`). `AGENTS.md` context files still load (`launch.rs:20-22`), as they do for `pi`.
 - **Built-in MCP.** `--no-mcp` is not passed on `Reno`. With an agent dir that holds no `mcp.json`, Pi's built-in
   MCP loads no server, and Reno's bridge is the only source of MCP tools.
-- **Codemode.** Whether Pi also needs `--tools +codemode` for the codemode tool is checked by the live test. The
-  spike passed it (`S1-pi-gate.md`, local).
+- **Codemode.** Pi 1.5.0 registers the codemode tool inactive by default (Pi `extensions/codemode/index.js:28`,
+  `defaultActive: false`), so the launch passes `--tools +codemode` (Pi `cli/args.js:398-399`) [agent-decided] to give
+  the model the tool. Its nested calls are gated one by one.
 - **Removal (11.3).** `ScratchDir`'s drop removes the per-attempt files at the attempt's end, however it ends,
   including when Pi is killed. A daemon crash leaves them for the OS temp cleaner, and they hold no secret: the key
   is only in Pi's environment.

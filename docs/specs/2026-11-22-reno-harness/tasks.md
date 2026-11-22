@@ -220,7 +220,8 @@ _Requirements: RENOHARNESS-1.4, RENOHARNESS-1.5, RENOHARNESS-1.6, RENOHARNESS-10
 - Produces: the `Launch` fields `session_dir: Option<&Path>`, `builtins: bool`, `no_approve: bool` and
   `gate: Option<&Path>`. They default to `None`/`false`, so the `Owner` argv is unchanged.
 - The `Reno` argv:
-  `--mode rpc --no-themes --no-extensions --no-skills --no-prompt-templates --no-approve --session-dir <root>/<run_id> [--session-id] [--append-system-prompt] -e builtin:mcp -e builtin:codemode [--extension <bridge>] --extension <gate>`.
+  `--mode rpc --no-themes --no-extensions --no-skills --no-prompt-templates --no-approve --session-dir <root>/<run_id> [--session-id] [--append-system-prompt] -e builtin:mcp -e builtin:codemode --tools +codemode [--extension <bridge>] --extension <gate>`.
+  `--tools +codemode` is agent-decided: Pi 1.5.0 registers codemode inactive (`extensions/codemode/index.js:28`).
 - The layout: `<scratch>/.reno/{gate.mjs, gate.sock, agent/, reno-mcp.mjs, mcp-servers.json, instructions.md}`. When
   that socket path is 104 bytes or more, the socket goes to `/tmp/reno-gate-<uuid>/.reno/gate.sock`.
 - The env, set last: `RENO_GATE_SOCKET`, `RENO_GATE_NONCE` (uuid v4) and `PI_CODING_AGENT_DIR=<scratch>/.reno/agent`.
@@ -236,7 +237,8 @@ _Requirements: RENOHARNESS-1.4, RENOHARNESS-1.5, RENOHARNESS-1.6, RENOHARNESS-10
     session dir `<sessions_root>/<run_id>` with mode 0700.
   - Two launches of the same run get a new scratch, gate file, nonce and socket path, but the same session dir.
   - With a 90-byte `TMPDIR` passed to the scratch builder, the socket path falls back to `/tmp/reno-gate-*`.
-  - After the attempt is torn down (normally, and with the fake killed), its scratch is gone.
+  - After the attempt is torn down (normally, and with the fake killed), its scratch is gone. Task 6 adds a failed
+    attempt and Task 7 a cancelled one.
 - [ ] Run `cargo test -p reno-harness --lib drivers::pi && cargo test -p reno-harness --lib wire::pi::launch`, and
   expect the new `Launch` fields and the `launch_pi` parameter to be unresolved.
 - [ ] Implement the `Launch` fields and `args`, `launch_pi(.., flavor)` with the layout, session dir (0700) and
@@ -408,6 +410,7 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
     logged, naming the check.
   - `second-client` is refused, and after arming, a connect to the socket path fails.
   - A resumed run arms again, with a new nonce.
+  - An attempt that fails to arm (`no-hello`) leaves no scratch behind.
 - [ ] Write a failing unit test in `gate.rs`: a peer of another uid is refused, tested by injecting the uid
   comparison.
 - [ ] Write a failing kernel test in `tests/routing.rs`: with `executors = ["reno", "pi"]` and a `MockExecutor` for
@@ -420,7 +423,7 @@ _Requirements: RENOHARNESS-3.2, RENOHARNESS-3.3, RENOHARNESS-3.4, RENOHARNESS-3.
 - [ ] Run `cargo test -p reno-harness --test pi`, and expect a pass.
 - [ ] `git commit -m "feat(harness): arm the Reno gate before the first prompt, failing the run otherwise"`
 
-_Requirements: RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.5, RENOHARNESS-11.1_
+_Requirements: RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.5, RENOHARNESS-11.1, RENOHARNESS-11.3_
 
 ---
 
@@ -467,7 +470,7 @@ _Requirements: RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.
   - An allowed call runs with its arguments unchanged.
   - `gate-200` runs 200 calls and ends at `agent_settled`, with no cap.
   - Per-turn `Usage` is still emitted.
-  - A cancel denies every open gate request.
+  - A cancel denies every open gate request, and the cancelled attempt leaves no scratch behind.
   - `gate-flood` gets its 17th call denied, and the run ends.
 - [ ] Run `cargo test -p reno-harness --test pi reno_calls`, and expect no `NeedsApproval` to be raised.
 - [ ] Implement `next`, `decide` and the writer task: a bounded channel on the `PiExecutor`'s `TaskTracker`, owned by
@@ -476,7 +479,7 @@ _Requirements: RENOHARNESS-5.1, RENOHARNESS-5.2, RENOHARNESS-5.3, RENOHARNESS-5.
 - [ ] Run, and expect a pass.
 - [ ] `git commit -m "feat(harness): hold each Reno-harness tool call for the kernel's approval ladder"`
 
-_Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.1, RENOHARNESS-8.2, RENOHARNESS-11.2_
+_Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.1, RENOHARNESS-8.2, RENOHARNESS-11.2, RENOHARNESS-11.3_
 
 ---
 
@@ -488,7 +491,8 @@ _Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.
   - `launch_pi` sets the client flag for `Reno`.
 - Modify: `crates/reno-harness/src/drivers/pi/rpc.rs` (`Client::send` at line 41: the per-run `refuse_host_bash` flag)
 - Modify: `crates/reno-harness/tests/fixtures/fake-pi.py` (scenarios `gate-close`, `gate-auth-json`,
-  `gate-auth-empty` and `gate-auth-garbled`)
+  `gate-auth-empty`, `gate-auth-garbled`, and `FAKE_PI_GATE=auth-preseed`, which writes a credential `auth.json` into
+  the agent dir before its hello)
 - Test: `crates/reno-harness/tests/pi.rs`
 
 **Reuse:** rung 2 and rung 5:
@@ -513,6 +517,8 @@ _Requirements: RENOHARNESS-3.1, RENOHARNESS-4.1, RENOHARNESS-4.4, RENOHARNESS-8.
   - `gate-auth-json`: a non-empty `auth.json` written into the agent dir ends the run at the next call, denying it.
   - `gate-auth-empty`: Pi's own `{}` and a missing file do not end it.
   - `gate-auth-garbled`: an unparsable `auth.json` ends it.
+  - `auth-preseed`: a credential `auth.json` present at arming fails the attempt `Done{stop: Error}` before any prompt
+    frame, naming the file.
   - A `reno` run's client refuses `{"type":"bash"}`.
   - The settings deny-list still refuses `set_auto_compaction` on both flavors, and a `pi` client is otherwise
     unchanged.
