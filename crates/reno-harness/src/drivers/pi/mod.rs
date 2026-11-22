@@ -78,8 +78,18 @@ use crate::wire::pi::launch::{self, Launch};
 use crate::wire::pi::normalize::Normalizer;
 use crate::{HarnessError, HarnessId};
 
+#[cfg(unix)]
+mod gate;
 mod mcp;
 mod rpc;
+
+#[cfg(unix)]
+use gate::GateHost;
+
+/// Where a Reno attempt's gate would listen. Never built off unix: `start` refuses first.
+#[cfg(not(unix))]
+#[derive(Debug)]
+struct GateHost;
 
 /// The oldest Pi this driver runs. Checked: 1.5.0 only (see the module docs). A Pi older than
 /// this is refused before a run instead of failing in the middle of one.
@@ -131,8 +141,8 @@ impl Flavor {
     }
 }
 
-/// How long arming a run's gate may take, unless tuned.
-const ARMING_BUDGET: Duration = Duration::from_secs(10);
+/// How long arming a run's gate may take, unless tuned. It sits inside [`STARTUP_BUDGET`].
+const ARMING_BUDGET: Duration = Duration::from_secs(30);
 
 /// What the stream carries before the consumer reads.
 const EVENT_CAPACITY: usize = 256;
@@ -225,8 +235,9 @@ fn is_default_model(model: Option<&str>) -> bool {
 /// [`PiExecutor::reno`] (the `reno` executor); tests point it at a fake Pi with
 /// [`PiExecutor::with_executable`].
 ///
-/// `reno` runs the same CLI but is refused a run until it is armed: a run on it never starts
-/// without Reno deciding its tool calls.
+/// `reno` runs the same CLI, and a run on it sends its first prompt only once its gate is armed:
+/// Pi lists the gate's command and the gate has said hello with the attempt's nonce. A run that
+/// cannot arm ends failed, never ungated.
 ///
 /// # Access modes
 ///
@@ -317,7 +328,7 @@ impl PiExecutor {
         self
     }
 
-    /// Bound how long arming a run's gate may take (tests shrink it; default 10 s).
+    /// Bound how long arming a run's gate may take (tests shrink it; default 30 s).
     #[must_use]
     pub fn with_arming_budget(mut self, budget: Duration) -> Self {
         self.arming_budget = budget;
@@ -549,8 +560,11 @@ impl Executor for PiExecutor {
                         .into(),
                 ));
             }
+        }
+        #[cfg(not(unix))]
+        if matches!(self.flavor, Flavor::Reno { .. }) {
             return Err(ExecError::InvalidSpec(
-                "the Reno harness is not armed in this build".into(),
+                "the Reno harness needs Unix sockets and cannot run on this platform".into(),
             ));
         }
         if spec.output_schema.is_some() {
@@ -594,8 +608,8 @@ impl Executor for PiExecutor {
         } = controls;
 
         let launched = launch_pi(&self.tracker, &exe, &spec, &processes, &self.flavor).await;
-        let pi = match launched {
-            Ok(pi) => pi,
+        let (pi, gate) = match launched {
+            Ok(launched) => launched,
             // Any failure to launch is a failed run, not an ineligible executor.
             Err(error) => {
                 let diagnostic = crate::redact_secrets(&error.to_string());
@@ -614,6 +628,9 @@ impl Executor for PiExecutor {
         let (event_tx, event_rx) = mpsc::channel::<ExecEvent>(EVENT_CAPACITY);
         let run = Run {
             pi,
+            gate,
+            gated: matches!(self.flavor, Flavor::Reno { .. }),
+            arming_budget: self.arming_budget,
             spec,
             event_tx,
             steering,
@@ -707,6 +724,17 @@ impl Pi {
 /// The gate extension: loaded after every other extension of a Reno attempt.
 const GATE: &str = include_str!("gate.mjs");
 
+/// The command the gate extension registers, which Pi must list before a prompt.
+const GATE_COMMAND: &str = "reno-gate";
+
+/// Provider variables named in the reason a bot's run has no model.
+const PROVIDER_KEY_HINT: [&str; 4] = [
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
 /// The longest path a Unix socket address holds on macOS (`sun_path`), the NUL included.
 const SUN_PATH_MAX: usize = 104;
 
@@ -736,6 +764,14 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         builder.mode(0o700);
         builder.create(path)?;
+        // set_permissions follows a link: a link planted at the path would have its target
+        // changed instead.
+        if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "{} is a symbolic link, not a directory",
+                path.display()
+            )));
+        }
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
@@ -819,7 +855,7 @@ async fn launch_pi(
     spec: &ExecSpec,
     processes: &ProcessSink,
     flavor: &Flavor,
-) -> Result<Pi, std::io::Error> {
+) -> Result<(Pi, Option<GateHost>), std::io::Error> {
     let reno = matches!(flavor, Flavor::Reno { .. });
     let (scratch, gate, session) = match flavor {
         Flavor::Owner => (ScratchDir::new("pi")?, None, None),
@@ -845,6 +881,8 @@ async fn launch_pi(
         None => None,
     };
     let bridge = mcp::install(files, &spec.mcp)?;
+    // Listening before Pi exists, so its gate's connection at start-up finds the socket.
+    let host = gate.as_ref().map(bind_gate).transpose()?;
     let mut cmd = Command::new(exe);
     crate::child_env::restrict(&mut cmd, child_driver_env(flavor));
     if let Some(gate) = &gate {
@@ -912,7 +950,7 @@ async fn launch_pi(
             tail.close();
         })
     });
-    Ok(Pi {
+    let pi = Pi {
         child,
         transport: rpc::Transport::new(stdin, stdout),
         stderr_tail,
@@ -920,7 +958,22 @@ async fn launch_pi(
         _scratch: Some(scratch),
         _gate: gate,
         exit_deadline: None,
-    })
+    };
+    Ok((pi, host))
+}
+
+fn bind_gate(files: &GateFiles) -> std::io::Result<GateHost> {
+    #[cfg(unix)]
+    {
+        GateHost::bind(&files.socket, &files.nonce)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = files;
+        Err(std::io::Error::other(
+            "the Reno gate needs Unix sockets and cannot run on this platform",
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +996,11 @@ enum Pending {
 
 struct Run {
     pi: Pi,
+    /// The attempt's gate socket; `Some` for every Reno attempt.
+    gate: Option<GateHost>,
+    /// A Reno attempt: nothing is prompted until its gate is armed.
+    gated: bool,
+    arming_budget: Duration,
     spec: ExecSpec,
     event_tx: mpsc::Sender<ExecEvent>,
     steering: mpsc::Receiver<String>,
@@ -997,6 +1055,9 @@ impl Run {
     /// Ask Pi for its model and thinking level and its state; say what the run starts as.
     async fn start_up(&mut self) -> Startup {
         let mut backlog = Vec::new();
+        if let Err(why) = self.arm(&mut backlog).await {
+            return Startup::Failed(format!("Reno's gate did not arm: {why}"));
+        }
         match self.set_up(&mut backlog).await {
             Ok(state) => {
                 let started = ExecEvent::Started {
@@ -1032,13 +1093,56 @@ impl Run {
         }
     }
 
+    /// Before any prompt, a Reno attempt needs two things: Pi lists the gate's command, and the
+    /// gate says hello on the attempt's socket with its nonce. Each is awaited as an event, both
+    /// within the arming budget. The listener is gone afterwards, so no later connection exists.
+    async fn arm(&mut self, backlog: &mut Vec<Value>) -> Result<(), String> {
+        if !self.gated {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            let Some(mut gate) = self.gate.take() else {
+                return Err("the attempt has no gate socket".into());
+            };
+            let budget = self.arming_budget;
+            let hello = async { gate.arm(budget).await.map_err(|error| error.to_string()) };
+            let listed = async {
+                let reply =
+                    tokio::time::timeout(budget, self.query(frames::get_commands(), backlog))
+                        .await
+                        .map_err(|_| format!("Pi did not list its commands within {budget:?}"))??;
+                if frames::lists_extension_command(&reply, GATE_COMMAND) {
+                    Ok(())
+                } else {
+                    Err(format!("Pi does not list the {GATE_COMMAND} command"))
+                }
+            };
+            let armed = tokio::try_join!(hello, listed).map(|((), ())| ());
+            self.gate = Some(gate);
+            armed
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backlog, self.arming_budget);
+            Err("the Reno gate needs Unix sockets and cannot run on this platform".into())
+        }
+    }
+
     async fn set_up(&mut self, backlog: &mut Vec<Value>) -> Result<State, String> {
-        if !is_default_model(self.spec.model.as_deref()) {
-            let wanted = self.spec.model.clone().unwrap_or_default();
+        let default_model = is_default_model(self.spec.model.as_deref());
+        if !default_model || self.gated {
             let models = self.query(frames::get_available_models(), backlog).await?;
-            let (provider, id) = catalog::resolve_model(&models, &wanted)?;
-            self.query(frames::set_model(&provider, &id), backlog)
-                .await?;
+            if default_model {
+                if catalog::model_infos(&models).is_empty() {
+                    return Err(self.no_model_reason());
+                }
+            } else {
+                let wanted = self.spec.model.clone().unwrap_or_default();
+                let (provider, id) = catalog::resolve_model(&models, &wanted)?;
+                self.query(frames::set_model(&provider, &id), backlog)
+                    .await?;
+            }
         }
         if let Some(level) = catalog::level_for(self.spec.effort, &self.spec.model_options) {
             self.query(frames::set_thinking_level(level), backlog)
@@ -1053,6 +1157,28 @@ impl Run {
             return Err("Pi resumed a different session".into());
         }
         Ok(state)
+    }
+
+    /// Why a bot's run has no model: the names of its secrets (never their values) and the
+    /// variables Pi reads provider keys from.
+    fn no_model_reason(&self) -> String {
+        let secrets: Vec<&str> = self
+            .spec
+            .env
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !name.starts_with("RENO_"))
+            .collect();
+        let secrets = if secrets.is_empty() {
+            "none".to_owned()
+        } else {
+            secrets.join(", ")
+        };
+        format!(
+            "Pi has no model from this bot's secrets ({secrets}); Pi reads provider keys such \
+             as {}",
+            PROVIDER_KEY_HINT.join(", ")
+        )
     }
 
     /// One command and its reply. A frame that is not the reply is kept for the run, except a
@@ -1617,7 +1743,7 @@ mod tests {
 
             async fn launch(&self, spec: &ExecSpec, flavor: &Flavor) -> Pi {
                 let (controls, _handle) = ExecControls::new(4);
-                launch_pi(
+                let (pi, _host) = launch_pi(
                     &TaskTracker::new(),
                     &fake(),
                     spec,
@@ -1625,7 +1751,8 @@ mod tests {
                     flavor,
                 )
                 .await
-                .unwrap()
+                .unwrap();
+                pi
             }
 
             /// Let the fake exit, so everything it logged as it started is written.
@@ -1810,6 +1937,29 @@ mod tests {
             assert_ne!(argvs[0].last(), argvs[1].last());
             assert_ne!(starts[0]["gate_socket"], starts[1]["gate_socket"]);
             assert_ne!(starts[0]["agent_dir"], starts[1]["agent_dir"]);
+        }
+
+        #[test]
+        fn a_private_directory_is_not_made_of_a_symbolic_link() {
+            let base = tempfile::tempdir().unwrap();
+            let target = base.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let link = base.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let error = create_private_dir(&link).unwrap_err();
+            assert!(error.to_string().contains("symbolic link"), "{error}");
+            assert_eq!(mode(&target), 0o755, "the link's target was left alone");
+            let fresh = base.path().join("fresh/inner");
+            create_private_dir(&fresh).unwrap();
+            assert_eq!(mode(&fresh), 0o700);
+        }
+
+        #[test]
+        fn the_provider_variables_the_no_model_reason_names_are_ones_pi_reads() {
+            for name in PROVIDER_KEY_HINT {
+                assert!(crate::child_env::PI.names.contains(&name), "{name}");
+            }
         }
 
         #[test]

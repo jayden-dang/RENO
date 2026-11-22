@@ -874,3 +874,35 @@ async fn a_reno_that_declines_for_an_account_reason_still_falls_back_to_the_next
     assert_eq!(routing_of(&fx, &run).await.chosen, Some(id("codex")));
     assert_eq!((reno.starts(), codex.starts()), (1, 1));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_reno_run_that_cannot_arm_fails_and_is_never_handed_to_the_next_executor() {
+    let reno = reno_fake();
+    let reno = Fake {
+        inner: reno.inner.with_steps([MockStep::Emit(ExecEvent::Done {
+            stop: StopReason::Error,
+            result: None,
+            diagnostic: Some("Reno's gate did not arm: the gate did not say hello in time".into()),
+            reason: None,
+        })]),
+        ..reno
+    };
+    let pi = Fake::new("pi");
+    let fx = fx_with_bot(&[&reno, &pi], "keeper", &["reno", "pi"], "").await;
+
+    let run = fx
+        .kernel
+        .submit_for_bot("keeper", "go", None, PathBuf::from("/work"), None)
+        .await
+        .unwrap();
+    fx.wait_status(&run, RunStatus::Failed).await;
+
+    let decision = routing_of(&fx, &run).await;
+    assert!(decision.fallbacks.is_empty(), "{:?}", decision.fallbacks);
+    assert_eq!(decision.chosen, Some(id("reno")));
+    assert_eq!((reno.starts(), pi.starts()), (1, 0));
+    assert!(
+        diagnostic_of(&fx, &run).await.contains("did not arm"),
+        "the run says why it failed"
+    );
+}

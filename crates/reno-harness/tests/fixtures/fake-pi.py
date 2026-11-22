@@ -6,9 +6,16 @@ The prompt of a run names the scenario it plays (`scenario:<name>`); anything el
 command frame received is appended to it as one JSON line, for the tests to read.
 
 Never talks to a model, a network or a Pi settings directory.
+
+With RENO_GATE_SOCKET set the fake plays the gate before it reads any command. FAKE_PI_GATE picks
+how: `ok` (the default), `no-hello`, `never-connect`, `wrong-nonce`, `no-command` (a hello, but
+`get_commands` does not list the gate) or `second-client` (a hello, then a second connection that
+the daemon must not serve). The outcome of the second connection and of one made when the first
+prompt arrives is logged.
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -58,6 +65,7 @@ log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
      "mcp_env": os.environ.get("RENO_PI_MCP"), "leak": os.environ.get("FAKE_PI_LEAK"),
      "gate_socket": os.environ.get("RENO_GATE_SOCKET"),
      "gate_nonce_len": len(os.environ["RENO_GATE_NONCE"]) if "RENO_GATE_NONCE" in os.environ else None,
+     "gate_nonce": os.environ.get("RENO_GATE_NONCE"),
      "agent_dir": os.environ.get("PI_CODING_AGENT_DIR"),
      "credential_env": credential_env(),
      "key_names": sorted(name for name in os.environ
@@ -66,6 +74,69 @@ log({"argv": args, "cwd": os.getcwd(), "claudecode": "CLAUDECODE" in os.environ,
      "session_dir": flag("--session-dir"),
      "extensions": {path: os.path.exists(path) for flag_name, path in zip(args, args[1:])
                     if flag_name == "--extension"}})
+
+GATE_SOCKET = os.environ.get("RENO_GATE_SOCKET")
+GATE_MODE = os.environ.get("FAKE_PI_GATE", "ok") if GATE_SOCKET else None
+GATE_CONNECTIONS = []
+
+
+def gate_connect():
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(GATE_SOCKET)
+    GATE_CONNECTIONS.append(client)
+    return client
+
+
+def gate_hello(client, nonce):
+    client.sendall((json.dumps({"t": "hello", "nonce": nonce}) + "\n").encode())
+
+
+def gate_outcome(client):
+    """Whether the daemon closed `client` (what it does to a connection it will not serve)."""
+    client.settimeout(5)
+    try:
+        return "served" if client.recv(1) else "closed"
+    except socket.timeout:
+        return "open"
+    except OSError:
+        return "closed"
+
+
+def arm_gate():
+    if GATE_MODE == "never-connect":
+        return
+    nonce = os.environ.get("RENO_GATE_NONCE", "")
+    try:
+        client = gate_connect()
+    except OSError:
+        log({"gate": "connect-failed"})
+        return
+    if GATE_MODE == "no-hello":
+        client.close()
+    elif GATE_MODE == "wrong-nonce":
+        gate_hello(client, "not-" + nonce)
+    else:
+        gate_hello(client, nonce)
+    if GATE_MODE == "second-client":
+        try:
+            second = gate_connect()
+            gate_hello(second, nonce)
+            log({"gate_second": gate_outcome(second)})
+        except OSError:
+            log({"gate_second": "refused"})
+
+
+def note_late_gate_connection():
+    """The first prompt is only sent once the gate is armed: nothing may accept by now."""
+    try:
+        gate_connect()
+        log({"gate_late": "connected"})
+    except OSError:
+        log({"gate_late": "refused"})
+
+
+if GATE_SOCKET:
+    arm_gate()
 
 session = flag("--session-id") or str(uuid.uuid4())
 session_file = os.path.join(SESSIONS, session + ".jsonl")
@@ -131,7 +202,11 @@ def misc(cmd):
         state["thinking"] = cmd["level"]
         reply(cmd)
     elif kind == "get_commands":
-        reply(cmd, {"commands": []})
+        commands = []
+        if GATE_SOCKET and GATE_MODE != "no-command":
+            commands.append({"name": "reno-gate", "description": "Reno's gate on tool calls",
+                             "source": "extension", "sourceInfo": {"path": "gate.mjs"}})
+        reply(cmd, {"commands": commands})
     elif kind == "clear_queue":
         reply(cmd, {"steering": [], "followUp": []})
     elif kind == "extension_ui_response":
@@ -366,6 +441,8 @@ def play(cmd):
 while True:
     command = read_cmd()
     if command["type"] == "prompt":
+        if GATE_SOCKET:
+            note_late_gate_connection()
         play(command)
         # One run per process: a settled run is followed by the daemon closing stdin.
         if command["message"] in ("scenario:handled",):

@@ -32,7 +32,6 @@ pub(crate) fn get_state() -> Value {
 }
 
 /// `{"type":"get_commands"}`: the extension commands, prompt templates and skills Pi has loaded.
-#[cfg_attr(not(test), expect(dead_code, reason = "nothing arms the gate yet"))]
 pub(crate) fn get_commands() -> Value {
     json!({ "type": "get_commands" })
 }
@@ -40,7 +39,6 @@ pub(crate) fn get_commands() -> Value {
 /// Whether the `data` of a `get_commands` reply lists the extension command `name`: an entry
 /// named `name` whose `source` is `extension`, so a skill or prompt template of that name does
 /// not count.
-#[cfg_attr(not(test), expect(dead_code, reason = "nothing arms the gate yet"))]
 pub(crate) fn lists_extension_command(data: &Value, name: &str) -> bool {
     data.get("commands")
         .and_then(Value::as_array)

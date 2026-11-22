@@ -1148,24 +1148,227 @@ async fn reno_refuses_a_bot_that_inherits_the_owners_config() {
     assert!(bench.logged().is_empty(), "nothing was spawned");
 }
 
+/// A bot's run whose fake plays the gate as `mode`.
+fn gate_spec(bench: &Bench, mode: &str) -> ExecSpec {
+    let mut spec = bot_spec(bench);
+    spec.env.insert("FAKE_PI_GATE".to_owned(), mode.to_owned());
+    spec
+}
+
+fn arming(bench: &Bench, budget: Duration) -> PiExecutor {
+    reno_executor(bench).with_arming_budget(budget)
+}
+
+const PLENTY: Duration = Duration::from_secs(10);
+
+fn prompts_sent(bench: &Bench) -> usize {
+    bench
+        .commands()
+        .iter()
+        .filter(|cmd| cmd["type"] == "prompt")
+        .count()
+}
+
+/// The fake's log lines that carry `key`, in order.
+fn logged_values(bench: &Bench, key: &str) -> Vec<Value> {
+    bench
+        .logged()
+        .iter()
+        .filter_map(|entry| entry.get(key).cloned())
+        .collect()
+}
+
+async fn gate_run(bench: &Bench, mode: &str, budget: Duration) -> Vec<ExecEvent> {
+    let mut live = start(&arming(bench, budget), gate_spec(bench, mode)).await;
+    drive(&mut live).await
+}
+
 #[tokio::test]
-async fn reno_refuses_a_run_until_it_is_armed() {
+async fn reno_arm_lets_the_prompt_go_only_after_the_gate_is_listed_and_has_said_hello() {
     let bench = Bench::new();
-    for access in [AccessMode::Supervised, AccessMode::FullAccess] {
-        let mut spec = bot_spec(&bench);
-        spec.access = access;
-        let (controls, _h) = ExecControls::new(4);
-        let error = reno_executor(&bench)
-            .start(spec, controls)
-            .await
-            .err()
-            .unwrap();
-        assert!(
-            matches!(&error, ExecError::InvalidSpec(why) if why.contains("not armed")),
-            "{error:?}"
-        );
+    let events = gate_run(&bench, "ok", PLENTY).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    assert_eq!(text(&events), "reply:hello");
+    let kinds: Vec<String> = bench
+        .commands()
+        .iter()
+        .map(|cmd| cmd["type"].as_str().unwrap().to_owned())
+        .collect();
+    let listed = kinds.iter().position(|k| k == "get_commands").unwrap();
+    let prompted = kinds.iter().position(|k| k == "prompt").unwrap();
+    assert!(listed < prompted, "{kinds:?}");
+    assert_eq!(prompts_sent(&bench), 1);
+}
+
+#[tokio::test]
+async fn reno_arm_a_gate_that_connects_and_closes_without_a_hello_fails_the_run() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "no-hello", PLENTY).await;
+    let (stop, result, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(result.is_none());
+    let why = diagnostic.unwrap();
+    assert!(
+        why.contains("did not arm") && why.contains("sent no hello"),
+        "{why}"
+    );
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_a_gate_that_never_connects_fails_the_run_when_the_budget_ends() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "never-connect", Duration::from_millis(500)).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    let why = diagnostic.unwrap();
+    assert!(
+        why.contains("did not arm") && why.contains("in time"),
+        "{why}"
+    );
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_a_hello_with_another_nonce_fails_the_run_without_echoing_either() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "wrong-nonce", PLENTY).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    let why = diagnostic.unwrap();
+    assert!(
+        why.contains("did not arm") && why.contains("nonce"),
+        "{why}"
+    );
+    let nonce = logged_values(&bench, "gate_nonce")[0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!why.contains(&nonce), "{why}");
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_a_pi_that_does_not_list_the_gate_command_fails_the_run() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "no-command", PLENTY).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    let why = diagnostic.unwrap();
+    assert!(
+        why.contains("did not arm") && why.contains("reno-gate"),
+        "{why}"
+    );
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_a_failed_arming_starts_no_run_and_is_a_stream_not_a_refusal() {
+    let bench = Bench::new();
+    let (controls, _handle) = ExecControls::new(4);
+    let stream = arming(&bench, PLENTY)
+        .start(gate_spec(&bench, "no-hello"), controls)
+        .await;
+    let mut stream = stream.expect("a failed arming is the attempt's own Done, not an ExecError");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
     }
-    assert!(bench.logged().is_empty(), "nothing was spawned");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ExecEvent::Started { .. })),
+        "{events:?}"
+    );
+    done(&events);
+}
+
+#[tokio::test]
+async fn reno_arm_a_second_connection_is_closed_unserved_and_none_is_accepted_once_armed() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "second-client", PLENTY).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    let second = logged_values(&bench, "gate_second");
+    assert!(
+        second == ["closed"] || second == ["refused"],
+        "the second client was served: {second:?}"
+    );
+    assert_eq!(logged_values(&bench, "gate_late"), ["refused"]);
+}
+
+#[tokio::test]
+async fn reno_arm_a_resumed_run_arms_again_with_a_new_socket_and_a_new_nonce() {
+    let bench = Bench::new();
+    let exec = arming(&bench, PLENTY);
+    for attempt in 0..2 {
+        let mut spec = gate_spec(&bench, "ok");
+        if attempt == 1 {
+            spec.resume = Some(SessionRef("th-conf".into()));
+        }
+        let mut live = start(&exec, spec).await;
+        let events = drive(&mut live).await;
+        let (stop, _, diagnostic) = done(&events);
+        assert_eq!(stop, StopReason::Completed, "{diagnostic:?}");
+    }
+    assert_eq!(prompts_sent(&bench), 2);
+    let nonces = logged_values(&bench, "gate_nonce");
+    let sockets = logged_values(&bench, "gate_socket");
+    assert_eq!(nonces.len(), 2);
+    assert_ne!(nonces[0], nonces[1]);
+    assert_ne!(sockets[0], sockets[1]);
+    assert!(
+        logged_values(&bench, "gate_late")
+            .iter()
+            .all(|late| late == "refused")
+    );
+}
+
+#[tokio::test]
+async fn reno_arm_a_bot_key_that_lists_no_model_fails_before_any_prompt_naming_the_secret() {
+    const VALUE: &str = "sk-secret-value-9876";
+    let bench = Bench::new();
+    let mut spec = gate_spec(&bench, "ok");
+    spec.env.insert("OPENAI".to_owned(), VALUE.to_owned());
+    spec.env
+        .insert("FAKE_PI_NO_MODELS".to_owned(), "1".to_owned());
+    let mut live = start(&arming(&bench, PLENTY), spec).await;
+    let events = drive(&mut live).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    let why = diagnostic.unwrap();
+    let (secrets, hint) = why.split_once("; Pi reads").expect(&why);
+    assert!(secrets.contains("OPENAI"), "{why}");
+    assert!(hint.contains("OPENAI_API_KEY"), "{why}");
+    assert!(!why.contains(VALUE), "{why}");
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_a_model_pi_does_not_list_still_fails_before_any_prompt() {
+    let bench = Bench::new();
+    let mut spec = gate_spec(&bench, "ok");
+    spec.model = Some("fake/not-a-model".into());
+    let mut live = start(&arming(&bench, PLENTY), spec).await;
+    let events = drive(&mut live).await;
+    let (stop, _, diagnostic) = done(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(diagnostic.unwrap().contains("not-a-model"));
+    assert_eq!(prompts_sent(&bench), 0);
+}
+
+#[tokio::test]
+async fn reno_arm_an_attempt_that_fails_to_arm_leaves_no_scratch_behind() {
+    let bench = Bench::new();
+    let events = gate_run(&bench, "no-hello", PLENTY).await;
+    done(&events);
+    let socket = logged_values(&bench, "gate_socket")[0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let scratch = Path::new(&socket).parent().unwrap().parent().unwrap();
+    assert!(!scratch.exists(), "{} was left behind", scratch.display());
 }
 
 #[tokio::test]
