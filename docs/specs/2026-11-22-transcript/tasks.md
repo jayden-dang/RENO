@@ -11,7 +11,7 @@ Feature code: TRANSCRIPT
 Status: Approved
 Approved: 2026-11-22, the operator's word "approve" (relayed by the conductor; RUN operator-reply.md)
 Date: 2026-11-22
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md

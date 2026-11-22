@@ -2,7 +2,7 @@
 # ROAD-33 [TRANSCRIPT] Reading, finding and copying in a long conversation stays fast
 
 Assignee: Jayden Đặng
-Status: enhancement, ready-for-agent
+Status: enhancement, status:building
 Priority: high
 Estimate: 8
 Blocked by: none

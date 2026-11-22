@@ -1,7 +1,7 @@
 # Requirements: Reading a conversation (transcript)
 
 Feature code: TRANSCRIPT
-Status: Approved
+Status: In-progress
 Approved: 2026-11-22, the operator's word "approve" (relayed by the conductor; RUN operator-reply.md)
 Date: 2026-11-22
 
