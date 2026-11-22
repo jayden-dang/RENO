@@ -141,14 +141,14 @@ Retrieval (load-subgraph, 2026-11-22):
 
 **Depends-on:** none
 
-- [ ] **Step 1:** Write the failing test `the_second_render_run_has_every_remaining_kind_of_content`. It asserts that each
+- [x] **Step 1:** Write the failing test `the_second_render_run_has_every_remaining_kind_of_content`. It asserts that each
   item above is present in `seeded_run_events("render2")`.
   Run: `cargo test -p reno-client --features fake the_second_render_run` — expect: fails, with no run `render2`.
-- [ ] **Step 2:** Seed `render2` and `docs/flow.svg` behind `FakeConfig::transcript_threads`, and expose
+- [x] **Step 2:** Seed `render2` and `docs/flow.svg` behind `FakeConfig::transcript_threads`, and expose
   `seeded_run_events`. Run the test — expect: pass.
-- [ ] **Step 3:** Run `cargo test -p reno-client --features fake` and `cargo test -p reno-app` — expect: pass, with no
+- [x] **Step 3:** Run `cargo test -p reno-client --features fake` and `cargo test -p reno-app` — expect: pass, with no
   existing test changed (15.4).
-- [ ] **Step 4:** Commit `fake: a second render run with the content the remaining stories draw`.
+- [x] **Step 4:** Commit `fake: a second render run with the content the remaining stories draw`.
 
 _Requirements: TRANSCRIPT-15.1, TRANSCRIPT-15.2, TRANSCRIPT-15.3, TRANSCRIPT-15.4_
 
