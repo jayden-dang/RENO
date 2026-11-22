@@ -131,3 +131,145 @@ async fn longreply_streams_one_long_message_and_ends_with_it_as_the_final_answer
     ));
     assert!(matches!(events[events.len() - 2], ExecEvent::Text { .. }));
 }
+
+fn render2() -> Vec<ExecEvent> {
+    reno_client::fake::transcript::seeded_run_events("render2")
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect()
+}
+
+fn calls(events: &[ExecEvent]) -> Vec<(&str, &reno_proto::ToolCall)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::Tool { id, call } => Some((id.as_str(), call)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn result_of<'a>(events: &'a [ExecEvent], call: &str) -> Option<&'a ExecEvent> {
+    events
+        .iter()
+        .find(|e| matches!(e, ExecEvent::ToolResult { id, .. } if id == call))
+}
+
+/// The stop of the attempt a call belongs to: the first `Done` after it.
+fn stop_after(events: &[ExecEvent], call: &str) -> StopReason {
+    let at = events
+        .iter()
+        .position(|e| matches!(e, ExecEvent::Tool { id, .. } if id == call))
+        .unwrap();
+    events[at..]
+        .iter()
+        .find_map(|e| match e {
+            ExecEvent::Done { stop, .. } => Some(*stop),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_second_render_run_has_every_remaining_kind_of_content() {
+    let client = FakeDaemon::spawn_with(on()).await.unwrap();
+    let events = render2();
+    let streamed: Vec<ExecEvent> = client
+        .run_events(run("render2"), None)
+        .map(|item| item.unwrap().event)
+        .collect()
+        .await;
+    assert_eq!(streamed, events);
+    let calls = calls(&events);
+    let find = |name: &str| {
+        calls
+            .iter()
+            .filter(|(_, c)| c.name == name)
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+    };
+
+    assert!(matches!(
+        events.last(),
+        Some(ExecEvent::Done { stop: StopReason::Error, result: Some(r), .. }) if !r.is_empty()
+    ));
+
+    let (_, edit) = find("edit").next().expect("an Edit call");
+    for key in ["file_path", "old_string", "new_string"] {
+        assert!(edit.input[key].is_string(), "{key}");
+    }
+
+    let (_, patch) = find("apply_patch").next().expect("a patch call");
+    let patch = patch.input["patch"].as_str().unwrap();
+    assert_eq!(patch.matches("*** Update File: ").count(), 2);
+
+    let (bash_id, bash) = find("bash")
+        .find(|(id, _)| {
+            matches!(
+                result_of(&events, id),
+                Some(ExecEvent::ToolResult { ok: false, .. })
+            )
+        })
+        .expect("a failed Bash call");
+    assert!(bash.input["command"].is_string());
+    assert!(matches!(
+        result_of(&events, bash_id),
+        Some(ExecEvent::ToolResult { summary: Some(s), .. }) if !s.is_empty()
+    ));
+
+    let (read_id, read) = find("read").next().expect("a read call");
+    assert!(read.input.get("file_path").is_none());
+    let Some(ExecEvent::ToolResult {
+        output: Some(out), ..
+    }) = result_of(&events, read_id)
+    else {
+        panic!("the read has output");
+    };
+    assert!(
+        out.text
+            .lines()
+            .all(|l| l.trim_start().chars().next().unwrap().is_ascii_digit())
+    );
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ExecEvent::ToolResult { output: Some(o), .. } if o.text.contains("src/supervisor.rs")
+    )));
+
+    let unanswered: Vec<_> = calls
+        .iter()
+        .filter(|(id, _)| result_of(&events, id).is_none())
+        .map(|(id, _)| stop_after(&events, id))
+        .collect();
+    assert!(unanswered.contains(&StopReason::Interrupted));
+    assert!(unanswered.contains(&StopReason::Completed));
+
+    let reply = events
+        .iter()
+        .filter_map(|e| match e {
+            ExecEvent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .find(|t| t.contains("[!NOTE]"))
+        .expect("a reply with a callout");
+    assert!(reply.starts_with("---\n"), "front matter");
+    assert!(reply.contains("- [x] ") && reply.contains("- [ ] "));
+    assert!(reply.contains("<!--"));
+    assert!(reply.contains("[^1]: ") && reply.contains("[^2]: "));
+    let wide = reply
+        .lines()
+        .filter(|l| l.starts_with('|'))
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap();
+    assert!(wide > 120, "a table wider than the column");
+    assert!(reply.contains("](docs/flow.svg)"));
+
+    let (mime, bytes) = client
+        .fs_read_image_all(run("render2"), "docs/flow.svg".into())
+        .await
+        .unwrap();
+    assert_eq!(mime, "image/svg+xml");
+    assert!(bytes.starts_with(b"<svg"));
+}

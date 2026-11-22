@@ -10,11 +10,15 @@
 //! - "Render check": one finished run whose final reply holds a display formula, an inline
 //!   formula, a Mermaid flowchart, a code block, a worktree image, a remote image, a file link,
 //!   an inline path and a callout.
+//! - "Render check, part 2": a second run, a thread of its own, in three attempts (an interrupted
+//!   one, a completed one with the long reply, a failed one), holding the rest of what the
+//!   transcript draws: edits, a patch, a failed command, a numbered read, calls that never got a
+//!   result and a reply with a callout, a wide table, footnotes, front matter and task boxes.
 //! - [`long_reply`]: the chunks a streaming run says for the prompt `/longreply`.
 //! - The extra files of the demo tree those replies point at ([`FILES`]): the image
 //!   `docs/graph.png` and `src/supervisor.rs`.
 
-use reno_proto::{ExecEvent, StopReason};
+use reno_proto::{ActionClass, ExecEvent, Seq, StopReason, ToolCall};
 use serde_json::json;
 
 use super::data::{
@@ -41,6 +45,8 @@ pub const HANDSHAKE_RUNS: [&str; TURNS] = [
 ];
 /// The Render check run.
 pub const RENDER_RUN: &str = "render1";
+/// The second Render check run: a thread of its own.
+pub const RENDER2_RUN: &str = "render2";
 
 const FIRST_TITLE: &str = "builder \u{b7} reno: fix the ACP v2 handshake";
 /// What the seeded turns took, in seconds.
@@ -270,7 +276,7 @@ fn journal(turn: usize) -> Vec<ExecEvent> {
     events
 }
 
-/// The handshake thread's runs, then the Render check run.
+/// The handshake thread's runs, then the Render check runs.
 pub(super) fn runs() -> Ids<Vec<SeedRun>> {
     let mut runs = Vec::new();
     for (at, name) in HANDSHAKE_RUNS.iter().enumerate() {
@@ -317,8 +323,204 @@ pub(super) fn runs() -> Ids<Vec<SeedRun>> {
             done(StopReason::Completed, None, None),
         ],
     });
+    let mut render2 = summary(
+        RENDER2_RUN,
+        "claude-code",
+        reno_proto::RunStatus::Failed,
+        Some(StopReason::Error),
+        "builder \u{b7} reno: Render check, part 2",
+        2 * HOUR,
+        2 * HOUR - 6 * MINUTE,
+    )?;
+    render2.attempt = 3;
+    render2.prompt = Some("Show the rest of what the transcript has to draw.".to_owned());
+    render2.cwd = Some(std::path::PathBuf::from("/demo/reno"));
+    runs.push(SeedRun {
+        summary: render2,
+        journal: render2_journal(),
+    });
     Ok(runs)
 }
+
+/// The events of a seeded run with their sequence numbers, counted from 1 as a journal is, or
+/// nothing when the demo world has no such run.
+pub fn seeded_run_events(run: &str) -> Vec<(Seq, ExecEvent)> {
+    let Ok(runs) = runs() else {
+        return Vec::new();
+    };
+    let Some(found) = runs
+        .into_iter()
+        .find(|r| r.summary.run_id.as_str().ends_with(run))
+    else {
+        return Vec::new();
+    };
+    found
+        .journal
+        .into_iter()
+        .zip(1u64..)
+        .map(|(event, seq)| (Seq(seq), event))
+        .collect()
+}
+
+fn call(id: &str, name: &str, class: ActionClass, input: serde_json::Value) -> ExecEvent {
+    ExecEvent::Tool {
+        id: id.to_owned(),
+        call: ToolCall::new(name, input, class),
+    }
+}
+
+const PATCH: &str = "*** Begin Patch
+*** Update File: src/supervisor.rs
+@@ pub fn shutdown(&mut self) -> Result<(), ShutdownError> {
+-        self.child.wait().map_err(ShutdownError::Signal)?;
++        self.wait_for(GRACE)?;
+*** Update File: src/shutdown.rs
+@@ pub const GRACE: Duration = Duration::from_secs(5);
+-pub fn kill_after() {}
++pub fn kill_after(grace: Duration) {
++    let _ = grace;
++}
+*** End Patch
+";
+
+const FAILED_TEST: &str = "running 2 tests
+test shutdown::tests::child_exits_on_signal ... ok
+test shutdown::tests::child_ignores_signal ... FAILED
+
+failures:
+
+---- shutdown::tests::child_ignores_signal stdout ----
+thread 'shutdown::tests::child_ignores_signal' panicked at src/supervisor.rs:42:9:
+timed out waiting for the child to exit
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+";
+
+const READ_OUTPUT: &str = "    38\t    /// Asks the child to leave and waits for it.
+    39\t    pub fn shutdown(&mut self) -> Result<(), ShutdownError> {
+    40\t        self.child.kill().map_err(ShutdownError::Signal)?;
+    41\t        // Waits as long as the child takes: there is no limit yet.
+    42\t        self.child.wait().map_err(ShutdownError::Signal)?;
+    43\t        let _ = GRACE;
+    44\t        Ok(())
+    45\t    }
+";
+
+/// The second Render check run: three attempts, so that a turn can be interrupted, completed
+/// or failed with the same run.
+fn render2_journal() -> Vec<ExecEvent> {
+    vec![
+        data::started(),
+        text("Bounding the wait in the supervisor first."),
+        call(
+            "e1",
+            "edit",
+            ActionClass::Edit,
+            json!({
+                "file_path": "src/supervisor.rs",
+                "old_string": "self.child.wait().map_err(ShutdownError::Signal)?;",
+                "new_string": "self.wait_for(GRACE)?;",
+            }),
+        ),
+        data::tool_ok("e1", "ok"),
+        call(
+            "p1",
+            "apply_patch",
+            ActionClass::Edit,
+            json!({ "patch": PATCH }),
+        ),
+        data::tool_ok("p1", "2 files changed"),
+        call(
+            "b1",
+            "bash",
+            ActionClass::Command,
+            json!({ "command": "cargo test -p reno-harness shutdown::" }),
+        ),
+        data::tool_output("b1", false, "1 test failed", FAILED_TEST),
+        call(
+            "g1",
+            "bash",
+            ActionClass::Command,
+            json!({ "command": "rg -n \"wait\" src" }),
+        ),
+        data::tool_output(
+            "g1",
+            true,
+            "2 matches",
+            "src/supervisor.rs:42:        self.child.wait().map_err(ShutdownError::Signal)?;\nsrc/shutdown.rs:7:pub fn wait_for() {}\n",
+        ),
+        call(
+            "c1",
+            "bash",
+            ActionClass::Command,
+            json!({ "command": "cargo build --workspace" }),
+        ),
+        done(StopReason::Interrupted, None, None),
+        ExecEvent::Resumed {
+            from_attempt: 1,
+            session: reno_proto::SessionRef("sess-fake".to_owned()),
+        },
+        data::started(),
+        call(
+            "r1",
+            "read",
+            ActionClass::Read,
+            json!({ "path": "src/supervisor.rs", "range": [38, 45] }),
+        ),
+        data::tool_output("r1", true, "8 lines", READ_OUTPUT),
+        call(
+            "w1",
+            "bash",
+            ActionClass::Command,
+            json!({ "command": "cargo clippy -p reno-harness" }),
+        ),
+        text(RENDER2_REPLY),
+        done(StopReason::Completed, None, None),
+        ExecEvent::Resumed {
+            from_attempt: 2,
+            session: reno_proto::SessionRef("sess-fake".to_owned()),
+        },
+        data::started(),
+        text("Running the suite one last time."),
+        done(
+            StopReason::Error,
+            Some(
+                "The last test run did not start: the build directory is locked by another process.",
+            ),
+            Some("cargo: Blocking waiting for file lock on build directory"),
+        ),
+    ]
+}
+
+/// The second Render check run's reply.
+pub const RENDER2_REPLY: &str = r#"---
+title: Bounded shutdown
+status: draft
+---
+
+The shutdown is bounded now.[^1] The steps left:
+
+- [x] Bound the wait
+- [x] Name the error
+- [ ] Log the negotiated version
+
+<!-- the table below is wider than the column on purpose -->
+
+| Step | What changes for a harness author | Where it is checked | Who owns the follow-up when the wait runs past the grace period |
+|---|---|---|---|
+| Bound the wait | The session sends the signal, waits, then kills the child | src/supervisor.rs | The harness crate maintainers, through the shutdown tests |
+| Name the error | The failure says which step timed out | src/shutdown.rs | The harness crate maintainers, through the error tests |
+
+> [!NOTE]
+> A child that ignores the signal is killed after the grace period.[^2]
+
+The flow, from the worktree:
+
+![shutdown flow](docs/flow.svg)
+
+[^1]: The wait was open-ended before this change.
+[^2]: The grace period is five seconds.
+"#;
 
 /// Makes the handshake runs one thread, each following the one before.
 pub(super) fn link_thread(world: &mut World) {
@@ -374,9 +576,26 @@ The wait is in [supervisor](src/supervisor.rs:42), at `src/supervisor.rs:42`.
 pub(super) fn files() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("docs/graph.png", GRAPH_PNG.to_vec()),
+        ("docs/flow.svg", FLOW_SVG.as_bytes().to_vec()),
+        ("src/shutdown.rs", SHUTDOWN.as_bytes().to_vec()),
         ("src/supervisor.rs", SUPERVISOR.as_bytes().to_vec()),
     ]
 }
+
+/// A small flow of three boxes, the picture the second Render check shows.
+const FLOW_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"240\" height=\"60\" viewBox=\"0 0 240 60\">\
+<rect x=\"4\" y=\"15\" width=\"60\" height=\"30\" fill=\"none\" stroke=\"#888\"/>\
+<rect x=\"90\" y=\"15\" width=\"60\" height=\"30\" fill=\"none\" stroke=\"#888\"/>\
+<rect x=\"176\" y=\"15\" width=\"60\" height=\"30\" fill=\"none\" stroke=\"#888\"/>\
+<path d=\"M64 30H90M150 30H176\" stroke=\"#888\"/></svg>";
+
+/// The second file the demo patch changes.
+const SHUTDOWN: &str = "use std::time::Duration;
+
+pub const GRACE: Duration = Duration::from_secs(5);
+
+pub fn kill_after() {}
+";
 
 /// A 96 by 48 PNG of four boxes joined by lines, the build graph the Render check shows.
 const GRAPH_PNG: &[u8] = &[
@@ -666,7 +885,7 @@ mod tests {
             .and_then(|s| s.split("```").next())
             .unwrap_or_default();
         assert_eq!(flow.matches("-->|").count(), 4, "four labelled edges");
-        assert_eq!(runs().unwrap().len(), TURNS + 1);
+        assert_eq!(runs().unwrap().len(), TURNS + 2);
     }
 
     #[test]
