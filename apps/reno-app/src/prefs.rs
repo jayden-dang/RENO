@@ -115,7 +115,7 @@ impl Word for SendWith {
 }
 
 /// The keys of the file this build reads besides the notification switches.
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 12] = [
     "mode",
     "theme",
     "accent",
@@ -126,7 +126,15 @@ const KEYS: [&str; 10] = [
     "sidebarWidth",
     "onboarded",
     "skippedUpdates",
+    "typesetMath",
+    "mathSize",
 ];
+
+/// The smallest, the default and the largest math size (a percentage of the text size) and the
+/// step between them (Settings › Appearance).
+pub(crate) const MATH_SIZES: [u8; 7] = [90, 100, 110, 120, 130, 140, 150];
+/// Math is drawn at the text's size unless the owner says otherwise.
+pub(crate) const MATH_SIZE_DEFAULT: u8 = 100;
 
 /// The switches of Settings → Notifications (all default to on), and the choices of Settings ›
 /// Appearance and General (today's look and behaviour by default).
@@ -156,6 +164,11 @@ pub(crate) struct Prefs {
     /// The agent versions the person chose not to be told about (ROAD-38), by executor id. The
     /// agents-updates island hides an update to exactly that version; a newer one shows again.
     pub(crate) skipped_updates: BTreeMap<String, String>,
+    /// Math is drawn typeset (ROAD-33); off, it is shown as its TeX source in code style.
+    pub(crate) typeset_math: bool,
+    /// How large typeset math is drawn, as a percentage of the text size: one of
+    /// [`MATH_SIZES`].
+    pub(crate) math_size: u8,
     /// Keys of the file this build does not know, written back unchanged.
     rest: Map<String, Value>,
 }
@@ -177,6 +190,8 @@ impl Default for Prefs {
             sidebar_width: crate::ui::sidebar::WIDTH,
             onboarded: false,
             skipped_updates: BTreeMap::new(),
+            typeset_math: true,
+            math_size: MATH_SIZE_DEFAULT,
             rest: Map::new(),
         }
     }
@@ -270,6 +285,15 @@ impl Prefs {
                     .collect()
             })
             .unwrap_or_default();
+        prefs.typeset_math = flag("typesetMath", prefs.typeset_math);
+        // A size the picker does not offer (hand-edited file) is the default, not a clamp: the
+        // picker could not show it as chosen.
+        prefs.math_size = map
+            .get("mathSize")
+            .and_then(Value::as_u64)
+            .and_then(|size| u8::try_from(size).ok())
+            .filter(|size| MATH_SIZES.contains(size))
+            .unwrap_or(MATH_SIZE_DEFAULT);
         prefs.rest = map
             .into_iter()
             .filter(|(key, _)| {
@@ -296,6 +320,8 @@ impl Prefs {
         put("hiddenFiles", self.hidden_files.into());
         put("sidebarWidth", f64::from(self.sidebar_width).into());
         put("onboarded", self.onboarded.into());
+        put("typesetMath", self.typeset_math.into());
+        put("mathSize", self.math_size.into());
         put(
             "skippedUpdates",
             Value::Object(
@@ -591,6 +617,52 @@ mod tests {
                 .skipped_updates
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn math_defaults_to_typeset_at_the_text_size_when_the_keys_are_missing() {
+        let p = Prefs::default();
+        assert!(p.typeset_math);
+        assert_eq!(p.math_size, 100);
+        // A file from before the keys existed reads as the defaults.
+        let old = Prefs::from_json(br#"{"mode": "dark", "hiddenFiles": false}"#);
+        assert!(old.typeset_math);
+        assert_eq!(old.math_size, 100);
+        assert_eq!(old.mode, Mode::Dark);
+    }
+
+    #[test]
+    fn math_choices_round_trip_and_odd_values_are_the_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-settings.json");
+        let mut store = PrefStore::at(path.clone());
+        store.update(|p| {
+            p.typeset_math = false;
+            p.math_size = 120;
+        });
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["typesetMath"], false);
+        assert_eq!(json["mathSize"], 120);
+        let again = PrefStore::at(path).prefs().clone();
+        assert!(!again.typeset_math);
+        assert_eq!(again.math_size, 120);
+        for odd in [
+            r#"{"mathSize": 95}"#,
+            r#"{"mathSize": "big"}"#,
+            r#"{"mathSize": 400}"#,
+        ] {
+            assert_eq!(Prefs::from_json(odd.as_bytes()).math_size, 100, "{odd}");
+        }
+        assert!(Prefs::from_json(br#"{"typesetMath": "no"}"#).typeset_math);
+    }
+
+    #[test]
+    fn unknown_keys_survive_beside_the_math_keys() {
+        let p = Prefs::from_json(br#"{"typesetMath": false, "mathSize": 110, "someFuture": [1]}"#);
+        let json: Value = serde_json::from_slice(&p.to_json()).unwrap();
+        assert_eq!(json["someFuture"][0], 1);
+        assert_eq!(json["mathSize"], 110);
+        assert_eq!(json["typesetMath"], false);
     }
 
     #[test]

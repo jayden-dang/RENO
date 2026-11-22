@@ -102,6 +102,21 @@ fn choice<T: Copy + PartialEq + 'static>(
         .into_any_element()
 }
 
+/// The math sizes, 90 to 150 % in steps of 10.
+fn math_size_choice(theme: &Theme, current: u8, cx: &mut Context<SettingsScreen>) -> AnyElement {
+    kit::segmented(theme)
+        .children(prefs::MATH_SIZES.map(|size| {
+            kit::segment(
+                theme,
+                format!("math-size-{size}"),
+                format!("{size}"),
+                size == current,
+            )
+            .on_click(cx.listener(move |_, _, _, cx| prefs::update(cx, |p| p.math_size = size)))
+        }))
+        .into_any_element()
+}
+
 fn switch(
     theme: &Theme,
     id: &'static str,
@@ -171,8 +186,32 @@ impl SettingsScreen {
                     ),
                     row(theme, "Theme", None, self.themes(theme, &p, cx), false),
                     row(theme, "Accent", None, self.accents(theme, &p, cx), false),
-                    row(theme, "Reduce motion", None, motion_choice, true),
-                ],
+                    row(theme, "Reduce motion", None, motion_choice, false),
+                    row(
+                        theme,
+                        "Typeset math",
+                        Some("Off shows formulas as their TeX source.".into()),
+                        switch(
+                            theme,
+                            "typeset-math",
+                            p.typeset_math,
+                            |p| p.typeset_math = !p.typeset_math,
+                            cx,
+                        ),
+                        !p.typeset_math,
+                    ),
+                ]
+                .into_iter()
+                .chain((p.typeset_math).then(|| {
+                    row(
+                        theme,
+                        "Math size",
+                        Some("As a share of the text size.".into()),
+                        math_size_choice(theme, p.math_size, cx),
+                        true,
+                    )
+                }))
+                .collect(),
             ),
         ]
     }
