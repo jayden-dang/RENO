@@ -45,7 +45,9 @@ use crate::ui::palette::{Palette, PaletteAction, PaletteEvent};
 use crate::ui::sidebar::{self, SidebarHandlers};
 use crate::ui::theme::{self, Appearance, Theme};
 use crate::ui::toast::{self, Toasts};
-use crate::vm::draft33::{OpenHook as Draft33Hook, Variant as Draft33Variant};
+use crate::vm::draft33::{
+    FindHook as Draft33Find, OpenHook as Draft33Hook, Variant as Draft33Variant,
+};
 use crate::vm::executors::{self, AgentUpdate};
 use crate::vm::settings_nav::Category;
 use crate::vm::shell::{self, Chip, History, Place};
@@ -127,6 +129,8 @@ pub(crate) struct Options {
     /// `RENO_DRAFT33_OPEN=thread|folds|render|stream`: with `--draft33`, open that state once the
     /// screen is up (screenshots, reviews). An unknown word is ignored, with a line on the console.
     pub(crate) draft33_open: Option<Draft33Hook>,
+    /// The find words of `RENO_DRAFT33_OPEN` (`find|enter|enter3|escape`).
+    pub(crate) draft33_find: Option<Draft33Find>,
     /// `RENO_BENCH=1`: print the lines `cargo xtask bench --app` reads (`bench.rs`), and scroll
     /// the open run's transcript. Off, nothing changes.
     pub(crate) bench: bool,
@@ -168,7 +172,8 @@ impl Options {
             });
             if let Some(word) = env("RENO_DRAFT33_OPEN").filter(|v| !v.is_empty()) {
                 options.draft33_open = Draft33Hook::parse(&word);
-                if options.draft33_open.is_none() {
+                options.draft33_find = Draft33Find::parse(&word);
+                if options.draft33_open.is_none() && options.draft33_find.is_none() {
                     crate::vm::draft33::ignore_unknown_hook(&word);
                 }
             }
@@ -340,6 +345,8 @@ pub(crate) struct Start {
     pub(crate) setup: Option<crate::vm::first_run::Hook>,
     /// `RENO_DRAFT33_OPEN`.
     pub(crate) draft33_open: Option<Draft33Hook>,
+    /// The find words of `RENO_DRAFT33_OPEN`.
+    pub(crate) draft33_find: Option<Draft33Find>,
 }
 
 pub(crate) fn run(options: Options) {
@@ -418,6 +425,7 @@ pub(crate) fn run(options: Options) {
                 .setup
                 .or(options.draft33.map(|_| crate::vm::first_run::Hook::Skip)),
             draft33_open: options.draft33_open,
+            draft33_find: options.draft33_find,
         };
         if open_window(store, toasts, options.appearance, start, cx).is_none() {
             cx.quit();
@@ -473,6 +481,7 @@ pub(crate) fn open_window(
         sidebar_open,
         setup,
         draft33_open,
+        draft33_find,
     } = start;
     let named = open.is_some()
         || open_run.is_some()
@@ -526,6 +535,19 @@ pub(crate) fn open_window(
                     .detach();
                 }
                 root.init_first_run(setup, named, window, cx);
+                if let Some(hook) = draft33_find {
+                    // After the runs and their threads are read.
+                    cx.spawn_in(window, async move |root, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1500))
+                            .await;
+                        root.update_in(cx, |root, window, cx| {
+                            root.draft33_find_hook(hook, window, cx);
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 if let Some(hook) = draft33_open {
                     // After the runs and their threads are read.
                     cx.spawn_in(window, async move |root, cx| {
@@ -536,6 +558,24 @@ pub(crate) fn open_window(
                             root.draft33_hook(hook, window, cx);
                         })
                         .ok();
+                        if hook == Draft33Hook::Latest {
+                            // The reply streams: take the view off its tail once it can scroll.
+                            for _ in 0..12 {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(1000))
+                                    .await;
+                                let done = root
+                                    .update(cx, |root, cx| {
+                                        root.run_screen().cloned().is_some_and(|screen| {
+                                            screen.update(cx, |s, cx| s.demo_scroll_up(cx))
+                                        })
+                                    })
+                                    .unwrap_or(true);
+                                if done {
+                                    break;
+                                }
+                            }
+                        }
                         if hook == Draft33Hook::Folds {
                             // A long thread's runs arrive one after another: open what is there,
                             // twice (an open fold stays open).
@@ -1395,7 +1435,7 @@ impl RootView {
                     self.open_run(run, window, cx);
                 }
             }
-            Draft33Hook::Stream => {
+            Draft33Hook::Stream | Draft33Hook::Latest => {
                 let params = reno_proto::TaskRunParams {
                     prompt: "/longreply".to_owned(),
                     executor: "claude-code".parse().ok(),
@@ -1406,6 +1446,30 @@ impl RootView {
                     .update(cx, |store, cx| store.submit_task(params, 0, cx));
             }
         }
+    }
+
+    /// `RENO_DRAFT33_OPEN=find|enter|enter3|escape`: the handshake thread with its folds closed
+    /// and the find bar on `supervisor.rs`, and then, as the word says, a hit and Escape.
+    pub(crate) fn draft33_find_hook(
+        &mut self,
+        hook: Draft33Find,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.draft33_hook(Draft33Hook::Thread, window, cx);
+        let Some(screen) = self.run_screen().cloned() else {
+            return;
+        };
+        screen.update(cx, |screen, cx| {
+            let demo = hook
+                .goto()
+                .map(|(goto, then_close)| crate::screens::run::FindDemo {
+                    goto,
+                    min_hits: reno_client::fake::transcript::NEEDLE_HITS,
+                    then_close,
+                });
+            screen.demo_find(Draft33Find::QUERY, demo, window, cx);
+        });
     }
 
     /// `RENO_COMPOSER_TYPE` and `RENO_COMPOSER_OPEN`: act on the composer that is showing.
@@ -1716,6 +1780,18 @@ impl RootView {
         if let Screen::Run(run) = &self.screen {
             run.update(cx, |run, cx| run.panel_action(action, window, cx));
         }
+    }
+
+    /// Closes the run screen's find bar if it is open. Whether it was.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Screen::Run(run) = &self.screen else {
+            return false;
+        };
+        run.update(cx, |run, cx| {
+            let was = run.find_is_open();
+            run.close_find(window, cx);
+            was
+        })
     }
 
     /// ⌘W: the run panel's tab when the panel is open, else the window.
@@ -2123,14 +2199,18 @@ impl Render for RootView {
 
         div()
             .id("root")
-            .key_context(if self.sidebar.any_open() {
-                gpui::KeyContext::parse(&format!("Root {}", actions::SIDEBAR_OPEN))
-                    .unwrap_or_default()
-            } else if self.restart_open {
-                gpui::KeyContext::parse(&format!("Root {}", crate::ui::restart::OPEN_CONTEXT))
-                    .unwrap_or_default()
-            } else {
-                gpui::KeyContext::parse("Root").unwrap_or_default()
+            .key_context({
+                let mut context = String::from("Root");
+                if self.sidebar.any_open() {
+                    context = format!("Root {}", actions::SIDEBAR_OPEN);
+                } else if self.restart_open {
+                    context = format!("Root {}", crate::ui::restart::OPEN_CONTEXT);
+                }
+                // While find is open in the run screen, Escape and ⌘G are its.
+                if matches!(&self.screen, Screen::Run(run) if run.read(cx).find_is_open()) {
+                    context = format!("{context} {}", crate::ui::find::OPEN_CONTEXT);
+                }
+                gpui::KeyContext::parse(&context).unwrap_or_default()
             })
             .track_focus(&self.focus_handle)
             .on_action(
@@ -2143,12 +2223,32 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &actions::DismissSidebar, w, cx| {
                 this.sidebar_act(sidebar::Act::Dismiss, w, cx);
             }))
-            // The composer lets Escape go when it has nothing to cancel: the draft takes it.
+            // The composer lets Escape go when it has nothing to cancel: the draft takes it. And
+            // when the find bar is open, Escape is the bar's (the composer lets it go).
             .on_action(cx.listener(|this, _: &composer::Cancel, w, cx| {
                 if this.sidebar.any_open() {
                     this.sidebar_act(sidebar::Act::Dismiss, w, cx);
-                } else {
+                } else if !this.close_find(w, cx) {
+                    // Nothing of the screen's was open: the draft takes it.
                     cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::CloseFind, w, cx| {
+                this.close_find(w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindInTranscript, w, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.open_find(w, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindNext, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.find_step(true, cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &actions::FindPrevious, _, cx| {
+                if let Screen::Run(run) = &this.screen {
+                    run.update(cx, |run, cx| run.find_step(false, cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &actions::PinThread, w, cx| {

@@ -75,6 +75,8 @@ pub(crate) enum OpenHook {
     Render,
     /// Start the long streaming reply and open its run.
     Stream,
+    /// As `Stream`, then scroll the view up, so that "jump to latest" shows.
+    Latest,
 }
 
 impl OpenHook {
@@ -84,7 +86,47 @@ impl OpenHook {
             "folds" => Some(Self::Folds),
             "render" => Some(Self::Render),
             "stream" => Some(Self::Stream),
+            "latest" => Some(Self::Latest),
             _ => None,
+        }
+    }
+}
+
+/// The find hooks of `RENO_DRAFT33_OPEN`: each opens "fix the ACP v2 handshake" with its folds
+/// closed and the find bar on [`FindHook::QUERY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FindHook {
+    /// The bar open with the query typed: "1 of 7".
+    Find,
+    /// As `Find`, then Enter: turn 3's fold opens at its `cargo test` step.
+    Enter,
+    /// As `Find`, then the third hit.
+    Enter3,
+    /// As `Enter`, then Escape: the fold search opened closes again.
+    Escape,
+}
+
+impl FindHook {
+    /// What the hooks look for.
+    pub(crate) const QUERY: &'static str = "supervisor.rs";
+
+    pub(crate) fn parse(word: &str) -> Option<Self> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "find" => Some(Self::Find),
+            "enter" => Some(Self::Enter),
+            "enter3" => Some(Self::Enter3),
+            "escape" => Some(Self::Escape),
+            _ => None,
+        }
+    }
+
+    /// The hit to go to (from 0), and whether to close search after it.
+    pub(crate) const fn goto(self) -> Option<(usize, bool)> {
+        match self {
+            Self::Find => None,
+            Self::Enter => Some((0, false)),
+            Self::Enter3 => Some((2, false)),
+            Self::Escape => Some((0, true)),
         }
     }
 }
@@ -120,6 +162,22 @@ mod tests {
         assert_eq!(Variant::A.label(), "A \u{2014} Quiet strip");
         assert_eq!(Variant::B.label(), "B \u{2014} Ledger");
         assert_eq!(Variant::C.label(), "C \u{2014} Results");
+    }
+
+    #[test]
+    fn the_find_hooks_are_their_own_words_and_say_where_they_go() {
+        for (word, want, goto) in [
+            ("find", FindHook::Find, None),
+            ("Enter", FindHook::Enter, Some((0, false))),
+            ("enter3", FindHook::Enter3, Some((2, false))),
+            ("escape", FindHook::Escape, Some((0, true))),
+        ] {
+            assert_eq!(FindHook::parse(word), Some(want), "{word}");
+            assert_eq!(want.goto(), goto, "{word}");
+        }
+        assert_eq!(FindHook::parse("thread"), None);
+        assert_eq!(OpenHook::parse("latest"), Some(OpenHook::Latest));
+        assert_eq!(FindHook::QUERY, reno_client::fake::transcript::NEEDLE);
     }
 
     #[test]
