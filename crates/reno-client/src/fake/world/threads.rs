@@ -38,6 +38,26 @@ fn conflict(why: String) -> ErrorObject {
 }
 
 impl World {
+    /// Puts the seeded runs whose ids end in `names` into the thread of the first of them, each
+    /// following the one before (a seeded run is otherwise a thread of its own).
+    pub(in crate::fake) fn chain_thread(&mut self, names: &[&str]) {
+        let mut thread = None;
+        let mut before: Option<RunId> = None;
+        for name in names {
+            let Some(record) = self
+                .runs
+                .iter_mut()
+                .find(|r| r.summary.run_id.as_str().ends_with(name))
+            else {
+                continue;
+            };
+            let thread = thread.get_or_insert_with(|| record.thread.clone());
+            record.thread = thread.clone();
+            record.parent = before.take();
+            before = Some(record.summary.run_id.clone());
+        }
+    }
+
     fn thread_run_ids(&self, thread: &ThreadId) -> Vec<&super::RunRecord> {
         let mut runs: Vec<_> = self.runs.iter().filter(|r| &r.thread == thread).collect();
         runs.sort_by_key(|r| (r.summary.created_at_ms, r.summary.run_id.clone()));

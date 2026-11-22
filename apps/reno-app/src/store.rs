@@ -968,7 +968,9 @@ impl Store {
     /// Starts `FakeDaemon` in-process, over the in-memory transport.
     /// The `--fake` demo world: a first run (five agents, three of them ready; `renod` 0.4.1
     /// running with 0.4.2 installed), with the sidebar's demo threads (pinned, archived, a
-    /// project with fourteen).
+    /// project with fourteen), and the transcript demo world (ROAD-33: a thread of 2,000 events, a
+    /// render check, the files they link to). Tests use [`Store::start_fake_with`], which has
+    /// none of it unless a test asks.
     pub(crate) fn start_fake(&mut self, cx: &mut Context<Self>) {
         self.start_fake_with(
             FakeConfig {
@@ -977,6 +979,7 @@ impl Store {
                 question_demo_runs: true,
                 activity_runs: true,
                 sidebar_threads: true,
+                transcript_threads: true,
                 ..FakeConfig::default()
             },
             cx,

@@ -6,7 +6,7 @@
 //! The bar only draws what the root view tells it and calls the root view's methods; the rules
 //! (history, live count, which agents have an update) are in `vm/shell.rs` and `vm/executors.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui::{
@@ -53,6 +53,8 @@ pub(crate) struct Bar<'a> {
     pub(crate) updates_at: Anchor_,
     /// The restart pill.
     pub(crate) restart: RestartBar,
+    /// The ROAD-33 draft's switch note, taken when the bar is drawn. Absent without `--draft33`.
+    pub(crate) draft_label: RefCell<Option<AnyElement>>,
 }
 
 /// Reports where its parent was painted into `at`.
@@ -234,7 +236,14 @@ pub(crate) fn status_bar(root: &Entity<RootView>, bar: &Bar<'_>) -> AnyElement {
                 .on_click(on(|root, _, cx| root.toggle_more(cx))),
         )
         .child(chip)
-        .child(div().flex_1().min_w_0())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .children(bar.draft_label.borrow_mut().take()),
+        )
         .child(
             kit::icon_chip(theme, Icon::Play, format!("{} live", bar.live))
                 .id("bar-live")
